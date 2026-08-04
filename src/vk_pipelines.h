@@ -1,7 +1,1 @@
-﻿#pragma once 
-#include <vk_types.h>
-
-namespace vkutil {
-
-
-};
+// Type this file by hand when VKGuide introduces it.

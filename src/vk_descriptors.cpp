@@ -1,1 +1,1 @@
-﻿#include <vk_descriptors.h>
+// Type this file by hand when VKGuide introduces it.

@@ -1,14 +1,15 @@
+
 #include <vk_engine.h>
 
 int main(int argc, char* argv[])
 {
-	VulkanEngine engine;
+    VulkanEngine engine;
 
-	engine.init();	
-	
-	engine.run();	
+    engine.init();
 
-	engine.cleanup();	
+    engine.run();
 
-	return 0;
+    engine.cleanup();
+
+    return 0;
 }

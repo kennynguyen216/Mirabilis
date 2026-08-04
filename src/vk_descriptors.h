@@ -1,3 +1,1 @@
-﻿#pragma once
-
-#include <vk_types.h>
+// Type this file by hand when VKGuide introduces it.
