@@ -30,3 +30,10 @@
 *.exe
 *.out
 *.app
+
+# Local Vulkan/CMake build products
+/build/
+/bin/
+/assets/brickadia/
+/shaders/*.spv
+/.vs/
