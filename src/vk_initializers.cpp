@@ -109,18 +109,18 @@ VkSubmitInfo2 vkinit::submit_info(VkCommandBufferSubmitInfo* cmd, VkSemaphoreSub
     return info;
 }
 
-VkImageCreateInfo nkinit::image_create_info(VkFormat format, VkImageUsageFlags usageFlags, VkExtent3D extent)
+VkImageCreateInfo vkinit::image_create_info(VkFormat format, VkImageUsageFlags usageFlags, VkExtent3D extent)
 {
     VkImageCreateInfo info = {};
-    info.sType = VK_STRUCTUR_TYPE_IMAGE_CREATE_INFO;
-    into.pNext = nullptr;
+    info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    info.pNext = nullptr;
 
     info.imageType = VK_IMAGE_TYPE_2D;
     
     info.format = format;
     info.extent = extent;
 
-    info.miplevels = 1;
+    info.mipLevels = 1;
     info.arrayLayers = 1;
 
     //for MSAA. we will not be using it by default, so default it to 1 sample per pixel.
@@ -143,8 +143,8 @@ VkImageViewCreateInfo vkinit::imageview_create_info(VkFormat format, VkImage ima
     info.viewType = VK_IMAGE_VIEW_TYPE_2D;
     info.image = image;
     info.format = format;
-    info.subresourceRange.baseMiplevel = 0;
-    info.subresourceRange.levelCOunt = 1;
+    info.subresourceRange.baseMipLevel = 0;
+    info.subresourceRange.levelCount = 1;
     info.subresourceRange.baseArrayLayer = 0;
     info.subresourceRange.layerCount = 1;
     info.subresourceRange.aspectMask = aspectFlags;
