@@ -14,6 +14,10 @@
 #include "vk_mem_alloc.h"
 #include <vk_pipelines.h>
 
+#include "imgui.h"
+#include "imgui_impl_sdl2.h"
+#include "imgui_impl_vulkan.h"
+
 constexpr bool bUseValidationLayers = false;
 
 VulkanEngine* loadedEngine = nullptr;
@@ -47,6 +51,7 @@ void VulkanEngine::init()
     init_sync_structures(); // creates traffic cops that sync timing between cpu and gpu. fences and semaphores
     init_descriptors();
     init_pipelines();
+    init_imgui();
     
     //evverything went fine
     _isInitialized = true;
@@ -120,19 +125,49 @@ void VulkanEngine::init_vulkan()
 
 void VulkanEngine::init_commands()
 {
-    //create a command pool for summands submitted to the grpahics queue
-    //we also want the pool to allow for resetting of individual command buffers
-    VkCommandPoolCreateInfo commandPoolInfo = vkinit::command_pool_create_info(_graphicsQueueFamily, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT);
-    for(int i = 0; i < FRAME_OVERLAP; i++){
+    // Describe command pools before trying to create them.
+    VkCommandPoolCreateInfo commandPoolInfo =
+        vkinit::command_pool_create_info(
+            _graphicsQueueFamily,
+            VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT);
 
-        VK_CHECK(vkCreateCommandPool(_device, &commandPoolInfo, nullptr, &_frames[i]._commandPool));
+    // Create the immediate-submit command pool.
+    VK_CHECK(vkCreateCommandPool(
+        _device,
+        &commandPoolInfo,
+        nullptr,
+        &_immCommandPool));
 
-        //allocate the default command buffer that we will use for rendering
-        VkCommandBufferAllocateInfo cmdAllocInfo = vkinit::command_buffer_allocate_info(_frames[i]._commandPool,1);
+    // Allocate the immediate-submit command buffer.
+    VkCommandBufferAllocateInfo immCmdAllocInfo =
+        vkinit::command_buffer_allocate_info(_immCommandPool, 1);
 
-        VK_CHECK(vkAllocateCommandBuffers(_device, &cmdAllocInfo, &_frames[i]._mainCommandBuffer));
-        
+    VK_CHECK(vkAllocateCommandBuffers(
+        _device,
+        &immCmdAllocInfo,
+        &_immCommandBuffer));
+
+    // Create the command resources used by normal frames.
+    for (int i = 0; i < FRAME_OVERLAP; i++) {
+        VK_CHECK(vkCreateCommandPool(
+            _device,
+            &commandPoolInfo,
+            nullptr,
+            &_frames[i]._commandPool));
+
+        VkCommandBufferAllocateInfo cmdAllocInfo =
+            vkinit::command_buffer_allocate_info(
+                _frames[i]._commandPool, 1);
+
+        VK_CHECK(vkAllocateCommandBuffers(
+            _device,
+            &cmdAllocInfo,
+            &_frames[i]._mainCommandBuffer));
     }
+
+    _mainDeletionQueue.push_function([=]() {
+        vkDestroyCommandPool(_device, _immCommandPool, nullptr);
+    });
 }
 void VulkanEngine::init_sync_structures()
 {
@@ -147,6 +182,8 @@ void VulkanEngine::init_sync_structures()
 		VK_CHECK(vkCreateSemaphore(_device, &semaphoreCreateInfo, nullptr, &_frames[i]._swapchainSemaphore));
 		VK_CHECK(vkCreateSemaphore(_device, &semaphoreCreateInfo, nullptr, &_frames[i]._renderSemaphore));
 	}
+    VK_CHECK(vkCreateFence(_device, &fenceCreateInfo, nullptr, &_immFence));
+    _mainDeletionQueue.push_function([=]() {vkDestroyFence(_device, _immFence, nullptr); });
 }
 
 void VulkanEngine::cleanup()
@@ -237,8 +274,12 @@ void VulkanEngine::draw()
 	// execute a copy from the draw image into the swapchain
 	vkutil::copy_image_to_image(cmd, _drawImage.image, _swapchainImages[swapchainImageIndex], _drawExtent, _swapchainExtent);
 
-	// set swapchain image layout to Present so we can show it on the screen
-	vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+	// Draw ImGui directly into the swapchain image with dynamic rendering.
+	vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	draw_imgui(cmd, _swapchainImageViews[swapchainImageIndex]);
+
+	// Set the swapchain image layout to Present so we can show it on screen.
+	vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
 	//finalize the command buffer (we can no longer add commands, but it can now be executed)
 	VK_CHECK(vkEndCommandBuffer(cmd));
@@ -247,10 +288,10 @@ void VulkanEngine::draw()
 	//wait until the swapchain image is ready, then signal when rendering is finished
 	VkCommandBufferSubmitInfo cmdinfo = vkinit::command_buffer_submit_info(cmd);
 	VkSemaphoreSubmitInfo waitInfo = vkinit::semaphore_submit_info(
-		VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR,
+		VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
 		get_current_frame()._swapchainSemaphore);
 	VkSemaphoreSubmitInfo signalInfo = vkinit::semaphore_submit_info(
-		VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
+		VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
 		get_current_frame()._renderSemaphore);
 
 	VkSubmitInfo2 submit = vkinit::submit_info(&cmdinfo, &signalInfo, &waitInfo);
@@ -302,6 +343,9 @@ void VulkanEngine::run(){
                 if(e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) {
                     bQuit = true;
                 }
+
+                // Send every SDL event to ImGui as well.
+                ImGui_ImplSDL2_ProcessEvent(&e);
         }
         // do not draw if we are minimized
         if(stop_rendering) {
@@ -309,6 +353,13 @@ void VulkanEngine::run(){
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
+        ImGui_ImplVulkan_NewFrame();
+        ImGui_ImplSDL2_NewFrame();
+        ImGui::NewFrame();
+
+        ImGui::ShowDemoWindow();
+
+        ImGui::Render();
         draw();
     }
 }
@@ -522,4 +573,107 @@ void VulkanEngine::init_background_pipelines()
 		vkDestroyPipeline(_device, _gradientPipeline, nullptr);
 		vkDestroyPipelineLayout(_device, _gradientPipelineLayout, nullptr);
 		});
+}
+
+void VulkanEngine::immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function)
+{
+    VK_CHECK(vkResetFences(_device, 1, &_immFence));
+	VK_CHECK(vkResetCommandBuffer(_immCommandBuffer, 0));
+
+	VkCommandBuffer cmd = _immCommandBuffer;
+
+	VkCommandBufferBeginInfo cmdBeginInfo = vkinit::command_buffer_begin_info(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+
+	VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
+
+	function(cmd);
+
+	VK_CHECK(vkEndCommandBuffer(cmd));
+
+	VkCommandBufferSubmitInfo cmdinfo = vkinit::command_buffer_submit_info(cmd);
+	VkSubmitInfo2 submit = vkinit::submit_info(&cmdinfo, nullptr, nullptr);
+
+	// submit command buffer to the queue and execute it.
+	//  _renderFence will now block until the graphic commands finish execution
+	VK_CHECK(vkQueueSubmit2(_graphicsQueue, 1, &submit, _immFence));
+
+	VK_CHECK(vkWaitForFences(_device, 1, &_immFence, true, 9999999999));
+}
+void VulkanEngine::init_imgui()
+{
+	// 1: create descriptor pool for IMGUI
+	//  the size of the pool is very oversize, but it's copied from imgui demo
+	//  itself.
+	VkDescriptorPoolSize pool_sizes[] = { { VK_DESCRIPTOR_TYPE_SAMPLER, 1000 },
+		{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000 },
+		{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1000 },
+		{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1000 },
+		{ VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1000 },
+		{ VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1000 },
+		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000 },
+		{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000 },
+		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1000 },
+		{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1000 },
+		{ VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1000 } };
+
+	VkDescriptorPoolCreateInfo pool_info = {};
+	pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+	pool_info.maxSets = 1000;
+	pool_info.poolSizeCount = (uint32_t)std::size(pool_sizes);
+	pool_info.pPoolSizes = pool_sizes;
+
+	VkDescriptorPool imguiPool;
+	VK_CHECK(vkCreateDescriptorPool(_device, &pool_info, nullptr, &imguiPool));
+
+	// 2: initialize imgui library
+
+	// this initializes the core structures of imgui
+	ImGui::CreateContext();
+
+	// this initializes imgui for SDL
+	ImGui_ImplSDL2_InitForVulkan(_window);
+
+	// this initializes imgui for Vulkan
+	ImGui_ImplVulkan_InitInfo init_info = {};
+	init_info.Instance = _instance;
+	init_info.PhysicalDevice = _chosenGPU;
+	init_info.Device = _device;
+	init_info.QueueFamily = _graphicsQueueFamily;
+	init_info.Queue = _graphicsQueue;
+	init_info.DescriptorPool = imguiPool;
+	init_info.MinImageCount = 2;
+	init_info.ImageCount = static_cast<uint32_t>(_swapchainImages.size());
+	init_info.UseDynamicRendering = true;
+
+	//dynamic rendering parameters for imgui to use
+	init_info.PipelineRenderingCreateInfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+	init_info.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
+	init_info.PipelineRenderingCreateInfo.pColorAttachmentFormats = &_swapchainImageFormat;
+
+	init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+
+	ImGui_ImplVulkan_Init(&init_info);
+
+	ImGui_ImplVulkan_CreateFontsTexture();
+
+	// add the destroy the imgui created structures
+	_mainDeletionQueue.push_function([=]() {
+		ImGui_ImplVulkan_Shutdown();
+		ImGui_ImplSDL2_Shutdown();
+		ImGui::DestroyContext();
+		vkDestroyDescriptorPool(_device, imguiPool, nullptr);
+	});
+}
+
+void VulkanEngine::draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView)
+{
+	VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
+		targetImageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	VkRenderingInfo renderInfo = vkinit::rendering_info(
+		_swapchainExtent, &colorAttachment, nullptr);
+
+	vkCmdBeginRendering(cmd, &renderInfo);
+	ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+	vkCmdEndRendering(cmd);
 }

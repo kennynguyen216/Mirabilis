@@ -65,6 +65,11 @@ class VulkanEngine{
     VkExtent2D _swapchainExtent;
     VmaAllocator _allocator;
 
+    VkFence _immFence;
+    VkCommandBuffer _immCommandBuffer;
+    VkCommandPool _immCommandPool;
+
+
     static VulkanEngine&  Get();
 
     // initializes everything in the engine
@@ -80,6 +85,8 @@ class VulkanEngine{
     //run main loop
     void run();
 
+    void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
+
     private:
         void init_vulkan();
         void init_swapchain();
@@ -91,4 +98,6 @@ class VulkanEngine{
         void draw_background(VkCommandBuffer cmd);
         void init_pipelines();
         void init_background_pipelines();
+        void init_imgui();
+        void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
     };
