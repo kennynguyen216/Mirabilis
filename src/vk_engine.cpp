@@ -37,7 +37,8 @@ void VulkanEngine::init()
 
     SDL_Init(SDL_INIT_VIDEO);
 
-    SDL_WindowFlags window_flags = SDL_WINDOW_VULKAN;
+    SDL_WindowFlags window_flags =
+        static_cast<SDL_WindowFlags>(SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
 
     _window = SDL_CreateWindow(
         "Vulkan Engine",
@@ -245,10 +246,22 @@ void VulkanEngine::draw()
     //wait until the gpu has finished rendering the last frame. timeout of 1 second
     VK_CHECK(vkWaitForFences(_device, 1, &get_current_frame()._renderFence, true, 1000000000));
     get_current_frame()._deletionQueue.flush();
-	VK_CHECK(vkResetFences(_device, 1, &get_current_frame()._renderFence));
     //request image from the swapchain 
     uint32_t swapchainImageIndex;
-    VK_CHECK(vkAcquireNextImageKHR(_device,_swapchain, 1000000000, get_current_frame()._swapchainSemaphore, nullptr, &swapchainImageIndex));
+    VkResult acquireResult = vkAcquireNextImageKHR(
+        _device,
+        _swapchain,
+        1000000000,
+        get_current_frame()._swapchainSemaphore,
+        nullptr,
+        &swapchainImageIndex);
+    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR ||
+        acquireResult == VK_SUBOPTIMAL_KHR) {
+        resize_requested = true;
+        return;
+    }
+    VK_CHECK(acquireResult);
+	VK_CHECK(vkResetFences(_device, 1, &get_current_frame()._renderFence));
     VkCommandBuffer cmd = get_current_frame()._mainCommandBuffer;
 
     // we are sure that commands finished executing so reset
@@ -258,8 +271,14 @@ void VulkanEngine::draw()
     VkCommandBufferBeginInfo cmdBeginInfo = vkinit::command_buffer_begin_info(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
     //start recording
 
-	_drawExtent.width = _drawImage.imageExtent.width;
-	_drawExtent.height = _drawImage.imageExtent.height;
+	_drawExtent.width = std::max(
+        1u,
+        static_cast<uint32_t>(
+            std::min(_swapchainExtent.width, _drawImage.imageExtent.width) * renderScale));
+	_drawExtent.height = std::max(
+        1u,
+        static_cast<uint32_t>(
+            std::min(_swapchainExtent.height, _drawImage.imageExtent.height) * renderScale));
 
     VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
 
@@ -334,7 +353,13 @@ void VulkanEngine::draw()
 
 	presentInfo.pImageIndices = &swapchainImageIndex;
 
-	VK_CHECK(vkQueuePresentKHR(_graphicsQueue, &presentInfo));
+	VkResult presentResult = vkQueuePresentKHR(_graphicsQueue, &presentInfo);
+	if (presentResult == VK_ERROR_OUT_OF_DATE_KHR ||
+        presentResult == VK_SUBOPTIMAL_KHR) {
+        resize_requested = true;
+    } else {
+        VK_CHECK(presentResult);
+    }
     
 	//increase the number of frames drawn
 	_frameNumber++;
@@ -359,6 +384,10 @@ void VulkanEngine::run(){
                     if(e.window.event == SDL_WINDOWEVENT_RESTORED) {
                         stop_rendering = false;
                     }
+                    if(e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+                       e.window.event == SDL_WINDOWEVENT_RESIZED) {
+                        resize_requested = true;
+                    }
                 }
                 if(e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) {
                     bQuit = true;
@@ -373,11 +402,18 @@ void VulkanEngine::run(){
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
+        if (resize_requested) {
+            resize_swapchain();
+            if (stop_rendering) {
+                continue;
+            }
+        }
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
 
         if (ImGui::Begin("background")) {
+            ImGui::SliderFloat("Render Scale", &renderScale, 0.3f, 1.0f);
             if (!backgroundEffects.empty()) {
                 ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
 
@@ -497,6 +533,26 @@ void VulkanEngine::destroy_swapchain()
 
         vkDestroyImageView(_device, _swapchainImageViews[i], nullptr);
     }
+}
+
+void VulkanEngine::resize_swapchain()
+{
+    int width = 0;
+    int height = 0;
+    SDL_GetWindowSize(_window, &width, &height);
+
+    if (width == 0 || height == 0) {
+        stop_rendering = true;
+        return;
+    }
+
+    vkDeviceWaitIdle(_device);
+    destroy_swapchain();
+
+    _windowExtent.width = static_cast<uint32_t>(width);
+    _windowExtent.height = static_cast<uint32_t>(height);
+    create_swapchain(_windowExtent.width, _windowExtent.height);
+    resize_requested = false;
 }
 
 void vkutil::copy_image_to_image(VkCommandBuffer cmd, VkImage source, VkImage destination, VkExtent2D srcSize, VkExtent2D dstSize)

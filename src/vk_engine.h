@@ -46,6 +46,8 @@ class VulkanEngine{
     bool _isInitialized{ false };
     int _frameNumber {0};
     bool stop_rendering {false};
+    bool resize_requested {false};
+    float renderScale {1.0f};
     VkExtent2D _windowExtent{1280, 720};
 
     FrameData _frames[FRAME_OVERLAP];
@@ -117,6 +119,7 @@ class VulkanEngine{
         void init_descriptors();
         void create_swapchain(uint32_t width, uint32_t height);
         void destroy_swapchain();
+        void resize_swapchain();
         void draw_background(VkCommandBuffer cmd);
         void init_pipelines();
         void init_background_pipelines();
