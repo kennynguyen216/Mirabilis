@@ -24,14 +24,21 @@ cd Mirabilis
 
 ```powershell
 cmake -S . -B build
-cmake --build build --config Debug --parallel
+cmake --build build --config Release --parallel
 ```
 
 ## Run
 
 ```powershell
-.\bin\Debug\engine.exe
+Push-Location .\bin\Release
+.\chapter_5.exe
+Pop-Location
 ```
+
+This project is pinned to the current tutorial's official `all-chapters-2`
+Chapter 5 implementation. The executable loads shaders and assets relative to
+`bin\Release`, so its working directory must be `bin\Release`. The included VS Code
+task and debug configuration set this automatically.
 
 Press `Esc` or close the window to exit.
 

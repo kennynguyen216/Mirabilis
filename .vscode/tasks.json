@@ -1,0 +1,39 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "CMake: Configure",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["-S", ".", "-B", "build"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: Build Chapter 5",
+            "type": "shell",
+            "command": "cmake",
+            "args": ["--build", "build", "--config", "Release", "--parallel"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": "$msCompile",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "Run vkguide Chapter 5",
+            "type": "shell",
+            "command": ".\\chapter_5.exe",
+            "options": {
+                "cwd": "${workspaceFolder}\\bin\\Release"
+            },
+            "dependsOn": "CMake: Build Chapter 5",
+            "problemMatcher": []
+        }
+    ]
+}

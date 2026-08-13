@@ -10,10 +10,17 @@ find_package(Vulkan REQUIRED)
 
 add_subdirectory(third_party)
 
+# The official Chapter 5 snapshot leaves Vulkan 1.3 feature-structure sType
+# fields zero-initialized. Its bundled vkbootstrap accepts that in normal
+# builds but has a Debug-only C assertion for it. Disable assertions only in
+# this dependency so the unchanged tutorial source works in either config.
+target_compile_definitions(vkbootstrap PRIVATE NDEBUG)
+
 set (CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin")
 set (CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin")
 
-add_subdirectory(src)
+add_subdirectory(shared)
+add_subdirectory(chapter-5)
 
 find_program(GLSL_VALIDATOR glslangValidator HINTS /usr/bin /usr/local/bin $ENV{VULKAN_SDK}/Bin/ $ENV{VULKAN_SDK}/Bin32/)
 
@@ -42,3 +49,7 @@ add_custom_target(
     Shaders 
     DEPENDS ${SPIRV_BINARY_FILES}
     )
+
+# Keep the official Chapter 5 sources unchanged while ensuring a normal build
+# also compiles the runtime shader files they load.
+add_dependencies(chapter_5 Shaders)

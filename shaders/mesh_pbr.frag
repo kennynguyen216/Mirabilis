@@ -1,7 +1,11 @@
 #version 450
 
 #extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+
+#define USE_BINDLESS
 #include "input_structures.glsl"
+
 
 layout (location = 0) in vec3 inNormal;
 layout (location = 1) in vec3 inColor;
@@ -45,7 +49,7 @@ vec3 calcIrradiance(vec3 nor) {
         2.0 * c2 * c.l10  * nor.z
     );
 }
-
+ 
 void main() 
 {
 	float lightValue = max(dot(inNormal, vec3(0.3f,1.f,0.3f)), 0.1f);
@@ -53,7 +57,9 @@ void main()
 	vec3 irradiance = calcIrradiance(inNormal); 
 
 
-	vec3 color = inColor * texture(colorTex,inUV).xyz;
+	//vec3 color = inColor * texture(colorTex,inUV).xyz;
+    int colorID = materialData.colorTexID;
+    vec3 color = inColor * texture(allTextures[colorID],inUV).xyz;
 
 	outFragColor = vec4(color * lightValue + color * irradiance.x * vec3(0.2f) ,1.0f);
 }

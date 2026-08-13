@@ -1,0 +1,8 @@
+{
+    "java.import.gradle.enabled": false,
+    "gradle.nestedProjects": false,
+    "files.watcherExclude": {
+        "**/third_party/**": true
+    },
+    "cmake.sourceDirectory": "${workspaceFolder}"
+}

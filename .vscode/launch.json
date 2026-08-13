@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug vkguide Chapter 5",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}\\bin\\Release\\chapter_5.exe",
+            "cwd": "${workspaceFolder}\\bin\\Release",
+            "preLaunchTask": "CMake: Build Chapter 5",
+            "stopAtEntry": false
+        }
+    ]
+}
