@@ -264,8 +264,17 @@ void VulkanEngine::draw()
 	// bind the descriptor set containing the draw image for the compute pipeline
 	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _gradientPipelineLayout, 0, 1, &_drawImageDescriptors, 0, nullptr);
 
+	ComputePushConstants pc{};
+	pc.data1 = glm::vec4(1, 0, 0, 1);
+	pc.data2 = glm::vec4(0, 0, 1, 1);
+
+	vkCmdPushConstants(cmd, _gradientPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+		0, sizeof(ComputePushConstants), &pc);
+
 	// execute the compute pipeline dispatch. We are using 16x16 workgroup size so we need to divide by it
-	vkCmdDispatch(cmd, std::ceil(_drawExtent.width / 16.0), std::ceil(_drawExtent.height / 16.0), 1);
+	vkCmdDispatch(cmd,
+		static_cast<uint32_t>(std::ceil(_drawExtent.width / 16.0)),
+		static_cast<uint32_t>(std::ceil(_drawExtent.height / 16.0)), 1);
 
 	// transition the draw image and the swapchain image into their correct transfer layouts
 	vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -544,10 +553,18 @@ void VulkanEngine::init_background_pipelines()
     computeLayout.pSetLayouts = &_drawImageDescriptorLayout;
     computeLayout.setLayoutCount = 1;
 
+    VkPushConstantRange pushConstant{};
+    pushConstant.offset = 0;
+    pushConstant.size = sizeof(ComputePushConstants);
+    pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    computeLayout.pPushConstantRanges = &pushConstant;
+    computeLayout.pushConstantRangeCount = 1;
+
     VkShaderModule computeDrawShader;
-    if (!vkutil::load_shader_module("../../shaders/gradient.comp.spv", _device, &computeDrawShader))
+	if (!vkutil::load_shader_module("../../shaders/gradient_color.comp.spv", _device, &computeDrawShader))
 	{
-		fmt::print("Error when building the compute shader \n");
+		fmt::print("Error loading gradient_color compute shader\n");
 		return;
 	}
     VkPipelineShaderStageCreateInfo stageinfo{};

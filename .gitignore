@@ -37,3 +37,6 @@
 /assets/brickadia/
 /shaders/*.spv
 /.vs/
+
+# Local Gradle caches
+.gradle/
