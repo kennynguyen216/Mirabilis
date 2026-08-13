@@ -1,0 +1,38 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rgba16f, set = 0, binding = 0) uniform image2D image;
+
+layout(push_constant) uniform constants
+{
+    vec4 data1;
+    vec4 data2;
+    vec4 data3;
+    vec4 data4;
+} PushConstants;
+
+float hash12(vec2 p)
+{
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+void main()
+{
+    ivec2 texelCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(image);
+
+    if (texelCoord.x < size.x && texelCoord.y < size.y)
+    {
+        vec2 uv = (vec2(texelCoord) + 0.5) / vec2(size);
+        vec3 skyColor = mix(PushConstants.data1.rgb * 0.2, PushConstants.data1.rgb, uv.y);
+
+        vec2 starGrid = vec2(texelCoord) / 8.0;
+        vec2 cell = floor(starGrid);
+        vec2 cellUv = fract(starGrid) - 0.5;
+        float star = step(0.985, hash12(cell)) * smoothstep(0.5, 0.0, length(cellUv));
+
+        vec3 color = skyColor + vec3(star * PushConstants.data1.a);
+        imageStore(image, texelCoord, vec4(color, 1.0));
+    }
+}

@@ -2,6 +2,7 @@
 
 #include <vk_types.h>
 #include <vk_descriptors.h>
+#include <vk_loader.h>
 
 struct DeletionQueue
 {
@@ -33,12 +34,19 @@ struct ComputePushConstants {
 	glm::vec4 data4;
 };
 
+struct ComputeEffect {
+    const char* name;
+    VkPipeline pipeline{};
+    VkPipelineLayout layout{};
+    ComputePushConstants data{};
+};
+
 class VulkanEngine{
     public:
     bool _isInitialized{ false };
     int _frameNumber {0};
     bool stop_rendering {false};
-    VkExtent2D _windowExtent{1700 , 900};
+    VkExtent2D _windowExtent{1280, 720};
 
     FrameData _frames[FRAME_OVERLAP];
     FrameData& get_current_frame() { return _frames[_frameNumber % FRAME_OVERLAP];};
@@ -53,8 +61,13 @@ class VulkanEngine{
     VkDescriptorSetLayout _drawImageDescriptorLayout;
     VkExtent2D _drawExtent;
     
-    VkPipeline _gradientPipeline;
     VkPipelineLayout _gradientPipelineLayout;
+    std::vector<ComputeEffect> backgroundEffects;
+    int currentBackgroundEffect{0};
+    VkPipelineLayout _meshPipelineLayout{};
+    VkPipeline _meshPipeline{};
+    AllocatedImage _depthImage;
+    std::vector<std::shared_ptr<MeshAsset>> testMeshes;
 
 
 
@@ -95,6 +108,8 @@ class VulkanEngine{
     void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
 
     private:
+        friend std::optional<std::vector<std::shared_ptr<MeshAsset>>> loadGltfMeshes(
+            VulkanEngine*, std::filesystem::path);
         void init_vulkan();
         void init_swapchain();
         void init_commands();
@@ -105,6 +120,12 @@ class VulkanEngine{
         void draw_background(VkCommandBuffer cmd);
         void init_pipelines();
         void init_background_pipelines();
+        void init_mesh_pipeline();
+        void init_default_data();
+        void draw_geometry(VkCommandBuffer cmd);
+        AllocatedBuffer create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage);
+        void destroy_buffer(const AllocatedBuffer& buffer);
+        GPUMeshBuffers uploadMesh(std::span<uint32_t> indices, std::span<Vertex> vertices);
         void init_imgui();
         void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
     };
