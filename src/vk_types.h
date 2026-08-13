@@ -91,6 +91,12 @@ struct GPUSceneData {
     glm::vec4 sunlightColor;
 };
 
+struct Bounds {
+    glm::vec3 origin{0.0f};
+    float sphereRadius{0.0f};
+    glm::vec3 extents{0.0f};
+};
+
 class IRenderable {
 public:
     virtual ~IRenderable() = default;
@@ -102,6 +108,7 @@ struct RenderObject {
     uint32_t firstIndex{};
     VkBuffer indexBuffer{};
     MaterialInstance* material{};
+    Bounds bounds{};
     glm::mat4 transform{1.0f};
     VkDeviceAddress vertexBufferAddress{};
 };

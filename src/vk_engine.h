@@ -45,6 +45,14 @@ struct ComputeEffect {
     ComputePushConstants data{};
 };
 
+struct EngineStats {
+    float frametime{0.0f};
+    int triangle_count{0};
+    int drawcall_count{0};
+    float scene_update_time{0.0f};
+    float mesh_draw_time{0.0f};
+};
+
 struct GLTFMetallic_Roughness {
     MaterialPipeline opaquePipeline;
     MaterialPipeline transparentPipeline;
@@ -114,12 +122,12 @@ class VulkanEngine{
     AllocatedImage _errorCheckerboardImage;
     VkSampler _defaultSamplerLinear{};
     VkSampler _defaultSamplerNearest{};
-    std::vector<std::shared_ptr<MeshAsset>> testMeshes;
     DrawContext mainDrawContext;
-    std::unordered_map<std::string, std::shared_ptr<Node>> loadedNodes;
+    std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> loadedScenes;
     GLTFMetallic_Roughness metalRoughMaterial;
-    MaterialInstance defaultMaterial;
     Camera mainCamera;
+    GPUSceneData sceneData{};
+    EngineStats stats{};
 
 
 
@@ -162,6 +170,9 @@ class VulkanEngine{
     private:
         friend std::optional<std::vector<std::shared_ptr<MeshAsset>>> loadGltfMeshes(
             VulkanEngine*, std::filesystem::path);
+        friend std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
+            VulkanEngine*, std::filesystem::path);
+        friend struct LoadedGLTF;
         void init_vulkan();
         void init_swapchain();
         void init_commands();
