@@ -17,6 +17,10 @@
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
+struct MaterialPipeline;
+struct MaterialInstance;
+struct DrawContext;
+
 
 
 #define VK_CHECK(x)                                                        \
@@ -59,4 +63,72 @@ struct GPUMeshBuffers {
 struct GPUDrawPushConstants {
     glm::mat4 worldMatrix;
     VkDeviceAddress vertexBuffer;
+};
+
+enum class MaterialPass : uint8_t {
+    MainColor,
+    Transparent,
+    Other
+};
+
+struct MaterialPipeline {
+    VkPipeline pipeline{};
+    VkPipelineLayout layout{};
+};
+
+struct MaterialInstance {
+    MaterialPipeline* pipeline{};
+    VkDescriptorSet materialSet{};
+    MaterialPass passType{MaterialPass::MainColor};
+};
+
+struct GPUSceneData {
+    glm::mat4 view;
+    glm::mat4 proj;
+    glm::mat4 viewproj;
+    glm::vec4 ambientColor;
+    glm::vec4 sunlightDirection;
+    glm::vec4 sunlightColor;
+};
+
+class IRenderable {
+public:
+    virtual ~IRenderable() = default;
+    virtual void Draw(const glm::mat4& topMatrix, DrawContext& ctx) = 0;
+};
+
+struct RenderObject {
+    uint32_t indexCount{};
+    uint32_t firstIndex{};
+    VkBuffer indexBuffer{};
+    MaterialInstance* material{};
+    glm::mat4 transform{1.0f};
+    VkDeviceAddress vertexBufferAddress{};
+};
+
+struct DrawContext {
+    std::vector<RenderObject> OpaqueSurfaces;
+    std::vector<RenderObject> TransparentSurfaces;
+};
+
+struct Node : public IRenderable {
+    std::weak_ptr<Node> parent;
+    std::vector<std::shared_ptr<Node>> children;
+    glm::mat4 localTransform{1.0f};
+    glm::mat4 worldTransform{1.0f};
+
+    void refreshTransform(const glm::mat4& parentMatrix)
+    {
+        worldTransform = parentMatrix * localTransform;
+        for (auto& child : children) {
+            child->refreshTransform(worldTransform);
+        }
+    }
+
+    void Draw(const glm::mat4& topMatrix, DrawContext& ctx) override
+    {
+        for (auto& child : children) {
+            child->Draw(topMatrix, ctx);
+        }
+    }
 };

@@ -3,6 +3,7 @@
 #include <vk_types.h>
 #include <vk_descriptors.h>
 #include <vk_loader.h>
+#include <camera.h>
 
 struct DeletionQueue
 {
@@ -24,6 +25,9 @@ struct FrameData {
         VkCommandPool _commandPool;
         VkCommandBuffer _mainCommandBuffer;
         DeletionQueue _deletionQueue;
+        DescriptorAllocatorGrowable _frameDescriptors;
+        AllocatedBuffer sceneBuffer;
+        VkDescriptorSet sceneDescriptor{};
     };
     constexpr unsigned int FRAME_OVERLAP = 2;
 
@@ -39,6 +43,41 @@ struct ComputeEffect {
     VkPipeline pipeline{};
     VkPipelineLayout layout{};
     ComputePushConstants data{};
+};
+
+struct GLTFMetallic_Roughness {
+    MaterialPipeline opaquePipeline;
+    MaterialPipeline transparentPipeline;
+    VkDescriptorSetLayout materialLayout{};
+
+    struct MaterialConstants {
+        glm::vec4 colorFactors;
+        glm::vec4 metal_rough_factors;
+        glm::vec4 extra[14];
+    };
+
+    struct MaterialResources {
+        AllocatedImage colorImage;
+        VkSampler colorSampler{};
+        AllocatedImage metalRoughImage;
+        VkSampler metalRoughSampler{};
+        VkBuffer dataBuffer{};
+        uint32_t dataBufferOffset{};
+    };
+
+    DescriptorWriter writer;
+    void build_pipelines(class VulkanEngine* engine);
+    void clear_resources(VkDevice device);
+    MaterialInstance write_material(
+        VkDevice device,
+        MaterialPass pass,
+        const MaterialResources& resources,
+        DescriptorAllocatorGrowable& descriptorAllocator);
+};
+
+struct MeshNode : public Node {
+    std::shared_ptr<MeshAsset> mesh;
+    void Draw(const glm::mat4& topMatrix, DrawContext& ctx) override;
 };
 
 class VulkanEngine{
@@ -57,19 +96,30 @@ class VulkanEngine{
     DeletionQueue _mainDeletionQueue;
     struct SDL_Window* _window {nullptr};
     AllocatedImage _drawImage;
-    DescriptorAllocator globalDescriptorAllocator;
+    DescriptorAllocatorGrowable globalDescriptorAllocator;
 
     VkDescriptorSet _drawImageDescriptors;
     VkDescriptorSetLayout _drawImageDescriptorLayout;
+    VkDescriptorSetLayout _singleImageDescriptorLayout{};
+    VkDescriptorSetLayout _gpuSceneDataDescriptorLayout{};
     VkExtent2D _drawExtent;
     
     VkPipelineLayout _gradientPipelineLayout;
     std::vector<ComputeEffect> backgroundEffects;
     int currentBackgroundEffect{0};
-    VkPipelineLayout _meshPipelineLayout{};
-    VkPipeline _meshPipeline{};
     AllocatedImage _depthImage;
+    AllocatedImage _whiteImage;
+    AllocatedImage _blackImage;
+    AllocatedImage _greyImage;
+    AllocatedImage _errorCheckerboardImage;
+    VkSampler _defaultSamplerLinear{};
+    VkSampler _defaultSamplerNearest{};
     std::vector<std::shared_ptr<MeshAsset>> testMeshes;
+    DrawContext mainDrawContext;
+    std::unordered_map<std::string, std::shared_ptr<Node>> loadedNodes;
+    GLTFMetallic_Roughness metalRoughMaterial;
+    MaterialInstance defaultMaterial;
+    Camera mainCamera;
 
 
 
@@ -102,7 +152,7 @@ class VulkanEngine{
     void cleanup();
 
     // draw loop
-    void draw();
+    void draw(float deltaTime);
 
     //run main loop
     void run();
@@ -123,12 +173,24 @@ class VulkanEngine{
         void draw_background(VkCommandBuffer cmd);
         void init_pipelines();
         void init_background_pipelines();
-        void init_mesh_pipeline();
         void init_default_data();
         void draw_geometry(VkCommandBuffer cmd);
+        void update_scene(float deltaTime);
         AllocatedBuffer create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage);
         void destroy_buffer(const AllocatedBuffer& buffer);
         GPUMeshBuffers uploadMesh(std::span<uint32_t> indices, std::span<Vertex> vertices);
+        AllocatedImage create_image(
+            VkExtent3D size,
+            VkFormat format,
+            VkImageUsageFlags usage,
+            bool mipmapped = false);
+        AllocatedImage create_image(
+            void* data,
+            VkExtent3D size,
+            VkFormat format,
+            VkImageUsageFlags usage,
+            bool mipmapped = false);
+        void destroy_image(const AllocatedImage& image);
         void init_imgui();
         void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
     };

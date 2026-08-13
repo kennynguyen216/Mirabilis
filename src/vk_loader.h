@@ -12,6 +12,11 @@
 struct GeoSurface {
     uint32_t startIndex{};
     uint32_t count{};
+    std::shared_ptr<struct GLTFMaterial> material;
+};
+
+struct GLTFMaterial {
+    MaterialInstance data;
 };
 
 struct MeshAsset {
