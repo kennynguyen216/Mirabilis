@@ -112,8 +112,49 @@ void VulkanEngine::init()
 
 void VulkanEngine::update_physics(float deltaTime)
 {
-    _playerMovement.simulate(_playerInput, deltaTime);
+    _playerMovement.simulate(
+        _playerInput, deltaTime, _boundaryWallColliders);
     _playerInput.jumpPressed = false;
+}
+
+void VulkanEngine::place_portal(Portal& portal, const Portal& otherPortal)
+{
+    const glm::vec3 rayOrigin = mainCamera.position;
+    const glm::vec3 rayDirection = glm::normalize(glm::vec3(
+        mainCamera.getRotationMatrix() * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+
+    std::optional<RaycastHit> closestHit;
+    const AABB* closestWall = nullptr;
+    for (const AABB& wall : _boundaryWallColliders) {
+        const std::optional<RaycastHit> hit = raycast_aabb(
+            rayOrigin, rayDirection, wall);
+        if (hit.has_value() &&
+            (!closestHit.has_value() || hit->distance < closestHit->distance)) {
+            closestHit = hit;
+            closestWall = &wall;
+        }
+    }
+
+    if (!closestHit.has_value() || closestWall == nullptr) {
+        return;
+    }
+
+    constexpr float PortalSurfaceOffset = 0.01f;
+    Portal candidate = portal;
+    candidate.placed = true;
+    candidate.position = closestHit->position +
+        closestHit->normal * PortalSurfaceOffset;
+    candidate.normal = closestHit->normal;
+    candidate.up = glm::vec3(0.0f, 1.0f, 0.0f);
+
+    if (!snap_portal_to_wall(candidate, *closestWall)) {
+        return;
+    }
+    if (portals_overlap(candidate, otherPortal)) {
+        return;
+    }
+
+    portal = candidate;
 }
 
 void VulkanEngine::set_mouse_capture(bool captured)
@@ -495,6 +536,16 @@ void VulkanEngine::run(){
                     if (wheelY < 0) {
                         _playerInput.jumpPressed = true;
                     }
+                }
+
+                if (_mouseCaptured && e.type == SDL_MOUSEBUTTONDOWN &&
+                    e.button.button == SDL_BUTTON_LEFT) {
+                    place_portal(_bluePortal, _orangePortal);
+                }
+
+                if (_mouseCaptured && e.type == SDL_MOUSEBUTTONDOWN &&
+                    e.button.button == SDL_BUTTON_RIGHT) {
+                    place_portal(_orangePortal, _bluePortal);
                 }
 
                 if (_mouseCaptured && e.type == SDL_KEYUP) {
@@ -1292,6 +1343,10 @@ void VulkanEngine::destroy_image(const AllocatedImage& image)
 
 void VulkanEngine::init_default_data()
 {
+    for (size_t i = 0; i < _boundaryWalls.size(); i++) {
+        _boundaryWallColliders[i] = get_aabb(_boundaryWalls[i]);
+    }
+
     uint32_t white = glm::packUnorm4x8(glm::vec4(1.0f));
     uint32_t grey = glm::packUnorm4x8(glm::vec4(0.66f, 0.66f, 0.66f, 1.0f));
     uint32_t black = glm::packUnorm4x8(glm::vec4(0.0f));
@@ -1389,6 +1444,25 @@ void VulkanEngine::init_default_data()
     _wallBounds.extents = glm::vec3(0.5f);
     _wallBounds.sphereRadius = glm::length(_wallBounds.extents);
 
+    std::array<Vertex, 4> portalVertices{};
+    portalVertices[0] = {
+        .position = {-0.5f, -0.5f, 0.0f}, .uv_x = 0.0f,
+        .normal = {0.0f, 0.0f, 1.0f}, .uv_y = 0.0f, .color = glm::vec4(1.0f)};
+    portalVertices[1] = {
+        .position = {0.5f, -0.5f, 0.0f}, .uv_x = 1.0f,
+        .normal = {0.0f, 0.0f, 1.0f}, .uv_y = 0.0f, .color = glm::vec4(1.0f)};
+    portalVertices[2] = {
+        .position = {0.5f, 0.5f, 0.0f}, .uv_x = 1.0f,
+        .normal = {0.0f, 0.0f, 1.0f}, .uv_y = 1.0f, .color = glm::vec4(1.0f)};
+    portalVertices[3] = {
+        .position = {-0.5f, 0.5f, 0.0f}, .uv_x = 0.0f,
+        .normal = {0.0f, 0.0f, 1.0f}, .uv_y = 1.0f, .color = glm::vec4(1.0f)};
+    std::array<uint32_t, 6> portalIndices{0, 1, 2, 0, 2, 3};
+    _portalMesh = uploadMesh(portalIndices, portalVertices);
+    _portalBounds.origin = glm::vec3(0.0f);
+    _portalBounds.extents = glm::vec3(0.5f, 0.5f, 0.0f);
+    _portalBounds.sphereRadius = glm::length(_portalBounds.extents);
+
 
     std::array<uint32_t, 16 * 16> checkerboard{};
     uint32_t magenta = glm::packUnorm4x8(glm::vec4(1, 0, 1, 1));
@@ -1456,6 +1530,44 @@ void VulkanEngine::init_default_data()
         wallResources,
         globalDescriptorAllocator);
 
+    _bluePortalMaterialBuffer = create_buffer(
+        sizeof(GLTFMetallic_Roughness::MaterialConstants),
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto* bluePortalConstants =
+        static_cast<GLTFMetallic_Roughness::MaterialConstants*>(
+            _bluePortalMaterialBuffer.info.pMappedData);
+    *bluePortalConstants = {};
+    // The current material shader has no emissive input yet, so use a bright
+    // base color to keep the placement prototype obvious on every wall face.
+    bluePortalConstants->colorFactors = glm::vec4(0.2f, 1.5f, 8.0f, 1.0f);
+
+    GLTFMetallic_Roughness::MaterialResources bluePortalResources = floorResources;
+    bluePortalResources.dataBuffer = _bluePortalMaterialBuffer.buffer;
+    _bluePortalMaterial = metalRoughMaterial.write_material(
+        _device,
+        MaterialPass::MainColor,
+        bluePortalResources,
+        globalDescriptorAllocator);
+
+    _orangePortalMaterialBuffer = create_buffer(
+        sizeof(GLTFMetallic_Roughness::MaterialConstants),
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto* orangePortalConstants =
+        static_cast<GLTFMetallic_Roughness::MaterialConstants*>(
+            _orangePortalMaterialBuffer.info.pMappedData);
+    *orangePortalConstants = {};
+    orangePortalConstants->colorFactors = glm::vec4(8.0f, 1.2f, 0.15f, 1.0f);
+
+    GLTFMetallic_Roughness::MaterialResources orangePortalResources = floorResources;
+    orangePortalResources.dataBuffer = _orangePortalMaterialBuffer.buffer;
+    _orangePortalMaterial = metalRoughMaterial.write_material(
+        _device,
+        MaterialPass::MainColor,
+        orangePortalResources,
+        globalDescriptorAllocator);
+
     //auto structureScene = loadGltf(this, "../../assets/structure.glb");
     //if (structureScene) {
       //  loadedScenes["structure"] = *structureScene;
@@ -1468,6 +1580,10 @@ void VulkanEngine::init_default_data()
     //}
 
     _mainDeletionQueue.push_function([this]() {
+        destroy_buffer(_orangePortalMaterialBuffer);
+        destroy_buffer(_bluePortalMaterialBuffer);
+        destroy_buffer(_portalMesh.vertexBuffer);
+        destroy_buffer(_portalMesh.indexBuffer);
         destroy_buffer(_wallMaterialBuffer);
         destroy_buffer(_wallMesh.vertexBuffer);
         destroy_buffer(_wallMesh.indexBuffer);
@@ -1535,22 +1651,49 @@ void VulkanEngine::update_scene(float deltaTime)
 
     mainDrawContext.OpaqueSurfaces.push_back(floor);
 
-    const auto addWall = [&](const glm::vec3& position, const glm::vec3& scale) {
+    const auto addWall = [&](const Wall& sourceWall) {
         RenderObject wall{};
         wall.indexCount = 36;
         wall.firstIndex = 0;
         wall.indexBuffer = _wallMesh.indexBuffer.buffer;
         wall.material = &_wallMaterial;
         wall.bounds = _wallBounds;
-        wall.transform = glm::translate(glm::mat4(1.0f), position) *
-            glm::scale(glm::mat4(1.0f), scale);
+        wall.transform = glm::translate(glm::mat4(1.0f), sourceWall.position) *
+            glm::scale(glm::mat4(1.0f), sourceWall.halfExtents * 2.0f);
         wall.vertexBufferAddress = _wallMesh.vertexBufferAddress;
         mainDrawContext.OpaqueSurfaces.push_back(wall);
     };
-    addWall(glm::vec3(0.0f, 1.0f, -24.75f), glm::vec3(50.0f, 2.0f, 0.5f));
-    addWall(glm::vec3(0.0f, 1.0f, 24.75f), glm::vec3(50.0f, 2.0f, 0.5f));
-    addWall(glm::vec3(-24.75f, 1.0f, 0.0f), glm::vec3(0.5f, 2.0f, 50.0f));
-    addWall(glm::vec3(24.75f, 1.0f, 0.0f), glm::vec3(0.5f, 2.0f, 50.0f));
+    for (const Wall& wall : _boundaryWalls) {
+        addWall(wall);
+    }
+
+    const auto addPortal = [&](const Portal& sourcePortal, MaterialInstance& material) {
+        if (!sourcePortal.placed) {
+            return;
+        }
+
+        const glm::vec3 right = glm::normalize(glm::cross(
+            sourcePortal.up, sourcePortal.normal));
+        glm::mat4 portalTransform(1.0f);
+        portalTransform[0] = glm::vec4(
+            right * (sourcePortal.halfWidth * 2.0f), 0.0f);
+        portalTransform[1] = glm::vec4(
+            sourcePortal.up * (sourcePortal.halfHeight * 2.0f), 0.0f);
+        portalTransform[2] = glm::vec4(sourcePortal.normal, 0.0f);
+        portalTransform[3] = glm::vec4(sourcePortal.position, 1.0f);
+
+        RenderObject portal{};
+        portal.indexCount = 6;
+        portal.firstIndex = 0;
+        portal.indexBuffer = _portalMesh.indexBuffer.buffer;
+        portal.material = &material;
+        portal.bounds = _portalBounds;
+        portal.transform = portalTransform;
+        portal.vertexBufferAddress = _portalMesh.vertexBufferAddress;
+        mainDrawContext.OpaqueSurfaces.push_back(portal);
+    };
+    addPortal(_bluePortal, _bluePortalMaterial);
+    addPortal(_orangePortal, _orangePortalMaterial);
 
     sceneData = {};
     sceneData.view = mainCamera.getViewMatrix();

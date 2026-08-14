@@ -17,6 +17,8 @@ add_executable (engine
   vk_loader.cpp
   camera.h
   camera.cpp
+  world.h
+  portal.h
   player_movement.h
   player_movement.cpp
 )

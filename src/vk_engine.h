@@ -1,10 +1,14 @@
 #pragma once 
 
+#include <array>
+
 #include <vk_types.h>
 #include <vk_descriptors.h>
 #include <vk_loader.h>
 #include <camera.h>
 #include <player_movement.h>
+#include <portal.h>
+#include <world.h>
 
 struct DeletionQueue
 {
@@ -207,6 +211,7 @@ class VulkanEngine{
         void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
         void update_physics(float deltaTime);
         void set_mouse_capture(bool captured);
+        void place_portal(Portal& portal, const Portal& otherPortal);
 
         PlayerInput _playerInput{};
         PlayerMovement _playerMovement{};
@@ -223,4 +228,19 @@ class VulkanEngine{
         AllocatedBuffer _wallMaterialBuffer;
         MaterialInstance _wallMaterial;
         Bounds _wallBounds;
+        GPUMeshBuffers _portalMesh;
+        AllocatedBuffer _bluePortalMaterialBuffer;
+        MaterialInstance _bluePortalMaterial;
+        AllocatedBuffer _orangePortalMaterialBuffer;
+        MaterialInstance _orangePortalMaterial;
+        Bounds _portalBounds;
+        Portal _bluePortal;
+        Portal _orangePortal;
+        std::array<Wall, 4> _boundaryWalls{{
+            {{0.0f, 1.5f, -24.75f}, {25.0f, 1.5f, 0.25f}}, // north
+            {{0.0f, 1.5f,  24.75f}, {25.0f, 1.5f, 0.25f}}, // south
+            {{-24.75f, 1.5f, 0.0f}, {0.25f, 1.5f, 25.0f}}, // west
+            {{ 24.75f, 1.5f, 0.0f}, {0.25f, 1.5f, 25.0f}}, // east
+        }};
+        std::array<AABB, 4> _boundaryWallColliders{};
     };

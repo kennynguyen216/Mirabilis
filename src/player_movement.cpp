@@ -4,7 +4,10 @@
 #include <cmath>
 #include <glm/geometric.hpp>
 
-void PlayerMovement::simulate(const PlayerInput& input, float deltaTime)
+void PlayerMovement::simulate(
+    const PlayerInput& input,
+    float deltaTime,
+    std::span<const AABB> collisionWalls)
 {
     if (input.jumpPressed) {
         jumpBufferRemaining = settings.jumpBufferSeconds;
@@ -65,7 +68,7 @@ void PlayerMovement::simulate(const PlayerInput& input, float deltaTime)
     // Resolve the player against the four boundary walls. The player is an
     // upright box whose position is at its feet; only the shallowest horizontal
     // overlap is resolved so approaching a wall slides along it.
-    for (const AABB& wall : boundaryWalls) {
+    for (const AABB& wall : collisionWalls) {
         const bool overlapsVertically =
             position.y < wall.max.y &&
             position.y + settings.playerHeight > wall.min.y;
@@ -73,10 +76,10 @@ void PlayerMovement::simulate(const PlayerInput& input, float deltaTime)
             continue;
         }
 
-        const float playerMinX = position.x - settings.playerRadius;
-        const float playerMaxX = position.x + settings.playerRadius;
-        const float playerMinZ = position.z - settings.playerRadius;
-        const float playerMaxZ = position.z + settings.playerRadius;
+        const float playerMinX = position.x - settings.playerHalfWidth;
+        const float playerMaxX = position.x + settings.playerHalfWidth;
+        const float playerMinZ = position.z - settings.playerHalfWidth;
+        const float playerMaxZ = position.z + settings.playerHalfWidth;
 
         const float overlapX = std::min(playerMaxX, wall.max.x) -
             std::max(playerMinX, wall.min.x);
