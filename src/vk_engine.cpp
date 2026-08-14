@@ -926,11 +926,8 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     builder.set_depth_format(engine->_depthImage.imageFormat);
     opaquePipeline.pipeline = builder.build_pipeline(engine->_device);
 
-    builder.enable_blending_alphablend();
-    // Transparent surfaces still need depth testing so they do not draw over
-    // opaque geometry, but they must not write their depth values.
-    builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
-    builder._depthStencil.depthWriteEnable = VK_FALSE;
+    builder.enable_blending_additive();
+    builder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
     transparentPipeline.pipeline = builder.build_pipeline(engine->_device);
 
     vkDestroyShaderModule(engine->_device, fragmentShader, nullptr);
@@ -1279,8 +1276,8 @@ void VulkanEngine::update_scene(float deltaTime)
     sceneData.proj = glm::perspective(
         glm::radians(70.0f),
         static_cast<float>(_drawExtent.width) / static_cast<float>(_drawExtent.height),
-        0.1f,
-        10000.0f);
+        10000.0f,
+        0.1f);
     sceneData.proj[1][1] *= -1.0f;
     sceneData.viewproj = sceneData.proj * sceneData.view;
     sceneData.ambientColor = glm::vec4(0.1f);

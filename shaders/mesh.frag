@@ -17,5 +17,5 @@ void main()
     vec3 lighting = sceneData.ambientColor.rgb +
         diffuse * sceneData.sunlightColor.rgb;
 
-    outFragColor = vec4(baseColor.rgb * lighting, baseColor.a);
+    outFragColor = vec4(baseColor.rgb * lighting, 1.0);
 }
