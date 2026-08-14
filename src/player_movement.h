@@ -44,8 +44,8 @@ struct PlayerMovement {
     float jumpBufferRemaining{0.0f};
     PlayerMovementSettings settings{};
 
-    void simulate(
-        const PlayerInput& input,
-        float deltaTime,
-        std::span<const AABB> collisionWalls);
+    // Advances player-controlled movement, but deliberately does not resolve
+    // world geometry. Portal traversal will run after this step.
+    void integrate(const PlayerInput& input, float deltaTime);
+    void resolve_world_collision(std::span<const AABB> collisionWalls);
 };

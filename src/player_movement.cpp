@@ -4,10 +4,7 @@
 #include <cmath>
 #include <glm/geometric.hpp>
 
-void PlayerMovement::simulate(
-    const PlayerInput& input,
-    float deltaTime,
-    std::span<const AABB> collisionWalls)
+void PlayerMovement::integrate(const PlayerInput& input, float deltaTime)
 {
     if (input.jumpPressed) {
         jumpBufferRemaining = settings.jumpBufferSeconds;
@@ -64,7 +61,10 @@ void PlayerMovement::simulate(
     velocity.z = horizontalVelocity.z;
     velocity.y -= settings.gravity * deltaTime;
     position += velocity * deltaTime;
+}
 
+void PlayerMovement::resolve_world_collision(std::span<const AABB> collisionWalls)
+{
     // Resolve the player against the four boundary walls. The player is an
     // upright box whose position is at its feet; only the shallowest horizontal
     // overlap is resolved so approaching a wall slides along it.

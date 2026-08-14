@@ -3,7 +3,11 @@
 #include <algorithm>
 #include <cmath>
 
+#include <glm/geometric.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
+#include <glm/mat4x4.hpp>
 #include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
 
 #include "world.h"
 
@@ -17,17 +21,109 @@ struct Portal {
     float halfHeight{1.2f};
 };
 
+// Projects a reference up vector onto the portal plane, guaranteeing that
+// normal/up/right form an orthonormal portal frame.
+inline void orient_portal(Portal& portal, const glm::vec3& normal)
+{
+    portal.normal = glm::normalize(normal);
+
+    glm::vec3 referenceUp{0.0f, 1.0f, 0.0f};
+    if (std::abs(glm::dot(referenceUp, portal.normal)) > 0.999f) {
+        referenceUp = glm::vec3(0.0f, 0.0f, 1.0f);
+    }
+
+    portal.up = glm::normalize(referenceUp -
+        portal.normal * glm::dot(referenceUp, portal.normal));
+}
+
+inline glm::mat4 get_portal_frame(const Portal& portal)
+{
+    const glm::vec3 right = glm::normalize(glm::cross(portal.up, portal.normal));
+    glm::mat4 frame{1.0f};
+    frame[0] = glm::vec4(right, 0.0f);
+    frame[1] = glm::vec4(portal.up, 0.0f);
+    frame[2] = glm::vec4(portal.normal, 0.0f);
+    frame[3] = glm::vec4(portal.position, 1.0f);
+    return frame;
+}
+
+// Maps a point or direction entering source to the matching frame at
+// destination. The local 180-degree Y rotation makes the result exit from
+// the front of the destination portal.
+inline glm::mat4 get_portal_transfer_transform(
+    const Portal& source,
+    const Portal& destination)
+{
+    glm::mat4 portalFlip{1.0f};
+    portalFlip[0][0] = -1.0f;
+    portalFlip[2][2] = -1.0f;
+
+    return get_portal_frame(destination) * portalFlip *
+        glm::inverse(get_portal_frame(source));
+}
+
+inline glm::vec3 transform_position_through_portal(
+    const Portal& source,
+    const Portal& destination,
+    const glm::vec3& position)
+{
+    const glm::vec4 transformed = get_portal_transfer_transform(source, destination) *
+        glm::vec4(position, 1.0f);
+    return glm::vec3(transformed);
+}
+
+inline glm::vec3 transform_direction_through_portal(
+    const Portal& source,
+    const Portal& destination,
+    const glm::vec3& direction)
+{
+    const glm::vec4 transformed = get_portal_transfer_transform(source, destination) *
+        glm::vec4(direction, 0.0f);
+    return glm::vec3(transformed);
+}
+
+inline float portal_signed_distance(const Portal& portal, const glm::vec3& point)
+{
+    return glm::dot(point - portal.position, portal.normal);
+}
+
+// Tests the player at the instant its leading face reaches the portal plane.
+// The player must fit completely inside the portal opening, not merely have its
+// center inside it.
+inline bool portal_fits_upright_player(
+    const Portal& portal,
+    const glm::vec3& playerFeetAtPlane,
+    float playerHalfWidth,
+    float playerHeight)
+{
+    // Traversal is checked after gravity but before the ground-plane snap, so
+    // a grounded player's feet can be a few millimetres below y = 0 here.
+    constexpr float FitEpsilon = 0.02f;
+    const glm::vec3 localPosition = glm::vec3(
+        glm::inverse(get_portal_frame(portal)) *
+        glm::vec4(playerFeetAtPlane, 1.0f));
+
+    return std::abs(localPosition.x) <=
+            portal.halfWidth - playerHalfWidth + FitEpsilon &&
+        localPosition.y >= -portal.halfHeight - FitEpsilon &&
+        localPosition.y + playerHeight <= portal.halfHeight + FitEpsilon;
+}
+
 // Snaps a portal to the closest legal center on one vertical, axis-aligned
 // wall. Placement fails only when the wall is physically too small.
 inline bool snap_portal_to_wall(Portal& portal, const AABB& wall)
 {
     constexpr float EdgeMargin = 0.001f;
-    const float minCenterY = wall.min.y + portal.halfHeight + EdgeMargin;
-    const float maxCenterY = wall.max.y - portal.halfHeight - EdgeMargin;
+    const float minCenterY = wall.min.y + portal.halfHeight;
+    const float maxCenterY = wall.max.y - portal.halfHeight;
     if (minCenterY > maxCenterY) {
         return false;
     }
-    portal.position.y = std::clamp(portal.position.y, minCenterY, maxCenterY);
+
+    // The bhop sandbox has a single ground plane at every wall's bottom edge.
+    // Floor-aligning portals means the upright player can always fit through
+    // them; their horizontal coordinate still comes from the placement ray.
+    portal.position.y = minCenterY;
 
     if (std::abs(portal.normal.x) > 0.5f) {
         const float minCenterZ = wall.min.z + portal.halfWidth + EdgeMargin;

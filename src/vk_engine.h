@@ -210,12 +210,17 @@ class VulkanEngine{
         void init_imgui();
         void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
         void update_physics(float deltaTime);
+        bool try_traverse_portal(
+            const Portal& source,
+            const Portal& destination,
+            const glm::vec3& previousPosition);
         void set_mouse_capture(bool captured);
         void place_portal(Portal& portal, const Portal& otherPortal);
 
         PlayerInput _playerInput{};
         PlayerMovement _playerMovement{};
         bool _mouseCaptured{true};
+        float _portalTraversalCooldown{0.0f};
         float _physicsAccumulator{0.0f};
         static constexpr float PhysicsDt = 1.0f / 120.0f;
         static constexpr int MaxPhysicsSteps = 8;

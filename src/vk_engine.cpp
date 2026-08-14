@@ -9,6 +9,7 @@
 #include <vk_types.h>
 #include <vk_images.h>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <thread>
 #define VMA_IMPLEMENTATION
@@ -112,9 +113,74 @@ void VulkanEngine::init()
 
 void VulkanEngine::update_physics(float deltaTime)
 {
-    _playerMovement.simulate(
-        _playerInput, deltaTime, _boundaryWallColliders);
+    const glm::vec3 previousPosition = _playerMovement.position;
+    _playerMovement.integrate(_playerInput, deltaTime);
+
+    _portalTraversalCooldown = std::max(
+        0.0f, _portalTraversalCooldown - deltaTime);
+    if (_portalTraversalCooldown <= 0.0f &&
+        _bluePortal.placed && _orangePortal.placed) {
+        if (!try_traverse_portal(_bluePortal, _orangePortal, previousPosition)) {
+            try_traverse_portal(_orangePortal, _bluePortal, previousPosition);
+        }
+    }
+
+    _playerMovement.resolve_world_collision(_boundaryWallColliders);
     _playerInput.jumpPressed = false;
+}
+
+bool VulkanEngine::try_traverse_portal(
+    const Portal& source,
+    const Portal& destination,
+    const glm::vec3& previousPosition)
+{
+    const float playerHalfWidth = _playerMovement.settings.playerHalfWidth;
+    const glm::vec3 previousLeadingFace = previousPosition -
+        source.normal * playerHalfWidth;
+    const glm::vec3 currentLeadingFace = _playerMovement.position -
+        source.normal * playerHalfWidth;
+
+    const float previousDistance = portal_signed_distance(source, previousLeadingFace);
+    const float currentDistance = portal_signed_distance(source, currentLeadingFace);
+    if (previousDistance <= 0.0f || currentDistance > 0.0f) {
+        return false;
+    }
+
+    const float crossingFraction = previousDistance /
+        (previousDistance - currentDistance);
+    const glm::vec3 crossingLeadingFace = glm::mix(
+        previousLeadingFace, currentLeadingFace, crossingFraction);
+    if (!portal_fits_upright_player(
+            source,
+            crossingLeadingFace,
+            playerHalfWidth,
+            _playerMovement.settings.playerHeight)) {
+        return false;
+    }
+
+    _playerMovement.position = transform_position_through_portal(
+        source, destination, _playerMovement.position);
+    _playerMovement.velocity = transform_direction_through_portal(
+        source, destination, _playerMovement.velocity);
+
+    // Move the collision box fully onto the room side of the exit wall.
+    constexpr float ExitEpsilon = 0.02f;
+    _playerMovement.position += destination.normal *
+        (playerHalfWidth + ExitEpsilon);
+
+    const glm::vec3 transformedForward = glm::normalize(
+        transform_direction_through_portal(
+            source,
+            destination,
+            glm::vec3(mainCamera.getRotationMatrix() *
+                glm::vec4(0.0f, 0.0f, -1.0f, 0.0f))));
+    mainCamera.yaw = std::atan2(transformedForward.x, -transformedForward.z);
+    mainCamera.pitch = std::asin(std::clamp(transformedForward.y, -1.0f, 1.0f));
+    _playerInput.yaw = mainCamera.yaw;
+
+    // Prevent the next fixed tick from immediately re-entering the exit.
+    _portalTraversalCooldown = 0.15f;
+    return true;
 }
 
 void VulkanEngine::place_portal(Portal& portal, const Portal& otherPortal)
@@ -144,8 +210,7 @@ void VulkanEngine::place_portal(Portal& portal, const Portal& otherPortal)
     candidate.placed = true;
     candidate.position = closestHit->position +
         closestHit->normal * PortalSurfaceOffset;
-    candidate.normal = closestHit->normal;
-    candidate.up = glm::vec3(0.0f, 1.0f, 0.0f);
+    orient_portal(candidate, closestHit->normal);
 
     if (!snap_portal_to_wall(candidate, *closestWall)) {
         return;
