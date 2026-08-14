@@ -4,29 +4,16 @@
 #include <cmath>
 #include <glm/geometric.hpp>
 
-namespace {
-constexpr float Gravity = 20.0f;
-constexpr float GroundHeight = 0.0f;
-constexpr float MaxGroundSpeed = 8.0f;
-constexpr float GroundAcceleration = 50.0f;
-constexpr float GroundFriction = 8.0f;
-constexpr float StopSpeed = 2.0f;
-constexpr float JumpSpeed = 8.0f;
-constexpr float AirAcceleration = 16.0f;
-constexpr float AirWishSpeedCap = 4.0f;
-constexpr float JumpBufferSeconds = 0.1f;
-}
-
 void PlayerMovement::simulate(const PlayerInput& input, float deltaTime)
 {
     if (input.jumpPressed) {
-        jumpBufferRemaining = JumpBufferSeconds;
+        jumpBufferRemaining = settings.jumpBufferSeconds;
     } else {
         jumpBufferRemaining = std::max(jumpBufferRemaining - deltaTime, 0.0f);
     }
 
     if (grounded && jumpBufferRemaining > 0.0f) {
-        velocity.y = JumpSpeed;
+        velocity.y = settings.jumpSpeed;
         grounded = false;
         jumpBufferRemaining = 0.0f;
     }
@@ -46,36 +33,49 @@ void PlayerMovement::simulate(const PlayerInput& input, float deltaTime)
     if (grounded) {
         const float speed = glm::length(horizontalVelocity);
         if (speed > 0.0f) {
-            const float control = std::max(speed, StopSpeed);
-            const float drop = control * GroundFriction * deltaTime;
+            const float control = std::max(speed, settings.stopSpeed);
+            const float drop = control * settings.groundFriction * deltaTime;
             horizontalVelocity *= std::max(speed - drop, 0.0f) / speed;
         }
 
         if (glm::length(wishDirection) > 0.0f) {
             const float currentSpeed = glm::dot(horizontalVelocity, wishDirection);
-            const float addSpeed = MaxGroundSpeed - currentSpeed;
+            const float addSpeed = settings.maxGroundSpeed - currentSpeed;
             if (addSpeed > 0.0f) {
-                const float accelSpeed = GroundAcceleration * deltaTime * MaxGroundSpeed;
+                const float accelSpeed = settings.groundAcceleration * deltaTime *
+                    settings.maxGroundSpeed;
                 horizontalVelocity += wishDirection * std::min(accelSpeed, addSpeed);
             }
         }
     } else if (glm::length(wishDirection) > 0.0f) {
         const float currentSpeed = glm::dot(horizontalVelocity, wishDirection);
-        const float addSpeed = AirWishSpeedCap - currentSpeed;
+        const float addSpeed = settings.airWishSpeedCap - currentSpeed;
         if (addSpeed > 0.0f) {
-            const float accelSpeed = AirAcceleration * deltaTime * AirWishSpeedCap;
+            const float accelSpeed = settings.airAcceleration * deltaTime *
+                settings.airWishSpeedCap;
             horizontalVelocity += wishDirection * std::min(accelSpeed, addSpeed);
         }
     }
 
     velocity.x = horizontalVelocity.x;
     velocity.z = horizontalVelocity.z;
-    velocity.y -= Gravity * deltaTime;
+    velocity.y -= settings.gravity * deltaTime;
     position += velocity * deltaTime;
 
+    if (position.y < settings.respawnHeight) {
+        position = settings.spawnPosition;
+        velocity = glm::vec3(0.0f);
+        grounded = false;
+        jumpBufferRemaining = 0.0f;
+        return;
+    }
+
+    const bool overFloor =
+        std::abs(position.x) <= settings.floorHalfExtent &&
+        std::abs(position.z) <= settings.floorHalfExtent;
     grounded = false;
-    if (position.y <= GroundHeight) {
-        position.y = GroundHeight;
+    if (overFloor && position.y <= settings.groundHeight) {
+        position.y = settings.groundHeight;
         if (velocity.y < 0.0f) {
             velocity.y = 0.0f;
         }

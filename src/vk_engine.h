@@ -219,4 +219,8 @@ class VulkanEngine{
         AllocatedBuffer _floorMaterialBuffer;
         MaterialInstance _floorMaterial;
         Bounds _floorBounds;
+        GPUMeshBuffers _wallMesh;
+        AllocatedBuffer _wallMaterialBuffer;
+        MaterialInstance _wallMaterial;
+        Bounds _wallBounds;
     };

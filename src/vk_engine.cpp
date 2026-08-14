@@ -98,7 +98,7 @@ void VulkanEngine::init()
     mainCamera.pitch = glm::radians(-20.0f);
     mainCamera.yaw = 0.0f;
 
-    _playerMovement.position = glm::vec3(0.0f);
+    _playerMovement.position = _playerMovement.settings.spawnPosition;
     _playerMovement.velocity = glm::vec3(0.0f);
     _playerMovement.grounded = true;
     
@@ -482,6 +482,21 @@ void VulkanEngine::run(){
                         _playerInput.jumpPressed = true;
                     }
                 }
+
+                if (_mouseCaptured && e.type == SDL_MOUSEWHEEL) {
+                    // SDL reports a normal scroll-down as a negative Y value.
+                    // Some touchpads request the opposite convention through
+                    // SDL_MOUSEWHEEL_FLIPPED, so normalize it before testing.
+                    int wheelY = e.wheel.y;
+                    if (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) {
+                        wheelY = -wheelY;
+                    }
+
+                    if (wheelY < 0) {
+                        _playerInput.jumpPressed = true;
+                    }
+                }
+
                 if (_mouseCaptured && e.type == SDL_KEYUP) {
                     if (e.key.keysym.sym == SDLK_w) _playerInput.forward = false;
                     if (e.key.keysym.sym == SDLK_s) _playerInput.backward = false;
@@ -541,6 +556,19 @@ void VulkanEngine::run(){
         }
         ImGui::End();
 
+        if (ImGui::Begin("Movement")) {
+            PlayerMovementSettings& movement = _playerMovement.settings;
+            ImGui::SliderFloat("Gravity", &movement.gravity, 1.0f, 60.0f);
+            ImGui::SliderFloat("Jump Speed", &movement.jumpSpeed, 1.0f, 20.0f);
+            ImGui::SliderFloat("Ground Speed", &movement.maxGroundSpeed, 1.0f, 20.0f);
+            ImGui::SliderFloat("Ground Accel", &movement.groundAcceleration, 1.0f, 100.0f);
+            ImGui::SliderFloat("Ground Friction", &movement.groundFriction, 0.0f, 20.0f);
+            ImGui::SliderFloat("Air Accel", &movement.airAcceleration, 0.0f, 50.0f);
+            ImGui::SliderFloat("Air Wish Cap", &movement.airWishSpeedCap, 0.1f, 20.0f);
+            ImGui::SliderFloat("Jump Buffer", &movement.jumpBufferSeconds, 0.0f, 0.25f);
+        }
+        ImGui::End();
+
         stats.frametime = deltaTime * 1000.0f;
         if (ImGui::Begin("Stats")) {
             const float horizontalSpeed = glm::length(glm::vec2(
@@ -583,7 +611,9 @@ void VulkanEngine::create_swapchain(uint32_t width, uint32_t height)
 
     vkb::Swapchain vkbSwapchain = swapchainBuilder
         .set_desired_format(VkSurfaceFormatKHR{ .format = _swapchainImageFormat, .colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
-        .set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR)
+        .set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
+        .add_fallback_present_mode(VK_PRESENT_MODE_FIFO_KHR)
+        .set_desired_min_image_count(vkb::SwapchainBuilder::TRIPLE_BUFFERING)
         .set_desired_extent(width, height)
         .add_image_usage_flags(VK_IMAGE_USAGE_TRANSFER_DST_BIT)
         .build()
@@ -1308,8 +1338,56 @@ void VulkanEngine::init_default_data()
     _floorMesh = uploadMesh(indices, corners);
 
     _floorBounds.origin = glm::vec3(0.0f);
-_floorBounds.extents = glm::vec3(25.0f, 0.0f, 25.0f);
-_floorBounds.sphereRadius = glm::length(_floorBounds.extents);
+    _floorBounds.extents = glm::vec3(25.0f, 0.0f, 25.0f);
+    _floorBounds.sphereRadius = glm::length(_floorBounds.extents);
+
+    std::vector<Vertex> wallVertices;
+    std::vector<uint32_t> wallIndices;
+    const auto makeWallVertex = [](const glm::vec3& position,
+                                   const glm::vec3& normal,
+                                   float u,
+                                   float v) {
+        Vertex vertex{};
+        vertex.position = position;
+        vertex.normal = normal;
+        vertex.uv_x = u;
+        vertex.uv_y = v;
+        vertex.color = glm::vec4(1.0f);
+        return vertex;
+    };
+    const auto addWallFace = [&](const glm::vec3& a,
+                                 const glm::vec3& b,
+                                 const glm::vec3& c,
+                                 const glm::vec3& d,
+                                 const glm::vec3& normal) {
+        const uint32_t first = static_cast<uint32_t>(wallVertices.size());
+        wallVertices.push_back(makeWallVertex(a, normal, 0.0f, 0.0f));
+        wallVertices.push_back(makeWallVertex(b, normal, 1.0f, 0.0f));
+        wallVertices.push_back(makeWallVertex(c, normal, 1.0f, 1.0f));
+        wallVertices.push_back(makeWallVertex(d, normal, 0.0f, 1.0f));
+        wallIndices.insert(wallIndices.end(), {
+            first, first + 1, first + 2,
+            first, first + 2, first + 3});
+    };
+
+    constexpr float half = 0.5f;
+    addWallFace({-half, -half, half}, {half, -half, half},
+                {half, half, half}, {-half, half, half}, {0.0f, 0.0f, 1.0f});
+    addWallFace({half, -half, -half}, {-half, -half, -half},
+                {-half, half, -half}, {half, half, -half}, {0.0f, 0.0f, -1.0f});
+    addWallFace({half, -half, half}, {half, -half, -half},
+                {half, half, -half}, {half, half, half}, {1.0f, 0.0f, 0.0f});
+    addWallFace({-half, -half, -half}, {-half, -half, half},
+                {-half, half, half}, {-half, half, -half}, {-1.0f, 0.0f, 0.0f});
+    addWallFace({-half, half, -half}, {-half, half, half},
+                {half, half, half}, {half, half, -half}, {0.0f, 1.0f, 0.0f});
+    addWallFace({-half, -half, half}, {-half, -half, -half},
+                {half, -half, -half}, {half, -half, half}, {0.0f, -1.0f, 0.0f});
+
+    _wallMesh = uploadMesh(wallIndices, wallVertices);
+    _wallBounds.origin = glm::vec3(0.0f);
+    _wallBounds.extents = glm::vec3(0.5f);
+    _wallBounds.sphereRadius = glm::length(_wallBounds.extents);
 
 
     std::array<uint32_t, 16 * 16> checkerboard{};
@@ -1344,7 +1422,7 @@ _floorBounds.sphereRadius = glm::length(_floorBounds.extents);
 
     *floorConstants = {};
     floorConstants->colorFactors = glm::vec4(1.0f);
-    floorConstants->metal_rough_factors = glm::vec4(0.0f, 0.8f, 0.0f, 0.0f);
+    floorConstants->metal_rough_factors = glm::vec4(0.0f, 0.8f, 1.0f, 0.0f);
 
     GLTFMetallic_Roughness::MaterialResources floorResources{};
     floorResources.colorImage = _whiteImage;
@@ -1355,10 +1433,28 @@ _floorBounds.sphereRadius = glm::length(_floorBounds.extents);
     floorResources.dataBufferOffset = 0;
 
     _floorMaterial = metalRoughMaterial.write_material(
-    _device,
-    MaterialPass::MainColor,
-    floorResources,
-    globalDescriptorAllocator);
+        _device,
+        MaterialPass::MainColor,
+        floorResources,
+        globalDescriptorAllocator);
+
+    _wallMaterialBuffer = create_buffer(
+        sizeof(GLTFMetallic_Roughness::MaterialConstants),
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto* wallConstants = static_cast<GLTFMetallic_Roughness::MaterialConstants*>(
+        _wallMaterialBuffer.info.pMappedData);
+    *wallConstants = {};
+    wallConstants->colorFactors = glm::vec4(0.18f, 0.32f, 0.55f, 1.0f);
+    wallConstants->metal_rough_factors = glm::vec4(0.0f, 0.8f, 0.0f, 0.0f);
+
+    GLTFMetallic_Roughness::MaterialResources wallResources = floorResources;
+    wallResources.dataBuffer = _wallMaterialBuffer.buffer;
+    _wallMaterial = metalRoughMaterial.write_material(
+        _device,
+        MaterialPass::MainColor,
+        wallResources,
+        globalDescriptorAllocator);
 
     //auto structureScene = loadGltf(this, "../../assets/structure.glb");
     //if (structureScene) {
@@ -1372,6 +1468,9 @@ _floorBounds.sphereRadius = glm::length(_floorBounds.extents);
     //}
 
     _mainDeletionQueue.push_function([this]() {
+        destroy_buffer(_wallMaterialBuffer);
+        destroy_buffer(_wallMesh.vertexBuffer);
+        destroy_buffer(_wallMesh.indexBuffer);
         destroy_buffer(_floorMaterialBuffer);
         destroy_buffer(_floorMesh.vertexBuffer);
         destroy_buffer(_floorMesh.indexBuffer);
@@ -1434,7 +1533,25 @@ void VulkanEngine::update_scene(float deltaTime)
     floor.transform = glm::mat4(1.0f);
     floor.vertexBufferAddress = _floorMesh.vertexBufferAddress;
 
-mainDrawContext.OpaqueSurfaces.push_back(floor);
+    mainDrawContext.OpaqueSurfaces.push_back(floor);
+
+    const auto addWall = [&](const glm::vec3& position, const glm::vec3& scale) {
+        RenderObject wall{};
+        wall.indexCount = 36;
+        wall.firstIndex = 0;
+        wall.indexBuffer = _wallMesh.indexBuffer.buffer;
+        wall.material = &_wallMaterial;
+        wall.bounds = _wallBounds;
+        wall.transform = glm::translate(glm::mat4(1.0f), position) *
+            glm::scale(glm::mat4(1.0f), scale);
+        wall.vertexBufferAddress = _wallMesh.vertexBufferAddress;
+        mainDrawContext.OpaqueSurfaces.push_back(wall);
+    };
+    addWall(glm::vec3(0.0f, 1.0f, -24.75f), glm::vec3(50.0f, 2.0f, 0.5f));
+    addWall(glm::vec3(0.0f, 1.0f, 24.75f), glm::vec3(50.0f, 2.0f, 0.5f));
+    addWall(glm::vec3(-24.75f, 1.0f, 0.0f), glm::vec3(0.5f, 2.0f, 50.0f));
+    addWall(glm::vec3(24.75f, 1.0f, 0.0f), glm::vec3(0.5f, 2.0f, 50.0f));
+
     sceneData = {};
     sceneData.view = mainCamera.getViewMatrix();
     sceneData.proj = glm::perspective(
