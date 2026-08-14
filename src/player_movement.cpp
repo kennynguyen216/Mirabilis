@@ -62,6 +62,50 @@ void PlayerMovement::simulate(const PlayerInput& input, float deltaTime)
     velocity.y -= settings.gravity * deltaTime;
     position += velocity * deltaTime;
 
+    // Resolve the player against the four boundary walls. The player is an
+    // upright box whose position is at its feet; only the shallowest horizontal
+    // overlap is resolved so approaching a wall slides along it.
+    for (const AABB& wall : boundaryWalls) {
+        const bool overlapsVertically =
+            position.y < wall.max.y &&
+            position.y + settings.playerHeight > wall.min.y;
+        if (!overlapsVertically) {
+            continue;
+        }
+
+        const float playerMinX = position.x - settings.playerRadius;
+        const float playerMaxX = position.x + settings.playerRadius;
+        const float playerMinZ = position.z - settings.playerRadius;
+        const float playerMaxZ = position.z + settings.playerRadius;
+
+        const float overlapX = std::min(playerMaxX, wall.max.x) -
+            std::max(playerMinX, wall.min.x);
+        const float overlapZ = std::min(playerMaxZ, wall.max.z) -
+            std::max(playerMinZ, wall.min.z);
+        if (overlapX <= 0.0f || overlapZ <= 0.0f) {
+            continue;
+        }
+
+        const glm::vec3 wallCenter = (wall.min + wall.max) * 0.5f;
+        if (overlapX < overlapZ) {
+            if (position.x < wallCenter.x) {
+                position.x -= overlapX;
+                velocity.x = std::min(velocity.x, 0.0f);
+            } else {
+                position.x += overlapX;
+                velocity.x = std::max(velocity.x, 0.0f);
+            }
+        } else {
+            if (position.z < wallCenter.z) {
+                position.z -= overlapZ;
+                velocity.z = std::min(velocity.z, 0.0f);
+            } else {
+                position.z += overlapZ;
+                velocity.z = std::max(velocity.z, 0.0f);
+            }
+        }
+    }
+
     if (position.y < settings.respawnHeight) {
         position = settings.spawnPosition;
         velocity = glm::vec3(0.0f);
