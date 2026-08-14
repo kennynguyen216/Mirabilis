@@ -4,6 +4,7 @@
 #include <vk_descriptors.h>
 #include <vk_loader.h>
 #include <camera.h>
+#include <player_movement.h>
 
 struct DeletionQueue
 {
@@ -204,4 +205,18 @@ class VulkanEngine{
         void destroy_image(const AllocatedImage& image);
         void init_imgui();
         void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
+        void update_physics(float deltaTime);
+        void set_mouse_capture(bool captured);
+
+        PlayerInput _playerInput{};
+        PlayerMovement _playerMovement{};
+        bool _mouseCaptured{true};
+        float _physicsAccumulator{0.0f};
+        static constexpr float PhysicsDt = 1.0f / 120.0f;
+        static constexpr int MaxPhysicsSteps = 8;
+
+        GPUMeshBuffers _floorMesh;
+        AllocatedBuffer _floorMaterialBuffer;
+        MaterialInstance _floorMaterial;
+        Bounds _floorBounds;
     };

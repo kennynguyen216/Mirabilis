@@ -17,6 +17,7 @@
 #include <glm/gtx/transform.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/packing.hpp>
+#include <glm/vec2.hpp>
 #include <algorithm>
 
 #include "imgui.h"
@@ -43,7 +44,7 @@ bool is_visible(const RenderObject& object, const glm::mat4& viewProjection)
         glm::vec4 projected = objectMatrix * glm::vec4(
             object.bounds.origin + corner * object.bounds.extents,
             1.0f);
-        if (projected.w == 0.0f) {
+        if (projected.w <= 0.0f) {
             return true;
         }
         projected /= projected.w;
@@ -78,6 +79,7 @@ void VulkanEngine::init()
         _windowExtent.height,
         window_flags
     );
+    set_mouse_capture(true);
     // creates the vulkan instance debug messengers, selectio of physical gpu, and device
     init_vulkan();
     init_swapchain(); // collection of image buggesr that allows vulkan to write daat into those buffers. prevents screen tearing
@@ -90,9 +92,15 @@ void VulkanEngine::init()
     init_imgui();
 
     mainCamera.velocity = glm::vec3(0.0f);
-    mainCamera.position = glm::vec3(30.0f, 0.0f, -85.0f);
-    mainCamera.pitch = 0.0f;
+    //mainCamera.position = glm::vec3(30.0f, 0.0f, -85.0f);
+    //mainCamera.pitch = 0.0f;
+    mainCamera.position = glm::vec3(0.0f, 5.0f, 12.0f);
+    mainCamera.pitch = glm::radians(-20.0f);
     mainCamera.yaw = 0.0f;
+
+    _playerMovement.position = glm::vec3(0.0f);
+    _playerMovement.velocity = glm::vec3(0.0f);
+    _playerMovement.grounded = true;
     
     //evverything went fine
     _isInitialized = true;
@@ -101,6 +109,25 @@ void VulkanEngine::init()
 }
     
 
+
+void VulkanEngine::update_physics(float deltaTime)
+{
+    _playerMovement.simulate(_playerInput, deltaTime);
+    _playerInput.jumpPressed = false;
+}
+
+void VulkanEngine::set_mouse_capture(bool captured)
+{
+    _mouseCaptured = captured;
+    SDL_SetRelativeMouseMode(captured ? SDL_TRUE : SDL_FALSE);
+
+    if (!captured) {
+        _playerInput.forward = false;
+        _playerInput.backward = false;
+        _playerInput.left = false;
+        _playerInput.right = false;
+    }
+}
 
 void VulkanEngine::init_vulkan()
 {
@@ -264,6 +291,7 @@ void VulkanEngine::cleanup()
 
         vkb::destroy_debug_utils_messenger(_instance, _debug_messenger);
         vkDestroyInstance(_instance, nullptr);
+        SDL_SetRelativeMouseMode(SDL_FALSE);
         SDL_DestroyWindow(_window);
 
     }
@@ -435,7 +463,31 @@ void VulkanEngine::run(){
                     bQuit = true;
                 }
 
-                mainCamera.processSDLEvent(e);
+                if (e.type == SDL_KEYDOWN &&
+                    e.key.keysym.sym == SDLK_TAB &&
+                    e.key.repeat == 0) {
+                    set_mouse_capture(!_mouseCaptured);
+                }
+
+                if (_mouseCaptured && e.type == SDL_MOUSEMOTION) {
+                    mainCamera.processSDLEvent(e);
+                }
+
+                if (_mouseCaptured && e.type == SDL_KEYDOWN) {
+                    if (e.key.keysym.sym == SDLK_w) _playerInput.forward = true;
+                    if (e.key.keysym.sym == SDLK_s) _playerInput.backward = true;
+                    if (e.key.keysym.sym == SDLK_a) _playerInput.left = true;
+                    if (e.key.keysym.sym == SDLK_d) _playerInput.right = true;
+                    if (e.key.keysym.sym == SDLK_SPACE && e.key.repeat == 0) {
+                        _playerInput.jumpPressed = true;
+                    }
+                }
+                if (_mouseCaptured && e.type == SDL_KEYUP) {
+                    if (e.key.keysym.sym == SDLK_w) _playerInput.forward = false;
+                    if (e.key.keysym.sym == SDLK_s) _playerInput.backward = false;
+                    if (e.key.keysym.sym == SDLK_a) _playerInput.left = false;
+                    if (e.key.keysym.sym == SDLK_d) _playerInput.right = false;
+                }
 
                 // Send every SDL event to ImGui as well.
                 ImGui_ImplSDL2_ProcessEvent(&e);
@@ -452,11 +504,25 @@ void VulkanEngine::run(){
                 continue;
             }
         }
+
+        _physicsAccumulator = std::min(
+            _physicsAccumulator + deltaTime,
+            PhysicsDt * static_cast<float>(MaxPhysicsSteps));
+        _playerInput.yaw = mainCamera.yaw;
+        while (_physicsAccumulator >= PhysicsDt) {
+            update_physics(PhysicsDt);
+            _physicsAccumulator -= PhysicsDt;
+        }
+
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
 
         if (ImGui::Begin("background")) {
+            if (ImGui::Button(
+                    _mouseCaptured ? "Release Mouse (Tab)" : "Capture Mouse (Tab)")) {
+                set_mouse_capture(!_mouseCaptured);
+            }
             ImGui::SliderFloat("Render Scale", &renderScale, 0.3f, 1.0f);
             if (!backgroundEffects.empty()) {
                 ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
@@ -477,6 +543,10 @@ void VulkanEngine::run(){
 
         stats.frametime = deltaTime * 1000.0f;
         if (ImGui::Begin("Stats")) {
+            const float horizontalSpeed = glm::length(glm::vec2(
+                _playerMovement.velocity.x,
+                _playerMovement.velocity.z));
+            ImGui::Text("speed %.2f", horizontalSpeed);
             ImGui::Text("frametime %.3f ms", stats.frametime);
             ImGui::Text("scene update %.3f ms", stats.scene_update_time);
             ImGui::Text("mesh draw %.3f ms", stats.mesh_draw_time);
@@ -484,6 +554,21 @@ void VulkanEngine::run(){
             ImGui::Text("draw calls %d", stats.drawcall_count);
         }
         ImGui::End();
+
+        if (_mouseCaptured) {
+            const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+            ImDrawList* crosshair = ImGui::GetForegroundDrawList();
+            crosshair->AddLine(
+                ImVec2(center.x - 7.0f, center.y),
+                ImVec2(center.x + 7.0f, center.y),
+                IM_COL32(255, 255, 255, 255),
+                2.0f);
+            crosshair->AddLine(
+                ImVec2(center.x, center.y - 7.0f),
+                ImVec2(center.x, center.y + 7.0f),
+                IM_COL32(255, 255, 255, 255),
+                2.0f);
+        }
 
         ImGui::Render();
         draw(deltaTime);
@@ -1186,6 +1271,46 @@ void VulkanEngine::init_default_data()
         &grey, {1, 1, 1}, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT);
     _blackImage = create_image(
         &black, {1, 1, 1}, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT);
+    std::array<uint32_t, 6> indices{};
+    std::array<Vertex, 4> corners{};
+    corners[0].position = glm::vec3(-25.f, 0.f, -25.f);
+    corners[0].uv_x = 0.f;
+    corners[0].uv_y = 0.f;
+    corners[0].normal = glm::vec3(0.f, 1.f, 0.f);
+    corners[0].color = glm::vec4(1.f);
+
+    corners[1].position = glm::vec3(25.f, 0.f, -25.f);
+    corners[1].uv_x = 1.f;
+    corners[1].uv_y = 0.f;
+    corners[1].normal = glm::vec3(0.f, 1.f, 0.f);
+    corners[1].color = glm::vec4(1.f);
+
+    corners[2].position = glm::vec3(25.f, 0.f, 25.f);
+    corners[2].uv_x = 1.f;
+    corners[2].uv_y = 1.f;
+    corners[2].normal = glm::vec3(0.f, 1.f, 0.f);
+    corners[2].color = glm::vec4(1.f);
+
+    corners[3].position = glm::vec3(-25.f, 0.f, 25.f);
+    corners[3].uv_x = 0.f;
+    corners[3].uv_y = 1.f;
+    corners[3].normal = glm::vec3(0.f, 1.f, 0.f);
+    corners[3].color = glm::vec4(1.f);
+    
+    indices[0] = 0;
+    indices[1] = 2;
+    indices[2] = 1;
+
+    indices[3] = 0;
+    indices[4] = 3;
+    indices[5] = 2;
+
+    _floorMesh = uploadMesh(indices, corners);
+
+    _floorBounds.origin = glm::vec3(0.0f);
+_floorBounds.extents = glm::vec3(25.0f, 0.0f, 25.0f);
+_floorBounds.sphereRadius = glm::length(_floorBounds.extents);
+
 
     std::array<uint32_t, 16 * 16> checkerboard{};
     uint32_t magenta = glm::packUnorm4x8(glm::vec4(1, 0, 1, 1));
@@ -1207,19 +1332,49 @@ void VulkanEngine::init_default_data()
     samplerInfo.magFilter = VK_FILTER_LINEAR;
     samplerInfo.minFilter = VK_FILTER_LINEAR;
     VK_CHECK(vkCreateSampler(_device, &samplerInfo, nullptr, &_defaultSamplerLinear));
+    
+    _floorMaterialBuffer = create_buffer(
+    sizeof(GLTFMetallic_Roughness::MaterialConstants),
+    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+    VMA_MEMORY_USAGE_CPU_TO_GPU);
 
-    auto structureScene = loadGltf(this, "../../assets/structure.glb");
-    if (structureScene) {
-        loadedScenes["structure"] = *structureScene;
-    } else {
-        fmt::print("Failed to load structure.glb; trying basicmesh.glb\n");
-        auto basicScene = loadGltf(this, "../../assets/basicmesh.glb");
-        if (basicScene) {
-            loadedScenes["basicmesh"] = *basicScene;
-        }
-    }
+    auto* floorConstants =
+    static_cast<GLTFMetallic_Roughness::MaterialConstants*>(
+        _floorMaterialBuffer.info.pMappedData);
+
+    *floorConstants = {};
+    floorConstants->colorFactors = glm::vec4(1.0f);
+    floorConstants->metal_rough_factors = glm::vec4(0.0f, 0.8f, 0.0f, 0.0f);
+
+    GLTFMetallic_Roughness::MaterialResources floorResources{};
+    floorResources.colorImage = _whiteImage;
+    floorResources.colorSampler = _defaultSamplerLinear;
+    floorResources.metalRoughImage = _whiteImage;
+    floorResources.metalRoughSampler = _defaultSamplerLinear;
+    floorResources.dataBuffer = _floorMaterialBuffer.buffer;
+    floorResources.dataBufferOffset = 0;
+
+    _floorMaterial = metalRoughMaterial.write_material(
+    _device,
+    MaterialPass::MainColor,
+    floorResources,
+    globalDescriptorAllocator);
+
+    //auto structureScene = loadGltf(this, "../../assets/structure.glb");
+    //if (structureScene) {
+      //  loadedScenes["structure"] = *structureScene;
+    //} else {
+      //  fmt::print("Failed to load structure.glb; trying basicmesh.glb\n");
+        //auto basicScene = loadGltf(this, "../../assets/basicmesh.glb");
+        //if (basicScene) {
+          //  loadedScenes["basicmesh"] = *basicScene;
+        //}
+    //}
 
     _mainDeletionQueue.push_function([this]() {
+        destroy_buffer(_floorMaterialBuffer);
+        destroy_buffer(_floorMesh.vertexBuffer);
+        destroy_buffer(_floorMesh.indexBuffer);
         vkDestroySampler(_device, _defaultSamplerNearest, nullptr);
         vkDestroySampler(_device, _defaultSamplerLinear, nullptr);
         destroy_image(_whiteImage);
@@ -1260,7 +1415,7 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
 void VulkanEngine::update_scene(float deltaTime)
 {
     const auto startTime = std::chrono::steady_clock::now();
-    mainCamera.update(deltaTime);
+    mainCamera.position = _playerMovement.position + glm::vec3(0.0f, 1.7f, 0.0f);
 
     mainDrawContext.OpaqueSurfaces.clear();
     mainDrawContext.TransparentSurfaces.clear();
@@ -1270,7 +1425,16 @@ void VulkanEngine::update_scene(float deltaTime)
             scene->Draw(glm::mat4(1.0f), mainDrawContext);
         }
     }
+    RenderObject floor{};
+    floor.indexCount = 6;
+    floor.firstIndex = 0;
+    floor.indexBuffer = _floorMesh.indexBuffer.buffer;
+    floor.material = &_floorMaterial;
+    floor.bounds = _floorBounds;
+    floor.transform = glm::mat4(1.0f);
+    floor.vertexBufferAddress = _floorMesh.vertexBufferAddress;
 
+mainDrawContext.OpaqueSurfaces.push_back(floor);
     sceneData = {};
     sceneData.view = mainCamera.getViewMatrix();
     sceneData.proj = glm::perspective(

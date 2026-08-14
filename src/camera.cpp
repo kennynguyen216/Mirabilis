@@ -1,7 +1,9 @@
 #include "camera.h"
 
+#include <algorithm>
 #include <glm/gtx/quaternion.hpp>
 #include <glm/gtx/transform.hpp>
+#include <glm/trigonometric.hpp>
 
 void Camera::update(float deltaTime)
 {
@@ -33,6 +35,10 @@ void Camera::processSDLEvent(const SDL_Event& e)
     if (e.type == SDL_MOUSEMOTION) {
         yaw += static_cast<float>(e.motion.xrel) / 200.0f;
         pitch -= static_cast<float>(e.motion.yrel) / 200.0f;
+        pitch = std::clamp(
+            pitch,
+            glm::radians(-89.0f),
+            glm::radians(89.0f));
     }
 }
 
