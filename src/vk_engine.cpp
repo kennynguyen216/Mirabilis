@@ -40,68 +40,64 @@ void add_collider_if_nonempty(std::vector<AABB>& colliders, const AABB& collider
     }
 }
 
-// Replaces a vertical host wall's rectangular portal area with empty space.
-// The four remaining AABBs are its left/right/top/bottom collision frame.
-void add_portal_frame_colliders(
-    const AABB& wall,
-    const Portal& portal,
-    std::vector<AABB>& colliders)
+// Subtract one vertical portal opening from a group of wall collider pieces.
+// Repeating this for every portal hosted by a wall handles both the usual
+// one-opening case and two separate portals on the same wall.
+void carve_portal_opening(
+    std::vector<AABB>& wallPieces,
+    const Portal& portal)
 {
-    const float openingMinY = portal.position.y - portal.halfHeight;
-    const float openingMaxY = portal.position.y + portal.halfHeight;
-
-    if (std::abs(portal.normal.z) > 0.5f) {
-        const float openingMinX = portal.position.x - portal.halfWidth;
-        const float openingMaxX = portal.position.x + portal.halfWidth;
-        add_collider_if_nonempty(colliders, {{wall.min.x, wall.min.y, wall.min.z},
-                                              {openingMinX, wall.max.y, wall.max.z}});
-        add_collider_if_nonempty(colliders, {{openingMaxX, wall.min.y, wall.min.z},
-                                              {wall.max.x, wall.max.y, wall.max.z}});
-        add_collider_if_nonempty(colliders, {{openingMinX, wall.min.y, wall.min.z},
-                                              {openingMaxX, openingMinY, wall.max.z}});
-        add_collider_if_nonempty(colliders, {{openingMinX, openingMaxY, wall.min.z},
-                                              {openingMaxX, wall.max.y, wall.max.z}});
+    const bool wallUsesX = std::abs(portal.normal.z) > 0.5f;
+    const bool wallUsesZ = std::abs(portal.normal.x) > 0.5f;
+    if (!wallUsesX && !wallUsesZ) {
         return;
     }
 
-    if (std::abs(portal.normal.x) > 0.5f) {
-        const float openingMinZ = portal.position.z - portal.halfWidth;
-        const float openingMaxZ = portal.position.z + portal.halfWidth;
-        add_collider_if_nonempty(colliders, {{wall.min.x, wall.min.y, wall.min.z},
-                                              {wall.max.x, wall.max.y, openingMinZ}});
-        add_collider_if_nonempty(colliders, {{wall.min.x, wall.min.y, openingMaxZ},
-                                              {wall.max.x, wall.max.y, wall.max.z}});
-        add_collider_if_nonempty(colliders, {{wall.min.x, wall.min.y, openingMinZ},
-                                              {wall.max.x, openingMinY, openingMaxZ}});
-        add_collider_if_nonempty(colliders, {{wall.min.x, openingMaxY, openingMinZ},
-                                              {wall.max.x, wall.max.y, openingMaxZ}});
-    }
-}
+    const float openingMinU = (wallUsesX ? portal.position.x : portal.position.z) -
+        portal.halfWidth;
+    const float openingMaxU = (wallUsesX ? portal.position.x : portal.position.z) +
+        portal.halfWidth;
+    const float openingMinY = portal.position.y - portal.halfHeight;
+    const float openingMaxY = portal.position.y + portal.halfHeight;
 
-// A portal screen is a zero-thickness surface. Once the first-person camera
-// is essentially on that surface, its clip-space triangle can span the near
-// plane and produce an undefined-looking full-screen mask for one frame.
-// Do not stamp stencil from that unsafe side/range; the already-rendered
-// destination world is used for the tiny handoff interval instead.
-bool can_rasterize_portal_surface(
-    const Portal& portal,
-    const glm::vec3& cameraPosition,
-    const glm::vec3& playerVelocity)
-{
-    // Rendering sees discrete fixed-physics snapshots.  At high frame rates
-    // it can see the last two snapshots before a crossing; at lower rates it
-    // often skips directly to the post-teleport snapshot. Reserve those
-    // upcoming tick distances, not merely one arbitrary constant distance.
-    constexpr float PhysicsStep = 1.0f / 120.0f;
-    constexpr float SnapshotCount = 2.5f;
-    constexpr float MinimumSafetyDistance = 0.08f;
-    constexpr float AdditionalMargin = 0.02f;
-    const float normalSpeed = std::abs(glm::dot(playerVelocity, portal.normal));
-    const float PortalNearPlaneSafetyDistance = std::max(
-        MinimumSafetyDistance,
-        normalSpeed * PhysicsStep * SnapshotCount + AdditionalMargin);
-    return portal_signed_distance(portal, cameraPosition) >
-        PortalNearPlaneSafetyDistance;
+    std::vector<AABB> carvedPieces;
+    carvedPieces.reserve(wallPieces.size() * 4);
+    for (const AABB& piece : wallPieces) {
+        const float pieceMinU = wallUsesX ? piece.min.x : piece.min.z;
+        const float pieceMaxU = wallUsesX ? piece.max.x : piece.max.z;
+        const float overlapMinU = std::max(pieceMinU, openingMinU);
+        const float overlapMaxU = std::min(pieceMaxU, openingMaxU);
+        const float overlapMinY = std::max(piece.min.y, openingMinY);
+        const float overlapMaxY = std::min(piece.max.y, openingMaxY);
+
+        if (overlapMinU >= overlapMaxU || overlapMinY >= overlapMaxY) {
+            carvedPieces.push_back(piece);
+            continue;
+        }
+
+        const auto addPiece = [&](float minU, float maxU, float minY, float maxY) {
+            AABB remaining = piece;
+            if (wallUsesX) {
+                remaining.min.x = minU;
+                remaining.max.x = maxU;
+            } else {
+                remaining.min.z = minU;
+                remaining.max.z = maxU;
+            }
+            remaining.min.y = minY;
+            remaining.max.y = maxY;
+            add_collider_if_nonempty(carvedPieces, remaining);
+        };
+
+        // Left/right strips keep their full height.  The two middle strips
+        // fill above and below the opening without overlapping each other.
+        addPiece(pieceMinU, overlapMinU, piece.min.y, piece.max.y);
+        addPiece(overlapMaxU, pieceMaxU, piece.min.y, piece.max.y);
+        addPiece(overlapMinU, overlapMaxU, piece.min.y, overlapMinY);
+        addPiece(overlapMinU, overlapMaxU, overlapMaxY, piece.max.y);
+    }
+
+    wallPieces = std::move(carvedPieces);
 }
 
 bool is_visible(const RenderObject& object, const glm::mat4& viewProjection)
@@ -212,26 +208,32 @@ bool VulkanEngine::try_traverse_portal(
 {
     const float playerHalfWidth = _playerMovement.settings.playerHalfWidth;
     // position is the feet point, but it is also the collider's X/Z center.
-    // Since the current portals are vertical, this is the center that must
-    // cross the portal plane for a seamless traversal.
+    // A rendered portal cannot safely occupy the main camera's near plane.
+    // Traverse just before that happens, while preserving the matching offset
+    // behind the exit portal.  The real camera then lands at the exact virtual
+    // camera location that was visible through the portal on the prior frame.
     const float previousDistance = portal_signed_distance(source, previousPosition);
     const float currentDistance = portal_signed_distance(
         source, _playerMovement.position);
     constexpr float MinimumEntrySpeed = 0.01f;
+    constexpr float PortalTraversalDistance = 0.12f;
     const float entrySpeed = glm::dot(_playerMovement.velocity, source.normal);
     const bool movingThroughPlane = entrySpeed < -MinimumEntrySpeed;
-    const bool crossedPortalPlane =
-        previousDistance > 0.0f &&
-        currentDistance <= 0.0f &&
+    const bool reachedPortalNearPlane =
+        previousDistance > PortalTraversalDistance &&
+        currentDistance <= PortalTraversalDistance &&
         previousDistance - currentDistance > 0.000001f;
 
-    if (!movingThroughPlane || !crossedPortalPlane) {
+    if (!movingThroughPlane || !reachedPortalNearPlane) {
         return false;
     }
 
     const float distanceDelta = previousDistance - currentDistance;
     const float crossingFraction = distanceDelta > 0.000001f
-        ? std::clamp(previousDistance / distanceDelta, 0.0f, 1.0f)
+        ? std::clamp(
+            (previousDistance - PortalTraversalDistance) / distanceDelta,
+            0.0f,
+            1.0f)
         : 1.0f;
     const glm::vec3 crossingCenter = glm::mix(
         previousPosition,
@@ -250,16 +252,16 @@ bool VulkanEngine::try_traverse_portal(
     _playerMovement.velocity = transform_direction_through_portal(
         source, destination, _playerMovement.velocity);
 
-    // The host wall now has a real collision gap around a linked portal, so
-    // keep the center only a tiny amount on the room side. The old
-    // playerHalfWidth push was needed for a fully solid wall, but made the
-    // camera visibly jump past the virtual portal camera on exit.
+    // Our physics collider has a portal-shaped gap, but the visible host wall
+    // is still one solid cube. The early near-plane transfer maps the player
+    // just behind the exit plane, so move them to the room-facing side before
+    // the main camera renders and cannot end up inside that opaque cube.
     constexpr float ExitEpsilon = 0.02f;
-    const float currentExitDistance = portal_signed_distance(
+    const float exitDistance = portal_signed_distance(
         destination, _playerMovement.position);
-    if (currentExitDistance < ExitEpsilon) {
+    if (exitDistance < ExitEpsilon) {
         _playerMovement.position += destination.normal *
-            (ExitEpsilon - currentExitDistance);
+            (ExitEpsilon - exitDistance);
     }
 
     const glm::vec3 transformedForward = glm::normalize(
@@ -274,33 +276,27 @@ bool VulkanEngine::try_traverse_portal(
 
     // Prevent the next fixed tick from immediately re-entering the exit.
     _portalTraversalCooldown = 0.15f;
-    // The renderer runs after physics. On its first frame after this
-    // transform, show the already-correct destination room directly instead
-    // of rasterizing a portal surface that intersects the camera near plane.
-    _portalRenderHandoffFrames = 1;
     return true;
 }
 
 void VulkanEngine::rebuild_active_wall_colliders()
 {
     _activeWallColliders.clear();
-    _activeWallColliders.reserve(_levelWallColliders.size() + 6);
-
-    const bool linkedPortalsHaveDifferentHosts =
-        _bluePortal.placed && _orangePortal.placed &&
-        _bluePortal.hostWallIndex >= 0 && _orangePortal.hostWallIndex >= 0 &&
-        _bluePortal.hostWallIndex != _orangePortal.hostWallIndex;
+    _activeWallColliders.reserve(_levelWallColliders.size() + 12);
 
     for (size_t wallIndex = 0; wallIndex < _levelWallColliders.size(); ++wallIndex) {
         const AABB& wall = _levelWallColliders[wallIndex];
-        if (linkedPortalsHaveDifferentHosts &&
-            wallIndex == static_cast<size_t>(_bluePortal.hostWallIndex)) {
-            add_portal_frame_colliders(wall, _bluePortal, _activeWallColliders);
-        } else if (linkedPortalsHaveDifferentHosts &&
-                   wallIndex == static_cast<size_t>(_orangePortal.hostWallIndex)) {
-            add_portal_frame_colliders(wall, _orangePortal, _activeWallColliders);
-        } else {
-            add_collider_if_nonempty(_activeWallColliders, wall);
+        std::vector<AABB> wallPieces{wall};
+        if (_bluePortal.placed &&
+            _bluePortal.hostWallIndex == static_cast<int>(wallIndex)) {
+            carve_portal_opening(wallPieces, _bluePortal);
+        }
+        if (_orangePortal.placed &&
+            _orangePortal.hostWallIndex == static_cast<int>(wallIndex)) {
+            carve_portal_opening(wallPieces, _orangePortal);
+        }
+        for (const AABB& piece : wallPieces) {
+            add_collider_if_nonempty(_activeWallColliders, piece);
         }
     }
 }
@@ -615,14 +611,11 @@ void VulkanEngine::draw(float deltaTime)
         sceneData.viewproj,
         get_current_frame().sceneDescriptor,
         true);
-    if (_portalRenderHandoffFrames > 0) {
-        // The main world was rendered from the post-traversal camera above.
-        // Consume this one-frame handoff only after that successful draw.
-        --_portalRenderHandoffFrames;
-    } else {
-        draw_portal_masks(cmd);
-        draw_portal_views(cmd);
-    }
+    // The portal view remains live all the way to the crossing plane.  Hiding
+    // it for a frame-rate-sized safety band exposed the solid host wall before
+    // physics teleported the player, causing the black flash.
+    draw_portal_masks(cmd);
+    draw_portal_views(cmd);
 
 	// transition the draw image and the swapchain image into their correct transfer layouts
 	vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -1378,45 +1371,33 @@ void VulkanEngine::draw_portal_masks(VkCommandBuffer cmd)
 
     // First mark only portal pixels that passed the main scene's depth test.
     // This prevents a portal hidden behind a nearer panel from drawing over it.
-    const bool drawBluePortal = can_rasterize_portal_surface(
-        _bluePortal, mainCamera.position, _playerMovement.velocity);
-    const bool drawOrangePortal = can_rasterize_portal_surface(
-        _orangePortal, mainCamera.position, _playerMovement.velocity);
-    if (drawBluePortal) {
-        drawMask(
-            metalRoughMaterial.portalStencilPipeline,
-            _bluePortal,
-            _bluePortalMaterial,
-            BluePortalView + 1,
-            0xff);
-    }
-    if (drawOrangePortal) {
-        drawMask(
-            metalRoughMaterial.portalStencilPipeline,
-            _orangePortal,
-            _orangePortalMaterial,
-            OrangePortalView + 1,
-            0xff);
-    }
+    drawMask(
+        metalRoughMaterial.portalStencilPipeline,
+        _bluePortal,
+        _bluePortalMaterial,
+        BluePortalView + 1,
+        0xff);
+    drawMask(
+        metalRoughMaterial.portalStencilPipeline,
+        _orangePortal,
+        _orangePortalMaterial,
+        OrangePortalView + 1,
+        0xff);
 
     // Then set far depth only inside each already-visible stencil silhouette,
     // opening room for its virtual scene without touching foreground depth.
-    if (drawBluePortal) {
-        drawMask(
-            metalRoughMaterial.portalMaskPipeline,
-            _bluePortal,
-            _bluePortalMaterial,
-            BluePortalView + 1,
-            0x00);
-    }
-    if (drawOrangePortal) {
-        drawMask(
-            metalRoughMaterial.portalMaskPipeline,
-            _orangePortal,
-            _orangePortalMaterial,
-            OrangePortalView + 1,
-            0x00);
-    }
+    drawMask(
+        metalRoughMaterial.portalMaskPipeline,
+        _bluePortal,
+        _bluePortalMaterial,
+        BluePortalView + 1,
+        0x00);
+    drawMask(
+        metalRoughMaterial.portalMaskPipeline,
+        _orangePortal,
+        _orangePortalMaterial,
+        OrangePortalView + 1,
+        0x00);
     vkCmdEndRendering(cmd);
 }
 

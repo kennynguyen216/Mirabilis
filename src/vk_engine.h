@@ -278,10 +278,6 @@ class VulkanEngine{
         PlayerMovement _playerMovement{};
         bool _mouseCaptured{true};
         float _portalTraversalCooldown{0.0f};
-        // One normal-world render immediately after a traversal prevents a
-        // portal quad from being rasterized while the camera crosses its
-        // plane. Physics has already moved the player to the exit by then.
-        uint32_t _portalRenderHandoffFrames{0};
         float _physicsAccumulator{0.0f};
         static constexpr float PhysicsDt = 1.0f / 120.0f;
         static constexpr int MaxPhysicsSteps = 8;
