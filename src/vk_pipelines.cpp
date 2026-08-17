@@ -99,10 +99,16 @@ VkPipeline PipelineBuilder::build_pipeline(VkDevice device)
         .layout = _pipelineLayout
     };
 
-    VkDynamicState states[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkDynamicState states[] = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+        VK_DYNAMIC_STATE_STENCIL_REFERENCE,
+        VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
+        VK_DYNAMIC_STATE_STENCIL_WRITE_MASK
+    };
     VkPipelineDynamicStateCreateInfo dynamicInfo{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = 2,
+        .dynamicStateCount = 5,
         .pDynamicStates = states
     };
     pipelineInfo.pDynamicState = &dynamicInfo;
@@ -197,6 +203,16 @@ void PipelineBuilder::set_depth_format(VkFormat format)
     _renderInfo.depthAttachmentFormat = format;
 }
 
+void PipelineBuilder::set_stencil_format(VkFormat format)
+{
+    _renderInfo.stencilAttachmentFormat = format;
+}
+
+void PipelineBuilder::set_color_write_mask(VkColorComponentFlags mask)
+{
+    _colorBlendAttachment.colorWriteMask = mask;
+}
+
 void PipelineBuilder::disable_depthtest()
 {
     _depthStencil.depthTestEnable = VK_FALSE;
@@ -221,4 +237,20 @@ void PipelineBuilder::enable_depthtest(bool depthWriteEnable, VkCompareOp op)
     _depthStencil.back = {};
     _depthStencil.minDepthBounds = 0.0f;
     _depthStencil.maxDepthBounds = 1.0f;
+}
+
+void PipelineBuilder::enable_stenciltest(VkCompareOp compareOp, VkStencilOp passOp)
+{
+    const VkStencilOpState state{
+        .failOp = VK_STENCIL_OP_KEEP,
+        .passOp = passOp,
+        .depthFailOp = VK_STENCIL_OP_KEEP,
+        .compareOp = compareOp,
+        .compareMask = 0xff,
+        .writeMask = 0xff,
+        .reference = 0,
+    };
+    _depthStencil.stencilTestEnable = VK_TRUE;
+    _depthStencil.front = state;
+    _depthStencil.back = state;
 }

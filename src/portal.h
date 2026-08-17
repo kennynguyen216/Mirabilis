@@ -14,6 +14,9 @@
 // Gameplay/rendering data for one placed portal. Linking and traversal come later.
 struct Portal {
     bool placed{false};
+    // Index into VulkanEngine's level-wall list. It lets physics replace the
+    // matching solid wall collider with a frame around this opening.
+    int hostWallIndex{-1};
     glm::vec3 position{0.0f};
     glm::vec3 normal{0.0f, 0.0f, 1.0f};
     glm::vec3 up{0.0f, 1.0f, 0.0f};
@@ -87,33 +90,58 @@ inline float portal_signed_distance(const Portal& portal, const glm::vec3& point
     return glm::dot(point - portal.position, portal.normal);
 }
 
-// Tests the player at the instant its leading face reaches the portal plane.
-// The player must fit completely inside the portal opening, not merely have its
-// center inside it.
-inline bool portal_fits_upright_player(
+// A view rendered through `source` is located on the back side of its linked
+// destination portal.  Never let that *render-only* camera land exactly on
+// the destination plane: the clip plane and the wall depth can otherwise
+// disagree for a frame while the player crosses the portal.
+inline glm::vec3 stabilize_portal_view_camera(
+    const Portal& destination,
+    const glm::vec3& virtualPosition)
+{
+    constexpr float MinimumDistanceBehindPlane = 0.05f;
+    const float signedDistance = portal_signed_distance(destination, virtualPosition);
+    if (signedDistance > -MinimumDistanceBehindPlane) {
+        return virtualPosition - destination.normal *
+            (signedDistance + MinimumDistanceBehindPlane);
+    }
+    return virtualPosition;
+}
+
+// Tests whether the player's collision body overlaps the portal opening when
+// its leading face reaches the portal plane. Overlap (rather than a center or
+// full-fit test) lets a player grazing the opening enter at shallow angles.
+inline bool portal_overlaps_upright_player(
     const Portal& portal,
     const glm::vec3& playerFeetAtPlane,
     float playerHalfWidth,
     float playerHeight)
 {
-    // Traversal is checked after gravity but before the ground-plane snap, so
-    // a grounded player's feet can be a few millimetres below y = 0 here.
-    constexpr float FitEpsilon = 0.02f;
-    const glm::vec3 localPosition = glm::vec3(
+    constexpr float FitEpsilon = 0.05f;
+    const glm::vec3 localFeet = glm::vec3(
         glm::inverse(get_portal_frame(portal)) *
         glm::vec4(playerFeetAtPlane, 1.0f));
+    const float playerMinX = localFeet.x - playerHalfWidth;
+    const float playerMaxX = localFeet.x + playerHalfWidth;
+    const float playerMinY = localFeet.y;
+    const float playerMaxY = localFeet.y + playerHeight;
 
-    return std::abs(localPosition.x) <=
-            portal.halfWidth - playerHalfWidth + FitEpsilon &&
-        localPosition.y >= -portal.halfHeight - FitEpsilon &&
-        localPosition.y + playerHeight <= portal.halfHeight + FitEpsilon;
+    const bool overlapsHorizontally =
+        playerMaxX >= -portal.halfWidth - FitEpsilon &&
+        playerMinX <= portal.halfWidth + FitEpsilon;
+    const bool overlapsVertically =
+        playerMaxY >= -portal.halfHeight - FitEpsilon &&
+        playerMinY <= portal.halfHeight + FitEpsilon;
+    return overlapsHorizontally && overlapsVertically;
 }
 
 // Snaps a portal to the closest legal center on one vertical, axis-aligned
 // wall. Placement fails only when the wall is physically too small.
 inline bool snap_portal_to_wall(Portal& portal, const AABB& wall)
 {
-    constexpr float EdgeMargin = 0.001f;
+    // The level walls are still solid boxes rather than meshes with holes
+    // cut for portals.  Keep an extra gap from a wall end so a portal's
+    // virtual camera cannot begin inside the perpendicular wall at a corner.
+    constexpr float CornerClearance = 1.0f;
     const float minCenterY = wall.min.y + portal.halfHeight;
     const float maxCenterY = wall.max.y - portal.halfHeight;
     if (minCenterY > maxCenterY) {
@@ -126,8 +154,8 @@ inline bool snap_portal_to_wall(Portal& portal, const AABB& wall)
     portal.position.y = minCenterY;
 
     if (std::abs(portal.normal.x) > 0.5f) {
-        const float minCenterZ = wall.min.z + portal.halfWidth + EdgeMargin;
-        const float maxCenterZ = wall.max.z - portal.halfWidth - EdgeMargin;
+        const float minCenterZ = wall.min.z + portal.halfWidth + CornerClearance;
+        const float maxCenterZ = wall.max.z - portal.halfWidth - CornerClearance;
         if (minCenterZ > maxCenterZ) {
             return false;
         }
@@ -135,8 +163,8 @@ inline bool snap_portal_to_wall(Portal& portal, const AABB& wall)
         return true;
     }
     if (std::abs(portal.normal.z) > 0.5f) {
-        const float minCenterX = wall.min.x + portal.halfWidth + EdgeMargin;
-        const float maxCenterX = wall.max.x - portal.halfWidth - EdgeMargin;
+        const float minCenterX = wall.min.x + portal.halfWidth + CornerClearance;
+        const float maxCenterX = wall.max.x - portal.halfWidth - CornerClearance;
         if (minCenterX > maxCenterX) {
             return false;
         }

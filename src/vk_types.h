@@ -89,7 +89,18 @@ struct GPUSceneData {
     glm::vec4 ambientColor;
     glm::vec4 sunlightDirection;
     glm::vec4 sunlightColor;
+    // Used only by the portal-view material pipeline.  The ordinary scene
+    // leaves portalClipEnabled at zero.
+    glm::vec4 portalClipPlane;
+    glm::vec4 portalClipEnabled;
 };
+
+// Two primary portal views plus one recursive view for each colour.
+constexpr uint32_t PortalViewCount = 4;
+constexpr uint32_t BluePortalView = 0;
+constexpr uint32_t OrangePortalView = 1;
+constexpr uint32_t BluePortalRecursiveView = 2;
+constexpr uint32_t OrangePortalRecursiveView = 3;
 
 struct Bounds {
     glm::vec3 origin{0.0f};

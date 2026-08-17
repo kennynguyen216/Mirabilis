@@ -33,6 +33,8 @@ struct FrameData {
         DescriptorAllocatorGrowable _frameDescriptors;
         AllocatedBuffer sceneBuffer;
         VkDescriptorSet sceneDescriptor{};
+        std::array<AllocatedBuffer, PortalViewCount> portalSceneBuffers;
+        std::array<VkDescriptorSet, PortalViewCount> portalSceneDescriptors{};
     };
     constexpr unsigned int FRAME_OVERLAP = 2;
 
@@ -50,6 +52,16 @@ struct ComputeEffect {
     ComputePushConstants data{};
 };
 
+// Fragment constants for the portal background pass.  They mirror the
+// compute background's editable data so a portal opening continues the same
+// selected gradient/sky rather than using a separate hard-coded colour.
+struct PortalSkyPushConstants {
+    glm::vec4 data1;
+    glm::vec4 data2;
+    // x = background effect index, y/z = render width/height.
+    glm::vec4 settings;
+};
+
 struct EngineStats {
     float frametime{0.0f};
     int triangle_count{0};
@@ -61,6 +73,12 @@ struct EngineStats {
 struct GLTFMetallic_Roughness {
     MaterialPipeline opaquePipeline;
     MaterialPipeline transparentPipeline;
+    // These use the same layout as opaquePipeline, but split a portal mask
+    // into visible-stencil and stencil-restricted depth-clear passes.
+    MaterialPipeline portalStencilPipeline;
+    MaterialPipeline portalRecursiveStencilPipeline;
+    MaterialPipeline portalMaskPipeline;
+    MaterialPipeline portalViewPipeline;
     VkDescriptorSetLayout materialLayout{};
 
     struct MaterialConstants {
@@ -128,7 +146,14 @@ class VulkanEngine{
     VkSampler _defaultSamplerLinear{};
     VkSampler _defaultSamplerNearest{};
     DrawContext mainDrawContext;
+    DrawContext worldDrawContext;
+    // The main camera is inside the player, so the proxy is added only to
+    // portal views.  It lets us see the player body through an opening.
+    DrawContext portalViewDrawContext;
     std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> loadedScenes;
+    // Kept separate from loadedScenes because the main camera is first person:
+    // this model should appear only in portal views, not around the camera.
+    std::shared_ptr<LoadedGLTF> _playerModel;
     GLTFMetallic_Roughness metalRoughMaterial;
     Camera mainCamera;
     GPUSceneData sceneData{};
@@ -178,6 +203,7 @@ class VulkanEngine{
         friend std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
             VulkanEngine*, std::filesystem::path);
         friend struct LoadedGLTF;
+        friend struct GLTFMetallic_Roughness;
         void init_vulkan();
         void init_swapchain();
         void init_commands();
@@ -190,7 +216,37 @@ class VulkanEngine{
         void init_pipelines();
         void init_background_pipelines();
         void init_default_data();
-        void draw_geometry(VkCommandBuffer cmd);
+        void draw_geometry(
+            VkCommandBuffer cmd,
+            const DrawContext& drawContext,
+            const glm::mat4& viewProjection,
+            VkDescriptorSet sceneDescriptor,
+            bool clearDepthAndStencil,
+            MaterialPipeline* overridePipeline = nullptr,
+            uint32_t stencilReference = 0,
+            bool useFrustumCulling = true,
+            uint32_t stencilCompareMask = 0xff);
+        void draw_portal_masks(VkCommandBuffer cmd);
+        void draw_recursive_portal_mask(
+            VkCommandBuffer cmd,
+            const Portal& portal,
+            MaterialInstance& material,
+            VkDescriptorSet sceneDescriptor,
+            uint32_t parentStencilReference,
+            uint32_t recursiveStencilReference,
+            uint32_t recursiveStencilBit);
+        void draw_portal_sky(
+            VkCommandBuffer cmd,
+            uint32_t stencilReference,
+            uint32_t stencilCompareMask = 0xff);
+        void draw_portal_views(VkCommandBuffer cmd);
+        RenderObject make_portal_render_object(
+            const Portal& portal,
+            MaterialInstance& material) const;
+        GPUSceneData build_scene_data(const glm::mat4& view) const;
+        GPUSceneData build_portal_scene_data(
+            const glm::mat4& view,
+            const Portal& destination) const;
         void update_scene(float deltaTime);
         AllocatedBuffer create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage);
         void destroy_buffer(const AllocatedBuffer& buffer);
@@ -214,6 +270,7 @@ class VulkanEngine{
             const Portal& source,
             const Portal& destination,
             const glm::vec3& previousPosition);
+        void rebuild_active_wall_colliders();
         void set_mouse_capture(bool captured);
         void place_portal(Portal& portal, const Portal& otherPortal);
 
@@ -233,6 +290,14 @@ class VulkanEngine{
         AllocatedBuffer _wallMaterialBuffer;
         MaterialInstance _wallMaterial;
         Bounds _wallBounds;
+        AllocatedBuffer _playerMaterialBuffer;
+        MaterialInstance _playerMaterial;
+        Bounds _playerBounds;
+        // The imported model has a large internal glTF scale (about 14 world
+        // units tall at 1.0), while the player is roughly 1.8 units tall.
+        float _playerModelScale{0.12f};
+        float _playerModelYOffset{0.0f};
+        float _playerModelYaw{0.0f};
         GPUMeshBuffers _portalMesh;
         AllocatedBuffer _bluePortalMaterialBuffer;
         MaterialInstance _bluePortalMaterial;
@@ -241,11 +306,19 @@ class VulkanEngine{
         Bounds _portalBounds;
         Portal _bluePortal;
         Portal _orangePortal;
-        std::array<Wall, 4> _boundaryWalls{{
+        std::array<GPUSceneData, PortalViewCount> _portalSceneData{};
+        MaterialPipeline _portalSkyPipeline;
+        // Arena boundary plus a compact portal test rig around spawn.  All
+        // walls share the same render, raycast, and collision representation.
+        std::array<Wall, 7> _levelWalls{{
             {{0.0f, 1.5f, -24.75f}, {25.0f, 1.5f, 0.25f}}, // north
             {{0.0f, 1.5f,  24.75f}, {25.0f, 1.5f, 0.25f}}, // south
             {{-24.75f, 1.5f, 0.0f}, {0.25f, 1.5f, 25.0f}}, // west
             {{ 24.75f, 1.5f, 0.0f}, {0.25f, 1.5f, 25.0f}}, // east
+            {{0.0f, 1.5f, -5.0f}, {3.0f, 1.5f, 0.25f}}, // test north panel
+            {{0.0f, 1.5f,  5.0f}, {3.0f, 1.5f, 0.25f}}, // test south panel
+            {{5.0f, 1.5f,  0.0f}, {0.25f, 1.5f, 3.0f}}, // test east panel
         }};
-        std::array<AABB, 4> _boundaryWallColliders{};
+        std::array<AABB, 7> _levelWallColliders{};
+        std::vector<AABB> _activeWallColliders;
     };

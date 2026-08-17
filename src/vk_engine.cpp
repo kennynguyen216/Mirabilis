@@ -29,6 +29,77 @@ constexpr bool bUseValidationLayers = false;
 
 VulkanEngine* loadedEngine = nullptr;
 
+void add_collider_if_nonempty(std::vector<AABB>& colliders, const AABB& collider)
+{
+    constexpr float MinimumThickness = 0.001f;
+    const glm::vec3 size = collider.max - collider.min;
+    if (size.x > MinimumThickness &&
+        size.y > MinimumThickness &&
+        size.z > MinimumThickness) {
+        colliders.push_back(collider);
+    }
+}
+
+// Subtract one vertical portal opening from a group of wall collider pieces.
+// Repeating this for every portal hosted by a wall handles both the usual
+// one-opening case and two separate portals on the same wall.
+void carve_portal_opening(
+    std::vector<AABB>& wallPieces,
+    const Portal& portal)
+{
+    const bool wallUsesX = std::abs(portal.normal.z) > 0.5f;
+    const bool wallUsesZ = std::abs(portal.normal.x) > 0.5f;
+    if (!wallUsesX && !wallUsesZ) {
+        return;
+    }
+
+    const float openingMinU = (wallUsesX ? portal.position.x : portal.position.z) -
+        portal.halfWidth;
+    const float openingMaxU = (wallUsesX ? portal.position.x : portal.position.z) +
+        portal.halfWidth;
+    const float openingMinY = portal.position.y - portal.halfHeight;
+    const float openingMaxY = portal.position.y + portal.halfHeight;
+
+    std::vector<AABB> carvedPieces;
+    carvedPieces.reserve(wallPieces.size() * 4);
+    for (const AABB& piece : wallPieces) {
+        const float pieceMinU = wallUsesX ? piece.min.x : piece.min.z;
+        const float pieceMaxU = wallUsesX ? piece.max.x : piece.max.z;
+        const float overlapMinU = std::max(pieceMinU, openingMinU);
+        const float overlapMaxU = std::min(pieceMaxU, openingMaxU);
+        const float overlapMinY = std::max(piece.min.y, openingMinY);
+        const float overlapMaxY = std::min(piece.max.y, openingMaxY);
+
+        if (overlapMinU >= overlapMaxU || overlapMinY >= overlapMaxY) {
+            carvedPieces.push_back(piece);
+            continue;
+        }
+
+        const auto addPiece = [&](float minU, float maxU, float minY, float maxY) {
+            AABB remaining = piece;
+            if (wallUsesX) {
+                remaining.min.x = minU;
+                remaining.max.x = maxU;
+            } else {
+                remaining.min.z = minU;
+                remaining.max.z = maxU;
+            }
+            remaining.min.y = minY;
+            remaining.max.y = maxY;
+            add_collider_if_nonempty(carvedPieces, remaining);
+        };
+
+        // Left/right strips keep their full height.  The two middle strips
+        // fill above and below the opening without overlapping each other.
+        addPiece(pieceMinU, overlapMinU, piece.min.y, piece.max.y);
+        addPiece(overlapMaxU, pieceMaxU, piece.min.y, piece.max.y);
+        addPiece(overlapMinU, overlapMaxU, piece.min.y, overlapMinY);
+        addPiece(overlapMinU, overlapMaxU, overlapMaxY, piece.max.y);
+    }
+
+    wallPieces = std::move(carvedPieces);
+}
+
 bool is_visible(const RenderObject& object, const glm::mat4& viewProjection)
 {
     const std::array<glm::vec3, 8> corners = {
@@ -125,7 +196,8 @@ void VulkanEngine::update_physics(float deltaTime)
         }
     }
 
-    _playerMovement.resolve_world_collision(_boundaryWallColliders);
+    rebuild_active_wall_colliders();
+    _playerMovement.resolve_world_collision(_activeWallColliders);
     _playerInput.jumpPressed = false;
 }
 
@@ -135,24 +207,41 @@ bool VulkanEngine::try_traverse_portal(
     const glm::vec3& previousPosition)
 {
     const float playerHalfWidth = _playerMovement.settings.playerHalfWidth;
-    const glm::vec3 previousLeadingFace = previousPosition -
-        source.normal * playerHalfWidth;
-    const glm::vec3 currentLeadingFace = _playerMovement.position -
-        source.normal * playerHalfWidth;
+    // position is the feet point, but it is also the collider's X/Z center.
+    // A rendered portal cannot safely occupy the main camera's near plane.
+    // Traverse just before that happens, while preserving the matching offset
+    // behind the exit portal.  The real camera then lands at the exact virtual
+    // camera location that was visible through the portal on the prior frame.
+    const float previousDistance = portal_signed_distance(source, previousPosition);
+    const float currentDistance = portal_signed_distance(
+        source, _playerMovement.position);
+    constexpr float MinimumEntrySpeed = 0.01f;
+    constexpr float PortalTraversalDistance = 0.12f;
+    const float entrySpeed = glm::dot(_playerMovement.velocity, source.normal);
+    const bool movingThroughPlane = entrySpeed < -MinimumEntrySpeed;
+    const bool reachedPortalNearPlane =
+        previousDistance > PortalTraversalDistance &&
+        currentDistance <= PortalTraversalDistance &&
+        previousDistance - currentDistance > 0.000001f;
 
-    const float previousDistance = portal_signed_distance(source, previousLeadingFace);
-    const float currentDistance = portal_signed_distance(source, currentLeadingFace);
-    if (previousDistance <= 0.0f || currentDistance > 0.0f) {
+    if (!movingThroughPlane || !reachedPortalNearPlane) {
         return false;
     }
 
-    const float crossingFraction = previousDistance /
-        (previousDistance - currentDistance);
-    const glm::vec3 crossingLeadingFace = glm::mix(
-        previousLeadingFace, currentLeadingFace, crossingFraction);
-    if (!portal_fits_upright_player(
+    const float distanceDelta = previousDistance - currentDistance;
+    const float crossingFraction = distanceDelta > 0.000001f
+        ? std::clamp(
+            (previousDistance - PortalTraversalDistance) / distanceDelta,
+            0.0f,
+            1.0f)
+        : 1.0f;
+    const glm::vec3 crossingCenter = glm::mix(
+        previousPosition,
+        _playerMovement.position,
+        crossingFraction);
+    if (!portal_overlaps_upright_player(
             source,
-            crossingLeadingFace,
+            crossingCenter,
             playerHalfWidth,
             _playerMovement.settings.playerHeight)) {
         return false;
@@ -163,10 +252,17 @@ bool VulkanEngine::try_traverse_portal(
     _playerMovement.velocity = transform_direction_through_portal(
         source, destination, _playerMovement.velocity);
 
-    // Move the collision box fully onto the room side of the exit wall.
+    // Our physics collider has a portal-shaped gap, but the visible host wall
+    // is still one solid cube. The early near-plane transfer maps the player
+    // just behind the exit plane, so move them to the room-facing side before
+    // the main camera renders and cannot end up inside that opaque cube.
     constexpr float ExitEpsilon = 0.02f;
-    _playerMovement.position += destination.normal *
-        (playerHalfWidth + ExitEpsilon);
+    const float exitDistance = portal_signed_distance(
+        destination, _playerMovement.position);
+    if (exitDistance < ExitEpsilon) {
+        _playerMovement.position += destination.normal *
+            (ExitEpsilon - exitDistance);
+    }
 
     const glm::vec3 transformedForward = glm::normalize(
         transform_direction_through_portal(
@@ -183,6 +279,28 @@ bool VulkanEngine::try_traverse_portal(
     return true;
 }
 
+void VulkanEngine::rebuild_active_wall_colliders()
+{
+    _activeWallColliders.clear();
+    _activeWallColliders.reserve(_levelWallColliders.size() + 12);
+
+    for (size_t wallIndex = 0; wallIndex < _levelWallColliders.size(); ++wallIndex) {
+        const AABB& wall = _levelWallColliders[wallIndex];
+        std::vector<AABB> wallPieces{wall};
+        if (_bluePortal.placed &&
+            _bluePortal.hostWallIndex == static_cast<int>(wallIndex)) {
+            carve_portal_opening(wallPieces, _bluePortal);
+        }
+        if (_orangePortal.placed &&
+            _orangePortal.hostWallIndex == static_cast<int>(wallIndex)) {
+            carve_portal_opening(wallPieces, _orangePortal);
+        }
+        for (const AABB& piece : wallPieces) {
+            add_collider_if_nonempty(_activeWallColliders, piece);
+        }
+    }
+}
+
 void VulkanEngine::place_portal(Portal& portal, const Portal& otherPortal)
 {
     const glm::vec3 rayOrigin = mainCamera.position;
@@ -191,13 +309,16 @@ void VulkanEngine::place_portal(Portal& portal, const Portal& otherPortal)
 
     std::optional<RaycastHit> closestHit;
     const AABB* closestWall = nullptr;
-    for (const AABB& wall : _boundaryWallColliders) {
+    int closestWallIndex = -1;
+    for (size_t wallIndex = 0; wallIndex < _levelWallColliders.size(); ++wallIndex) {
+        const AABB& wall = _levelWallColliders[wallIndex];
         const std::optional<RaycastHit> hit = raycast_aabb(
             rayOrigin, rayDirection, wall);
         if (hit.has_value() &&
             (!closestHit.has_value() || hit->distance < closestHit->distance)) {
             closestHit = hit;
             closestWall = &wall;
+            closestWallIndex = static_cast<int>(wallIndex);
         }
     }
 
@@ -208,6 +329,7 @@ void VulkanEngine::place_portal(Portal& portal, const Portal& otherPortal)
     constexpr float PortalSurfaceOffset = 0.01f;
     Portal candidate = portal;
     candidate.placed = true;
+    candidate.hostWallIndex = closestWallIndex;
     candidate.position = closestHit->position +
         closestHit->normal * PortalSurfaceOffset;
     orient_portal(candidate, closestHit->normal);
@@ -263,11 +385,17 @@ void VulkanEngine::init_vulkan()
     features12.bufferDeviceAddress = true;
     features12.descriptorIndexing = true;
 
+    // Portal views use a hardware clip distance so geometry behind the exit
+    // portal is removed before rasterization/depth testing.
+    VkPhysicalDeviceFeatures features10{};
+    features10.shaderClipDistance = VK_TRUE;
+
     // use vkbootstrap to select a gpu
     // we want a gpu that can write tot eh sdl surfance and supporters vulkan 1.3 with correct features
     vkb::PhysicalDeviceSelector selector { vkb_inst};
     vkb::PhysicalDevice physicalDevice = selector
         .set_minimum_version(1,3)
+        .set_required_features(features10)
         .set_required_features_13(features)
         .set_required_features_12(features12)
         .set_surface(_surface)
@@ -389,6 +517,7 @@ void VulkanEngine::cleanup()
         _frames[i]._deletionQueue.flush();
     }
         loadedScenes.clear();
+        _playerModel.reset();
         _mainDeletionQueue.flush();
         destroy_swapchain();
 
@@ -473,7 +602,20 @@ void VulkanEngine::draw(float deltaTime)
 
 	vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 	vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
-	draw_geometry(cmd);
+	stats.drawcall_count = 0;
+	stats.triangle_count = 0;
+	stats.mesh_draw_time = 0.0f;
+	draw_geometry(
+        cmd,
+        mainDrawContext,
+        sceneData.viewproj,
+        get_current_frame().sceneDescriptor,
+        true);
+    // The portal view remains live all the way to the crossing plane.  Hiding
+    // it for a frame-rate-sized safety band exposed the solid host wall before
+    // physics teleported the player, causing the black flash.
+    draw_portal_masks(cmd);
+    draw_portal_views(cmd);
 
 	// transition the draw image and the swapchain image into their correct transfer layouts
 	vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -682,6 +824,11 @@ void VulkanEngine::run(){
             ImGui::SliderFloat("Air Accel", &movement.airAcceleration, 0.0f, 50.0f);
             ImGui::SliderFloat("Air Wish Cap", &movement.airWishSpeedCap, 0.1f, 20.0f);
             ImGui::SliderFloat("Jump Buffer", &movement.jumpBufferSeconds, 0.0f, 0.25f);
+
+            ImGui::SeparatorText("Portal Player Model");
+            ImGui::SliderFloat("Model Scale", &_playerModelScale, 0.01f, 5.0f);
+            ImGui::SliderFloat("Model Y Offset", &_playerModelYOffset, -2.0f, 2.0f);
+            ImGui::SliderAngle("Model Facing Offset", &_playerModelYaw);
         }
         ImGui::End();
 
@@ -779,7 +926,9 @@ void VulkanEngine::init_swapchain()
 
     VK_CHECK(vkCreateImageView(_device, &rview_info, nullptr, &_drawImage.imageView));
 
-    _depthImage.imageFormat = VK_FORMAT_D32_SFLOAT;
+    // Real portal rendering uses the stencil half of this image to mark each
+    // portal opening. Depth still handles normal world visibility.
+    _depthImage.imageFormat = VK_FORMAT_D32_SFLOAT_S8_UINT;
     _depthImage.imageExtent = drawImageExtent;
 
     VkImageUsageFlags depthImageUsages = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
@@ -796,7 +945,7 @@ void VulkanEngine::init_swapchain()
     VkImageViewCreateInfo dview_info = vkinit::imageview_create_info(
         _depthImage.imageFormat,
         _depthImage.image,
-        VK_IMAGE_ASPECT_DEPTH_BIT);
+        VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
     VK_CHECK(vkCreateImageView(_device, &dview_info, nullptr, &_depthImage.imageView));
 
     // add to deletion queues
@@ -929,7 +1078,9 @@ void VulkanEngine::init_descriptors()
             sizeof(GPUSceneData),
             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
             VMA_MEMORY_USAGE_CPU_TO_GPU);
-        frame.sceneDescriptor = frame._frameDescriptors.allocate(
+        // These sets live for the frame's lifetime.  They cannot come from
+        // _frameDescriptors because that allocator is reset every frame.
+        frame.sceneDescriptor = globalDescriptorAllocator.allocate(
             _device, _gpuSceneDataDescriptorLayout);
         DescriptorWriter sceneWriter;
         sceneWriter.write_buffer(
@@ -939,6 +1090,25 @@ void VulkanEngine::init_descriptors()
             0,
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         sceneWriter.update_set(_device, frame.sceneDescriptor);
+
+        for (uint32_t view = 0; view < PortalViewCount; ++view) {
+            frame.portalSceneBuffers[view] = create_buffer(
+                sizeof(GPUSceneData),
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VMA_MEMORY_USAGE_CPU_TO_GPU);
+            frame.portalSceneDescriptors[view] = globalDescriptorAllocator.allocate(
+                _device, _gpuSceneDataDescriptorLayout);
+
+            DescriptorWriter portalSceneWriter;
+            portalSceneWriter.write_buffer(
+                0,
+                frame.portalSceneBuffers[view].buffer,
+                sizeof(GPUSceneData),
+                0,
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+            portalSceneWriter.update_set(
+                _device, frame.portalSceneDescriptors[view]);
+        }
     }
 
     // allocate a descriptor set for our draw image
@@ -960,6 +1130,9 @@ void VulkanEngine::init_descriptors()
         for (FrameData& frame : _frames) {
             frame._frameDescriptors.destroy_pools(_device);
             destroy_buffer(frame.sceneBuffer);
+            for (AllocatedBuffer& portalSceneBuffer : frame.portalSceneBuffers) {
+                destroy_buffer(portalSceneBuffer);
+            }
         }
 
         vkDestroyDescriptorSetLayout(_device, _drawImageDescriptorLayout, nullptr);
@@ -973,23 +1146,34 @@ void VulkanEngine::init_pipelines()
     metalRoughMaterial.build_pipelines(this);
 }
 
-void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
+void VulkanEngine::draw_geometry(
+    VkCommandBuffer cmd,
+    const DrawContext& drawContext,
+    const glm::mat4& viewProjection,
+    VkDescriptorSet sceneDescriptor,
+    bool clearDepthAndStencil,
+    MaterialPipeline* overridePipeline,
+    uint32_t stencilReference,
+    bool useFrustumCulling,
+    uint32_t stencilCompareMask)
 {
-    stats.drawcall_count = 0;
-    stats.triangle_count = 0;
     const auto startTime = std::chrono::steady_clock::now();
 
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
         _drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
         _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    depthAttachment.loadOp = clearDepthAndStencil
+        ? VK_ATTACHMENT_LOAD_OP_CLEAR
+        : VK_ATTACHMENT_LOAD_OP_LOAD;
+    VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
+
     VkRenderingInfo renderInfo = vkinit::rendering_info(
         _drawExtent, &colorAttachment, &depthAttachment);
+    renderInfo.pStencilAttachment = &stencilAttachment;
 
     vkCmdBeginRendering(cmd, &renderInfo);
     VkViewport viewport{};
-    viewport.x = 0.0f;
-    viewport.y = 0.0f;
     viewport.width = static_cast<float>(_drawExtent.width);
     viewport.height = static_cast<float>(_drawExtent.height);
     viewport.minDepth = 0.0f;
@@ -999,11 +1183,22 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
     VkRect2D scissor{};
     scissor.extent = _drawExtent;
     vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdSetStencilReference(
+        cmd, VK_STENCIL_FACE_FRONT_AND_BACK, stencilReference);
+    vkCmdSetStencilCompareMask(
+        cmd, VK_STENCIL_FACE_FRONT_AND_BACK, stencilCompareMask);
+    vkCmdSetStencilWriteMask(
+        cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
 
     std::vector<uint32_t> opaqueDraws;
-    opaqueDraws.reserve(mainDrawContext.OpaqueSurfaces.size());
-    for (uint32_t i = 0; i < mainDrawContext.OpaqueSurfaces.size(); ++i) {
-        if (is_visible(mainDrawContext.OpaqueSurfaces[i], sceneData.viewproj)) {
+    opaqueDraws.reserve(drawContext.OpaqueSurfaces.size());
+    for (uint32_t i = 0; i < drawContext.OpaqueSurfaces.size(); ++i) {
+        // Oblique portal projections replace their near plane.  The simple
+        // CPU frustum test above assumes an ordinary projection, so using it
+        // there wrongly throws away visible destination walls and exposes the
+        // background.  The GPU still performs the real clip/depth tests.
+        if (!useFrustumCulling ||
+            is_visible(drawContext.OpaqueSurfaces[i], viewProjection)) {
             opaqueDraws.push_back(i);
         }
     }
@@ -1012,8 +1207,8 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
         opaqueDraws.begin(),
         opaqueDraws.end(),
         [&](uint32_t leftIndex, uint32_t rightIndex) {
-            const RenderObject& left = mainDrawContext.OpaqueSurfaces[leftIndex];
-            const RenderObject& right = mainDrawContext.OpaqueSurfaces[rightIndex];
+            const RenderObject& left = drawContext.OpaqueSurfaces[leftIndex];
+            const RenderObject& right = drawContext.OpaqueSurfaces[rightIndex];
             if (left.material == right.material) {
                 return left.indexBuffer < right.indexBuffer;
             }
@@ -1029,25 +1224,25 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
             return;
         }
 
-        MaterialPipeline* pipeline = renderObject.material->pipeline;
+        MaterialPipeline* pipeline = overridePipeline != nullptr
+            ? overridePipeline
+            : renderObject.material->pipeline;
+        if (pipeline != lastPipeline) {
+            lastPipeline = pipeline;
+            vkCmdBindPipeline(
+                cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
+            vkCmdBindDescriptorSets(
+                cmd,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                pipeline->layout,
+                0,
+                1,
+                &sceneDescriptor,
+                0,
+                nullptr);
+        }
         if (renderObject.material != lastMaterial) {
             lastMaterial = renderObject.material;
-            if (pipeline != lastPipeline) {
-                lastPipeline = pipeline;
-                vkCmdBindPipeline(
-                    cmd,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    pipeline->pipeline);
-                vkCmdBindDescriptorSets(
-                    cmd,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    pipeline->layout,
-                    0,
-                    1,
-                    &get_current_frame().sceneDescriptor,
-                    0,
-                    nullptr);
-            }
             vkCmdBindDescriptorSets(
                 cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1062,10 +1257,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
         if (renderObject.indexBuffer != lastIndexBuffer) {
             lastIndexBuffer = renderObject.indexBuffer;
             vkCmdBindIndexBuffer(
-                cmd,
-                renderObject.indexBuffer,
-                0,
-                VK_INDEX_TYPE_UINT32);
+                cmd, renderObject.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
         }
 
         GPUDrawPushConstants pushConstants{};
@@ -1079,42 +1271,411 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
             sizeof(GPUDrawPushConstants),
             &pushConstants);
         vkCmdDrawIndexed(
-            cmd,
-            renderObject.indexCount,
-            1,
-            renderObject.firstIndex,
-            0,
-            0);
+            cmd, renderObject.indexCount, 1, renderObject.firstIndex, 0, 0);
 
         ++stats.drawcall_count;
         stats.triangle_count += static_cast<int>(renderObject.indexCount / 3);
     };
 
     for (uint32_t drawIndex : opaqueDraws) {
-        draw(mainDrawContext.OpaqueSurfaces[drawIndex]);
+        draw(drawContext.OpaqueSurfaces[drawIndex]);
     }
-    for (const RenderObject& renderObject : mainDrawContext.TransparentSurfaces) {
+    for (const RenderObject& renderObject : drawContext.TransparentSurfaces) {
         draw(renderObject);
     }
 
     vkCmdEndRendering(cmd);
 
-    stats.mesh_draw_time = std::chrono::duration<float, std::milli>(
+    stats.mesh_draw_time += std::chrono::duration<float, std::milli>(
         std::chrono::steady_clock::now() - startTime).count();
+}
+
+RenderObject VulkanEngine::make_portal_render_object(
+    const Portal& portal,
+    MaterialInstance& material) const
+{
+    const glm::vec3 right = glm::normalize(glm::cross(portal.up, portal.normal));
+    glm::mat4 transform(1.0f);
+    transform[0] = glm::vec4(right * (portal.halfWidth * 2.0f), 0.0f);
+    transform[1] = glm::vec4(portal.up * (portal.halfHeight * 2.0f), 0.0f);
+    transform[2] = glm::vec4(portal.normal, 0.0f);
+    transform[3] = glm::vec4(portal.position, 1.0f);
+
+    return RenderObject{
+        .indexCount = 6,
+        .firstIndex = 0,
+        .indexBuffer = _portalMesh.indexBuffer.buffer,
+        .material = &material,
+        .bounds = _portalBounds,
+        .transform = transform,
+        .vertexBufferAddress = _portalMesh.vertexBufferAddress,
+    };
+}
+
+void VulkanEngine::draw_portal_masks(VkCommandBuffer cmd)
+{
+    if (!_bluePortal.placed || !_orangePortal.placed) {
+        return;
+    }
+
+    VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
+        _drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
+        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
+    VkRenderingInfo renderInfo = vkinit::rendering_info(
+        _drawExtent, &colorAttachment, &depthAttachment);
+    renderInfo.pStencilAttachment = &stencilAttachment;
+
+    vkCmdBeginRendering(cmd, &renderInfo);
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(_drawExtent.width);
+    viewport.height = static_cast<float>(_drawExtent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    VkRect2D scissor{};
+    scissor.extent = _drawExtent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    const VkDescriptorSet sceneDescriptor = get_current_frame().sceneDescriptor;
+    const auto drawMask = [&](MaterialPipeline& pipeline,
+                              const Portal& portal,
+                              MaterialInstance& material,
+                              uint32_t stencilReference,
+                              uint32_t stencilWriteMask) {
+        const RenderObject object = make_portal_render_object(portal, material);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline);
+        vkCmdBindDescriptorSets(
+            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout, 0, 1,
+            &sceneDescriptor, 0, nullptr);
+        vkCmdSetStencilReference(
+            cmd, VK_STENCIL_FACE_FRONT_AND_BACK, stencilReference);
+        vkCmdSetStencilCompareMask(
+            cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
+        vkCmdSetStencilWriteMask(
+            cmd, VK_STENCIL_FACE_FRONT_AND_BACK, stencilWriteMask);
+        vkCmdBindDescriptorSets(
+            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout, 1, 1,
+            &material.materialSet, 0, nullptr);
+        vkCmdBindIndexBuffer(cmd, object.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        GPUDrawPushConstants pushConstants{};
+        pushConstants.worldMatrix = object.transform;
+        pushConstants.vertexBuffer = object.vertexBufferAddress;
+        vkCmdPushConstants(
+            cmd, pipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+            sizeof(GPUDrawPushConstants), &pushConstants);
+        vkCmdDrawIndexed(cmd, object.indexCount, 1, object.firstIndex, 0, 0);
+    };
+
+    // First mark only portal pixels that passed the main scene's depth test.
+    // This prevents a portal hidden behind a nearer panel from drawing over it.
+    drawMask(
+        metalRoughMaterial.portalStencilPipeline,
+        _bluePortal,
+        _bluePortalMaterial,
+        BluePortalView + 1,
+        0xff);
+    drawMask(
+        metalRoughMaterial.portalStencilPipeline,
+        _orangePortal,
+        _orangePortalMaterial,
+        OrangePortalView + 1,
+        0xff);
+
+    // Then set far depth only inside each already-visible stencil silhouette,
+    // opening room for its virtual scene without touching foreground depth.
+    drawMask(
+        metalRoughMaterial.portalMaskPipeline,
+        _bluePortal,
+        _bluePortalMaterial,
+        BluePortalView + 1,
+        0x00);
+    drawMask(
+        metalRoughMaterial.portalMaskPipeline,
+        _orangePortal,
+        _orangePortalMaterial,
+        OrangePortalView + 1,
+        0x00);
+    vkCmdEndRendering(cmd);
+}
+
+void VulkanEngine::draw_recursive_portal_mask(
+    VkCommandBuffer cmd,
+    const Portal& portal,
+    MaterialInstance& material,
+    VkDescriptorSet sceneDescriptor,
+    uint32_t parentStencilReference,
+    uint32_t recursiveStencilReference,
+    uint32_t recursiveStencilBit)
+{
+    VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
+        _drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
+        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
+    VkRenderingInfo renderInfo = vkinit::rendering_info(
+        _drawExtent, &colorAttachment, &depthAttachment);
+    renderInfo.pStencilAttachment = &stencilAttachment;
+
+    vkCmdBeginRendering(cmd, &renderInfo);
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(_drawExtent.width);
+    viewport.height = static_cast<float>(_drawExtent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    VkRect2D scissor{};
+    scissor.extent = _drawExtent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    const RenderObject object = make_portal_render_object(portal, material);
+    const auto drawMask = [&](MaterialPipeline& pipeline,
+                              uint32_t compareMask,
+                              uint32_t writeMask) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline);
+        vkCmdBindDescriptorSets(
+            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout, 0, 1,
+            &sceneDescriptor, 0, nullptr);
+        vkCmdBindDescriptorSets(
+            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout, 1, 1,
+            &material.materialSet, 0, nullptr);
+        vkCmdSetStencilReference(
+            cmd, VK_STENCIL_FACE_FRONT_AND_BACK, recursiveStencilReference);
+        vkCmdSetStencilCompareMask(
+            cmd, VK_STENCIL_FACE_FRONT_AND_BACK, compareMask);
+        vkCmdSetStencilWriteMask(
+            cmd, VK_STENCIL_FACE_FRONT_AND_BACK, writeMask);
+        vkCmdBindIndexBuffer(cmd, object.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        GPUDrawPushConstants pushConstants{};
+        pushConstants.worldMatrix = object.transform;
+        pushConstants.vertexBuffer = object.vertexBufferAddress;
+        vkCmdPushConstants(
+            cmd, pipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+            sizeof(GPUDrawPushConstants), &pushConstants);
+        vkCmdDrawIndexed(cmd, object.indexCount, 1, object.firstIndex, 0, 0);
+    };
+
+    // The recursive mask can only be written inside its primary portal.
+    drawMask(
+        metalRoughMaterial.portalRecursiveStencilPipeline,
+        parentStencilReference,
+        recursiveStencilBit);
+    // Clear depth only where both the parent and recursive bits are set.
+    drawMask(
+        metalRoughMaterial.portalMaskPipeline,
+        recursiveStencilReference,
+        0x00);
+    vkCmdEndRendering(cmd);
+}
+
+void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
+{
+    if (!_bluePortal.placed || !_orangePortal.placed) {
+        return;
+    }
+
+    FrameData& frame = get_current_frame();
+    constexpr uint32_t BluePrimaryStencil = 0x01;
+    constexpr uint32_t OrangePrimaryStencil = 0x02;
+    constexpr uint32_t BlueRecursiveBit = 0x04;
+    constexpr uint32_t OrangeRecursiveBit = 0x08;
+    constexpr uint32_t BlueRecursiveStencil = BluePrimaryStencil | BlueRecursiveBit;
+    constexpr uint32_t OrangeRecursiveStencil = OrangePrimaryStencil | OrangeRecursiveBit;
+
+    draw_portal_sky(cmd, BluePrimaryStencil);
+    draw_geometry(
+        cmd,
+        portalViewDrawContext,
+        _portalSceneData[BluePortalView].viewproj,
+        frame.portalSceneDescriptors[BluePortalView],
+        false,
+        &metalRoughMaterial.portalViewPipeline,
+        BluePrimaryStencil,
+        false);
+    draw_recursive_portal_mask(
+        cmd,
+        _bluePortal,
+        _bluePortalMaterial,
+        frame.portalSceneDescriptors[BluePortalView],
+        BluePrimaryStencil,
+        BlueRecursiveStencil,
+        BlueRecursiveBit);
+    draw_portal_sky(cmd, BlueRecursiveStencil, BlueRecursiveStencil);
+    draw_geometry(
+        cmd,
+        portalViewDrawContext,
+        _portalSceneData[BluePortalRecursiveView].viewproj,
+        frame.portalSceneDescriptors[BluePortalRecursiveView],
+        false,
+        &metalRoughMaterial.portalViewPipeline,
+        BlueRecursiveStencil,
+        false,
+        BlueRecursiveStencil);
+
+    draw_portal_sky(cmd, OrangePrimaryStencil);
+    draw_geometry(
+        cmd,
+        portalViewDrawContext,
+        _portalSceneData[OrangePortalView].viewproj,
+        frame.portalSceneDescriptors[OrangePortalView],
+        false,
+        &metalRoughMaterial.portalViewPipeline,
+        OrangePrimaryStencil,
+        false);
+    draw_recursive_portal_mask(
+        cmd,
+        _orangePortal,
+        _orangePortalMaterial,
+        frame.portalSceneDescriptors[OrangePortalView],
+        OrangePrimaryStencil,
+        OrangeRecursiveStencil,
+        OrangeRecursiveBit);
+    draw_portal_sky(cmd, OrangeRecursiveStencil, OrangeRecursiveStencil);
+    draw_geometry(
+        cmd,
+        portalViewDrawContext,
+        _portalSceneData[OrangePortalRecursiveView].viewproj,
+        frame.portalSceneDescriptors[OrangePortalRecursiveView],
+        false,
+        &metalRoughMaterial.portalViewPipeline,
+        OrangeRecursiveStencil,
+        false,
+        OrangeRecursiveStencil);
+}
+
+void VulkanEngine::draw_portal_sky(
+    VkCommandBuffer cmd,
+    uint32_t stencilReference,
+    uint32_t stencilCompareMask)
+{
+    VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
+        _drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
+        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
+    VkRenderingInfo renderInfo = vkinit::rendering_info(
+        _drawExtent, &colorAttachment, &depthAttachment);
+    renderInfo.pStencilAttachment = &stencilAttachment;
+
+    vkCmdBeginRendering(cmd, &renderInfo);
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(_drawExtent.width);
+    viewport.height = static_cast<float>(_drawExtent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    VkRect2D scissor{};
+    scissor.extent = _drawExtent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdSetStencilReference(
+        cmd, VK_STENCIL_FACE_FRONT_AND_BACK, stencilReference);
+    vkCmdSetStencilCompareMask(
+        cmd, VK_STENCIL_FACE_FRONT_AND_BACK, stencilCompareMask);
+    vkCmdSetStencilWriteMask(
+        cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
+    vkCmdBindPipeline(
+        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _portalSkyPipeline.pipeline);
+    const ComputePushConstants& backgroundData =
+        backgroundEffects[currentBackgroundEffect].data;
+    PortalSkyPushConstants pushConstants{};
+    pushConstants.data1 = backgroundData.data1;
+    pushConstants.data2 = backgroundData.data2;
+    pushConstants.settings = glm::vec4(
+        static_cast<float>(currentBackgroundEffect),
+        static_cast<float>(_drawExtent.width),
+        static_cast<float>(_drawExtent.height),
+        0.0f);
+    vkCmdPushConstants(
+        cmd,
+        _portalSkyPipeline.layout,
+        VK_SHADER_STAGE_FRAGMENT_BIT,
+        0,
+        sizeof(PortalSkyPushConstants),
+        &pushConstants);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRendering(cmd);
+}
+
+GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
+{
+    GPUSceneData data{};
+    data.view = view;
+    // Passing far, then near, intentionally builds the reversed-depth
+    // projection used by the existing GREATER_OR_EQUAL depth pipeline.
+    data.proj = glm::perspective(
+        glm::radians(70.0f),
+        static_cast<float>(_drawExtent.width) / static_cast<float>(_drawExtent.height),
+        10000.0f,
+        0.1f);
+    data.proj[1][1] *= -1.0f;
+    data.viewproj = data.proj * data.view;
+    data.ambientColor = glm::vec4(0.1f);
+    data.sunlightDirection = glm::vec4(0.0f, 1.0f, 0.5f, 1.0f);
+    data.sunlightColor = glm::vec4(1.0f);
+    return data;
+}
+
+GPUSceneData VulkanEngine::build_portal_scene_data(
+    const glm::mat4& view,
+    const Portal& destination) const
+{
+    GPUSceneData data = build_scene_data(view);
+
+    // Keep the room-facing side of the destination portal and clip the
+    // outside/behind-wall side. A tiny offset avoids a precision fight with
+    // the wall face. This is performed in the portal fragment shader rather
+    // than by mutating the reversed-Z projection matrix.
+    constexpr float ClipEpsilon = 0.01f;
+    const glm::vec3 clipPoint = destination.position +
+        destination.normal * ClipEpsilon;
+    data.portalClipPlane = glm::vec4(
+        destination.normal,
+        -glm::dot(destination.normal, clipPoint));
+    data.portalClipEnabled = glm::vec4(1.0f);
+    return data;
 }
 
 void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
 {
     VkShaderModule fragmentShader = VK_NULL_HANDLE;
     VkShaderModule vertexShader = VK_NULL_HANDLE;
+    VkShaderModule portalMaskVertexShader = VK_NULL_HANDLE;
+    VkShaderModule portalViewVertexShader = VK_NULL_HANDLE;
+    VkShaderModule portalViewFragmentShader = VK_NULL_HANDLE;
+    VkShaderModule portalSkyVertexShader = VK_NULL_HANDLE;
+    VkShaderModule portalSkyFragmentShader = VK_NULL_HANDLE;
     if (!vkutil::load_shader_module("../../shaders/mesh.frag.spv", engine->_device, &fragmentShader) ||
-        !vkutil::load_shader_module("../../shaders/mesh.vert.spv", engine->_device, &vertexShader)) {
+        !vkutil::load_shader_module("../../shaders/mesh.vert.spv", engine->_device, &vertexShader) ||
+        !vkutil::load_shader_module("../../shaders/portal_mask.vert.spv", engine->_device, &portalMaskVertexShader) ||
+        !vkutil::load_shader_module("../../shaders/portal_view.vert.spv", engine->_device, &portalViewVertexShader) ||
+        !vkutil::load_shader_module("../../shaders/portal_view.frag.spv", engine->_device, &portalViewFragmentShader) ||
+        !vkutil::load_shader_module("../../shaders/portal_sky.vert.spv", engine->_device, &portalSkyVertexShader) ||
+        !vkutil::load_shader_module("../../shaders/portal_sky.frag.spv", engine->_device, &portalSkyFragmentShader)) {
         fmt::print("Error loading material shaders\n");
         if (fragmentShader != VK_NULL_HANDLE) {
             vkDestroyShaderModule(engine->_device, fragmentShader, nullptr);
         }
         if (vertexShader != VK_NULL_HANDLE) {
             vkDestroyShaderModule(engine->_device, vertexShader, nullptr);
+        }
+        if (portalMaskVertexShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(engine->_device, portalMaskVertexShader, nullptr);
+        }
+        if (portalViewVertexShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(engine->_device, portalViewVertexShader, nullptr);
+        }
+        if (portalViewFragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(engine->_device, portalViewFragmentShader, nullptr);
+        }
+        if (portalSkyVertexShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(engine->_device, portalSkyVertexShader, nullptr);
+        }
+        if (portalSkyFragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(engine->_device, portalSkyFragmentShader, nullptr);
         }
         return;
     }
@@ -1143,6 +1704,10 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     VK_CHECK(vkCreatePipelineLayout(engine->_device, &layoutInfo, nullptr, &pipelineLayout));
     opaquePipeline.layout = pipelineLayout;
     transparentPipeline.layout = pipelineLayout;
+    portalStencilPipeline.layout = pipelineLayout;
+    portalRecursiveStencilPipeline.layout = pipelineLayout;
+    portalMaskPipeline.layout = pipelineLayout;
+    portalViewPipeline.layout = pipelineLayout;
 
     PipelineBuilder builder;
     builder._pipelineLayout = pipelineLayout;
@@ -1155,19 +1720,93 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
     builder.set_color_attachment_format(engine->_drawImage.imageFormat);
     builder.set_depth_format(engine->_depthImage.imageFormat);
+    builder.set_stencil_format(engine->_depthImage.imageFormat);
     opaquePipeline.pipeline = builder.build_pipeline(engine->_device);
 
     builder.enable_blending_additive();
     builder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
     transparentPipeline.pipeline = builder.build_pipeline(engine->_device);
 
+    // Mark a portal in stencil only where its real, slightly front-offset
+    // surface is visible against the already-rendered main scene. This pass
+    // intentionally does not change depth yet.
+    builder.disable_blending();
+    builder.set_color_write_mask(0);
+    builder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    builder.enable_stenciltest(VK_COMPARE_OP_ALWAYS, VK_STENCIL_OP_REPLACE);
+    builder.set_shaders(vertexShader, fragmentShader);
+    portalStencilPipeline.pipeline = builder.build_pipeline(engine->_device);
+
+    // A recursive portal mask must already be inside its parent portal's
+    // stencil value. It writes one additional bit without changing the
+    // parent's bits.
+    builder.enable_stenciltest(VK_COMPARE_OP_EQUAL, VK_STENCIL_OP_REPLACE);
+    portalRecursiveStencilPipeline.pipeline = builder.build_pipeline(engine->_device);
+
+    // Clear main-scene depth to the far value only where the preceding
+    // stencil pass succeeded. portal_mask.vert forces reversed depth to zero.
+    builder.enable_depthtest(true, VK_COMPARE_OP_ALWAYS);
+    builder.enable_stenciltest(VK_COMPARE_OP_EQUAL, VK_STENCIL_OP_KEEP);
+    builder.set_shaders(portalMaskVertexShader, fragmentShader);
+    portalMaskPipeline.pipeline = builder.build_pipeline(engine->_device);
+
+    // The linked world's pixels pass only where its portal's stencil value
+    // was written by the mask pass.
+    builder.set_color_write_mask(
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT);
+    builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    builder.enable_stenciltest(VK_COMPARE_OP_EQUAL, VK_STENCIL_OP_KEEP);
+    builder.set_shaders(portalViewVertexShader, portalViewFragmentShader);
+    portalViewPipeline.pipeline = builder.build_pipeline(engine->_device);
+
+    VkPipelineLayoutCreateInfo portalSkyLayoutInfo = vkinit::pipeline_layout_create_info();
+    VkPushConstantRange portalSkyRange{
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset = 0,
+        .size = sizeof(PortalSkyPushConstants),
+    };
+    portalSkyLayoutInfo.pushConstantRangeCount = 1;
+    portalSkyLayoutInfo.pPushConstantRanges = &portalSkyRange;
+    VK_CHECK(vkCreatePipelineLayout(
+        engine->_device,
+        &portalSkyLayoutInfo,
+        nullptr,
+        &engine->_portalSkyPipeline.layout));
+
+    PipelineBuilder skyBuilder;
+    skyBuilder._pipelineLayout = engine->_portalSkyPipeline.layout;
+    skyBuilder.set_shaders(portalSkyVertexShader, portalSkyFragmentShader);
+    skyBuilder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    skyBuilder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    skyBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    skyBuilder.set_multisampling_none();
+    skyBuilder.disable_blending();
+    skyBuilder.disable_depthtest();
+    skyBuilder.enable_stenciltest(VK_COMPARE_OP_EQUAL, VK_STENCIL_OP_KEEP);
+    skyBuilder.set_color_attachment_format(engine->_drawImage.imageFormat);
+    skyBuilder.set_depth_format(engine->_depthImage.imageFormat);
+    skyBuilder.set_stencil_format(engine->_depthImage.imageFormat);
+    engine->_portalSkyPipeline.pipeline = skyBuilder.build_pipeline(engine->_device);
+
     vkDestroyShaderModule(engine->_device, fragmentShader, nullptr);
     vkDestroyShaderModule(engine->_device, vertexShader, nullptr);
+    vkDestroyShaderModule(engine->_device, portalMaskVertexShader, nullptr);
+    vkDestroyShaderModule(engine->_device, portalViewVertexShader, nullptr);
+    vkDestroyShaderModule(engine->_device, portalViewFragmentShader, nullptr);
+    vkDestroyShaderModule(engine->_device, portalSkyVertexShader, nullptr);
+    vkDestroyShaderModule(engine->_device, portalSkyFragmentShader, nullptr);
 
     engine->_mainDeletionQueue.push_function([this, engine]() {
         vkDestroyPipeline(engine->_device, opaquePipeline.pipeline, nullptr);
         vkDestroyPipeline(engine->_device, transparentPipeline.pipeline, nullptr);
+        vkDestroyPipeline(engine->_device, portalStencilPipeline.pipeline, nullptr);
+        vkDestroyPipeline(engine->_device, portalRecursiveStencilPipeline.pipeline, nullptr);
+        vkDestroyPipeline(engine->_device, portalMaskPipeline.pipeline, nullptr);
+        vkDestroyPipeline(engine->_device, portalViewPipeline.pipeline, nullptr);
+        vkDestroyPipeline(engine->_device, engine->_portalSkyPipeline.pipeline, nullptr);
         vkDestroyPipelineLayout(engine->_device, opaquePipeline.layout, nullptr);
+        vkDestroyPipelineLayout(engine->_device, engine->_portalSkyPipeline.layout, nullptr);
         vkDestroyDescriptorSetLayout(engine->_device, materialLayout, nullptr);
     });
 }
@@ -1176,6 +1815,10 @@ void GLTFMetallic_Roughness::clear_resources(VkDevice device)
 {
     vkDestroyPipeline(device, opaquePipeline.pipeline, nullptr);
     vkDestroyPipeline(device, transparentPipeline.pipeline, nullptr);
+    vkDestroyPipeline(device, portalStencilPipeline.pipeline, nullptr);
+    vkDestroyPipeline(device, portalRecursiveStencilPipeline.pipeline, nullptr);
+    vkDestroyPipeline(device, portalMaskPipeline.pipeline, nullptr);
+    vkDestroyPipeline(device, portalViewPipeline.pipeline, nullptr);
     vkDestroyPipelineLayout(device, opaquePipeline.layout, nullptr);
     vkDestroyDescriptorSetLayout(device, materialLayout, nullptr);
 }
@@ -1331,8 +1974,12 @@ AllocatedImage VulkanEngine::create_image(
         &image.allocation,
         nullptr));
 
-    VkImageAspectFlags aspect =
-        format == VK_FORMAT_D32_SFLOAT ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    if (format == VK_FORMAT_D32_SFLOAT) {
+        aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+    } else if (format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+        aspect = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    }
     VkImageViewCreateInfo viewInfo = vkinit::imageview_create_info(format, image.image, aspect);
     viewInfo.subresourceRange.levelCount = imageInfo.mipLevels;
     VK_CHECK(vkCreateImageView(_device, &viewInfo, nullptr, &image.imageView));
@@ -1408,8 +2055,8 @@ void VulkanEngine::destroy_image(const AllocatedImage& image)
 
 void VulkanEngine::init_default_data()
 {
-    for (size_t i = 0; i < _boundaryWalls.size(); i++) {
-        _boundaryWallColliders[i] = get_aabb(_boundaryWalls[i]);
+    for (size_t i = 0; i < _levelWalls.size(); i++) {
+        _levelWallColliders[i] = get_aabb(_levelWalls[i]);
     }
 
     uint32_t white = glm::packUnorm4x8(glm::vec4(1.0f));
@@ -1595,6 +2242,28 @@ void VulkanEngine::init_default_data()
         wallResources,
         globalDescriptorAllocator);
 
+    // There is no character asset in assets/ yet, so start with a visible
+    // collision-sized proxy.  It is rendered only by portal cameras; the
+    // first-person main camera never sees the box enclosing itself.
+    _playerBounds = _wallBounds;
+    _playerMaterialBuffer = create_buffer(
+        sizeof(GLTFMetallic_Roughness::MaterialConstants),
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto* playerConstants = static_cast<GLTFMetallic_Roughness::MaterialConstants*>(
+        _playerMaterialBuffer.info.pMappedData);
+    *playerConstants = {};
+    playerConstants->colorFactors = glm::vec4(0.95f, 0.90f, 0.75f, 1.0f);
+    playerConstants->metal_rough_factors = glm::vec4(0.0f, 0.9f, 0.0f, 0.0f);
+
+    GLTFMetallic_Roughness::MaterialResources playerResources = floorResources;
+    playerResources.dataBuffer = _playerMaterialBuffer.buffer;
+    _playerMaterial = metalRoughMaterial.write_material(
+        _device,
+        MaterialPass::MainColor,
+        playerResources,
+        globalDescriptorAllocator);
+
     _bluePortalMaterialBuffer = create_buffer(
         sizeof(GLTFMetallic_Roughness::MaterialConstants),
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
@@ -1633,6 +2302,16 @@ void VulkanEngine::init_default_data()
         orangePortalResources,
         globalDescriptorAllocator);
 
+    // This model is deliberately not put in loadedScenes: that collection is
+    // rendered by the main first-person camera.  We draw this one only into
+    // portalViewDrawContext so the player can see their body through a portal.
+    auto playerModel = loadGltf(this, "../../assets/tung_tung_tung_sahur.glb");
+    if (playerModel) {
+        _playerModel = *playerModel;
+    } else {
+        fmt::print("Failed to load tung_tung_tung_sahur.glb\n");
+    }
+
     //auto structureScene = loadGltf(this, "../../assets/structure.glb");
     //if (structureScene) {
       //  loadedScenes["structure"] = *structureScene;
@@ -1652,6 +2331,7 @@ void VulkanEngine::init_default_data()
         destroy_buffer(_wallMaterialBuffer);
         destroy_buffer(_wallMesh.vertexBuffer);
         destroy_buffer(_wallMesh.indexBuffer);
+        destroy_buffer(_playerMaterialBuffer);
         destroy_buffer(_floorMaterialBuffer);
         destroy_buffer(_floorMesh.vertexBuffer);
         destroy_buffer(_floorMesh.indexBuffer);
@@ -1699,10 +2379,14 @@ void VulkanEngine::update_scene(float deltaTime)
 
     mainDrawContext.OpaqueSurfaces.clear();
     mainDrawContext.TransparentSurfaces.clear();
+    worldDrawContext.OpaqueSurfaces.clear();
+    worldDrawContext.TransparentSurfaces.clear();
+    portalViewDrawContext.OpaqueSurfaces.clear();
+    portalViewDrawContext.TransparentSurfaces.clear();
 
     for (auto& [name, scene] : loadedScenes) {
         if (scene != nullptr) {
-            scene->Draw(glm::mat4(1.0f), mainDrawContext);
+            scene->Draw(glm::mat4(1.0f), worldDrawContext);
         }
     }
     RenderObject floor{};
@@ -1714,7 +2398,7 @@ void VulkanEngine::update_scene(float deltaTime)
     floor.transform = glm::mat4(1.0f);
     floor.vertexBufferAddress = _floorMesh.vertexBufferAddress;
 
-    mainDrawContext.OpaqueSurfaces.push_back(floor);
+    worldDrawContext.OpaqueSurfaces.push_back(floor);
 
     const auto addWall = [&](const Wall& sourceWall) {
         RenderObject wall{};
@@ -1726,57 +2410,141 @@ void VulkanEngine::update_scene(float deltaTime)
         wall.transform = glm::translate(glm::mat4(1.0f), sourceWall.position) *
             glm::scale(glm::mat4(1.0f), sourceWall.halfExtents * 2.0f);
         wall.vertexBufferAddress = _wallMesh.vertexBufferAddress;
-        mainDrawContext.OpaqueSurfaces.push_back(wall);
+        worldDrawContext.OpaqueSurfaces.push_back(wall);
     };
-    for (const Wall& wall : _boundaryWalls) {
+    for (const Wall& wall : _levelWalls) {
         addWall(wall);
     }
 
+    portalViewDrawContext = worldDrawContext;
+    if (_playerModel) {
+        const glm::mat4 playerTransform =
+            glm::translate(
+                glm::mat4(1.0f),
+                _playerMovement.position + glm::vec3(0.0f, _playerModelYOffset, 0.0f)) *
+            // Camera yaw uses a negative-Y rotation. Apply the matching
+            // world-space turn first; the slider is only the imported asset's
+            // fixed forward-axis correction.
+            glm::rotate(
+                glm::mat4(1.0f),
+                -mainCamera.yaw + _playerModelYaw,
+                glm::vec3(0.0f, 1.0f, 0.0f)) *
+            glm::scale(glm::mat4(1.0f), glm::vec3(_playerModelScale));
+        _playerModel->Draw(playerTransform, portalViewDrawContext);
+    } else {
+        // Keep the collision-sized box as a visible fallback if the asset
+        // fails to load on another machine.
+        RenderObject playerProxy{};
+        playerProxy.indexCount = 36;
+        playerProxy.firstIndex = 0;
+        playerProxy.indexBuffer = _wallMesh.indexBuffer.buffer;
+        playerProxy.material = &_playerMaterial;
+        playerProxy.bounds = _playerBounds;
+        const glm::vec3 playerScale{
+            _playerMovement.settings.playerHalfWidth * 2.0f,
+            _playerMovement.settings.playerHeight,
+            _playerMovement.settings.playerHalfWidth * 2.0f};
+        const glm::vec3 playerCenter = _playerMovement.position + glm::vec3(
+            0.0f, _playerMovement.settings.playerHeight * 0.5f, 0.0f);
+        playerProxy.transform = glm::translate(glm::mat4(1.0f), playerCenter) *
+            glm::scale(glm::mat4(1.0f), playerScale);
+        playerProxy.vertexBufferAddress = _wallMesh.vertexBufferAddress;
+        portalViewDrawContext.OpaqueSurfaces.push_back(playerProxy);
+    }
+
+    // The ordinary world is drawn first.  Once both portals exist, their
+    // rectangle is replaced by the stencil/virtual-camera passes below.  A
+    // single unlinked portal stays coloured so its placement is still visible.
+    mainDrawContext = worldDrawContext;
     const auto addPortal = [&](const Portal& sourcePortal, MaterialInstance& material) {
         if (!sourcePortal.placed) {
             return;
         }
-
-        const glm::vec3 right = glm::normalize(glm::cross(
-            sourcePortal.up, sourcePortal.normal));
-        glm::mat4 portalTransform(1.0f);
-        portalTransform[0] = glm::vec4(
-            right * (sourcePortal.halfWidth * 2.0f), 0.0f);
-        portalTransform[1] = glm::vec4(
-            sourcePortal.up * (sourcePortal.halfHeight * 2.0f), 0.0f);
-        portalTransform[2] = glm::vec4(sourcePortal.normal, 0.0f);
-        portalTransform[3] = glm::vec4(sourcePortal.position, 1.0f);
-
-        RenderObject portal{};
-        portal.indexCount = 6;
-        portal.firstIndex = 0;
-        portal.indexBuffer = _portalMesh.indexBuffer.buffer;
-        portal.material = &material;
-        portal.bounds = _portalBounds;
-        portal.transform = portalTransform;
-        portal.vertexBufferAddress = _portalMesh.vertexBufferAddress;
-        mainDrawContext.OpaqueSurfaces.push_back(portal);
+        mainDrawContext.OpaqueSurfaces.push_back(
+            make_portal_render_object(sourcePortal, material));
     };
-    addPortal(_bluePortal, _bluePortalMaterial);
-    addPortal(_orangePortal, _orangePortalMaterial);
+    if (!_bluePortal.placed || !_orangePortal.placed) {
+        addPortal(_bluePortal, _bluePortalMaterial);
+        addPortal(_orangePortal, _orangePortalMaterial);
+    }
 
-    sceneData = {};
-    sceneData.view = mainCamera.getViewMatrix();
-    sceneData.proj = glm::perspective(
-        glm::radians(70.0f),
-        static_cast<float>(_drawExtent.width) / static_cast<float>(_drawExtent.height),
-        10000.0f,
-        0.1f);
-    sceneData.proj[1][1] *= -1.0f;
-    sceneData.viewproj = sceneData.proj * sceneData.view;
-    sceneData.ambientColor = glm::vec4(0.1f);
-    sceneData.sunlightDirection = glm::vec4(0.0f, 1.0f, 0.5f, 1.0f);
-    sceneData.sunlightColor = glm::vec4(1.0f);
+    sceneData = build_scene_data(mainCamera.getViewMatrix());
 
     std::memcpy(
         get_current_frame().sceneBuffer.info.pMappedData,
         &sceneData,
         sizeof(sceneData));
+
+    if (_bluePortal.placed && _orangePortal.placed) {
+        const glm::vec3 cameraForward = glm::normalize(glm::vec3(
+            mainCamera.getRotationMatrix() * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+        const glm::vec3 cameraUp = glm::normalize(glm::vec3(
+            mainCamera.getRotationMatrix() * glm::vec4(0.0f, 1.0f, 0.0f, 0.0f)));
+
+        const auto updatePortalView = [&](const Portal& source,
+                                          const Portal& destination,
+                                          uint32_t viewIndex,
+                                          uint32_t recursiveViewIndex) {
+            const glm::mat4 transfer = get_portal_transfer_transform(
+                source, destination);
+            // At the instant we cross a portal, the mathematically exact
+            // virtual camera lies on the exit portal plane.  Keep it a tiny
+            // distance behind that plane for rendering only so the clip and
+            // depth passes never leave a one-frame black aperture.
+            const glm::vec3 virtualPosition = stabilize_portal_view_camera(
+                destination,
+                glm::vec3(transfer * glm::vec4(mainCamera.position, 1.0f)));
+            const glm::vec3 virtualForward = glm::normalize(glm::vec3(
+                transfer * glm::vec4(cameraForward, 0.0f)));
+            const glm::vec3 virtualUp = glm::normalize(glm::vec3(
+                transfer * glm::vec4(cameraUp, 0.0f)));
+
+            _portalSceneData[viewIndex] = build_portal_scene_data(
+                glm::lookAt(
+                    virtualPosition,
+                    virtualPosition + virtualForward,
+                    virtualUp),
+                destination);
+            std::memcpy(
+                get_current_frame().portalSceneBuffers[viewIndex].info.pMappedData,
+                &_portalSceneData[viewIndex],
+                sizeof(GPUSceneData));
+
+            // One additional application of the same transform is the view
+            // seen when this portal appears inside its own primary portal
+            // view. Deeper recursion would repeat this same operation.
+            const glm::vec3 recursivePosition = stabilize_portal_view_camera(
+                destination,
+                glm::vec3(transfer * glm::vec4(virtualPosition, 1.0f)));
+            const glm::vec3 recursiveForward = glm::normalize(glm::vec3(
+                transfer * glm::vec4(virtualForward, 0.0f)));
+            const glm::vec3 recursiveUp = glm::normalize(glm::vec3(
+                transfer * glm::vec4(virtualUp, 0.0f)));
+            _portalSceneData[recursiveViewIndex] = build_portal_scene_data(
+                glm::lookAt(
+                    recursivePosition,
+                    recursivePosition + recursiveForward,
+                    recursiveUp),
+                destination);
+            std::memcpy(
+                get_current_frame().portalSceneBuffers[recursiveViewIndex].info.pMappedData,
+                &_portalSceneData[recursiveViewIndex],
+                sizeof(GPUSceneData));
+        };
+
+        // Looking into blue means rendering the world as seen after exiting
+        // orange; looking into orange is the inverse relation.
+        updatePortalView(
+            _bluePortal,
+            _orangePortal,
+            BluePortalView,
+            BluePortalRecursiveView);
+        updatePortalView(
+            _orangePortal,
+            _bluePortal,
+            OrangePortalView,
+            OrangePortalRecursiveView);
+    }
 
     stats.scene_update_time = std::chrono::duration<float, std::milli>(
         std::chrono::steady_clock::now() - startTime).count();
