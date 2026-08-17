@@ -5,6 +5,8 @@ layout(set = 0, binding = 0) uniform SceneData {
     vec4 ambientColor;
     vec4 sunlightDirection;
     vec4 sunlightColor;
+    vec4 portalClipPlane;
+    vec4 portalClipEnabled;
 } sceneData;
 
 layout(set = 1, binding = 0) uniform GLTFMaterialData {
