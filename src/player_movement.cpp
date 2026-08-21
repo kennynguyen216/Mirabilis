@@ -118,8 +118,8 @@ void PlayerMovement::resolve_world_collision(std::span<const AABB> collisionWall
     }
 
     const bool overFloor =
-        std::abs(position.x) <= settings.floorHalfExtent &&
-        std::abs(position.z) <= settings.floorHalfExtent;
+        std::abs(position.x - settings.floorCenter.x) <= settings.floorHalfExtents.x &&
+        std::abs(position.z - settings.floorCenter.y) <= settings.floorHalfExtents.y;
     grounded = false;
     if (overFloor && position.y <= settings.groundHeight) {
         position.y = settings.groundHeight;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <span>
 
@@ -22,7 +23,9 @@ struct PlayerMovementSettings {
     float playerHalfWidth{0.3f};
     float playerHeight{1.8f};
 
-    float floorHalfExtent{25.0f};
+    // Walkable ground plane, rebuilt each tick from the floor scene object.
+    glm::vec2 floorCenter{0.0f, 0.0f};
+    glm::vec2 floorHalfExtents{25.0f, 25.0f};
     float respawnHeight{-20.0f};
     glm::vec3 spawnPosition{0.0f};
 

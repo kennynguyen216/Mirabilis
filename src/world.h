@@ -84,17 +84,3 @@ inline std::optional<RaycastHit> raycast_aabb(
         .normal = startsInsideBox ? farNormal : nearNormal,
     };
 }
-
-// Static level object. Rendering and physics both derive their data from this.
-struct Wall {
-    glm::vec3 position{0.0f};
-    glm::vec3 halfExtents{0.0f};
-};
-
-inline AABB get_aabb(const Wall& wall)
-{
-    return {
-        .min = wall.position - wall.halfExtents,
-        .max = wall.position + wall.halfExtents,
-    };
-}

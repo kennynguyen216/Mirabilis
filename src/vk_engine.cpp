@@ -18,12 +18,15 @@
 #include <glm/gtx/transform.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/packing.hpp>
+#include <glm/gtc/type_ptr.hpp>
 #include <glm/vec2.hpp>
 #include <algorithm>
 
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_vulkan.h"
+#include "ImGuizmo.h"
 
 constexpr bool bUseValidationLayers = false;
 
@@ -196,7 +199,7 @@ void VulkanEngine::update_physics(float deltaTime)
         }
     }
 
-    rebuild_active_wall_colliders();
+    rebuild_collision_from_scene();
     _playerMovement.resolve_world_collision(_activeWallColliders);
     _playerInput.jumpPressed = false;
 }
@@ -279,20 +282,36 @@ bool VulkanEngine::try_traverse_portal(
     return true;
 }
 
-void VulkanEngine::rebuild_active_wall_colliders()
+void VulkanEngine::rebuild_collision_from_scene()
 {
+    // Colliders are rebuilt from the scene every tick, so a wall edited in
+    // the inspector moves its collision in the same frame it moves visually.
     _activeWallColliders.clear();
-    _activeWallColliders.reserve(_levelWallColliders.size() + 12);
+    _activeWallColliders.reserve(_scene.objects.size() + 12);
 
-    for (size_t wallIndex = 0; wallIndex < _levelWallColliders.size(); ++wallIndex) {
-        const AABB& wall = _levelWallColliders[wallIndex];
-        std::vector<AABB> wallPieces{wall};
-        if (_bluePortal.placed &&
-            _bluePortal.hostWallIndex == static_cast<int>(wallIndex)) {
+    for (const SceneObject& object : _scene.objects) {
+        if (!object.alive || !object.hasCollision) {
+            continue;
+        }
+
+        if (object.collisionShape == CollisionShape::GroundPlane) {
+            // The floor is a plane rather than a box: the player stands on
+            // its top face instead of being pushed out horizontally.
+            const glm::mat4 world = _scene.world_matrix(object.id);
+            PlayerMovementSettings& settings = _playerMovement.settings;
+            settings.groundHeight = world[3].y;
+            settings.floorCenter = glm::vec2(world[3].x, world[3].z);
+            settings.floorHalfExtents = glm::vec2(
+                glm::length(glm::vec3(world[0])) * 0.5f,
+                glm::length(glm::vec3(world[2])) * 0.5f);
+            continue;
+        }
+
+        std::vector<AABB> wallPieces{collider_from_object(_scene, object.id)};
+        if (_bluePortal.placed && _bluePortal.hostWallObject == object.id) {
             carve_portal_opening(wallPieces, _bluePortal);
         }
-        if (_orangePortal.placed &&
-            _orangePortal.hostWallIndex == static_cast<int>(wallIndex)) {
+        if (_orangePortal.placed && _orangePortal.hostWallObject == object.id) {
             carve_portal_opening(wallPieces, _orangePortal);
         }
         for (const AABB& piece : wallPieces) {
@@ -308,33 +327,36 @@ void VulkanEngine::place_portal(Portal& portal, const Portal& otherPortal)
         mainCamera.getRotationMatrix() * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
 
     std::optional<RaycastHit> closestHit;
-    const AABB* closestWall = nullptr;
-    int closestWallIndex = -1;
-    for (size_t wallIndex = 0; wallIndex < _levelWallColliders.size(); ++wallIndex) {
-        const AABB& wall = _levelWallColliders[wallIndex];
+    AABB closestWall{};
+    SceneObjectID closestWallObject = InvalidSceneObject;
+    for (const SceneObject& object : _scene.objects) {
+        if (!object.alive || !object.portalPlaceable) {
+            continue;
+        }
+        const AABB wall = collider_from_object(_scene, object.id);
         const std::optional<RaycastHit> hit = raycast_aabb(
             rayOrigin, rayDirection, wall);
         if (hit.has_value() &&
             (!closestHit.has_value() || hit->distance < closestHit->distance)) {
             closestHit = hit;
-            closestWall = &wall;
-            closestWallIndex = static_cast<int>(wallIndex);
+            closestWall = wall;
+            closestWallObject = object.id;
         }
     }
 
-    if (!closestHit.has_value() || closestWall == nullptr) {
+    if (!closestHit.has_value() || closestWallObject == InvalidSceneObject) {
         return;
     }
 
     constexpr float PortalSurfaceOffset = 0.01f;
     Portal candidate = portal;
     candidate.placed = true;
-    candidate.hostWallIndex = closestWallIndex;
+    candidate.hostWallObject = closestWallObject;
     candidate.position = closestHit->position +
         closestHit->normal * PortalSurfaceOffset;
     orient_portal(candidate, closestHit->normal);
 
-    if (!snap_portal_to_wall(candidate, *closestWall)) {
+    if (!snap_portal_to_wall(candidate, closestWall)) {
         return;
     }
     if (portals_overlap(candidate, otherPortal)) {
@@ -355,6 +377,45 @@ void VulkanEngine::set_mouse_capture(bool captured)
         _playerInput.left = false;
         _playerInput.right = false;
     }
+}
+
+void VulkanEngine::set_editor_mode(bool enabled)
+{
+    if (_editorMode == enabled) {
+        return;
+    }
+
+    _editorMode = enabled;
+    _editorCameraLooking = false;
+    _physicsAccumulator = 0.0f;
+
+    if (enabled) {
+        // Start where the player was looking, then let the editor camera move
+        // independently.  This feels much less disorienting than spawning a
+        // second camera at an arbitrary point in the level.
+        _editorCamera = mainCamera;
+        _editorCamera.velocity = glm::vec3(0.0f);
+        _editorCamera.moveSpeed = 8.0f;
+        set_mouse_capture(false);
+    } else {
+        _editorCamera.velocity = glm::vec3(0.0f);
+        set_mouse_capture(true);
+    }
+}
+
+const Camera& VulkanEngine::render_camera() const
+{
+    return _editorMode ? _editorCamera : mainCamera;
+}
+
+void VulkanEngine::retract_portals()
+{
+    // Resetting the complete value also clears hostWallObject. That avoids a
+    // stale portal opening if its former wall is edited after retraction.
+    _bluePortal = Portal{};
+    _orangePortal = Portal{};
+    _portalTraversalCooldown = 0.0f;
+    rebuild_collision_from_scene();
 }
 
 void VulkanEngine::init_vulkan()
@@ -516,6 +577,9 @@ void VulkanEngine::cleanup()
 
         _frames[i]._deletionQueue.flush();
     }
+        // Scene objects can hold the last reference to a loaded glTF, so
+        // they must release it while the device is still alive.
+        _scene.objects.clear();
         loadedScenes.clear();
         _playerModel.reset();
         _mainDeletionQueue.flush();
@@ -707,6 +771,10 @@ void VulkanEngine::run(){
                         resize_requested = true;
                     }
                 }
+                // Let ImGui observe every event before deciding whether the
+                // editor camera should consume it.
+                ImGui_ImplSDL2_ProcessEvent(&e);
+
                 if(e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) {
                     bQuit = true;
                 }
@@ -714,56 +782,91 @@ void VulkanEngine::run(){
                 if (e.type == SDL_KEYDOWN &&
                     e.key.keysym.sym == SDLK_TAB &&
                     e.key.repeat == 0) {
-                    set_mouse_capture(!_mouseCaptured);
+                    set_editor_mode(!_editorMode);
                 }
 
-                if (_mouseCaptured && e.type == SDL_MOUSEMOTION) {
-                    mainCamera.processSDLEvent(e);
+                if (!_editorMode &&
+                    e.type == SDL_KEYDOWN &&
+                    e.key.keysym.sym == SDLK_r &&
+                    e.key.repeat == 0) {
+                    retract_portals();
                 }
 
-                if (_mouseCaptured && e.type == SDL_KEYDOWN) {
-                    if (e.key.keysym.sym == SDLK_w) _playerInput.forward = true;
-                    if (e.key.keysym.sym == SDLK_s) _playerInput.backward = true;
-                    if (e.key.keysym.sym == SDLK_a) _playerInput.left = true;
-                    if (e.key.keysym.sym == SDLK_d) _playerInput.right = true;
-                    if (e.key.keysym.sym == SDLK_SPACE && e.key.repeat == 0) {
-                        _playerInput.jumpPressed = true;
-                    }
-                }
-
-                if (_mouseCaptured && e.type == SDL_MOUSEWHEEL) {
-                    // SDL reports a normal scroll-down as a negative Y value.
-                    // Some touchpads request the opposite convention through
-                    // SDL_MOUSEWHEEL_FLIPPED, so normalize it before testing.
-                    int wheelY = e.wheel.y;
-                    if (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) {
-                        wheelY = -wheelY;
+                if (_editorMode) {
+                    if (e.type == SDL_KEYDOWN &&
+                        e.key.keysym.sym == SDLK_DELETE &&
+                        e.key.repeat == 0 &&
+                        !ImGui::GetIO().WantCaptureKeyboard) {
+                        delete_selected_scene_object();
                     }
 
-                    if (wheelY < 0) {
-                        _playerInput.jumpPressed = true;
+                    // The cursor remains free for ImGui. Hold RMB over the
+                    // scene to temporarily capture it for fly-camera input.
+                    if (e.type == SDL_MOUSEBUTTONDOWN &&
+                        e.button.button == SDL_BUTTON_RIGHT &&
+                        !ImGui::GetIO().WantCaptureMouse) {
+                        _editorCameraLooking = true;
+                        set_mouse_capture(true);
+                    }
+                    if (e.type == SDL_MOUSEBUTTONUP &&
+                        e.button.button == SDL_BUTTON_RIGHT &&
+                        _editorCameraLooking) {
+                        _editorCameraLooking = false;
+                        _editorCamera.velocity = glm::vec3(0.0f);
+                        set_mouse_capture(false);
+                    }
+                    if (_editorCameraLooking &&
+                        (e.type == SDL_MOUSEMOTION ||
+                         e.type == SDL_KEYDOWN || e.type == SDL_KEYUP)) {
+                        _editorCamera.processSDLEvent(e);
+                    }
+                    if (e.type == SDL_MOUSEBUTTONDOWN &&
+                        e.button.button == SDL_BUTTON_LEFT &&
+                        !ImGui::GetIO().WantCaptureMouse &&
+                        !ImGuizmo::IsOver()) {
+                        select_scene_object_at_screen_position(
+                            e.button.x, e.button.y);
+                    }
+                } else {
+                    if (_mouseCaptured && e.type == SDL_MOUSEMOTION) {
+                        mainCamera.processSDLEvent(e);
+                    }
+
+                    if (_mouseCaptured && e.type == SDL_KEYDOWN) {
+                        if (e.key.keysym.sym == SDLK_w) _playerInput.forward = true;
+                        if (e.key.keysym.sym == SDLK_s) _playerInput.backward = true;
+                        if (e.key.keysym.sym == SDLK_a) _playerInput.left = true;
+                        if (e.key.keysym.sym == SDLK_d) _playerInput.right = true;
+                        if (e.key.keysym.sym == SDLK_SPACE && e.key.repeat == 0) {
+                            _playerInput.jumpPressed = true;
+                        }
+                    }
+
+                    if (_mouseCaptured && e.type == SDL_MOUSEWHEEL) {
+                        int wheelY = e.wheel.y;
+                        if (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) {
+                            wheelY = -wheelY;
+                        }
+                        if (wheelY < 0) {
+                            _playerInput.jumpPressed = true;
+                        }
+                    }
+
+                    if (_mouseCaptured && e.type == SDL_MOUSEBUTTONDOWN &&
+                        e.button.button == SDL_BUTTON_LEFT) {
+                        place_portal(_bluePortal, _orangePortal);
+                    }
+                    if (_mouseCaptured && e.type == SDL_MOUSEBUTTONDOWN &&
+                        e.button.button == SDL_BUTTON_RIGHT) {
+                        place_portal(_orangePortal, _bluePortal);
+                    }
+                    if (_mouseCaptured && e.type == SDL_KEYUP) {
+                        if (e.key.keysym.sym == SDLK_w) _playerInput.forward = false;
+                        if (e.key.keysym.sym == SDLK_s) _playerInput.backward = false;
+                        if (e.key.keysym.sym == SDLK_a) _playerInput.left = false;
+                        if (e.key.keysym.sym == SDLK_d) _playerInput.right = false;
                     }
                 }
-
-                if (_mouseCaptured && e.type == SDL_MOUSEBUTTONDOWN &&
-                    e.button.button == SDL_BUTTON_LEFT) {
-                    place_portal(_bluePortal, _orangePortal);
-                }
-
-                if (_mouseCaptured && e.type == SDL_MOUSEBUTTONDOWN &&
-                    e.button.button == SDL_BUTTON_RIGHT) {
-                    place_portal(_orangePortal, _bluePortal);
-                }
-
-                if (_mouseCaptured && e.type == SDL_KEYUP) {
-                    if (e.key.keysym.sym == SDLK_w) _playerInput.forward = false;
-                    if (e.key.keysym.sym == SDLK_s) _playerInput.backward = false;
-                    if (e.key.keysym.sym == SDLK_a) _playerInput.left = false;
-                    if (e.key.keysym.sym == SDLK_d) _playerInput.right = false;
-                }
-
-                // Send every SDL event to ImGui as well.
-                ImGui_ImplSDL2_ProcessEvent(&e);
         }
         // do not draw if we are minimized
         if(stop_rendering) {
@@ -778,87 +881,120 @@ void VulkanEngine::run(){
             }
         }
 
-        _physicsAccumulator = std::min(
-            _physicsAccumulator + deltaTime,
-            PhysicsDt * static_cast<float>(MaxPhysicsSteps));
-        _playerInput.yaw = mainCamera.yaw;
-        while (_physicsAccumulator >= PhysicsDt) {
-            update_physics(PhysicsDt);
-            _physicsAccumulator -= PhysicsDt;
+        if (_editorMode) {
+            _editorCamera.update(deltaTime);
+            _physicsAccumulator = 0.0f;
+        } else {
+            _physicsAccumulator = std::min(
+                _physicsAccumulator + deltaTime,
+                PhysicsDt * static_cast<float>(MaxPhysicsSteps));
+            _playerInput.yaw = mainCamera.yaw;
+            while (_physicsAccumulator >= PhysicsDt) {
+                update_physics(PhysicsDt);
+                _physicsAccumulator -= PhysicsDt;
+            }
         }
 
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
+        ImGuizmo::BeginFrame();
+        if (_editorMode) {
+            // This full-window dockspace has a transparent centre, so the
+            // Vulkan scene remains the editor viewport between side panels.
+            const ImGuiID dockspaceID = ImGui::DockSpaceOverViewport(
+                0,
+                ImGui::GetMainViewport(),
+                ImGuiDockNodeFlags_PassthruCentralNode);
+            setup_default_dock_layout(dockspaceID);
+            draw_editor_menu();
 
-        if (ImGui::Begin("background")) {
-            if (ImGui::Button(
-                    _mouseCaptured ? "Release Mouse (Tab)" : "Capture Mouse (Tab)")) {
-                set_mouse_capture(!_mouseCaptured);
-            }
-            ImGui::SliderFloat("Render Scale", &renderScale, 0.3f, 1.0f);
-            if (!backgroundEffects.empty()) {
-                ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
+            // The player model's offset, facing correction, and scale now
+            // live on this object instead of in a separate tuning panel.
+            draw_hierarchy_panel();
+            draw_inspector_panel();
 
-                ImGui::Text("Selected effect: %s", selected.name);
-                ImGui::SliderInt(
-                    "Effect Index",
-                    &currentBackgroundEffect,
-                    0,
-                    static_cast<int>(backgroundEffects.size()) - 1);
-                ImGui::InputFloat4("data1", &selected.data.data1.x);
-                ImGui::InputFloat4("data2", &selected.data.data2.x);
-                ImGui::InputFloat4("data3", &selected.data.data3.x);
-                ImGui::InputFloat4("data4", &selected.data.data4.x);
+            if (_showDebugPanels) {
+                if (ImGui::Begin("Render Settings")) {
+                    ImGui::SliderFloat("Resolution Scale", &renderScale, 0.3f, 1.0f);
+                    if (!backgroundEffects.empty()) {
+                        ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
+                        ImGui::Text("Effect: %s", selected.name);
+                        ImGui::SliderInt(
+                            "Effect Index",
+                            &currentBackgroundEffect,
+                            0,
+                            static_cast<int>(backgroundEffects.size()) - 1);
+                        ImGui::InputFloat4("data1", &selected.data.data1.x);
+                        ImGui::InputFloat4("data2", &selected.data.data2.x);
+                        ImGui::InputFloat4("data3", &selected.data.data3.x);
+                        ImGui::InputFloat4("data4", &selected.data.data4.x);
+                    }
+                }
+                ImGui::End();
+
+                if (ImGui::Begin("Movement Tuning")) {
+                    PlayerMovementSettings& movement = _playerMovement.settings;
+                    ImGui::SliderFloat("Gravity", &movement.gravity, 1.0f, 60.0f);
+                    ImGui::SliderFloat("Jump Speed", &movement.jumpSpeed, 1.0f, 20.0f);
+                    ImGui::SliderFloat("Ground Speed", &movement.maxGroundSpeed, 1.0f, 20.0f);
+                    ImGui::SliderFloat("Ground Accel", &movement.groundAcceleration, 1.0f, 100.0f);
+                    ImGui::SliderFloat("Ground Friction", &movement.groundFriction, 0.0f, 20.0f);
+                    ImGui::SliderFloat("Air Accel", &movement.airAcceleration, 0.0f, 50.0f);
+                    ImGui::SliderFloat("Air Wish Cap", &movement.airWishSpeedCap, 0.1f, 20.0f);
+                    ImGui::SliderFloat("Jump Buffer", &movement.jumpBufferSeconds, 0.0f, 0.25f);
+                }
+                ImGui::End();
             }
         }
-        ImGui::End();
 
-        if (ImGui::Begin("Movement")) {
-            PlayerMovementSettings& movement = _playerMovement.settings;
-            ImGui::SliderFloat("Gravity", &movement.gravity, 1.0f, 60.0f);
-            ImGui::SliderFloat("Jump Speed", &movement.jumpSpeed, 1.0f, 20.0f);
-            ImGui::SliderFloat("Ground Speed", &movement.maxGroundSpeed, 1.0f, 20.0f);
-            ImGui::SliderFloat("Ground Accel", &movement.groundAcceleration, 1.0f, 100.0f);
-            ImGui::SliderFloat("Ground Friction", &movement.groundFriction, 0.0f, 20.0f);
-            ImGui::SliderFloat("Air Accel", &movement.airAcceleration, 0.0f, 50.0f);
-            ImGui::SliderFloat("Air Wish Cap", &movement.airWishSpeedCap, 0.1f, 20.0f);
-            ImGui::SliderFloat("Jump Buffer", &movement.jumpBufferSeconds, 0.0f, 0.25f);
-
-            ImGui::SeparatorText("Portal Player Model");
-            ImGui::SliderFloat("Model Scale", &_playerModelScale, 0.01f, 5.0f);
-            ImGui::SliderFloat("Model Y Offset", &_playerModelYOffset, -2.0f, 2.0f);
-            ImGui::SliderAngle("Model Facing Offset", &_playerModelYaw);
+        if (_editorMode) {
+            draw_editor_gizmo();
         }
-        ImGui::End();
 
         stats.frametime = deltaTime * 1000.0f;
-        if (ImGui::Begin("Stats")) {
-            const float horizontalSpeed = glm::length(glm::vec2(
-                _playerMovement.velocity.x,
-                _playerMovement.velocity.z));
-            ImGui::Text("speed %.2f", horizontalSpeed);
-            ImGui::Text("frametime %.3f ms", stats.frametime);
-            ImGui::Text("scene update %.3f ms", stats.scene_update_time);
-            ImGui::Text("mesh draw %.3f ms", stats.mesh_draw_time);
-            ImGui::Text("triangles %d", stats.triangle_count);
-            ImGui::Text("draw calls %d", stats.drawcall_count);
+        const float horizontalSpeed = glm::length(glm::vec2(
+            _playerMovement.velocity.x,
+            _playerMovement.velocity.z));
+        if (_editorMode && _showDebugPanels) {
+            if (ImGui::Begin("Statistics")) {
+                ImGui::Text("Speed %.2f", horizontalSpeed);
+                ImGui::Text("Frame time %.3f ms", stats.frametime);
+                ImGui::Text("Scene update %.3f ms", stats.scene_update_time);
+                ImGui::Text("Mesh draw %.3f ms", stats.mesh_draw_time);
+                ImGui::Text("Triangles %d", stats.triangle_count);
+                ImGui::Text("Draw calls %d", stats.drawcall_count);
+            }
+            ImGui::End();
         }
-        ImGui::End();
 
-        if (_mouseCaptured) {
+        if (!_editorMode) {
             const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
             ImDrawList* crosshair = ImGui::GetForegroundDrawList();
-            crosshair->AddLine(
-                ImVec2(center.x - 7.0f, center.y),
-                ImVec2(center.x + 7.0f, center.y),
-                IM_COL32(255, 255, 255, 255),
-                2.0f);
-            crosshair->AddLine(
-                ImVec2(center.x, center.y - 7.0f),
-                ImVec2(center.x, center.y + 7.0f),
-                IM_COL32(255, 255, 255, 255),
-                2.0f);
+            // Portal-style status reticle: blue is left mouse and orange is
+            // right mouse. Bright means the portal is placed; dim means it is
+            // available and the next click will create it.
+            const ImU32 bluePortalColor = _bluePortal.placed
+                ? IM_COL32(45, 195, 255, 255)
+                : IM_COL32(45, 195, 255, 90);
+            const ImU32 orangePortalColor = _orangePortal.placed
+                ? IM_COL32(255, 155, 35, 255)
+                : IM_COL32(255, 155, 35, 90);
+            crosshair->PathArcTo(
+                center, 16.0f, IM_PI * 0.5f, IM_PI * 1.5f, 14);
+            crosshair->PathStroke(bluePortalColor, ImDrawFlags_None, 2.5f);
+            crosshair->PathArcTo(
+                center, 16.0f, -IM_PI * 0.5f, IM_PI * 0.5f, 14);
+            crosshair->PathStroke(orangePortalColor, ImDrawFlags_None, 2.5f);
+            const std::string speedLabel = fmt::format("Speed {:.1f}", horizontalSpeed);
+            crosshair->AddText(
+                ImVec2(18.0f, ImGui::GetIO().DisplaySize.y - 34.0f),
+                IM_COL32(220, 230, 245, 255),
+                speedLabel.c_str());
+            crosshair->AddText(
+                ImVec2(18.0f, ImGui::GetIO().DisplaySize.y - 56.0f),
+                IM_COL32(150, 165, 185, 210),
+                "LMB Blue  |  RMB Orange  |  R Retract");
         }
 
         ImGui::Render();
@@ -2055,10 +2191,6 @@ void VulkanEngine::destroy_image(const AllocatedImage& image)
 
 void VulkanEngine::init_default_data()
 {
-    for (size_t i = 0; i < _levelWalls.size(); i++) {
-        _levelWallColliders[i] = get_aabb(_levelWalls[i]);
-    }
-
     uint32_t white = glm::packUnorm4x8(glm::vec4(1.0f));
     uint32_t grey = glm::packUnorm4x8(glm::vec4(0.66f, 0.66f, 0.66f, 1.0f));
     uint32_t black = glm::packUnorm4x8(glm::vec4(0.0f));
@@ -2070,25 +2202,27 @@ void VulkanEngine::init_default_data()
         &black, {1, 1, 1}, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT);
     std::array<uint32_t, 6> indices{};
     std::array<Vertex, 4> corners{};
-    corners[0].position = glm::vec3(-25.f, 0.f, -25.f);
+    // A unit quad. The floor scene object scales it to the arena size, so
+    // the rendered floor and the walkable ground plane cannot disagree.
+    corners[0].position = glm::vec3(-0.5f, 0.f, -0.5f);
     corners[0].uv_x = 0.f;
     corners[0].uv_y = 0.f;
     corners[0].normal = glm::vec3(0.f, 1.f, 0.f);
     corners[0].color = glm::vec4(1.f);
 
-    corners[1].position = glm::vec3(25.f, 0.f, -25.f);
+    corners[1].position = glm::vec3(0.5f, 0.f, -0.5f);
     corners[1].uv_x = 1.f;
     corners[1].uv_y = 0.f;
     corners[1].normal = glm::vec3(0.f, 1.f, 0.f);
     corners[1].color = glm::vec4(1.f);
 
-    corners[2].position = glm::vec3(25.f, 0.f, 25.f);
+    corners[2].position = glm::vec3(0.5f, 0.f, 0.5f);
     corners[2].uv_x = 1.f;
     corners[2].uv_y = 1.f;
     corners[2].normal = glm::vec3(0.f, 1.f, 0.f);
     corners[2].color = glm::vec4(1.f);
 
-    corners[3].position = glm::vec3(-25.f, 0.f, 25.f);
+    corners[3].position = glm::vec3(-0.5f, 0.f, 0.5f);
     corners[3].uv_x = 0.f;
     corners[3].uv_y = 1.f;
     corners[3].normal = glm::vec3(0.f, 1.f, 0.f);
@@ -2105,7 +2239,7 @@ void VulkanEngine::init_default_data()
     _floorMesh = uploadMesh(indices, corners);
 
     _floorBounds.origin = glm::vec3(0.0f);
-    _floorBounds.extents = glm::vec3(25.0f, 0.0f, 25.0f);
+    _floorBounds.extents = glm::vec3(0.5f, 0.0f, 0.5f);
     _floorBounds.sphereRadius = glm::length(_floorBounds.extents);
 
     std::vector<Vertex> wallVertices;
@@ -2323,6 +2457,8 @@ void VulkanEngine::init_default_data()
         //}
     //}
 
+    build_sandbox_scene();
+
     _mainDeletionQueue.push_function([this]() {
         destroy_buffer(_orangePortalMaterialBuffer);
         destroy_buffer(_bluePortalMaterialBuffer);
@@ -2372,10 +2508,592 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
     Node::Draw(topMatrix, ctx);
 }
 
+// Draws one hierarchy row plus its children.  Selection is the only edit the
+// first version of the panel performs.
+static void draw_hierarchy_node(
+    Scene& scene,
+    SceneObjectID id,
+    SceneObjectID& selected)
+{
+    const SceneObject* object = scene.get(id);
+    if (object == nullptr) {
+        return;
+    }
+
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
+        ImGuiTreeNodeFlags_SpanAvailWidth |
+        ImGuiTreeNodeFlags_DefaultOpen;
+    if (object->children.empty()) {
+        flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+    }
+    if (id == selected) {
+        flags |= ImGuiTreeNodeFlags_Selected;
+    }
+
+    const bool opened = ImGui::TreeNodeEx(
+        reinterpret_cast<void*>(static_cast<uintptr_t>(id)),
+        flags,
+        "%s",
+        object->name.c_str());
+    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+        selected = id;
+    }
+
+    // Dragging a static object onto another static object makes it a child.
+    // Physics/player/portal-driven nodes deliberately stay fixed so the editor
+    // cannot create a hierarchy their owner overwrites next frame.
+    if (!object->transformDrivenExternally &&
+        ImGui::BeginDragDropSource()) {
+        ImGui::SetDragDropPayload("SCENE_OBJECT", &id, sizeof(id));
+        ImGui::Text("Parent %s", object->name.c_str());
+        ImGui::EndDragDropSource();
+    }
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(
+                "SCENE_OBJECT")) {
+            if (payload->DataSize == sizeof(SceneObjectID)) {
+                const SceneObjectID child = *static_cast<const SceneObjectID*>(
+                    payload->Data);
+                const SceneObject* childObject = scene.get(child);
+                if (childObject != nullptr &&
+                    !childObject->transformDrivenExternally &&
+                    scene.set_parent(child, id)) {
+                    selected = child;
+                }
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+
+    if (opened && !object->children.empty()) {
+        for (const SceneObjectID child : object->children) {
+            draw_hierarchy_node(scene, child, selected);
+        }
+        ImGui::TreePop();
+    }
+}
+
+void VulkanEngine::draw_hierarchy_panel()
+{
+    if (ImGui::Begin("Hierarchy")) {
+        for (const SceneObject& object : _scene.objects) {
+            if (object.alive && object.parent == InvalidSceneObject) {
+                draw_hierarchy_node(_scene, object.id, _selectedSceneObject);
+            }
+        }
+    }
+    ImGui::End();
+}
+
+void VulkanEngine::draw_inspector_panel()
+{
+    if (ImGui::Begin("Inspector")) {
+        SceneObject* object = _scene.get(_selectedSceneObject);
+        if (object == nullptr) {
+            ImGui::TextUnformatted("No object selected.");
+        } else {
+            ImGui::Text("Name: %s", object->name.c_str());
+            ImGui::Separator();
+
+            // Transforms written by physics or portal placement would be
+            // overwritten again next frame, so show them read-only.
+            const bool driven = object->transformDrivenExternally;
+            if (driven) {
+                ImGui::TextUnformatted("Transform is driven by the simulation.");
+            }
+            ImGui::BeginDisabled(driven);
+            ImGui::DragFloat3(
+                "Position", &object->localTransform.position.x, 0.05f);
+
+            glm::vec3 rotationDegrees = glm::degrees(object->localTransform.rotation);
+            if (ImGui::DragFloat3("Rotation", &rotationDegrees.x, 0.5f)) {
+                object->localTransform.rotation = glm::radians(rotationDegrees);
+            }
+
+            ImGui::DragFloat3("Scale", &object->localTransform.scale.x, 0.05f);
+            ImGui::EndDisabled();
+
+            ImGui::Separator();
+            ImGui::Checkbox("Visible", &object->visible);
+            ImGui::Checkbox("Has Collision", &object->hasCollision);
+            ImGui::Checkbox("Portal Placeable", &object->portalPlaceable);
+
+            if ((_bluePortal.placed && _bluePortal.hostWallObject == object->id) ||
+                (_orangePortal.placed && _orangePortal.hostWallObject == object->id)) {
+                ImGui::TextDisabled(
+                    "Translation gizmo is disabled while a portal is attached.");
+            }
+
+            if (object->hasCollision &&
+                object->collisionShape == CollisionShape::Box) {
+                const AABB collider = collider_from_object(
+                    _scene, object->id);
+                ImGui::Text(
+                    "Collider min %.2f %.2f %.2f",
+                    collider.min.x, collider.min.y, collider.min.z);
+                ImGui::Text(
+                    "Collider max %.2f %.2f %.2f",
+                    collider.max.x, collider.max.y, collider.max.z);
+            }
+
+            const bool isRequiredSandboxObject =
+                object->id == _sandboxRoot ||
+                object->id == _floorObject ||
+                object->transformDrivenExternally;
+            const bool hostsPlacedPortal =
+                (_bluePortal.placed && _bluePortal.hostWallObject == object->id) ||
+                (_orangePortal.placed && _orangePortal.hostWallObject == object->id);
+            ImGui::Separator();
+            ImGui::BeginDisabled(isRequiredSandboxObject || hostsPlacedPortal);
+            if (ImGui::Button("Delete Selected")) {
+                delete_selected_scene_object();
+            }
+            ImGui::EndDisabled();
+            if (isRequiredSandboxObject) {
+                ImGui::TextDisabled("Sandbox-owned objects cannot be deleted.");
+            } else if (hostsPlacedPortal) {
+                ImGui::TextDisabled("Remove or move the attached portal first.");
+            } else {
+                ImGui::TextDisabled("Shortcut: Delete");
+            }
+        }
+    }
+    ImGui::End();
+}
+
+void VulkanEngine::draw_editor_gizmo()
+{
+    SceneObject* object = _scene.get(_selectedSceneObject);
+    if (object == nullptr || object->transformDrivenExternally) {
+        return;
+    }
+
+    // A portal's placement data is still owned by the portal system. Moving
+    // its host wall while it has a placed portal would leave that portal off
+    // the wall, so block the gizmo until portal parenting is introduced.
+    if ((_bluePortal.placed && _bluePortal.hostWallObject == object->id) ||
+        (_orangePortal.placed && _orangePortal.hostWallObject == object->id)) {
+        return;
+    }
+
+    const Camera& camera = render_camera();
+    // ImGuizmo draws in ImGui's screen space, which performs its own Y flip.
+    // Do not pass the renderer's Vulkan-flipped, reversed-Z projection here:
+    // that made the overlay behave as if it were attached to the camera
+    // rather than the selected world-space object.
+    const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+    const glm::mat4 gizmoProjection = glm::perspective(
+        glm::radians(70.0f),
+        displaySize.x / std::max(displaySize.y, 1.0f),
+        0.1f,
+        10000.0f);
+    glm::mat4 worldTransform = _scene.world_matrix(object->id);
+
+    ImGuizmo::SetOrthographic(false);
+    ImGuizmo::SetDrawlist(ImGui::GetForegroundDrawList());
+    ImGuizmo::SetRect(0.0f, 0.0f, displaySize.x, displaySize.y);
+
+    if (!ImGuizmo::Manipulate(
+            glm::value_ptr(camera.getViewMatrix()),
+            glm::value_ptr(gizmoProjection),
+            ImGuizmo::TRANSLATE,
+            ImGuizmo::WORLD,
+            glm::value_ptr(worldTransform))) {
+        return;
+    }
+
+    // ImGuizmo edits a world matrix. Scene objects store local transforms, so
+    // convert back through the parent's world matrix before saving position.
+    glm::mat4 parentWorld{1.0f};
+    if (object->parent != InvalidSceneObject) {
+        parentWorld = _scene.world_matrix(object->parent);
+    }
+    const glm::mat4 localTransform = glm::inverse(parentWorld) * worldTransform;
+    object->localTransform.position = glm::vec3(localTransform[3]);
+
+    // Keep collision and portal raycasts coherent while the arrow is dragged.
+    rebuild_collision_from_scene();
+}
+
+void VulkanEngine::select_scene_object_at_screen_position(
+    int screenX,
+    int screenY)
+{
+    int windowWidth = 0;
+    int windowHeight = 0;
+    SDL_GetWindowSize(_window, &windowWidth, &windowHeight);
+    if (windowWidth <= 0 || windowHeight <= 0) {
+        return;
+    }
+
+    // Convert the mouse position into a world-space ray through the editor
+    // camera. The projection has Vulkan's flipped Y, so screen Y maps to NDC
+    // in the ordinary top-to-bottom SDL direction here.
+    const float ndcX = 2.0f * static_cast<float>(screenX) /
+            static_cast<float>(windowWidth) - 1.0f;
+    const float ndcY = 2.0f * static_cast<float>(screenY) /
+            static_cast<float>(windowHeight) - 1.0f;
+    const GPUSceneData cameraData = build_scene_data(
+        _editorCamera.getViewMatrix());
+    const glm::mat4 inverseViewProjection = glm::inverse(cameraData.viewproj);
+    glm::vec4 farPoint = inverseViewProjection * glm::vec4(ndcX, ndcY, 0.0f, 1.0f);
+    farPoint /= farPoint.w;
+
+    const glm::vec3 rayOrigin = _editorCamera.position;
+    const glm::vec3 rayDirection = glm::normalize(
+        glm::vec3(farPoint) - rayOrigin);
+
+    std::optional<RaycastHit> closestHit;
+    SceneObjectID closestObject = InvalidSceneObject;
+    for (const SceneObject& object : _scene.objects) {
+        // Version 1 selects the scene's axis-aligned editable primitives.
+        // Imported models get mesh picking later, once their bounds are
+        // represented in the scene system.
+        if (!object.alive || !object.visible || !object.hasCollision ||
+            object.collisionShape != CollisionShape::Box) {
+            continue;
+        }
+
+        const std::optional<RaycastHit> hit = raycast_aabb(
+            rayOrigin,
+            rayDirection,
+            collider_from_object(_scene, object.id));
+        if (hit.has_value() &&
+            (!closestHit.has_value() || hit->distance < closestHit->distance)) {
+            closestHit = hit;
+            closestObject = object.id;
+        }
+    }
+
+    if (closestObject != InvalidSceneObject) {
+        _selectedSceneObject = closestObject;
+    }
+}
+
+void VulkanEngine::draw_editor_menu()
+{
+    if (!ImGui::BeginMainMenuBar()) {
+        return;
+    }
+
+    if (ImGui::BeginMenu("Create")) {
+        if (ImGui::MenuItem("Empty Actor")) {
+            create_editor_actor("Actor", false, false);
+        }
+        if (ImGui::MenuItem("Cube")) {
+            create_editor_actor("Cube", true, false);
+        }
+        if (ImGui::MenuItem("Wall")) {
+            create_editor_actor("Wall", true, true);
+        }
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Edit")) {
+        const bool hasSelection = _scene.get(_selectedSceneObject) != nullptr;
+        if (ImGui::MenuItem("Delete Selected", "Delete", false, hasSelection)) {
+            delete_selected_scene_object();
+        }
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Portals")) {
+        if (ImGui::MenuItem("Retract Both", "R")) {
+            retract_portals();
+        }
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Window")) {
+        ImGui::MenuItem("Show Debug Panels", nullptr, &_showDebugPanels);
+        if (ImGui::MenuItem("Reset Editor Layout")) {
+            _resetEditorLayoutRequested = true;
+        }
+        ImGui::EndMenu();
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button("Play")) {
+        set_editor_mode(false);
+    }
+    ImGui::EndMainMenuBar();
+}
+
+void VulkanEngine::setup_default_dock_layout(uint32_t dockspaceID)
+{
+    // A saved ImGui layout wins after the first run.  This block only builds
+    // the initial editor arrangement, or runs again from Window > Reset.
+    if (!_resetEditorLayoutRequested && ImGui::DockBuilderGetNode(dockspaceID) != nullptr) {
+        return;
+    }
+
+    _resetEditorLayoutRequested = false;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::DockBuilderRemoveNode(dockspaceID);
+    ImGui::DockBuilderAddNode(
+        dockspaceID,
+        ImGuiDockNodeFlags_DockSpace | ImGuiDockNodeFlags_PassthruCentralNode);
+    ImGui::DockBuilderSetNodeSize(dockspaceID, viewport->WorkSize);
+
+    ImGuiID centerID = dockspaceID;
+    ImGuiID leftID = ImGui::DockBuilderSplitNode(
+        centerID, ImGuiDir_Left, 0.22f, nullptr, &centerID);
+    ImGuiID rightID = ImGui::DockBuilderSplitNode(
+        centerID, ImGuiDir_Right, 0.27f, nullptr, &centerID);
+    ImGuiID bottomID = ImGui::DockBuilderSplitNode(
+        centerID, ImGuiDir_Down, 0.25f, nullptr, &centerID);
+
+    ImGui::DockBuilderDockWindow("Hierarchy", leftID);
+    ImGui::DockBuilderDockWindow("Inspector", rightID);
+    ImGui::DockBuilderDockWindow("Render Settings", bottomID);
+    ImGui::DockBuilderDockWindow("Movement Tuning", bottomID);
+    ImGui::DockBuilderDockWindow("Statistics", bottomID);
+    ImGui::DockBuilderFinish(dockspaceID);
+}
+
+bool VulkanEngine::delete_selected_scene_object()
+{
+    SceneObject* object = _scene.get(_selectedSceneObject);
+    if (object == nullptr) {
+        return false;
+    }
+
+    // These objects are owned by the sandbox/player/portal systems. They
+    // need a dedicated replacement workflow rather than a generic delete.
+    const bool isRequiredSandboxObject =
+        object->id == _sandboxRoot ||
+        object->id == _floorObject ||
+        object->transformDrivenExternally;
+    const bool hostsPlacedPortal =
+        (_bluePortal.placed && _bluePortal.hostWallObject == object->id) ||
+        (_orangePortal.placed && _orangePortal.hostWallObject == object->id);
+    if (isRequiredSandboxObject || hostsPlacedPortal) {
+        return false;
+    }
+
+    if (!_scene.destroy_object(object->id)) {
+        return false;
+    }
+
+    _selectedSceneObject = InvalidSceneObject;
+    rebuild_collision_from_scene();
+    return true;
+}
+
+SceneObjectID VulkanEngine::create_editor_actor(
+    const char* baseName,
+    bool renderCube,
+    bool collidable)
+{
+    const std::string name = std::string(baseName) + " " +
+        std::to_string(_nextCreatedActorNumber++);
+    const SceneObjectID id = _scene.create_object(name, _sandboxRoot);
+    SceneObject* object = _scene.get(id);
+    if (object == nullptr) {
+        return InvalidSceneObject;
+    }
+
+    const Camera& camera = render_camera();
+    const glm::vec3 forward = glm::normalize(glm::vec3(
+        camera.getRotationMatrix() * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+    const glm::vec3 spawnWorldPosition = camera.position + forward * 5.0f;
+    const glm::mat4 parentWorld = _sandboxRoot == InvalidSceneObject
+        ? glm::mat4(1.0f)
+        : _scene.world_matrix(_sandboxRoot);
+    object->localTransform.position = glm::vec3(
+        glm::inverse(parentWorld) * glm::vec4(spawnWorldPosition, 1.0f));
+
+    if (renderCube) {
+        object->primitive = MeshPrimitive{
+            .indexCount = 36,
+            .firstIndex = 0,
+            .indexBuffer = _wallMesh.indexBuffer.buffer,
+            .vertexBufferAddress = _wallMesh.vertexBufferAddress,
+            .bounds = _wallBounds,
+            .material = &_wallMaterial};
+        object->localTransform.scale = collidable
+            ? glm::vec3(4.0f, 3.0f, 0.5f)
+            : glm::vec3(1.0f);
+    }
+
+    object->hasCollision = collidable;
+    object->portalPlaceable = collidable;
+    _selectedSceneObject = id;
+    rebuild_collision_from_scene();
+    return id;
+}
+
+void VulkanEngine::build_sandbox_scene()
+{
+    const MeshPrimitive floorPrimitive{
+        .indexCount = 6,
+        .firstIndex = 0,
+        .indexBuffer = _floorMesh.indexBuffer.buffer,
+        .vertexBufferAddress = _floorMesh.vertexBufferAddress,
+        .bounds = _floorBounds,
+        .material = &_floorMaterial};
+    // The unit cube every wall and panel is built from.
+    const MeshPrimitive cubePrimitive{
+        .indexCount = 36,
+        .firstIndex = 0,
+        .indexBuffer = _wallMesh.indexBuffer.buffer,
+        .vertexBufferAddress = _wallMesh.vertexBufferAddress,
+        .bounds = _wallBounds,
+        .material = &_wallMaterial};
+
+    _sandboxRoot = _scene.create_object("Sandbox");
+
+    _floorObject = _scene.create_object("Floor", _sandboxRoot);
+    if (SceneObject* floor = _scene.get(_floorObject)) {
+        floor->localTransform.scale = glm::vec3(50.0f, 1.0f, 50.0f);
+        floor->primitive = floorPrimitive;
+        floor->hasCollision = true;
+        floor->collisionShape = CollisionShape::GroundPlane;
+    }
+
+    // Arena boundary plus a compact portal test rig around spawn.  Scale is
+    // the full size of the box, so a wall's collider is exactly its mesh.
+    struct WallDescription {
+        const char* name;
+        glm::vec3 position;
+        glm::vec3 scale;
+    };
+    const std::array<WallDescription, 7> wallDescriptions{{
+        {"North Wall", {0.0f, 1.5f, -24.75f}, {50.0f, 3.0f, 0.5f}},
+        {"South Wall", {0.0f, 1.5f, 24.75f}, {50.0f, 3.0f, 0.5f}},
+        {"West Wall", {-24.75f, 1.5f, 0.0f}, {0.5f, 3.0f, 50.0f}},
+        {"East Wall", {24.75f, 1.5f, 0.0f}, {0.5f, 3.0f, 50.0f}},
+        {"Test North Panel", {0.0f, 1.5f, -5.0f}, {6.0f, 3.0f, 0.5f}},
+        {"Test South Panel", {0.0f, 1.5f, 5.0f}, {6.0f, 3.0f, 0.5f}},
+        {"Test East Panel", {5.0f, 1.5f, 0.0f}, {0.5f, 3.0f, 6.0f}},
+    }};
+    for (const WallDescription& description : wallDescriptions) {
+        const SceneObjectID id = _scene.create_object(
+            description.name, _sandboxRoot);
+        SceneObject* wall = _scene.get(id);
+        if (wall == nullptr) {
+            continue;
+        }
+        wall->localTransform.position = description.position;
+        wall->localTransform.scale = description.scale;
+        wall->primitive = cubePrimitive;
+        wall->hasCollision = true;
+        wall->portalPlaceable = true;
+    }
+
+    // The player node follows physics; its model child holds the editable
+    // asset offset, facing correction, and scale.
+    _playerObject = _scene.create_object("Player", _sandboxRoot);
+    if (SceneObject* player = _scene.get(_playerObject)) {
+        player->transformDrivenExternally = true;
+        player->layer = RenderLayer::PortalViewOnly;
+    }
+
+    _playerModelObject = _scene.create_object("Player Model", _playerObject);
+    if (SceneObject* playerModel = _scene.get(_playerModelObject)) {
+        playerModel->layer = RenderLayer::PortalViewOnly;
+        if (_playerModel) {
+            playerModel->model = _playerModel;
+            // The imported model has a large internal glTF scale (about 14
+            // world units tall at 1.0), while the player is roughly 1.8 tall.
+            playerModel->localTransform.scale = glm::vec3(0.12f);
+        } else {
+            // Keep the collision-sized box as a visible fallback if the asset
+            // fails to load on another machine.
+            const PlayerMovementSettings& settings = _playerMovement.settings;
+            playerModel->primitive = cubePrimitive;
+            playerModel->primitive.material = &_playerMaterial;
+            playerModel->primitive.bounds = _playerBounds;
+            playerModel->localTransform.position = glm::vec3(
+                0.0f, settings.playerHeight * 0.5f, 0.0f);
+            playerModel->localTransform.scale = glm::vec3(
+                settings.playerHalfWidth * 2.0f,
+                settings.playerHeight,
+                settings.playerHalfWidth * 2.0f);
+        }
+    }
+
+    // Portals keep their own placement, traversal, and stencil logic. These
+    // objects only mirror it so the hierarchy shows where each portal is.
+    const auto createPortalObject = [&](const char* name) {
+        const SceneObjectID id = _scene.create_object(name, _sandboxRoot);
+        if (SceneObject* portalObject = _scene.get(id)) {
+            portalObject->visible = false;
+            portalObject->transformDrivenExternally = true;
+        }
+        return id;
+    };
+    _bluePortalObject = createPortalObject("Blue Portal");
+    _orangePortalObject = createPortalObject("Orange Portal");
+
+    // Give physics its ground plane before the first frame runs.
+    rebuild_collision_from_scene();
+}
+
+void VulkanEngine::sync_scene_driven_objects()
+{
+    if (SceneObject* player = _scene.get(_playerObject)) {
+        player->localTransform.position = _playerMovement.position;
+        // Camera yaw uses a negative-Y rotation.
+        player->localTransform.rotation = glm::vec3(0.0f, -mainCamera.yaw, 0.0f);
+    }
+
+    const auto syncPortalObject = [&](SceneObjectID id, const Portal& portal) {
+        SceneObject* portalObject = _scene.get(id);
+        if (portalObject == nullptr) {
+            return;
+        }
+        portalObject->visible = portal.placed;
+        if (!portal.placed) {
+            return;
+        }
+        portalObject->localTransform.position = portal.position;
+        // Placed portals are always axis-aligned and upright for now, so the
+        // frame reduces to a yaw around the wall normal.
+        portalObject->localTransform.rotation = glm::vec3(
+            0.0f, std::atan2(portal.normal.x, portal.normal.z), 0.0f);
+        portalObject->localTransform.scale = glm::vec3(
+            portal.halfWidth * 2.0f, portal.halfHeight * 2.0f, 1.0f);
+    };
+    syncPortalObject(_bluePortalObject, _bluePortal);
+    syncPortalObject(_orangePortalObject, _orangePortal);
+}
+
+void VulkanEngine::emit_scene_render_objects(
+    RenderLayer layer,
+    DrawContext& drawContext)
+{
+    for (const SceneObject& object : _scene.objects) {
+        if (!object.alive || !object.visible || object.layer != layer) {
+            continue;
+        }
+
+        const glm::mat4 world = _scene.world_matrix(object.id);
+        if (object.model != nullptr) {
+            object.model->Draw(world, drawContext);
+            continue;
+        }
+        if (!object.primitive.valid()) {
+            continue;
+        }
+
+        RenderObject renderObject{};
+        renderObject.indexCount = object.primitive.indexCount;
+        renderObject.firstIndex = object.primitive.firstIndex;
+        renderObject.indexBuffer = object.primitive.indexBuffer;
+        renderObject.material = object.primitive.material;
+        renderObject.bounds = object.primitive.bounds;
+        renderObject.transform = world;
+        renderObject.vertexBufferAddress = object.primitive.vertexBufferAddress;
+        drawContext.OpaqueSurfaces.push_back(renderObject);
+    }
+}
+
 void VulkanEngine::update_scene(float deltaTime)
 {
     const auto startTime = std::chrono::steady_clock::now();
     mainCamera.position = _playerMovement.position + glm::vec3(0.0f, 1.7f, 0.0f);
+    const Camera& camera = render_camera();
 
     mainDrawContext.OpaqueSurfaces.clear();
     mainDrawContext.TransparentSurfaces.clear();
@@ -2389,68 +3107,13 @@ void VulkanEngine::update_scene(float deltaTime)
             scene->Draw(glm::mat4(1.0f), worldDrawContext);
         }
     }
-    RenderObject floor{};
-    floor.indexCount = 6;
-    floor.firstIndex = 0;
-    floor.indexBuffer = _floorMesh.indexBuffer.buffer;
-    floor.material = &_floorMaterial;
-    floor.bounds = _floorBounds;
-    floor.transform = glm::mat4(1.0f);
-    floor.vertexBufferAddress = _floorMesh.vertexBufferAddress;
-
-    worldDrawContext.OpaqueSurfaces.push_back(floor);
-
-    const auto addWall = [&](const Wall& sourceWall) {
-        RenderObject wall{};
-        wall.indexCount = 36;
-        wall.firstIndex = 0;
-        wall.indexBuffer = _wallMesh.indexBuffer.buffer;
-        wall.material = &_wallMaterial;
-        wall.bounds = _wallBounds;
-        wall.transform = glm::translate(glm::mat4(1.0f), sourceWall.position) *
-            glm::scale(glm::mat4(1.0f), sourceWall.halfExtents * 2.0f);
-        wall.vertexBufferAddress = _wallMesh.vertexBufferAddress;
-        worldDrawContext.OpaqueSurfaces.push_back(wall);
-    };
-    for (const Wall& wall : _levelWalls) {
-        addWall(wall);
-    }
+    sync_scene_driven_objects();
+    emit_scene_render_objects(RenderLayer::World, worldDrawContext);
 
     portalViewDrawContext = worldDrawContext;
-    if (_playerModel) {
-        const glm::mat4 playerTransform =
-            glm::translate(
-                glm::mat4(1.0f),
-                _playerMovement.position + glm::vec3(0.0f, _playerModelYOffset, 0.0f)) *
-            // Camera yaw uses a negative-Y rotation. Apply the matching
-            // world-space turn first; the slider is only the imported asset's
-            // fixed forward-axis correction.
-            glm::rotate(
-                glm::mat4(1.0f),
-                -mainCamera.yaw + _playerModelYaw,
-                glm::vec3(0.0f, 1.0f, 0.0f)) *
-            glm::scale(glm::mat4(1.0f), glm::vec3(_playerModelScale));
-        _playerModel->Draw(playerTransform, portalViewDrawContext);
-    } else {
-        // Keep the collision-sized box as a visible fallback if the asset
-        // fails to load on another machine.
-        RenderObject playerProxy{};
-        playerProxy.indexCount = 36;
-        playerProxy.firstIndex = 0;
-        playerProxy.indexBuffer = _wallMesh.indexBuffer.buffer;
-        playerProxy.material = &_playerMaterial;
-        playerProxy.bounds = _playerBounds;
-        const glm::vec3 playerScale{
-            _playerMovement.settings.playerHalfWidth * 2.0f,
-            _playerMovement.settings.playerHeight,
-            _playerMovement.settings.playerHalfWidth * 2.0f};
-        const glm::vec3 playerCenter = _playerMovement.position + glm::vec3(
-            0.0f, _playerMovement.settings.playerHeight * 0.5f, 0.0f);
-        playerProxy.transform = glm::translate(glm::mat4(1.0f), playerCenter) *
-            glm::scale(glm::mat4(1.0f), playerScale);
-        playerProxy.vertexBufferAddress = _wallMesh.vertexBufferAddress;
-        portalViewDrawContext.OpaqueSurfaces.push_back(playerProxy);
-    }
+    // The main camera sits inside the player, so the body is added only to
+    // the portal views.
+    emit_scene_render_objects(RenderLayer::PortalViewOnly, portalViewDrawContext);
 
     // The ordinary world is drawn first.  Once both portals exist, their
     // rectangle is replaced by the stencil/virtual-camera passes below.  A
@@ -2468,7 +3131,7 @@ void VulkanEngine::update_scene(float deltaTime)
         addPortal(_orangePortal, _orangePortalMaterial);
     }
 
-    sceneData = build_scene_data(mainCamera.getViewMatrix());
+    sceneData = build_scene_data(camera.getViewMatrix());
 
     std::memcpy(
         get_current_frame().sceneBuffer.info.pMappedData,
@@ -2477,9 +3140,9 @@ void VulkanEngine::update_scene(float deltaTime)
 
     if (_bluePortal.placed && _orangePortal.placed) {
         const glm::vec3 cameraForward = glm::normalize(glm::vec3(
-            mainCamera.getRotationMatrix() * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+            camera.getRotationMatrix() * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
         const glm::vec3 cameraUp = glm::normalize(glm::vec3(
-            mainCamera.getRotationMatrix() * glm::vec4(0.0f, 1.0f, 0.0f, 0.0f)));
+            camera.getRotationMatrix() * glm::vec4(0.0f, 1.0f, 0.0f, 0.0f)));
 
         const auto updatePortalView = [&](const Portal& source,
                                           const Portal& destination,
@@ -2493,7 +3156,7 @@ void VulkanEngine::update_scene(float deltaTime)
             // depth passes never leave a one-frame black aperture.
             const glm::vec3 virtualPosition = stabilize_portal_view_camera(
                 destination,
-                glm::vec3(transfer * glm::vec4(mainCamera.position, 1.0f)));
+                glm::vec3(transfer * glm::vec4(camera.position, 1.0f)));
             const glm::vec3 virtualForward = glm::normalize(glm::vec3(
                 transfer * glm::vec4(cameraForward, 0.0f)));
             const glm::vec3 virtualUp = glm::normalize(glm::vec3(
@@ -2681,12 +3344,34 @@ void VulkanEngine::init_imgui()
 
 	// this initializes the core structures of imgui
 	ImGui::CreateContext();
+	ImGuiIO& io = ImGui::GetIO();
+	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+	// Start the editor with its own layout instead of inheriting the scattered
+	// windows saved by the old in-game debug UI.
+	io.IniFilename = "mirabilis_editor.ini";
+
+	ImGui::StyleColorsDark();
+	ImGuiStyle& style = ImGui::GetStyle();
+	style.WindowPadding = ImVec2(10.0f, 8.0f);
+	style.FramePadding = ImVec2(7.0f, 4.0f);
+	style.ItemSpacing = ImVec2(8.0f, 6.0f);
+	style.WindowRounding = 4.0f;
+	style.FrameRounding = 3.0f;
+	style.GrabRounding = 3.0f;
+	style.Colors[ImGuiCol_WindowBg] = ImVec4(0.045f, 0.055f, 0.075f, 0.96f);
+	style.Colors[ImGuiCol_TitleBg] = ImVec4(0.055f, 0.075f, 0.105f, 1.0f);
+	style.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.075f, 0.130f, 0.190f, 1.0f);
+	style.Colors[ImGuiCol_Header] = ImVec4(0.090f, 0.180f, 0.290f, 0.85f);
+	style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.110f, 0.250f, 0.390f, 0.95f);
+	style.Colors[ImGuiCol_Button] = ImVec4(0.080f, 0.190f, 0.310f, 0.90f);
+	style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.110f, 0.270f, 0.440f, 1.0f);
 
 	// this initializes imgui for SDL
 	ImGui_ImplSDL2_InitForVulkan(_window);
 
 	// this initializes imgui for Vulkan
 	ImGui_ImplVulkan_InitInfo init_info = {};
+	init_info.ApiVersion = VK_API_VERSION_1_3;
 	init_info.Instance = _instance;
 	init_info.PhysicalDevice = _chosenGPU;
 	init_info.Device = _device;
@@ -2698,15 +3383,15 @@ void VulkanEngine::init_imgui()
 	init_info.UseDynamicRendering = true;
 
 	//dynamic rendering parameters for imgui to use
-	init_info.PipelineRenderingCreateInfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-	init_info.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
-	init_info.PipelineRenderingCreateInfo.pColorAttachmentFormats = &_swapchainImageFormat;
-
-	init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+	init_info.PipelineInfoMain.PipelineRenderingCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+	init_info.PipelineInfoMain.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
+	init_info.PipelineInfoMain.PipelineRenderingCreateInfo.pColorAttachmentFormats = &_swapchainImageFormat;
+	init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
 
 	ImGui_ImplVulkan_Init(&init_info);
-
-	ImGui_ImplVulkan_CreateFontsTexture();
+	// The modern Vulkan backend uploads the font texture automatically during
+	// its first NewFrame call.
 
 	// add the destroy the imgui created structures
 	_mainDeletionQueue.push_function([=]() {

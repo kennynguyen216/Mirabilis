@@ -21,6 +21,8 @@ void Camera::processSDLEvent(const SDL_Event& e)
         if (e.key.keysym.sym == SDLK_s) velocity.z = 1.0f;
         if (e.key.keysym.sym == SDLK_a) velocity.x = -1.0f;
         if (e.key.keysym.sym == SDLK_d) velocity.x = 1.0f;
+        if (e.key.keysym.sym == SDLK_q) velocity.y = -1.0f;
+        if (e.key.keysym.sym == SDLK_e) velocity.y = 1.0f;
     }
 
     if (e.type == SDL_KEYUP) {
@@ -29,6 +31,9 @@ void Camera::processSDLEvent(const SDL_Event& e)
         }
         if (e.key.keysym.sym == SDLK_a || e.key.keysym.sym == SDLK_d) {
             velocity.x = 0.0f;
+        }
+        if (e.key.keysym.sym == SDLK_q || e.key.keysym.sym == SDLK_e) {
+            velocity.y = 0.0f;
         }
     }
 

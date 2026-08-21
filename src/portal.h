@@ -9,14 +9,15 @@
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
+#include "scene.h"
 #include "world.h"
 
 // Gameplay/rendering data for one placed portal. Linking and traversal come later.
 struct Portal {
     bool placed{false};
-    // Index into VulkanEngine's level-wall list. It lets physics replace the
+    // Scene object this portal was placed on. It lets physics replace the
     // matching solid wall collider with a frame around this opening.
-    int hostWallIndex{-1};
+    SceneObjectID hostWallObject{InvalidSceneObject};
     glm::vec3 position{0.0f};
     glm::vec3 normal{0.0f, 0.0f, 1.0f};
     glm::vec3 up{0.0f, 1.0f, 0.0f};

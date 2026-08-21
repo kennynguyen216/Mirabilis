@@ -49,4 +49,14 @@ target_sources(imgui PRIVATE
 
 target_link_libraries(imgui PUBLIC Vulkan::Vulkan SDL2::SDL2)
 
+# ImGuizmo is a small Dear ImGui companion used by the scene editor for the
+# familiar X/Y/Z transform arrows.  Keep it as a separate target so engine
+# code only depends on it where editor UI is drawn.
+add_library(imguizmo STATIC
+  ImGuizmo/ImGuizmo.h
+  ImGuizmo/ImGuizmo.cpp
+  )
+target_include_directories(imguizmo PUBLIC ImGuizmo)
+target_link_libraries(imguizmo PUBLIC imgui)
+
 target_include_directories(stb_image INTERFACE stb_image)

@@ -8,6 +8,7 @@
 #include <camera.h>
 #include <player_movement.h>
 #include <portal.h>
+#include <scene.h>
 #include <world.h>
 
 struct DeletionQueue
@@ -156,6 +157,9 @@ class VulkanEngine{
     std::shared_ptr<LoadedGLTF> _playerModel;
     GLTFMetallic_Roughness metalRoughMaterial;
     Camera mainCamera;
+    // This camera exists only while editing.  It lets the user inspect the
+    // scene without moving the Source-style player or changing portal state.
+    Camera _editorCamera;
     GPUSceneData sceneData{};
     EngineStats stats{};
 
@@ -270,13 +274,34 @@ class VulkanEngine{
             const Portal& source,
             const Portal& destination,
             const glm::vec3& previousPosition);
-        void rebuild_active_wall_colliders();
+        void build_sandbox_scene();
+        void sync_scene_driven_objects();
+        void emit_scene_render_objects(RenderLayer layer, DrawContext& drawContext);
+        void rebuild_collision_from_scene();
+        void draw_hierarchy_panel();
+        void draw_inspector_panel();
+        void draw_editor_gizmo();
+        void select_scene_object_at_screen_position(int screenX, int screenY);
+        void draw_editor_menu();
+        void setup_default_dock_layout(uint32_t dockspaceID);
+        bool delete_selected_scene_object();
+        SceneObjectID create_editor_actor(
+            const char* baseName,
+            bool renderCube,
+            bool collidable);
         void set_mouse_capture(bool captured);
+        void set_editor_mode(bool enabled);
+        const Camera& render_camera() const;
+        void retract_portals();
         void place_portal(Portal& portal, const Portal& otherPortal);
 
         PlayerInput _playerInput{};
         PlayerMovement _playerMovement{};
         bool _mouseCaptured{true};
+        bool _editorMode{false};
+        bool _editorCameraLooking{false};
+        bool _showDebugPanels{false};
+        bool _resetEditorLayoutRequested{false};
         float _portalTraversalCooldown{0.0f};
         float _physicsAccumulator{0.0f};
         static constexpr float PhysicsDt = 1.0f / 120.0f;
@@ -293,11 +318,6 @@ class VulkanEngine{
         AllocatedBuffer _playerMaterialBuffer;
         MaterialInstance _playerMaterial;
         Bounds _playerBounds;
-        // The imported model has a large internal glTF scale (about 14 world
-        // units tall at 1.0), while the player is roughly 1.8 units tall.
-        float _playerModelScale{0.12f};
-        float _playerModelYOffset{0.0f};
-        float _playerModelYaw{0.0f};
         GPUMeshBuffers _portalMesh;
         AllocatedBuffer _bluePortalMaterialBuffer;
         MaterialInstance _bluePortalMaterial;
@@ -308,17 +328,17 @@ class VulkanEngine{
         Portal _orangePortal;
         std::array<GPUSceneData, PortalViewCount> _portalSceneData{};
         MaterialPipeline _portalSkyPipeline;
-        // Arena boundary plus a compact portal test rig around spawn.  All
-        // walls share the same render, raycast, and collision representation.
-        std::array<Wall, 7> _levelWalls{{
-            {{0.0f, 1.5f, -24.75f}, {25.0f, 1.5f, 0.25f}}, // north
-            {{0.0f, 1.5f,  24.75f}, {25.0f, 1.5f, 0.25f}}, // south
-            {{-24.75f, 1.5f, 0.0f}, {0.25f, 1.5f, 25.0f}}, // west
-            {{ 24.75f, 1.5f, 0.0f}, {0.25f, 1.5f, 25.0f}}, // east
-            {{0.0f, 1.5f, -5.0f}, {3.0f, 1.5f, 0.25f}}, // test north panel
-            {{0.0f, 1.5f,  5.0f}, {3.0f, 1.5f, 0.25f}}, // test south panel
-            {{5.0f, 1.5f,  0.0f}, {0.25f, 1.5f, 3.0f}}, // test east panel
-        }};
-        std::array<AABB, 7> _levelWallColliders{};
+        // The sandbox level lives here: the floor, the boundary walls, the
+        // portal test panels, and the player body all render and collide from
+        // these objects.  Nothing about the level is hard-coded twice.
+        Scene _scene;
+        SceneObjectID _sandboxRoot{InvalidSceneObject};
+        SceneObjectID _floorObject{InvalidSceneObject};
+        SceneObjectID _playerObject{InvalidSceneObject};
+        SceneObjectID _playerModelObject{InvalidSceneObject};
+        SceneObjectID _bluePortalObject{InvalidSceneObject};
+        SceneObjectID _orangePortalObject{InvalidSceneObject};
+        SceneObjectID _selectedSceneObject{InvalidSceneObject};
+        uint32_t _nextCreatedActorNumber{1};
         std::vector<AABB> _activeWallColliders;
     };
