@@ -1,8 +1,9 @@
 {
   "version": 1,
-  "nextActor": 2,
+  "nextActor": 3,
   "objects": [
     {"id": 0, "parent": -1, "name": "Sandbox", "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1], "colliderCenter": [0, 0, 0], "colliderHalfExtents": [0.5, 0.5, 0.5], "visible": true, "hasCollision": false, "portalPlaceable": false, "layer": 0, "collisionShape": 0, "asset": "empty", "modelPath": ""},
-    {"id": 1, "parent": 0, "name": "Spawn Platform", "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [20, 1, 20], "colliderCenter": [0, 0, 0], "colliderHalfExtents": [0.5, 0.5, 0.5], "visible": true, "hasCollision": true, "portalPlaceable": false, "layer": 0, "collisionShape": 1, "asset": "floor", "modelPath": ""}
+    {"id": 1, "parent": 0, "name": "Spawn Platform", "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [20, 1, 20], "colliderCenter": [0, 0, 0], "colliderHalfExtents": [0.5, 0.5, 0.5], "visible": true, "hasCollision": true, "portalPlaceable": false, "layer": 0, "collisionShape": 1, "asset": "floor", "modelPath": ""},
+    {"id": 2, "parent": 0, "name": "Surf Ramp 2", "position": [0.00755425543, -15.1699915, -28.6811523], "rotation": [-0, -1.53588974, 0], "scale": [35.9999924, 12, 11.9999981], "colliderCenter": [0, 0.5, 0], "colliderHalfExtents": [0.5, 0.5, 0.5], "visible": true, "hasCollision": true, "portalPlaceable": false, "layer": 0, "collisionShape": 2, "asset": "ramp", "modelPath": ""}
   ]
 }

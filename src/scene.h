@@ -50,12 +50,12 @@ enum class RenderLayer : uint8_t {
     PortalViewOnly,
 };
 
-// Version 1 supports two collider kinds.  A Box has an editable local center
-// and half extents; both are transformed into a world-space AABB for the
-// current simple player solver.
+// A Box has an editable local center and half extents. Ground planes are flat
+// horizontal platforms, while SurfRamp is the engine's wedge-shaped slope.
 enum class CollisionShape : uint8_t {
     Box,
     GroundPlane,
+    SurfRamp,
 };
 
 // GPU buffers and material pointers are runtime-only.  This small identity is
@@ -65,6 +65,7 @@ enum class SceneAssetKind : uint8_t {
     None,
     FloorQuad,
     UnitCube,
+    SurfRamp,
     ImportedGLTF,
 };
 

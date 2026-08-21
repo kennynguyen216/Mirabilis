@@ -335,8 +335,9 @@ class VulkanEngine{
         bool duplicate_selected_scene_object();
         SceneObjectID create_editor_actor(
             const char* baseName,
-            bool renderCube,
-            bool collidable);
+            SceneAssetKind assetKind,
+            bool collidable,
+            bool portalPlaceable = false);
         SceneObjectID import_gltf_actor(std::string_view modelPath);
         void set_mouse_capture(bool captured);
         void set_editor_mode(bool enabled);
@@ -375,6 +376,8 @@ class VulkanEngine{
         AllocatedBuffer _wallMaterialBuffer;
         MaterialInstance _wallMaterial;
         Bounds _wallBounds;
+        GPUMeshBuffers _rampMesh;
+        Bounds _rampBounds;
         AllocatedBuffer _playerMaterialBuffer;
         MaterialInstance _playerMaterial;
         Bounds _playerBounds;
@@ -410,4 +413,6 @@ class VulkanEngine{
         SceneObjectID _selectedSceneObject{InvalidSceneObject};
         uint32_t _nextCreatedActorNumber{1};
         std::vector<AABB> _activeWallColliders;
+        std::vector<GroundPlane> _activeGroundPlanes;
+        std::vector<SurfRamp> _activeSurfRamps;
     };

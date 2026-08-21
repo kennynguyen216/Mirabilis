@@ -83,6 +83,7 @@ const char* scene_asset_name(SceneAssetKind kind)
     switch (kind) {
     case SceneAssetKind::FloorQuad: return "floor";
     case SceneAssetKind::UnitCube: return "cube";
+    case SceneAssetKind::SurfRamp: return "ramp";
     case SceneAssetKind::ImportedGLTF: return "gltf";
     case SceneAssetKind::None: return "empty";
     }
@@ -93,6 +94,7 @@ std::optional<SceneAssetKind> scene_asset_from_name(std::string_view name)
 {
     if (name == "floor") return SceneAssetKind::FloorQuad;
     if (name == "cube") return SceneAssetKind::UnitCube;
+    if (name == "ramp") return SceneAssetKind::SurfRamp;
     if (name == "gltf") return SceneAssetKind::ImportedGLTF;
     if (name == "empty") return SceneAssetKind::None;
     return std::nullopt;
@@ -345,7 +347,8 @@ void VulkanEngine::update_physics(float deltaTime)
     }
 
     rebuild_collision_from_scene();
-    _playerMovement.resolve_world_collision(_activeWallColliders);
+    _playerMovement.resolve_world_collision(
+        _activeWallColliders, _activeGroundPlanes, _activeSurfRamps);
     _playerInput.jumpPressed = false;
 }
 
@@ -433,6 +436,10 @@ void VulkanEngine::rebuild_collision_from_scene()
     // the inspector moves its collision in the same frame it moves visually.
     _activeWallColliders.clear();
     _activeWallColliders.reserve(_scene.objects.size() + 12);
+    _activeGroundPlanes.clear();
+    _activeGroundPlanes.reserve(_scene.objects.size());
+    _activeSurfRamps.clear();
+    _activeSurfRamps.reserve(_scene.objects.size());
 
     for (const SceneObject& object : _scene.objects) {
         if (!object.alive || !object.hasCollision) {
@@ -440,15 +447,26 @@ void VulkanEngine::rebuild_collision_from_scene()
         }
 
         if (object.collisionShape == CollisionShape::GroundPlane) {
-            // The floor is a plane rather than a box: the player stands on
-            // its top face instead of being pushed out horizontally.
+            // A floor is a horizontal walkable surface rather than a box the
+            // player gets pushed sideways from. Multiple floor actors make
+            // independent platforms for course blockout.
             const glm::mat4 world = _scene.world_matrix(object.id);
-            PlayerMovementSettings& settings = _playerMovement.settings;
-            settings.groundHeight = world[3].y;
-            settings.floorCenter = glm::vec2(world[3].x, world[3].z);
-            settings.floorHalfExtents = glm::vec2(
-                glm::length(glm::vec3(world[0])) * 0.5f,
-                glm::length(glm::vec3(world[2])) * 0.5f);
+            _activeGroundPlanes.push_back(GroundPlane{
+                .center = glm::vec2(world[3].x, world[3].z),
+                .halfExtents = glm::vec2(
+                    glm::length(glm::vec3(world[0])) * 0.5f,
+                    glm::length(glm::vec3(world[2])) * 0.5f),
+                .height = world[3].y});
+            continue;
+        }
+
+        if (object.collisionShape == CollisionShape::SurfRamp) {
+            const glm::mat4 world = _scene.world_matrix(object.id);
+            _activeSurfRamps.push_back(SurfRamp{
+                .worldToLocal = glm::inverse(world),
+                .lowLeft = glm::vec3(world * glm::vec4(-0.5f, 0.0f, -0.5f, 1.0f)),
+                .lowRight = glm::vec3(world * glm::vec4(0.5f, 0.0f, -0.5f, 1.0f)),
+                .highLeft = glm::vec3(world * glm::vec4(-0.5f, 1.0f, 0.5f, 1.0f))});
             continue;
         }
 
@@ -1947,6 +1965,7 @@ void VulkanEngine::draw_geometry_to_portal_camera(
         if (renderObject.material == nullptr) {
             continue;
         }
+
         vkCmdBindPipeline(
             cmd,
             VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2160,7 +2179,7 @@ void VulkanEngine::draw_collider_debug_bounds(VkCommandBuffer cmd)
         cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _colliderDebugPipeline.pipeline);
     for (const SceneObject& object : _scene.objects) {
         if (!object.alive || !object.hasCollision ||
-            object.collisionShape != CollisionShape::Box) {
+            object.collisionShape == CollisionShape::GroundPlane) {
             continue;
         }
 
@@ -2815,6 +2834,55 @@ void VulkanEngine::init_default_data()
     _wallBounds.extents = glm::vec3(0.5f);
     _wallBounds.sphereRadius = glm::length(_wallBounds.extents);
 
+    // Unit wedge used by the Surf Ramp editor asset. It rises along local +Z:
+    // the low edge is y=0 at z=-0.5 and the high edge is y=1 at z=0.5.
+    std::vector<Vertex> rampVertices;
+    std::vector<uint32_t> rampIndices;
+    const auto addRampFace = [&](const glm::vec3& a,
+                                 const glm::vec3& b,
+                                 const glm::vec3& c,
+                                 const glm::vec3& d,
+                                 const glm::vec3& normal) {
+        const uint32_t first = static_cast<uint32_t>(rampVertices.size());
+        rampVertices.push_back(makeWallVertex(a, normal, 0.0f, 0.0f));
+        rampVertices.push_back(makeWallVertex(b, normal, 1.0f, 0.0f));
+        rampVertices.push_back(makeWallVertex(c, normal, 1.0f, 1.0f));
+        rampVertices.push_back(makeWallVertex(d, normal, 0.0f, 1.0f));
+        rampIndices.insert(rampIndices.end(), {
+            first, first + 1, first + 2, first, first + 2, first + 3});
+    };
+    const auto addRampTriangle = [&](const glm::vec3& a,
+                                     const glm::vec3& b,
+                                     const glm::vec3& c,
+                                     const glm::vec3& normal) {
+        const uint32_t first = static_cast<uint32_t>(rampVertices.size());
+        rampVertices.push_back(makeWallVertex(a, normal, 0.0f, 0.0f));
+        rampVertices.push_back(makeWallVertex(b, normal, 1.0f, 0.0f));
+        rampVertices.push_back(makeWallVertex(c, normal, 0.5f, 1.0f));
+        rampIndices.insert(rampIndices.end(), {first, first + 1, first + 2});
+    };
+    const glm::vec3 rampLowLeft{-0.5f, 0.0f, -0.5f};
+    const glm::vec3 rampLowRight{0.5f, 0.0f, -0.5f};
+    const glm::vec3 rampHighRight{0.5f, 1.0f, 0.5f};
+    const glm::vec3 rampHighLeft{-0.5f, 1.0f, 0.5f};
+    const glm::vec3 rampBackRight{0.5f, 0.0f, 0.5f};
+    const glm::vec3 rampBackLeft{-0.5f, 0.0f, 0.5f};
+    addRampFace(rampLowLeft, rampHighLeft, rampHighRight, rampLowRight,
+                glm::normalize(glm::vec3(0.0f, 1.0f, -1.0f)));
+    addRampFace(rampLowLeft, rampLowRight, rampBackRight, rampBackLeft,
+                glm::vec3(0.0f, -1.0f, 0.0f));
+    addRampTriangle(rampLowRight, rampHighRight, rampBackRight,
+                    glm::vec3(1.0f, 0.0f, 0.0f));
+    addRampTriangle(rampLowLeft, rampBackLeft, rampHighLeft,
+                    glm::vec3(-1.0f, 0.0f, 0.0f));
+    addRampFace(rampBackLeft, rampBackRight, rampHighRight, rampHighLeft,
+                glm::vec3(0.0f, 0.0f, 1.0f));
+
+    _rampMesh = uploadMesh(rampIndices, rampVertices);
+    _rampBounds.origin = glm::vec3(0.0f, 0.5f, 0.0f);
+    _rampBounds.extents = glm::vec3(0.5f);
+    _rampBounds.sphereRadius = glm::length(_rampBounds.extents);
+
     std::array<Vertex, 4> portalVertices{};
     portalVertices[0] = {
         .position = {-0.5f, -0.5f, 0.0f}, .uv_x = 0.0f,
@@ -3067,6 +3135,8 @@ void VulkanEngine::init_default_data()
         destroy_buffer(_portalMesh.vertexBuffer);
         destroy_buffer(_portalMesh.indexBuffer);
         destroy_buffer(_wallMaterialBuffer);
+        destroy_buffer(_rampMesh.vertexBuffer);
+        destroy_buffer(_rampMesh.indexBuffer);
         destroy_buffer(_wallMesh.vertexBuffer);
         destroy_buffer(_wallMesh.indexBuffer);
         destroy_buffer(_playerMaterialBuffer);
@@ -3294,6 +3364,12 @@ void VulkanEngine::draw_inspector_panel()
                 }
                 ImGui::TextDisabled(
                     "Center/size are local to this actor. Full size = half extents x 2.");
+            } else if (object->hasCollision &&
+                       object->collisionShape == CollisionShape::SurfRamp) {
+                ImGui::SeparatorText("Surf Ramp Collider");
+                ImGui::TextDisabled("Local +Z rises from the low edge to the high edge.");
+                ImGui::TextDisabled("Scale X/Y/Z controls width, height, and length.");
+                ImGui::TextDisabled("Steep ramps use surf physics; do not use a zero scale.");
             }
             if (changed && !driven) {
                 _sceneDirty = true;
@@ -3307,7 +3383,7 @@ void VulkanEngine::draw_inspector_panel()
             }
 
             if (object->hasCollision &&
-                object->collisionShape == CollisionShape::Box) {
+                object->collisionShape != CollisionShape::GroundPlane) {
                 const AABB collider = collider_from_object(
                     _scene, object->id);
                 ImGui::Text(
@@ -3451,7 +3527,7 @@ void VulkanEngine::select_scene_object_at_screen_position(
         // Imported models get mesh picking later, once their bounds are
         // represented in the scene system.
         if (!object.alive || !object.visible || !object.hasCollision ||
-            object.collisionShape != CollisionShape::Box) {
+            object.collisionShape == CollisionShape::GroundPlane) {
             continue;
         }
 
@@ -3528,13 +3604,20 @@ void VulkanEngine::draw_editor_menu()
 
     if (ImGui::BeginMenu("Create")) {
         if (ImGui::MenuItem("Empty Actor")) {
-            create_editor_actor("Actor", false, false);
+            create_editor_actor("Actor", SceneAssetKind::None, false);
         }
         if (ImGui::MenuItem("Cube")) {
-            create_editor_actor("Cube", true, false);
+            create_editor_actor("Cube", SceneAssetKind::UnitCube, false);
         }
         if (ImGui::MenuItem("Wall")) {
-            create_editor_actor("Wall", true, true);
+            create_editor_actor(
+                "Wall", SceneAssetKind::UnitCube, true, true);
+        }
+        if (ImGui::MenuItem("Floor Platform")) {
+            create_editor_actor("Floor", SceneAssetKind::FloorQuad, true);
+        }
+        if (ImGui::MenuItem("Surf Ramp")) {
+            create_editor_actor("Surf Ramp", SceneAssetKind::SurfRamp, true);
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Import GLB/glTF...")) {
@@ -3777,8 +3860,9 @@ bool VulkanEngine::duplicate_selected_scene_object()
 
 SceneObjectID VulkanEngine::create_editor_actor(
     const char* baseName,
-    bool renderCube,
-    bool collidable)
+    SceneAssetKind assetKind,
+    bool collidable,
+    bool portalPlaceable)
 {
     const std::string name = std::string(baseName) + " " +
         std::to_string(_nextCreatedActorNumber++);
@@ -3798,15 +3882,26 @@ SceneObjectID VulkanEngine::create_editor_actor(
     object->localTransform.position = glm::vec3(
         glm::inverse(parentWorld) * glm::vec4(spawnWorldPosition, 1.0f));
 
-    if (renderCube) {
-        assign_scene_asset(*object, SceneAssetKind::UnitCube);
+    if (assetKind != SceneAssetKind::None) {
+        assign_scene_asset(*object, assetKind);
+    }
+    if (assetKind == SceneAssetKind::UnitCube) {
         object->localTransform.scale = collidable
             ? glm::vec3(4.0f, 3.0f, 0.5f)
             : glm::vec3(1.0f);
+    } else if (assetKind == SceneAssetKind::FloorQuad) {
+        object->localTransform.scale = glm::vec3(10.0f, 1.0f, 10.0f);
+        object->collisionShape = CollisionShape::GroundPlane;
+    } else if (assetKind == SceneAssetKind::SurfRamp) {
+        object->localTransform.scale = glm::vec3(8.0f, 12.0f, 12.0f);
+        object->collisionShape = CollisionShape::SurfRamp;
+        // Matches the wedge's local bounding box, for editor picking/debug.
+        object->colliderCenter = glm::vec3(0.0f, 0.5f, 0.0f);
+        object->colliderHalfExtents = glm::vec3(0.5f);
     }
 
     object->hasCollision = collidable;
-    object->portalPlaceable = collidable;
+    object->portalPlaceable = portalPlaceable;
     _selectedSceneObject = id;
     _sceneDirty = true;
     rebuild_collision_from_scene();
@@ -3879,6 +3974,15 @@ void VulkanEngine::assign_scene_asset(
             .indexBuffer = _wallMesh.indexBuffer.buffer,
             .vertexBufferAddress = _wallMesh.vertexBufferAddress,
             .bounds = _wallBounds,
+            .material = &_wallMaterial};
+        break;
+    case SceneAssetKind::SurfRamp:
+        object.primitive = MeshPrimitive{
+            .indexCount = 24,
+            .firstIndex = 0,
+            .indexBuffer = _rampMesh.indexBuffer.buffer,
+            .vertexBufferAddress = _rampMesh.vertexBufferAddress,
+            .bounds = _rampBounds,
             .material = &_wallMaterial};
         break;
     case SceneAssetKind::ImportedGLTF: {
@@ -4131,7 +4235,7 @@ bool VulkanEngine::load_editor_scene()
         }
         const std::optional<SceneAssetKind> assetKind = scene_asset_from_name(assetName);
         if (!assetKind.has_value() || layer < 0 || layer > 1 ||
-            collisionShape < 0 || collisionShape > 1) {
+            collisionShape < 0 || collisionShape > 2) {
             fmt::print("Unsupported object data in editor scene: {}\n", scenePath.string());
             return false;
         }
@@ -4218,7 +4322,8 @@ bool VulkanEngine::load_editor_scene()
         if (object.parent == InvalidSceneObject && object.name == "Sandbox") {
             restoredRoot = object.id;
         }
-        if (object.assetKind == SceneAssetKind::FloorQuad) {
+        if (object.assetKind == SceneAssetKind::FloorQuad &&
+            restoredFloor == InvalidSceneObject) {
             restoredFloor = object.id;
         }
     }
