@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "nextActor": 3,
+  "objects": [
+    {"id": 0, "parent": -1, "name": "Sandbox", "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1], "visible": true, "hasCollision": false, "portalPlaceable": false, "layer": 0, "collisionShape": 0, "asset": "empty"},
+    {"id": 1, "parent": 0, "name": "Floor", "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [50, 1, 50], "visible": true, "hasCollision": true, "portalPlaceable": false, "layer": 0, "collisionShape": 1, "asset": "floor"},
+    {"id": 2, "parent": 0, "name": "North Wall", "position": [0, 1.5, -24.75], "rotation": [0, 0, 0], "scale": [50, 3, 0.5], "visible": true, "hasCollision": true, "portalPlaceable": true, "layer": 0, "collisionShape": 0, "asset": "cube"},
+    {"id": 3, "parent": 0, "name": "South Wall", "position": [0, 1.5, 24.75], "rotation": [0, 0, 0], "scale": [50, 3, 0.5], "visible": true, "hasCollision": true, "portalPlaceable": true, "layer": 0, "collisionShape": 0, "asset": "cube"},
+    {"id": 4, "parent": 0, "name": "West Wall", "position": [-24.75, 1.5, 0], "rotation": [0, 0, 0], "scale": [0.5, 3, 50], "visible": true, "hasCollision": true, "portalPlaceable": true, "layer": 0, "collisionShape": 0, "asset": "cube"},
+    {"id": 5, "parent": 0, "name": "East Wall", "position": [24.75, 1.5, 0], "rotation": [0, 0, 0], "scale": [0.5, 3, 50], "visible": true, "hasCollision": true, "portalPlaceable": true, "layer": 0, "collisionShape": 0, "asset": "cube"},
+    {"id": 6, "parent": 0, "name": "Test North Panel", "position": [0, 1.5, -5], "rotation": [0, 0, 0], "scale": [6, 3, 0.5], "visible": true, "hasCollision": true, "portalPlaceable": true, "layer": 0, "collisionShape": 0, "asset": "cube"},
+    {"id": 7, "parent": 0, "name": "Test South Panel", "position": [0, 1.5, 5], "rotation": [0, 0, 0], "scale": [6, 3, 0.5], "visible": true, "hasCollision": true, "portalPlaceable": true, "layer": 0, "collisionShape": 0, "asset": "cube"},
+    {"id": 8, "parent": 0, "name": "Test East Panel", "position": [5, 1.5, 0], "rotation": [0, 0, 0], "scale": [0.5, 3, 6], "visible": true, "hasCollision": true, "portalPlaceable": true, "layer": 0, "collisionShape": 0, "asset": "cube"},
+    {"id": 9, "parent": 0, "name": "Cube 1", "position": [-10.6572533, 1.53060997, -1.54978466], "rotation": [0, 0, 0], "scale": [1, 1, 1], "visible": true, "hasCollision": false, "portalPlaceable": false, "layer": 0, "collisionShape": 0, "asset": "cube"},
+    {"id": 14, "parent": 0, "name": "Cube 2", "position": [-12.9505234, 1.49500167, -3.3608408], "rotation": [0, 0, 0], "scale": [1, 1, 1], "visible": true, "hasCollision": false, "portalPlaceable": false, "layer": 0, "collisionShape": 0, "asset": "cube"}
+  ]
+}

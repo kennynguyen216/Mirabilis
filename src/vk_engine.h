@@ -67,8 +67,17 @@ struct EngineStats {
     float frametime{0.0f};
     int triangle_count{0};
     int drawcall_count{0};
+    int world_drawcall_count{0};
+    int portal_drawcall_count{0};
     float scene_update_time{0.0f};
     float mesh_draw_time{0.0f};
+};
+
+// Kept independent of ImGuizmo so the editor state remains engine-owned.
+enum class EditorGizmoOperation : uint8_t {
+    Translate,
+    Rotate,
+    Scale,
 };
 
 struct GLTFMetallic_Roughness {
@@ -80,6 +89,8 @@ struct GLTFMetallic_Roughness {
     MaterialPipeline portalRecursiveStencilPipeline;
     MaterialPipeline portalMaskPipeline;
     MaterialPipeline portalViewPipeline;
+    MaterialPipeline portalOffscreenPipeline;
+    MaterialPipeline portalCompositePipeline;
     VkDescriptorSetLayout materialLayout{};
 
     struct MaterialConstants {
@@ -220,6 +231,7 @@ class VulkanEngine{
         void init_pipelines();
         void init_background_pipelines();
         void init_default_data();
+        void init_portal_camera_targets();
         void draw_geometry(
             VkCommandBuffer cmd,
             const DrawContext& drawContext,
@@ -244,6 +256,13 @@ class VulkanEngine{
             uint32_t stencilReference,
             uint32_t stencilCompareMask = 0xff);
         void draw_portal_views(VkCommandBuffer cmd);
+        void draw_offscreen_portal_views(VkCommandBuffer cmd);
+        void draw_geometry_to_portal_camera(
+            VkCommandBuffer cmd,
+            const DrawContext& drawContext,
+            const glm::mat4& viewProjection,
+            VkDescriptorSet sceneDescriptor,
+            const AllocatedImage& colorTarget);
         RenderObject make_portal_render_object(
             const Portal& portal,
             MaterialInstance& material) const;
@@ -275,6 +294,13 @@ class VulkanEngine{
             const Portal& destination,
             const glm::vec3& previousPosition);
         void build_sandbox_scene();
+        bool save_editor_scene();
+        bool save_editor_scene_as(std::string_view sceneName);
+        bool load_editor_scene();
+        bool load_editor_scene_named(std::string_view sceneName);
+        void restore_last_editor_scene_name();
+        void assign_scene_asset(SceneObject& object, SceneAssetKind assetKind);
+        void create_runtime_scene_objects();
         void sync_scene_driven_objects();
         void emit_scene_render_objects(RenderLayer layer, DrawContext& drawContext);
         void rebuild_collision_from_scene();
@@ -285,10 +311,12 @@ class VulkanEngine{
         void draw_editor_menu();
         void setup_default_dock_layout(uint32_t dockspaceID);
         bool delete_selected_scene_object();
+        bool duplicate_selected_scene_object();
         SceneObjectID create_editor_actor(
             const char* baseName,
             bool renderCube,
             bool collidable);
+        SceneObjectID import_gltf_actor(std::string_view modelPath);
         void set_mouse_capture(bool captured);
         void set_editor_mode(bool enabled);
         const Camera& render_camera() const;
@@ -302,6 +330,16 @@ class VulkanEngine{
         bool _editorCameraLooking{false};
         bool _showDebugPanels{false};
         bool _resetEditorLayoutRequested{false};
+        bool _sceneDirty{false};
+        std::string _activeSceneFilename{"sandbox.json"};
+        std::array<char, 64> _sceneNameInput{};
+        std::array<char, 260> _gltfPathInput{};
+        EditorGizmoOperation _gizmoOperation{EditorGizmoOperation::Translate};
+        bool _gizmoLocalSpace{false};
+        bool _gizmoSnapping{true};
+        float _translationSnap{0.5f};
+        float _rotationSnapDegrees{15.0f};
+        float _scaleSnap{0.1f};
         float _portalTraversalCooldown{0.0f};
         float _physicsAccumulator{0.0f};
         static constexpr float PhysicsDt = 1.0f / 120.0f;
@@ -326,6 +364,14 @@ class VulkanEngine{
         Bounds _portalBounds;
         Portal _bluePortal;
         Portal _orangePortal;
+        static constexpr uint32_t PortalCameraTargetCount = 2;
+        VkExtent2D _portalCameraExtent{640, 360};
+        std::array<AllocatedImage, PortalCameraTargetCount> _portalCameraImages{};
+        AllocatedImage _portalCameraDepthImage;
+        std::array<AllocatedBuffer, PortalCameraTargetCount> _portalCameraMaterialBuffers{};
+        std::array<MaterialInstance, PortalCameraTargetCount> _portalCameraMaterials{};
+        bool _useOffscreenPortalCameras{false};
+        bool _portalRecursionEnabled{true};
         std::array<GPUSceneData, PortalViewCount> _portalSceneData{};
         MaterialPipeline _portalSkyPipeline;
         // The sandbox level lives here: the floor, the boundary walls, the

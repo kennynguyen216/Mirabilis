@@ -11,7 +11,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <thread>
+#include <unordered_map>
 #define VMA_IMPLEMENTATION
 #include "vk_mem_alloc.h"
 #include <vk_pipelines.h>
@@ -21,6 +25,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/vec2.hpp>
 #include <algorithm>
+#include <simdjson.h>
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -31,6 +36,143 @@
 constexpr bool bUseValidationLayers = false;
 
 VulkanEngine* loadedEngine = nullptr;
+
+namespace {
+
+constexpr const char* EditorSceneDirectory = "../../assets/scenes";
+constexpr const char* LastEditorScenePath = "../../assets/scenes/.last_scene";
+constexpr const char* DefaultEditorSceneFilename = "sandbox.json";
+constexpr uint64_t EditorSceneVersion = 1;
+
+std::optional<std::string> normalize_scene_filename(std::string_view name)
+{
+    if (name.empty() || name.find_first_of("\\/:*?\"<>|") != std::string_view::npos) {
+        return std::nullopt;
+    }
+    std::string filename{name};
+    if (!filename.ends_with(".json")) {
+        filename += ".json";
+    }
+    return filename;
+}
+
+std::filesystem::path editor_scene_path(std::string_view filename)
+{
+    return std::filesystem::path(EditorSceneDirectory) / std::string(filename);
+}
+
+struct SavedSceneObject {
+    uint32_t oldID{0};
+    int64_t oldParent{-1};
+    std::string name;
+    Transform transform{};
+    bool visible{true};
+    bool hasCollision{false};
+    bool portalPlaceable{false};
+    RenderLayer layer{RenderLayer::World};
+    CollisionShape collisionShape{CollisionShape::Box};
+    SceneAssetKind assetKind{SceneAssetKind::None};
+    std::string modelPath;
+};
+
+const char* scene_asset_name(SceneAssetKind kind)
+{
+    switch (kind) {
+    case SceneAssetKind::FloorQuad: return "floor";
+    case SceneAssetKind::UnitCube: return "cube";
+    case SceneAssetKind::ImportedGLTF: return "gltf";
+    case SceneAssetKind::None: return "empty";
+    }
+    return "empty";
+}
+
+std::optional<SceneAssetKind> scene_asset_from_name(std::string_view name)
+{
+    if (name == "floor") return SceneAssetKind::FloorQuad;
+    if (name == "cube") return SceneAssetKind::UnitCube;
+    if (name == "gltf") return SceneAssetKind::ImportedGLTF;
+    if (name == "empty") return SceneAssetKind::None;
+    return std::nullopt;
+}
+
+std::string json_escape(std::string_view text)
+{
+    std::string escaped;
+    escaped.reserve(text.size());
+    for (const char character : text) {
+        switch (character) {
+        case '\\': escaped += "\\\\"; break;
+        case '\"': escaped += "\\\""; break;
+        case '\n': escaped += "\\n"; break;
+        case '\r': escaped += "\\r"; break;
+        case '\t': escaped += "\\t"; break;
+        default: escaped += character; break;
+        }
+    }
+    return escaped;
+}
+
+bool read_json_vec3(simdjson::dom::element element, glm::vec3& value)
+{
+    simdjson::dom::array values;
+    if (element.get_array().get(values)) {
+        return false;
+    }
+    auto valueIt = values.begin();
+    for (int index = 0; index < 3; index++) {
+        if (valueIt == values.end()) {
+            return false;
+        }
+        double component = 0.0;
+        if ((*valueIt).get_double().get(component)) {
+            return false;
+        }
+        value[index] = static_cast<float>(component);
+        ++valueIt;
+    }
+    return valueIt == values.end();
+}
+
+// Inverse of scene.h's Y * X * Z Euler convention.  ImGuizmo gives us a
+// modified matrix; scene objects store editable components, so recover those
+// components after each drag instead of keeping a second matrix representation.
+Transform transform_from_matrix(const glm::mat4& matrix)
+{
+    constexpr float Epsilon = 0.00001f;
+    Transform transform{};
+    transform.position = glm::vec3(matrix[3]);
+
+    glm::mat3 rotation{matrix};
+    transform.scale = glm::vec3(
+        glm::length(rotation[0]),
+        glm::length(rotation[1]),
+        glm::length(rotation[2]));
+    if (transform.scale.x < Epsilon || transform.scale.y < Epsilon ||
+        transform.scale.z < Epsilon) {
+        return transform;
+    }
+    rotation[0] /= transform.scale.x;
+    rotation[1] /= transform.scale.y;
+    rotation[2] /= transform.scale.z;
+
+    // For R = Ry(yaw) * Rx(pitch) * Rz(roll):
+    // pitch = asin(-R[1][2]), yaw = atan2(R[0][2], R[2][2]),
+    // roll = atan2(R[1][0], R[1][1]). GLM uses column-major indexing.
+    transform.rotation.x = std::asin(std::clamp(-rotation[2][1], -1.0f, 1.0f));
+    const float cosPitch = std::cos(transform.rotation.x);
+    if (std::abs(cosPitch) > Epsilon) {
+        transform.rotation.y = std::atan2(rotation[2][0], rotation[2][2]);
+        transform.rotation.z = std::atan2(rotation[0][1], rotation[1][1]);
+    } else {
+        // At the singularity yaw and roll describe the same degree of
+        // freedom. Preserve a stable, editable representation.
+        transform.rotation.y = std::atan2(-rotation[0][2], rotation[0][0]);
+        transform.rotation.z = 0.0f;
+    }
+    return transform;
+}
+
+} // namespace
 
 void add_collider_if_nonempty(std::vector<AABB>& colliders, const AABB& collider)
 {
@@ -554,6 +696,13 @@ void VulkanEngine::cleanup()
     if(_isInitialized) {
         vkDeviceWaitIdle(_device);
 
+        // The explicit File > Save Scene command is still useful for named
+        // checkpoints, but closing the editor should not discard unsaved
+        // level construction work.
+        if (_sceneDirty) {
+            save_editor_scene();
+        }
+
     for (int i = 0; i < FRAME_OVERLAP; i++) {
         vkDestroyCommandPool(
             _device,
@@ -668,6 +817,8 @@ void VulkanEngine::draw(float deltaTime)
 	vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
 	stats.drawcall_count = 0;
 	stats.triangle_count = 0;
+	stats.world_drawcall_count = 0;
+	stats.portal_drawcall_count = 0;
 	stats.mesh_draw_time = 0.0f;
 	draw_geometry(
         cmd,
@@ -675,11 +826,17 @@ void VulkanEngine::draw(float deltaTime)
         sceneData.viewproj,
         get_current_frame().sceneDescriptor,
         true);
+	stats.world_drawcall_count = stats.drawcall_count;
     // The portal view remains live all the way to the crossing plane.  Hiding
     // it for a frame-rate-sized safety band exposed the solid host wall before
     // physics teleported the player, causing the black flash.
     draw_portal_masks(cmd);
-    draw_portal_views(cmd);
+    if (_useOffscreenPortalCameras) {
+        draw_offscreen_portal_views(cmd);
+    } else {
+        draw_portal_views(cmd);
+    }
+	stats.portal_drawcall_count = stats.drawcall_count - stats.world_drawcall_count;
 
 	// transition the draw image and the swapchain image into their correct transfer layouts
 	vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -785,6 +942,19 @@ void VulkanEngine::run(){
                     set_editor_mode(!_editorMode);
                 }
 
+                // Handle this before the gameplay WASD code below.  Without
+                // consuming the event, the S in Ctrl+S also starts backward
+                // movement for one frame (or while the key is held).
+                if (e.type == SDL_KEYDOWN &&
+                    e.key.keysym.sym == SDLK_s &&
+                    (e.key.keysym.mod & KMOD_CTRL) != 0 &&
+                    e.key.repeat == 0 &&
+                    !ImGui::GetIO().WantTextInput) {
+                    save_editor_scene();
+                    _playerInput.backward = false;
+                    continue;
+                }
+
                 if (!_editorMode &&
                     e.type == SDL_KEYDOWN &&
                     e.key.keysym.sym == SDLK_r &&
@@ -793,6 +963,29 @@ void VulkanEngine::run(){
                 }
 
                 if (_editorMode) {
+                    // Match the conventional ImGuizmo/Unity-style transform
+                    // bindings, but leave W/A/S/D to the fly camera while
+                    // RMB is held.
+                    if (e.type == SDL_KEYDOWN && e.key.repeat == 0 &&
+                        !_editorCameraLooking &&
+                        !ImGui::GetIO().WantCaptureKeyboard) {
+                        if (e.key.keysym.sym == SDLK_w) {
+                            _gizmoOperation = EditorGizmoOperation::Translate;
+                        } else if (e.key.keysym.sym == SDLK_e) {
+                            _gizmoOperation = EditorGizmoOperation::Rotate;
+                        } else if (e.key.keysym.sym == SDLK_r) {
+                            _gizmoOperation = EditorGizmoOperation::Scale;
+                        } else if (e.key.keysym.sym == SDLK_s) {
+                            _gizmoSnapping = !_gizmoSnapping;
+                        }
+                    }
+                    if (e.type == SDL_KEYDOWN &&
+                        e.key.keysym.sym == SDLK_d &&
+                        (e.key.keysym.mod & KMOD_CTRL) != 0 &&
+                        e.key.repeat == 0 &&
+                        !ImGui::GetIO().WantCaptureKeyboard) {
+                        duplicate_selected_scene_object();
+                    }
                     if (e.type == SDL_KEYDOWN &&
                         e.key.keysym.sym == SDLK_DELETE &&
                         e.key.repeat == 0 &&
@@ -963,7 +1156,17 @@ void VulkanEngine::run(){
                 ImGui::Text("Scene update %.3f ms", stats.scene_update_time);
                 ImGui::Text("Mesh draw %.3f ms", stats.mesh_draw_time);
                 ImGui::Text("Triangles %d", stats.triangle_count);
-                ImGui::Text("Draw calls %d", stats.drawcall_count);
+                ImGui::Separator();
+                ImGui::Text("World draw calls %d", stats.world_drawcall_count);
+                ImGui::Text("Portal draw calls %d", stats.portal_drawcall_count);
+                ImGui::Text("Total draw calls %d", stats.drawcall_count);
+                ImGui::Text(
+                    "Portal mode: %s",
+                    _useOffscreenPortalCameras
+                        ? "Offscreen camera (primary only)"
+                        : (_portalRecursionEnabled
+                            ? "Direct stencil (one recursive level)"
+                            : "Direct stencil (primary only)"));
             }
             ImGui::End();
         }
@@ -1631,25 +1834,27 @@ void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
         &metalRoughMaterial.portalViewPipeline,
         BluePrimaryStencil,
         false);
-    draw_recursive_portal_mask(
-        cmd,
-        _bluePortal,
-        _bluePortalMaterial,
-        frame.portalSceneDescriptors[BluePortalView],
-        BluePrimaryStencil,
-        BlueRecursiveStencil,
-        BlueRecursiveBit);
-    draw_portal_sky(cmd, BlueRecursiveStencil, BlueRecursiveStencil);
-    draw_geometry(
-        cmd,
-        portalViewDrawContext,
-        _portalSceneData[BluePortalRecursiveView].viewproj,
-        frame.portalSceneDescriptors[BluePortalRecursiveView],
-        false,
-        &metalRoughMaterial.portalViewPipeline,
-        BlueRecursiveStencil,
-        false,
-        BlueRecursiveStencil);
+    if (_portalRecursionEnabled) {
+        draw_recursive_portal_mask(
+            cmd,
+            _bluePortal,
+            _bluePortalMaterial,
+            frame.portalSceneDescriptors[BluePortalView],
+            BluePrimaryStencil,
+            BlueRecursiveStencil,
+            BlueRecursiveBit);
+        draw_portal_sky(cmd, BlueRecursiveStencil, BlueRecursiveStencil);
+        draw_geometry(
+            cmd,
+            portalViewDrawContext,
+            _portalSceneData[BluePortalRecursiveView].viewproj,
+            frame.portalSceneDescriptors[BluePortalRecursiveView],
+            false,
+            &metalRoughMaterial.portalViewPipeline,
+            BlueRecursiveStencil,
+            false,
+            BlueRecursiveStencil);
+    }
 
     draw_portal_sky(cmd, OrangePrimaryStencil);
     draw_geometry(
@@ -1661,25 +1866,179 @@ void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
         &metalRoughMaterial.portalViewPipeline,
         OrangePrimaryStencil,
         false);
-    draw_recursive_portal_mask(
-        cmd,
-        _orangePortal,
-        _orangePortalMaterial,
-        frame.portalSceneDescriptors[OrangePortalView],
-        OrangePrimaryStencil,
-        OrangeRecursiveStencil,
-        OrangeRecursiveBit);
-    draw_portal_sky(cmd, OrangeRecursiveStencil, OrangeRecursiveStencil);
+    if (_portalRecursionEnabled) {
+        draw_recursive_portal_mask(
+            cmd,
+            _orangePortal,
+            _orangePortalMaterial,
+            frame.portalSceneDescriptors[OrangePortalView],
+            OrangePrimaryStencil,
+            OrangeRecursiveStencil,
+            OrangeRecursiveBit);
+        draw_portal_sky(cmd, OrangeRecursiveStencil, OrangeRecursiveStencil);
+        draw_geometry(
+            cmd,
+            portalViewDrawContext,
+            _portalSceneData[OrangePortalRecursiveView].viewproj,
+            frame.portalSceneDescriptors[OrangePortalRecursiveView],
+            false,
+            &metalRoughMaterial.portalViewPipeline,
+            OrangeRecursiveStencil,
+            false,
+            OrangeRecursiveStencil);
+    }
+}
+
+void VulkanEngine::draw_geometry_to_portal_camera(
+    VkCommandBuffer cmd,
+    const DrawContext& drawContext,
+    const glm::mat4& viewProjection,
+    VkDescriptorSet sceneDescriptor,
+    const AllocatedImage& colorTarget)
+{
+    const auto startTime = std::chrono::steady_clock::now();
+    VkClearValue clearColor{};
+    clearColor.color = {{0.025f, 0.045f, 0.085f, 1.0f}};
+    VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
+        colorTarget.imageView, &clearColor, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
+        _portalCameraDepthImage.imageView,
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
+    VkRenderingInfo renderInfo = vkinit::rendering_info(
+        _portalCameraExtent, &colorAttachment, &depthAttachment);
+    renderInfo.pStencilAttachment = &stencilAttachment;
+
+    vkCmdBeginRendering(cmd, &renderInfo);
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(_portalCameraExtent.width);
+    viewport.height = static_cast<float>(_portalCameraExtent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    VkRect2D scissor{};
+    scissor.extent = _portalCameraExtent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    MaterialInstance* lastMaterial = nullptr;
+    VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
+    for (const RenderObject& renderObject : drawContext.OpaqueSurfaces) {
+        if (renderObject.material == nullptr) {
+            continue;
+        }
+        vkCmdBindPipeline(
+            cmd,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            metalRoughMaterial.portalOffscreenPipeline.pipeline);
+        vkCmdBindDescriptorSets(
+            cmd,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            metalRoughMaterial.portalOffscreenPipeline.layout,
+            0,
+            1,
+            &sceneDescriptor,
+            0,
+            nullptr);
+        if (renderObject.material != lastMaterial) {
+            lastMaterial = renderObject.material;
+            vkCmdBindDescriptorSets(
+                cmd,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                metalRoughMaterial.portalOffscreenPipeline.layout,
+                1,
+                1,
+                &renderObject.material->materialSet,
+                0,
+                nullptr);
+        }
+        if (renderObject.indexBuffer != lastIndexBuffer) {
+            lastIndexBuffer = renderObject.indexBuffer;
+            vkCmdBindIndexBuffer(cmd, renderObject.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        }
+        GPUDrawPushConstants pushConstants{};
+        pushConstants.worldMatrix = renderObject.transform;
+        pushConstants.vertexBuffer = renderObject.vertexBufferAddress;
+        vkCmdPushConstants(
+            cmd,
+            metalRoughMaterial.portalOffscreenPipeline.layout,
+            VK_SHADER_STAGE_VERTEX_BIT,
+            0,
+            sizeof(GPUDrawPushConstants),
+            &pushConstants);
+        vkCmdDrawIndexed(
+            cmd, renderObject.indexCount, 1, renderObject.firstIndex, 0, 0);
+        ++stats.drawcall_count;
+        stats.triangle_count += static_cast<int>(renderObject.indexCount / 3);
+    }
+    vkCmdEndRendering(cmd);
+    stats.mesh_draw_time += std::chrono::duration<float, std::milli>(
+        std::chrono::steady_clock::now() - startTime).count();
+}
+
+void VulkanEngine::draw_offscreen_portal_views(VkCommandBuffer cmd)
+{
+    if (!_bluePortal.placed || !_orangePortal.placed) {
+        return;
+    }
+
+    FrameData& frame = get_current_frame();
+    const auto renderCamera = [&](uint32_t targetIndex, uint32_t viewIndex) {
+        AllocatedImage& target = _portalCameraImages[targetIndex];
+        // Every target is completely cleared before use, so the old contents
+        // are irrelevant. This is valid from either first-use or shader-read.
+        vkutil::transition_image(
+            cmd,
+            target.image,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        vkutil::transition_image(
+            cmd,
+            _portalCameraDepthImage.image,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+        draw_geometry_to_portal_camera(
+            cmd,
+            portalViewDrawContext,
+            _portalSceneData[viewIndex].viewproj,
+            frame.portalSceneDescriptors[viewIndex],
+            target);
+        vkutil::transition_image(
+            cmd,
+            target.image,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    };
+
+    // This experiment deliberately renders only one virtual view per portal.
+    // The normal stencil mode below remains the recursive reference path.
+    renderCamera(0, BluePortalView);
+    renderCamera(1, OrangePortalView);
+
+    DrawContext blueComposite{};
+    blueComposite.OpaqueSurfaces.push_back(make_portal_render_object(
+        _bluePortal, _portalCameraMaterials[0]));
     draw_geometry(
         cmd,
-        portalViewDrawContext,
-        _portalSceneData[OrangePortalRecursiveView].viewproj,
-        frame.portalSceneDescriptors[OrangePortalRecursiveView],
+        blueComposite,
+        sceneData.viewproj,
+        frame.sceneDescriptor,
         false,
-        &metalRoughMaterial.portalViewPipeline,
-        OrangeRecursiveStencil,
+        &metalRoughMaterial.portalCompositePipeline,
+        BluePortalView + 1,
+        false);
+
+    DrawContext orangeComposite{};
+    orangeComposite.OpaqueSurfaces.push_back(make_portal_render_object(
+        _orangePortal, _portalCameraMaterials[1]));
+    draw_geometry(
+        cmd,
+        orangeComposite,
+        sceneData.viewproj,
+        frame.sceneDescriptor,
         false,
-        OrangeRecursiveStencil);
+        &metalRoughMaterial.portalCompositePipeline,
+        OrangePortalView + 1,
+        false);
 }
 
 void VulkanEngine::draw_portal_sky(
@@ -1782,6 +2141,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     VkShaderModule portalMaskVertexShader = VK_NULL_HANDLE;
     VkShaderModule portalViewVertexShader = VK_NULL_HANDLE;
     VkShaderModule portalViewFragmentShader = VK_NULL_HANDLE;
+    VkShaderModule portalCompositeFragmentShader = VK_NULL_HANDLE;
     VkShaderModule portalSkyVertexShader = VK_NULL_HANDLE;
     VkShaderModule portalSkyFragmentShader = VK_NULL_HANDLE;
     if (!vkutil::load_shader_module("../../shaders/mesh.frag.spv", engine->_device, &fragmentShader) ||
@@ -1789,6 +2149,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
         !vkutil::load_shader_module("../../shaders/portal_mask.vert.spv", engine->_device, &portalMaskVertexShader) ||
         !vkutil::load_shader_module("../../shaders/portal_view.vert.spv", engine->_device, &portalViewVertexShader) ||
         !vkutil::load_shader_module("../../shaders/portal_view.frag.spv", engine->_device, &portalViewFragmentShader) ||
+        !vkutil::load_shader_module("../../shaders/portal_composite.frag.spv", engine->_device, &portalCompositeFragmentShader) ||
         !vkutil::load_shader_module("../../shaders/portal_sky.vert.spv", engine->_device, &portalSkyVertexShader) ||
         !vkutil::load_shader_module("../../shaders/portal_sky.frag.spv", engine->_device, &portalSkyFragmentShader)) {
         fmt::print("Error loading material shaders\n");
@@ -1806,6 +2167,9 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
         }
         if (portalViewFragmentShader != VK_NULL_HANDLE) {
             vkDestroyShaderModule(engine->_device, portalViewFragmentShader, nullptr);
+        }
+        if (portalCompositeFragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(engine->_device, portalCompositeFragmentShader, nullptr);
         }
         if (portalSkyVertexShader != VK_NULL_HANDLE) {
             vkDestroyShaderModule(engine->_device, portalSkyVertexShader, nullptr);
@@ -1844,6 +2208,8 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     portalRecursiveStencilPipeline.layout = pipelineLayout;
     portalMaskPipeline.layout = pipelineLayout;
     portalViewPipeline.layout = pipelineLayout;
+    portalOffscreenPipeline.layout = pipelineLayout;
+    portalCompositePipeline.layout = pipelineLayout;
 
     PipelineBuilder builder;
     builder._pipelineLayout = pipelineLayout;
@@ -1858,6 +2224,13 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     builder.set_depth_format(engine->_depthImage.imageFormat);
     builder.set_stencil_format(engine->_depthImage.imageFormat);
     opaquePipeline.pipeline = builder.build_pipeline(engine->_device);
+
+    // This pass samples a previously-rendered virtual camera image. Its
+    // fragment shader is intentionally unlit, because the source scene was
+    // already lit while rendering into that image.
+    builder.enable_stenciltest(VK_COMPARE_OP_EQUAL, VK_STENCIL_OP_KEEP);
+    builder.set_shaders(vertexShader, portalCompositeFragmentShader);
+    portalCompositePipeline.pipeline = builder.build_pipeline(engine->_device);
 
     builder.enable_blending_additive();
     builder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
@@ -1896,6 +2269,11 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     builder.set_shaders(portalViewVertexShader, portalViewFragmentShader);
     portalViewPipeline.pipeline = builder.build_pipeline(engine->_device);
 
+    // Same oblique-clipped portal-view shader, but without stencil testing:
+    // it renders into a standalone camera target before composition.
+    builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    portalOffscreenPipeline.pipeline = builder.build_pipeline(engine->_device);
+
     VkPipelineLayoutCreateInfo portalSkyLayoutInfo = vkinit::pipeline_layout_create_info();
     VkPushConstantRange portalSkyRange{
         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -1930,6 +2308,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     vkDestroyShaderModule(engine->_device, portalMaskVertexShader, nullptr);
     vkDestroyShaderModule(engine->_device, portalViewVertexShader, nullptr);
     vkDestroyShaderModule(engine->_device, portalViewFragmentShader, nullptr);
+    vkDestroyShaderModule(engine->_device, portalCompositeFragmentShader, nullptr);
     vkDestroyShaderModule(engine->_device, portalSkyVertexShader, nullptr);
     vkDestroyShaderModule(engine->_device, portalSkyFragmentShader, nullptr);
 
@@ -1940,6 +2319,8 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
         vkDestroyPipeline(engine->_device, portalRecursiveStencilPipeline.pipeline, nullptr);
         vkDestroyPipeline(engine->_device, portalMaskPipeline.pipeline, nullptr);
         vkDestroyPipeline(engine->_device, portalViewPipeline.pipeline, nullptr);
+        vkDestroyPipeline(engine->_device, portalOffscreenPipeline.pipeline, nullptr);
+        vkDestroyPipeline(engine->_device, portalCompositePipeline.pipeline, nullptr);
         vkDestroyPipeline(engine->_device, engine->_portalSkyPipeline.pipeline, nullptr);
         vkDestroyPipelineLayout(engine->_device, opaquePipeline.layout, nullptr);
         vkDestroyPipelineLayout(engine->_device, engine->_portalSkyPipeline.layout, nullptr);
@@ -1955,6 +2336,8 @@ void GLTFMetallic_Roughness::clear_resources(VkDevice device)
     vkDestroyPipeline(device, portalRecursiveStencilPipeline.pipeline, nullptr);
     vkDestroyPipeline(device, portalMaskPipeline.pipeline, nullptr);
     vkDestroyPipeline(device, portalViewPipeline.pipeline, nullptr);
+    vkDestroyPipeline(device, portalOffscreenPipeline.pipeline, nullptr);
+    vkDestroyPipeline(device, portalCompositePipeline.pipeline, nullptr);
     vkDestroyPipelineLayout(device, opaquePipeline.layout, nullptr);
     vkDestroyDescriptorSetLayout(device, materialLayout, nullptr);
 }
@@ -2436,6 +2819,8 @@ void VulkanEngine::init_default_data()
         orangePortalResources,
         globalDescriptorAllocator);
 
+    init_portal_camera_targets();
+
     // This model is deliberately not put in loadedScenes: that collection is
     // rendered by the main first-person camera.  We draw this one only into
     // portalViewDrawContext so the player can see their body through a portal.
@@ -2458,6 +2843,10 @@ void VulkanEngine::init_default_data()
     //}
 
     build_sandbox_scene();
+    // A missing file simply leaves the starter sandbox intact on the first
+    // launch.  After the first File > Save Scene, this restores the level.
+    restore_last_editor_scene_name();
+    load_editor_scene();
 
     _mainDeletionQueue.push_function([this]() {
         destroy_buffer(_orangePortalMaterialBuffer);
@@ -2477,6 +2866,59 @@ void VulkanEngine::init_default_data()
         destroy_image(_greyImage);
         destroy_image(_blackImage);
         destroy_image(_errorCheckerboardImage);
+    });
+}
+
+void VulkanEngine::init_portal_camera_targets()
+{
+    const VkExtent3D targetExtent{
+        _portalCameraExtent.width,
+        _portalCameraExtent.height,
+        1};
+    for (AllocatedImage& image : _portalCameraImages) {
+        image = create_image(
+            targetExtent,
+            _drawImage.imageFormat,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    }
+    _portalCameraDepthImage = create_image(
+        targetExtent,
+        _depthImage.imageFormat,
+        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+
+    for (uint32_t index = 0; index < PortalCameraTargetCount; ++index) {
+        _portalCameraMaterialBuffers[index] = create_buffer(
+            sizeof(GLTFMetallic_Roughness::MaterialConstants),
+            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        auto* constants = static_cast<GLTFMetallic_Roughness::MaterialConstants*>(
+            _portalCameraMaterialBuffers[index].info.pMappedData);
+        *constants = {};
+        constants->colorFactors = glm::vec4(1.0f);
+
+        GLTFMetallic_Roughness::MaterialResources resources{};
+        resources.colorImage = _portalCameraImages[index];
+        resources.colorSampler = _defaultSamplerLinear;
+        resources.metalRoughImage = _whiteImage;
+        resources.metalRoughSampler = _defaultSamplerLinear;
+        resources.dataBuffer = _portalCameraMaterialBuffers[index].buffer;
+        _portalCameraMaterials[index] = metalRoughMaterial.write_material(
+            _device,
+            MaterialPass::MainColor,
+            resources,
+            globalDescriptorAllocator);
+        _portalCameraMaterials[index].pipeline =
+            &metalRoughMaterial.portalCompositePipeline;
+    }
+
+    _mainDeletionQueue.push_function([this]() {
+        for (const AllocatedBuffer& buffer : _portalCameraMaterialBuffers) {
+            destroy_buffer(buffer);
+        }
+        for (const AllocatedImage& image : _portalCameraImages) {
+            destroy_image(image);
+        }
+        destroy_image(_portalCameraDepthImage);
     });
 }
 
@@ -2598,25 +3040,32 @@ void VulkanEngine::draw_inspector_panel()
             // Transforms written by physics or portal placement would be
             // overwritten again next frame, so show them read-only.
             const bool driven = object->transformDrivenExternally;
+            bool changed = false;
             if (driven) {
                 ImGui::TextUnformatted("Transform is driven by the simulation.");
             }
             ImGui::BeginDisabled(driven);
-            ImGui::DragFloat3(
+            changed |= ImGui::DragFloat3(
                 "Position", &object->localTransform.position.x, 0.05f);
 
             glm::vec3 rotationDegrees = glm::degrees(object->localTransform.rotation);
             if (ImGui::DragFloat3("Rotation", &rotationDegrees.x, 0.5f)) {
                 object->localTransform.rotation = glm::radians(rotationDegrees);
+                changed = true;
             }
 
-            ImGui::DragFloat3("Scale", &object->localTransform.scale.x, 0.05f);
+            changed |= ImGui::DragFloat3(
+                "Scale", &object->localTransform.scale.x, 0.05f);
             ImGui::EndDisabled();
 
             ImGui::Separator();
-            ImGui::Checkbox("Visible", &object->visible);
-            ImGui::Checkbox("Has Collision", &object->hasCollision);
-            ImGui::Checkbox("Portal Placeable", &object->portalPlaceable);
+            changed |= ImGui::Checkbox("Visible", &object->visible);
+            changed |= ImGui::Checkbox("Has Collision", &object->hasCollision);
+            changed |= ImGui::Checkbox("Portal Placeable", &object->portalPlaceable);
+            if (changed && !driven) {
+                _sceneDirty = true;
+                rebuild_collision_from_scene();
+            }
 
             if ((_bluePortal.placed && _bluePortal.hostWallObject == object->id) ||
                 (_orangePortal.placed && _orangePortal.hostWallObject == object->id)) {
@@ -2693,25 +3142,44 @@ void VulkanEngine::draw_editor_gizmo()
     ImGuizmo::SetDrawlist(ImGui::GetForegroundDrawList());
     ImGuizmo::SetRect(0.0f, 0.0f, displaySize.x, displaySize.y);
 
+    ImGuizmo::OPERATION operation = ImGuizmo::TRANSLATE;
+    float snapValues[3]{_translationSnap, _translationSnap, _translationSnap};
+    switch (_gizmoOperation) {
+    case EditorGizmoOperation::Translate:
+        operation = ImGuizmo::TRANSLATE;
+        break;
+    case EditorGizmoOperation::Rotate:
+        operation = ImGuizmo::ROTATE;
+        snapValues[0] = _rotationSnapDegrees;
+        break;
+    case EditorGizmoOperation::Scale:
+        operation = ImGuizmo::SCALE;
+        snapValues[0] = _scaleSnap;
+        break;
+    }
+
     if (!ImGuizmo::Manipulate(
             glm::value_ptr(camera.getViewMatrix()),
             glm::value_ptr(gizmoProjection),
-            ImGuizmo::TRANSLATE,
-            ImGuizmo::WORLD,
-            glm::value_ptr(worldTransform))) {
+            operation,
+            _gizmoLocalSpace ? ImGuizmo::LOCAL : ImGuizmo::WORLD,
+            glm::value_ptr(worldTransform),
+            nullptr,
+            _gizmoSnapping ? snapValues : nullptr)) {
         return;
     }
 
-    // ImGuizmo edits a world matrix. Scene objects store local transforms, so
-    // convert back through the parent's world matrix before saving position.
+    // ImGuizmo edits a world matrix. Scene objects store local components, so
+    // convert back through the parent's world matrix before saving the change.
     glm::mat4 parentWorld{1.0f};
     if (object->parent != InvalidSceneObject) {
         parentWorld = _scene.world_matrix(object->parent);
     }
     const glm::mat4 localTransform = glm::inverse(parentWorld) * worldTransform;
-    object->localTransform.position = glm::vec3(localTransform[3]);
+    object->localTransform = transform_from_matrix(localTransform);
 
     // Keep collision and portal raycasts coherent while the arrow is dragged.
+    _sceneDirty = true;
     rebuild_collision_from_scene();
 }
 
@@ -2776,6 +3244,55 @@ void VulkanEngine::draw_editor_menu()
         return;
     }
 
+    if (ImGui::BeginMenu("File")) {
+        if (ImGui::MenuItem("Save Scene", "Ctrl+S")) {
+            save_editor_scene();
+        }
+        if (ImGui::MenuItem("Save Scene As...")) {
+            _sceneNameInput.fill('\0');
+            const size_t copyLength = std::min(
+                _activeSceneFilename.size(), _sceneNameInput.size() - 1);
+            std::memcpy(
+                _sceneNameInput.data(), _activeSceneFilename.data(), copyLength);
+            ImGui::OpenPopup("Save Scene As");
+        }
+        if (ImGui::MenuItem("Reload Current Scene")) {
+            load_editor_scene();
+        }
+        if (ImGui::BeginMenu("Open Scene")) {
+            std::vector<std::string> sceneFilenames;
+            std::error_code directoryError;
+            for (const std::filesystem::directory_entry& entry :
+                 std::filesystem::directory_iterator(
+                     EditorSceneDirectory, directoryError)) {
+                if (directoryError) {
+                    break;
+                }
+                if (entry.is_regular_file() && entry.path().extension() == ".json") {
+                    sceneFilenames.push_back(entry.path().filename().string());
+                }
+            }
+            std::sort(sceneFilenames.begin(), sceneFilenames.end());
+            if (sceneFilenames.empty()) {
+                ImGui::TextDisabled("No saved scenes yet.");
+            }
+            for (const std::string& filename : sceneFilenames) {
+                if (ImGui::MenuItem(
+                        filename.c_str(),
+                        nullptr,
+                        filename == _activeSceneFilename)) {
+                    load_editor_scene_named(filename);
+                }
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::Separator();
+        ImGui::TextDisabled("../../assets/scenes/%s%s",
+            _activeSceneFilename.c_str(),
+            _sceneDirty ? "  (unsaved changes)" : "");
+        ImGui::EndMenu();
+    }
+
     if (ImGui::BeginMenu("Create")) {
         if (ImGui::MenuItem("Empty Actor")) {
             create_editor_actor("Actor", false, false);
@@ -2786,11 +3303,48 @@ void VulkanEngine::draw_editor_menu()
         if (ImGui::MenuItem("Wall")) {
             create_editor_actor("Wall", true, true);
         }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Import GLB/glTF...")) {
+            _gltfPathInput.fill('\0');
+            ImGui::OpenPopup("Import GLB/glTF");
+        }
         ImGui::EndMenu();
     }
 
     if (ImGui::BeginMenu("Edit")) {
         const bool hasSelection = _scene.get(_selectedSceneObject) != nullptr;
+        if (ImGui::BeginMenu("Gizmo")) {
+            if (ImGui::MenuItem(
+                    "Move", "W",
+                    _gizmoOperation == EditorGizmoOperation::Translate)) {
+                _gizmoOperation = EditorGizmoOperation::Translate;
+            }
+            if (ImGui::MenuItem(
+                    "Rotate", "E",
+                    _gizmoOperation == EditorGizmoOperation::Rotate)) {
+                _gizmoOperation = EditorGizmoOperation::Rotate;
+            }
+            if (ImGui::MenuItem(
+                    "Scale", "R",
+                    _gizmoOperation == EditorGizmoOperation::Scale)) {
+                _gizmoOperation = EditorGizmoOperation::Scale;
+            }
+            ImGui::Separator();
+            ImGui::MenuItem("Local space", nullptr, &_gizmoLocalSpace);
+            ImGui::MenuItem("Enable snapping", "S", &_gizmoSnapping);
+            if (_gizmoOperation == EditorGizmoOperation::Translate) {
+                ImGui::DragFloat("Move snap", &_translationSnap, 0.05f, 0.05f, 10.0f);
+            } else if (_gizmoOperation == EditorGizmoOperation::Rotate) {
+                ImGui::DragFloat(
+                    "Rotation snap", &_rotationSnapDegrees, 1.0f, 1.0f, 180.0f);
+            } else {
+                ImGui::DragFloat("Scale snap", &_scaleSnap, 0.05f, 0.01f, 10.0f);
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::MenuItem("Duplicate Selected", "Ctrl+D", false, hasSelection)) {
+            duplicate_selected_scene_object();
+        }
         if (ImGui::MenuItem("Delete Selected", "Delete", false, hasSelection)) {
             delete_selected_scene_object();
         }
@@ -2801,6 +3355,17 @@ void VulkanEngine::draw_editor_menu()
         if (ImGui::MenuItem("Retract Both", "R")) {
             retract_portals();
         }
+        ImGui::Separator();
+        ImGui::MenuItem(
+            "Use Offscreen Camera Experiment",
+            nullptr,
+            &_useOffscreenPortalCameras);
+        ImGui::BeginDisabled(_useOffscreenPortalCameras);
+        ImGui::MenuItem(
+            "Direct Stencil Recursion",
+            nullptr,
+            &_portalRecursionEnabled);
+        ImGui::EndDisabled();
         ImGui::EndMenu();
     }
 
@@ -2817,6 +3382,40 @@ void VulkanEngine::draw_editor_menu()
         set_editor_mode(false);
     }
     ImGui::EndMainMenuBar();
+
+    if (ImGui::BeginPopupModal(
+            "Save Scene As", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("Scene files are stored in assets/scenes.");
+        ImGui::InputText("Filename", _sceneNameInput.data(), _sceneNameInput.size());
+        ImGui::TextDisabled(".json is added automatically.");
+        if (ImGui::Button("Save")) {
+            if (save_editor_scene_as(_sceneNameInput.data())) {
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    if (ImGui::BeginPopupModal(
+            "Import GLB/glTF", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("Enter an asset path relative to bin/Debug.");
+        ImGui::TextDisabled("Example: ../../assets/my_model.glb");
+        ImGui::InputText("Asset path", _gltfPathInput.data(), _gltfPathInput.size());
+        if (ImGui::Button("Import")) {
+            if (import_gltf_actor(_gltfPathInput.data()) != InvalidSceneObject) {
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
 }
 
 void VulkanEngine::setup_default_dock_layout(uint32_t dockspaceID)
@@ -2876,6 +3475,55 @@ bool VulkanEngine::delete_selected_scene_object()
     }
 
     _selectedSceneObject = InvalidSceneObject;
+    _sceneDirty = true;
+    rebuild_collision_from_scene();
+    return true;
+}
+
+bool VulkanEngine::duplicate_selected_scene_object()
+{
+    const SceneObject* source = _scene.get(_selectedSceneObject);
+    if (source == nullptr || source->id == _sandboxRoot ||
+        source->id == _floorObject || source->transformDrivenExternally) {
+        return false;
+    }
+    for (const SceneObject* current = source;
+         current != nullptr;
+         current = _scene.get(current->parent)) {
+        if (current->transformDrivenExternally) {
+            return false;
+        }
+    }
+
+    // Copy the scene-facing data, then rebuild the primitive from its stable
+    // asset kind. Copying raw VkBuffer/material pointers is unnecessary and
+    // would make persistence harder to reason about.
+    const SceneObjectID duplicateID = _scene.create_object(
+        source->name + " Copy " + std::to_string(_nextCreatedActorNumber++),
+        source->parent);
+    SceneObject* duplicate = _scene.get(duplicateID);
+    if (duplicate == nullptr) {
+        return false;
+    }
+
+    duplicate->localTransform = source->localTransform;
+    duplicate->localTransform.position += glm::vec3(0.5f, 0.0f, 0.5f);
+    duplicate->visible = source->visible;
+    duplicate->hasCollision = source->hasCollision;
+    duplicate->portalPlaceable = source->portalPlaceable;
+    duplicate->layer = source->layer;
+    duplicate->collisionShape = source->collisionShape;
+    duplicate->modelPath = source->modelPath;
+    if (source->assetKind == SceneAssetKind::ImportedGLTF) {
+        // Instances of the same imported scene can share its loaded GPU data.
+        duplicate->assetKind = SceneAssetKind::ImportedGLTF;
+        duplicate->model = source->model;
+    } else {
+        assign_scene_asset(*duplicate, source->assetKind);
+    }
+
+    _selectedSceneObject = duplicateID;
+    _sceneDirty = true;
     rebuild_collision_from_scene();
     return true;
 }
@@ -2904,13 +3552,7 @@ SceneObjectID VulkanEngine::create_editor_actor(
         glm::inverse(parentWorld) * glm::vec4(spawnWorldPosition, 1.0f));
 
     if (renderCube) {
-        object->primitive = MeshPrimitive{
-            .indexCount = 36,
-            .firstIndex = 0,
-            .indexBuffer = _wallMesh.indexBuffer.buffer,
-            .vertexBufferAddress = _wallMesh.vertexBufferAddress,
-            .bounds = _wallBounds,
-            .material = &_wallMaterial};
+        assign_scene_asset(*object, SceneAssetKind::UnitCube);
         object->localTransform.scale = collidable
             ? glm::vec3(4.0f, 3.0f, 0.5f)
             : glm::vec3(1.0f);
@@ -2919,8 +3561,432 @@ SceneObjectID VulkanEngine::create_editor_actor(
     object->hasCollision = collidable;
     object->portalPlaceable = collidable;
     _selectedSceneObject = id;
+    _sceneDirty = true;
     rebuild_collision_from_scene();
     return id;
+}
+
+SceneObjectID VulkanEngine::import_gltf_actor(std::string_view modelPath)
+{
+    if (modelPath.empty()) {
+        return InvalidSceneObject;
+    }
+
+    auto model = loadGltf(this, std::filesystem::path(modelPath));
+    if (!model) {
+        fmt::print("Failed to import glTF actor: {}\n", modelPath);
+        return InvalidSceneObject;
+    }
+
+    const std::filesystem::path path(modelPath);
+    std::string baseName = path.stem().string();
+    if (baseName.empty()) {
+        baseName = "GLTF Actor";
+    }
+    const SceneObjectID id = _scene.create_object(
+        baseName + " " + std::to_string(_nextCreatedActorNumber++),
+        _sandboxRoot);
+    SceneObject* object = _scene.get(id);
+    if (object == nullptr) {
+        return InvalidSceneObject;
+    }
+
+    const Camera& camera = render_camera();
+    const glm::vec3 forward = glm::normalize(glm::vec3(
+        camera.getRotationMatrix() * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+    const glm::mat4 parentWorld = _scene.world_matrix(_sandboxRoot);
+    const glm::vec3 spawnWorldPosition = camera.position + forward * 5.0f;
+    object->localTransform.position = glm::vec3(
+        glm::inverse(parentWorld) * glm::vec4(spawnWorldPosition, 1.0f));
+    object->assetKind = SceneAssetKind::ImportedGLTF;
+    object->modelPath = std::string(modelPath);
+    object->model = *model;
+
+    _selectedSceneObject = id;
+    _sceneDirty = true;
+    return id;
+}
+
+void VulkanEngine::assign_scene_asset(
+    SceneObject& object,
+    SceneAssetKind assetKind)
+{
+    object.assetKind = assetKind;
+    object.primitive = {};
+    object.model.reset();
+
+    switch (assetKind) {
+    case SceneAssetKind::FloorQuad:
+        object.primitive = MeshPrimitive{
+            .indexCount = 6,
+            .firstIndex = 0,
+            .indexBuffer = _floorMesh.indexBuffer.buffer,
+            .vertexBufferAddress = _floorMesh.vertexBufferAddress,
+            .bounds = _floorBounds,
+            .material = &_floorMaterial};
+        break;
+    case SceneAssetKind::UnitCube:
+        object.primitive = MeshPrimitive{
+            .indexCount = 36,
+            .firstIndex = 0,
+            .indexBuffer = _wallMesh.indexBuffer.buffer,
+            .vertexBufferAddress = _wallMesh.vertexBufferAddress,
+            .bounds = _wallBounds,
+            .material = &_wallMaterial};
+        break;
+    case SceneAssetKind::ImportedGLTF: {
+        if (object.modelPath.empty()) {
+            fmt::print("Scene glTF actor '{}' has no model path.\n", object.name);
+            break;
+        }
+        auto model = loadGltf(this, object.modelPath);
+        if (model) {
+            object.model = *model;
+        } else {
+            fmt::print(
+                "Failed to load scene glTF '{}' for actor '{}'.\n",
+                object.modelPath,
+                object.name);
+        }
+        break;
+    }
+    case SceneAssetKind::None:
+        break;
+    }
+}
+
+void VulkanEngine::create_runtime_scene_objects()
+{
+    // These are simulation-owned. They are recreated after loading a level,
+    // rather than being serialized with the editor-authored geometry.
+    _playerObject = _scene.create_object("Player", _sandboxRoot);
+    if (SceneObject* player = _scene.get(_playerObject)) {
+        player->transformDrivenExternally = true;
+        player->layer = RenderLayer::PortalViewOnly;
+    }
+
+    _playerModelObject = _scene.create_object("Player Model", _playerObject);
+    if (SceneObject* playerModel = _scene.get(_playerModelObject)) {
+        playerModel->layer = RenderLayer::PortalViewOnly;
+        if (_playerModel) {
+            playerModel->model = _playerModel;
+            // The source glTF is about 14 units tall at scale 1.0.
+            playerModel->localTransform.scale = glm::vec3(0.12f);
+        } else {
+            const PlayerMovementSettings& settings = _playerMovement.settings;
+            assign_scene_asset(*playerModel, SceneAssetKind::UnitCube);
+            playerModel->primitive.material = &_playerMaterial;
+            playerModel->primitive.bounds = _playerBounds;
+            playerModel->localTransform.position = glm::vec3(
+                0.0f, settings.playerHeight * 0.5f, 0.0f);
+            playerModel->localTransform.scale = glm::vec3(
+                settings.playerHalfWidth * 2.0f,
+                settings.playerHeight,
+                settings.playerHalfWidth * 2.0f);
+        }
+    }
+
+    const auto createPortalObject = [&](const char* name) {
+        const SceneObjectID id = _scene.create_object(name, _sandboxRoot);
+        if (SceneObject* portalObject = _scene.get(id)) {
+            portalObject->visible = false;
+            portalObject->transformDrivenExternally = true;
+        }
+        return id;
+    };
+    _bluePortalObject = createPortalObject("Blue Portal");
+    _orangePortalObject = createPortalObject("Orange Portal");
+}
+
+bool VulkanEngine::save_editor_scene()
+{
+    const std::filesystem::path scenePath = editor_scene_path(_activeSceneFilename);
+    std::error_code directoryError;
+    std::filesystem::create_directories(scenePath.parent_path(), directoryError);
+    if (directoryError) {
+        fmt::print("Could not create scene directory: {}\n", directoryError.message());
+        return false;
+    }
+
+    std::ofstream file(scenePath, std::ios::trunc);
+    if (!file) {
+        fmt::print("Could not save scene: {}\n", scenePath.string());
+        return false;
+    }
+
+    file << std::setprecision(9);
+    file << "{\n  \"version\": " << EditorSceneVersion
+         << ",\n  \"nextActor\": " << _nextCreatedActorNumber
+         << ",\n  \"objects\": [\n";
+
+    bool firstObject = true;
+    const auto writeVec3 = [&](const glm::vec3& value) {
+        file << '[' << value.x << ", " << value.y << ", " << value.z << ']';
+    };
+    const auto runtime_owned = [&](const SceneObject& object) {
+        for (const SceneObject* current = &object;
+             current != nullptr;
+             current = _scene.get(current->parent)) {
+            if (current->transformDrivenExternally) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const SceneObject& object : _scene.objects) {
+        // Physics/player and the portal system rebuild their objects from
+        // current runtime state.  Saving them would make stale data win on
+        // the next launch.
+        if (!object.alive || runtime_owned(object)) {
+            continue;
+        }
+        if (!firstObject) {
+            file << ",\n";
+        }
+        firstObject = false;
+        file << "    {\"id\": " << object.id
+             << ", \"parent\": "
+             << (object.parent == InvalidSceneObject
+                    ? -1
+                    : static_cast<int64_t>(object.parent))
+             << ", \"name\": \"" << json_escape(object.name) << "\""
+             << ", \"position\": ";
+        writeVec3(object.localTransform.position);
+        file << ", \"rotation\": ";
+        writeVec3(object.localTransform.rotation);
+        file << ", \"scale\": ";
+        writeVec3(object.localTransform.scale);
+        file << ", \"visible\": " << (object.visible ? "true" : "false")
+             << ", \"hasCollision\": " << (object.hasCollision ? "true" : "false")
+             << ", \"portalPlaceable\": "
+             << (object.portalPlaceable ? "true" : "false")
+             << ", \"layer\": " << static_cast<int>(object.layer)
+             << ", \"collisionShape\": "
+             << static_cast<int>(object.collisionShape)
+             << ", \"asset\": \"" << scene_asset_name(object.assetKind)
+             << "\", \"modelPath\": \""
+             << json_escape(object.modelPath) << "\"}";
+    }
+    file << "\n  ]\n}\n";
+    if (!file) {
+        fmt::print("Could not finish writing scene: {}\n", scenePath.string());
+        return false;
+    }
+
+    _sceneDirty = false;
+    std::ofstream lastSceneFile(LastEditorScenePath, std::ios::trunc);
+    if (lastSceneFile) {
+        lastSceneFile << _activeSceneFilename << '\n';
+    }
+    fmt::print("Saved editor scene: {}\n", scenePath.string());
+    return true;
+}
+
+bool VulkanEngine::save_editor_scene_as(std::string_view sceneName)
+{
+    const std::optional<std::string> filename = normalize_scene_filename(sceneName);
+    if (!filename.has_value()) {
+        fmt::print("Invalid scene filename: {}\n", sceneName);
+        return false;
+    }
+    const std::string previousFilename = _activeSceneFilename;
+    _activeSceneFilename = *filename;
+    if (save_editor_scene()) {
+        return true;
+    }
+    _activeSceneFilename = previousFilename;
+    return false;
+}
+
+void VulkanEngine::restore_last_editor_scene_name()
+{
+    std::ifstream lastSceneFile(LastEditorScenePath);
+    std::string filename;
+    if (!lastSceneFile || !std::getline(lastSceneFile, filename)) {
+        return;
+    }
+    const std::optional<std::string> normalized = normalize_scene_filename(filename);
+    if (normalized.has_value() && std::filesystem::exists(editor_scene_path(*normalized))) {
+        _activeSceneFilename = *normalized;
+    }
+}
+
+bool VulkanEngine::load_editor_scene()
+{
+    const std::filesystem::path scenePath = editor_scene_path(_activeSceneFilename);
+    if (!std::filesystem::exists(scenePath)) {
+        return false;
+    }
+
+    simdjson::padded_string json;
+    if (simdjson::padded_string::load(scenePath.string()).get(json)) {
+        fmt::print("Could not read editor scene: {}\n", scenePath.string());
+        return false;
+    }
+    simdjson::dom::parser parser;
+    simdjson::dom::element document;
+    if (parser.parse(json).get(document)) {
+        fmt::print("Could not parse editor scene JSON: {}\n", scenePath.string());
+        return false;
+    }
+
+    uint64_t version = 0;
+    simdjson::dom::array jsonObjects;
+    if (document["version"].get_uint64().get(version) ||
+        version != EditorSceneVersion ||
+        document["objects"].get_array().get(jsonObjects)) {
+        fmt::print("Unsupported editor scene: {}\n", scenePath.string());
+        return false;
+    }
+
+    uint64_t nextActor = 1;
+    document["nextActor"].get_uint64().get(nextActor);
+
+    std::vector<SavedSceneObject> savedObjects;
+    for (simdjson::dom::element jsonObjectElement : jsonObjects) {
+        simdjson::dom::object jsonObject;
+        SavedSceneObject saved{};
+        simdjson::dom::element position;
+        simdjson::dom::element rotation;
+        simdjson::dom::element scale;
+        std::string_view name;
+        std::string_view assetName;
+        std::string_view modelPath;
+        uint64_t id = 0;
+        int64_t parent = -1;
+        int64_t layer = 0;
+        int64_t collisionShape = 0;
+
+        if (jsonObjectElement.get_object().get(jsonObject) ||
+            jsonObject["id"].get_uint64().get(id) ||
+            jsonObject["parent"].get_int64().get(parent) ||
+            jsonObject["name"].get_string().get(name) ||
+            jsonObject["position"].get(position) ||
+            jsonObject["rotation"].get(rotation) ||
+            jsonObject["scale"].get(scale) ||
+            !read_json_vec3(position, saved.transform.position) ||
+            !read_json_vec3(rotation, saved.transform.rotation) ||
+            !read_json_vec3(scale, saved.transform.scale) ||
+            jsonObject["visible"].get_bool().get(saved.visible) ||
+            jsonObject["hasCollision"].get_bool().get(saved.hasCollision) ||
+            jsonObject["portalPlaceable"].get_bool().get(saved.portalPlaceable) ||
+            jsonObject["layer"].get_int64().get(layer) ||
+            jsonObject["collisionShape"].get_int64().get(collisionShape) ||
+            jsonObject["asset"].get_string().get(assetName)) {
+            fmt::print("Invalid object in editor scene: {}\n", scenePath.string());
+            return false;
+        }
+        const std::optional<SceneAssetKind> assetKind = scene_asset_from_name(assetName);
+        if (!assetKind.has_value() || layer < 0 || layer > 1 ||
+            collisionShape < 0 || collisionShape > 1) {
+            fmt::print("Unsupported object data in editor scene: {}\n", scenePath.string());
+            return false;
+        }
+        saved.oldID = static_cast<uint32_t>(id);
+        saved.oldParent = parent;
+        saved.name = name;
+        saved.layer = static_cast<RenderLayer>(layer);
+        saved.collisionShape = static_cast<CollisionShape>(collisionShape);
+        saved.assetKind = *assetKind;
+        if (saved.assetKind == SceneAssetKind::ImportedGLTF) {
+            if (jsonObject["modelPath"].get_string().get(modelPath) ||
+                modelPath.empty()) {
+                fmt::print("Missing model path in editor scene: {}\n", scenePath.string());
+                return false;
+            }
+            saved.modelPath = modelPath;
+        }
+        // Version 1 accidentally wrote Player Model even though its Player
+        // parent is runtime-only.  PortalViewOnly is reserved for that
+        // runtime graph, so ignore those stale entries and preserve the
+        // editor-authored objects in already-saved files.
+        if (saved.layer == RenderLayer::PortalViewOnly) {
+            continue;
+        }
+        savedObjects.push_back(std::move(saved));
+    }
+
+    if (savedObjects.empty()) {
+        fmt::print("Editor scene has no objects: {}\n", scenePath.string());
+        return false;
+    }
+
+    Scene restoredScene{};
+    std::unordered_map<uint32_t, SceneObjectID> restoredIDs;
+    for (const SavedSceneObject& saved : savedObjects) {
+        const SceneObjectID newID = restoredScene.create_object(saved.name);
+        restoredIDs.emplace(saved.oldID, newID);
+        SceneObject* object = restoredScene.get(newID);
+        object->localTransform = saved.transform;
+        object->visible = saved.visible;
+        object->hasCollision = saved.hasCollision;
+        object->portalPlaceable = saved.portalPlaceable;
+        object->layer = saved.layer;
+        object->collisionShape = saved.collisionShape;
+        object->assetKind = saved.assetKind;
+        object->modelPath = saved.modelPath;
+    }
+    for (const SavedSceneObject& saved : savedObjects) {
+        if (saved.oldParent < 0) {
+            continue;
+        }
+        const auto child = restoredIDs.find(saved.oldID);
+        const auto parent = restoredIDs.find(static_cast<uint32_t>(saved.oldParent));
+        if (child == restoredIDs.end() || parent == restoredIDs.end() ||
+            !restoredScene.set_parent(child->second, parent->second)) {
+            fmt::print("Invalid hierarchy in editor scene: {}\n", scenePath.string());
+            return false;
+        }
+    }
+
+    SceneObjectID restoredRoot = InvalidSceneObject;
+    SceneObjectID restoredFloor = InvalidSceneObject;
+    for (SceneObject& object : restoredScene.objects) {
+        if (object.parent == InvalidSceneObject && object.name == "Sandbox") {
+            restoredRoot = object.id;
+        }
+        if (object.assetKind == SceneAssetKind::FloorQuad) {
+            restoredFloor = object.id;
+        }
+    }
+    if (restoredRoot == InvalidSceneObject || restoredFloor == InvalidSceneObject) {
+        fmt::print("Editor scene is missing its Sandbox root or Floor: {}\n", scenePath.string());
+        return false;
+    }
+
+    _scene = std::move(restoredScene);
+    _sandboxRoot = restoredRoot;
+    _floorObject = restoredFloor;
+    for (SceneObject& object : _scene.objects) {
+        assign_scene_asset(object, object.assetKind);
+    }
+    create_runtime_scene_objects();
+    retract_portals();
+    _selectedSceneObject = InvalidSceneObject;
+    _nextCreatedActorNumber = static_cast<uint32_t>(std::max<uint64_t>(nextActor, 1));
+    _sceneDirty = false;
+    std::ofstream lastSceneFile(LastEditorScenePath, std::ios::trunc);
+    if (lastSceneFile) {
+        lastSceneFile << _activeSceneFilename << '\n';
+    }
+    rebuild_collision_from_scene();
+    fmt::print("Loaded editor scene: {}\n", scenePath.string());
+    return true;
+}
+
+bool VulkanEngine::load_editor_scene_named(std::string_view sceneName)
+{
+    const std::optional<std::string> filename = normalize_scene_filename(sceneName);
+    if (!filename.has_value()) {
+        return false;
+    }
+    const std::string previousFilename = _activeSceneFilename;
+    _activeSceneFilename = *filename;
+    if (load_editor_scene()) {
+        return true;
+    }
+    _activeSceneFilename = previousFilename;
+    return false;
 }
 
 void VulkanEngine::build_sandbox_scene()
@@ -2947,6 +4013,7 @@ void VulkanEngine::build_sandbox_scene()
     if (SceneObject* floor = _scene.get(_floorObject)) {
         floor->localTransform.scale = glm::vec3(50.0f, 1.0f, 50.0f);
         floor->primitive = floorPrimitive;
+        floor->assetKind = SceneAssetKind::FloorQuad;
         floor->hasCollision = true;
         floor->collisionShape = CollisionShape::GroundPlane;
     }
@@ -2977,6 +4044,7 @@ void VulkanEngine::build_sandbox_scene()
         wall->localTransform.position = description.position;
         wall->localTransform.scale = description.scale;
         wall->primitive = cubePrimitive;
+        wall->assetKind = SceneAssetKind::UnitCube;
         wall->hasCollision = true;
         wall->portalPlaceable = true;
     }

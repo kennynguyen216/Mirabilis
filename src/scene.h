@@ -57,6 +57,16 @@ enum class CollisionShape : uint8_t {
     GroundPlane,
 };
 
+// GPU buffers and material pointers are runtime-only.  This small identity is
+// what lets a saved scene reconstruct an object's engine-owned primitive when
+// it is loaded in a later session.
+enum class SceneAssetKind : uint8_t {
+    None,
+    FloorQuad,
+    UnitCube,
+    ImportedGLTF,
+};
+
 struct SceneObject {
     SceneObjectID id{InvalidSceneObject};
     std::string name;
@@ -74,11 +84,15 @@ struct SceneObject {
     bool portalPlaceable{false};
     RenderLayer layer{RenderLayer::World};
     CollisionShape collisionShape{CollisionShape::Box};
+    SceneAssetKind assetKind{SceneAssetKind::None};
     // Set for objects whose transform is written every frame by another
     // system (physics, portal placement).  The inspector shows them read-only.
     bool transformDrivenExternally{false};
 
     MeshPrimitive primitive{};
+    // Relative or absolute source path for an ImportedGLTF. The GPU resource
+    // itself is reconstructed through loadGltf when a scene is opened.
+    std::string modelPath;
     std::shared_ptr<LoadedGLTF> model;
 
     bool renderable() const { return primitive.valid() || model != nullptr; }
