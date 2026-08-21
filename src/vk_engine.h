@@ -61,6 +61,19 @@ struct PortalSkyPushConstants {
     glm::vec4 data2;
     // x = background effect index, y/z = render width/height.
     glm::vec4 settings;
+    // World-space camera axes.  The panorama is sampled from these directions,
+    // so it rotates as the camera rotates but never parallax-shifts when the
+    // camera changes position.
+    glm::vec4 cameraRight;
+    glm::vec4 cameraUp;
+    glm::vec4 cameraForward;
+};
+
+// The collider overlay has no vertex buffer or descriptors.  Its vertex
+// shader contains the 12 unit-cube edges and expands them with this matrix.
+struct ColliderDebugPushConstants {
+    glm::mat4 viewProjection;
+    glm::mat4 model;
 };
 
 struct EngineStats {
@@ -149,14 +162,20 @@ class VulkanEngine{
     
     VkPipelineLayout _gradientPipelineLayout;
     std::vector<ComputeEffect> backgroundEffects;
-    int currentBackgroundEffect{0};
+    // 0 remains the teaching gradient; start new sessions on the asset sky.
+    int currentBackgroundEffect{1};
     AllocatedImage _depthImage;
     AllocatedImage _whiteImage;
     AllocatedImage _blackImage;
     AllocatedImage _greyImage;
     AllocatedImage _errorCheckerboardImage;
+    // A single equirectangular (2:1) panorama used as the world skybox.
+    // It is sampled by the main compute background and portal sky pass.
+    AllocatedImage _skyboxImage;
     VkSampler _defaultSamplerLinear{};
     VkSampler _defaultSamplerNearest{};
+    VkSampler _skyboxSampler{};
+    VkDescriptorSet _skyboxDescriptor{};
     DrawContext mainDrawContext;
     DrawContext worldDrawContext;
     // The main camera is inside the player, so the proxy is added only to
@@ -253,8 +272,10 @@ class VulkanEngine{
             uint32_t recursiveStencilBit);
         void draw_portal_sky(
             VkCommandBuffer cmd,
+            const GPUSceneData& skyCamera,
             uint32_t stencilReference,
             uint32_t stencilCompareMask = 0xff);
+        void draw_collider_debug_bounds(VkCommandBuffer cmd);
         void draw_portal_views(VkCommandBuffer cmd);
         void draw_offscreen_portal_views(VkCommandBuffer cmd);
         void draw_geometry_to_portal_camera(
@@ -329,6 +350,7 @@ class VulkanEngine{
         bool _editorMode{false};
         bool _editorCameraLooking{false};
         bool _showDebugPanels{false};
+        bool _showColliderBounds{false};
         bool _resetEditorLayoutRequested{false};
         bool _sceneDirty{false};
         std::string _activeSceneFilename{"sandbox.json"};
@@ -374,6 +396,7 @@ class VulkanEngine{
         bool _portalRecursionEnabled{true};
         std::array<GPUSceneData, PortalViewCount> _portalSceneData{};
         MaterialPipeline _portalSkyPipeline;
+        MaterialPipeline _colliderDebugPipeline;
         // The sandbox level lives here: the floor, the boundary walls, the
         // portal test panels, and the player body all render and collide from
         // these objects.  Nothing about the level is hard-coded twice.

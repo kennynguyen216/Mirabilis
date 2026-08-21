@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "nextActor": 2,
+  "objects": [
+    {"id": 0, "parent": -1, "name": "Sandbox", "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1], "colliderCenter": [0, 0, 0], "colliderHalfExtents": [0.5, 0.5, 0.5], "visible": true, "hasCollision": false, "portalPlaceable": false, "layer": 0, "collisionShape": 0, "asset": "empty", "modelPath": ""},
+    {"id": 1, "parent": 0, "name": "Spawn Platform", "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [20, 1, 20], "colliderCenter": [0, 0, 0], "colliderHalfExtents": [0.5, 0.5, 0.5], "visible": true, "hasCollision": true, "portalPlaceable": false, "layer": 0, "collisionShape": 1, "asset": "floor", "modelPath": ""}
+  ]
+}

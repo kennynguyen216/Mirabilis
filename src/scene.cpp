@@ -135,12 +135,26 @@ glm::mat4 Scene::world_matrix(SceneObjectID id) const
 
 AABB collider_from_object(const Scene& scene, SceneObjectID id)
 {
+    const SceneObject* object = scene.get(id);
+    if (object == nullptr) {
+        return {};
+    }
+
     const glm::mat4 world = scene.world_matrix(id);
-    const glm::vec3 center{world[3]};
+    const glm::vec3 center = glm::vec3(
+        world * glm::vec4(object->colliderCenter, 1.0f));
+    const glm::vec3 localHalfExtents = glm::max(
+        object->colliderHalfExtents, glm::vec3(0.001f));
+
+    // Each world basis column describes one local axis after scale/rotation.
+    // Taking absolute values gives the enclosing axis-aligned half extents.
+    const glm::vec3 axisX = glm::abs(glm::vec3(world[0]));
+    const glm::vec3 axisY = glm::abs(glm::vec3(world[1]));
+    const glm::vec3 axisZ = glm::abs(glm::vec3(world[2]));
     const glm::vec3 halfExtents{
-        glm::length(glm::vec3(world[0])) * 0.5f,
-        glm::length(glm::vec3(world[1])) * 0.5f,
-        glm::length(glm::vec3(world[2])) * 0.5f};
+        axisX.x * localHalfExtents.x + axisY.x * localHalfExtents.y + axisZ.x * localHalfExtents.z,
+        axisX.y * localHalfExtents.x + axisY.y * localHalfExtents.y + axisZ.y * localHalfExtents.z,
+        axisX.z * localHalfExtents.x + axisY.z * localHalfExtents.y + axisZ.z * localHalfExtents.z};
 
     return {
         .min = center - halfExtents,

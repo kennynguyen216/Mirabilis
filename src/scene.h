@@ -50,8 +50,9 @@ enum class RenderLayer : uint8_t {
     PortalViewOnly,
 };
 
-// Version 1 supports two collider kinds, both derived from the object's own
-// world transform so a moved wall moves its collision with it.
+// Version 1 supports two collider kinds.  A Box has an editable local center
+// and half extents; both are transformed into a world-space AABB for the
+// current simple player solver.
 enum class CollisionShape : uint8_t {
     Box,
     GroundPlane,
@@ -84,6 +85,10 @@ struct SceneObject {
     bool portalPlaceable{false};
     RenderLayer layer{RenderLayer::World};
     CollisionShape collisionShape{CollisionShape::Box};
+    // Local-space box collider data.  The default describes the engine's
+    // unit cube, so existing cube walls keep exactly the same collision.
+    glm::vec3 colliderCenter{0.0f};
+    glm::vec3 colliderHalfExtents{0.5f};
     SceneAssetKind assetKind{SceneAssetKind::None};
     // Set for objects whose transform is written every frame by another
     // system (physics, portal placement).  The inspector shows them read-only.
@@ -114,8 +119,7 @@ struct Scene {
     glm::mat4 world_matrix(SceneObjectID id) const;
 };
 
-// Axis-aligned collider taken from the same world matrix used to render the
-// object.  Rotated objects are not supported yet: the box is built from the
-// world translation and the world scale, so a rotated wall would collide as
-// if it were unrotated.
+// Axis-aligned broad-phase collider taken from the same world matrix used to
+// render the object.  A rotated box becomes the AABB enclosing it, which is
+// safe for this solver but not yet exact oriented-box collision.
 AABB collider_from_object(const Scene& scene, SceneObjectID id);

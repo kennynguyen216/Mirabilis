@@ -26,6 +26,7 @@
 #include <glm/vec2.hpp>
 #include <algorithm>
 #include <simdjson.h>
+#include <stb_image.h>
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -71,6 +72,8 @@ struct SavedSceneObject {
     bool portalPlaceable{false};
     RenderLayer layer{RenderLayer::World};
     CollisionShape collisionShape{CollisionShape::Box};
+    glm::vec3 colliderCenter{0.0f};
+    glm::vec3 colliderHalfExtents{0.5f};
     SceneAssetKind assetKind{SceneAssetKind::None};
     std::string modelPath;
 };
@@ -838,6 +841,13 @@ void VulkanEngine::draw(float deltaTime)
     }
 	stats.portal_drawcall_count = stats.drawcall_count - stats.world_drawcall_count;
 
+    // Collider bounds are an editor-only overlay.  They are intentionally
+    // drawn after portal composition, so they never affect playable portal
+    // views or the saved scene itself.
+    if (_editorMode && _showColliderBounds) {
+        draw_collider_debug_bounds(cmd);
+    }
+
 	// transition the draw image and the swapchain image into their correct transfer layouts
 	vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -1395,6 +1405,9 @@ void VulkanEngine::init_descriptors()
     {
         DescriptorLayoutBuilder builder;
         builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        // The gradient shader ignores this binding, while the panorama sky
+        // shader samples it as a regular 2D equirectangular texture.
+        builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         _drawImageDescriptorLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
     }
 
@@ -1824,7 +1837,7 @@ void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
     constexpr uint32_t BlueRecursiveStencil = BluePrimaryStencil | BlueRecursiveBit;
     constexpr uint32_t OrangeRecursiveStencil = OrangePrimaryStencil | OrangeRecursiveBit;
 
-    draw_portal_sky(cmd, BluePrimaryStencil);
+    draw_portal_sky(cmd, _portalSceneData[BluePortalView], BluePrimaryStencil);
     draw_geometry(
         cmd,
         portalViewDrawContext,
@@ -1843,7 +1856,11 @@ void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
             BluePrimaryStencil,
             BlueRecursiveStencil,
             BlueRecursiveBit);
-        draw_portal_sky(cmd, BlueRecursiveStencil, BlueRecursiveStencil);
+        draw_portal_sky(
+            cmd,
+            _portalSceneData[BluePortalRecursiveView],
+            BlueRecursiveStencil,
+            BlueRecursiveStencil);
         draw_geometry(
             cmd,
             portalViewDrawContext,
@@ -1856,7 +1873,7 @@ void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
             BlueRecursiveStencil);
     }
 
-    draw_portal_sky(cmd, OrangePrimaryStencil);
+    draw_portal_sky(cmd, _portalSceneData[OrangePortalView], OrangePrimaryStencil);
     draw_geometry(
         cmd,
         portalViewDrawContext,
@@ -1875,7 +1892,11 @@ void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
             OrangePrimaryStencil,
             OrangeRecursiveStencil,
             OrangeRecursiveBit);
-        draw_portal_sky(cmd, OrangeRecursiveStencil, OrangeRecursiveStencil);
+        draw_portal_sky(
+            cmd,
+            _portalSceneData[OrangePortalRecursiveView],
+            OrangeRecursiveStencil,
+            OrangeRecursiveStencil);
         draw_geometry(
             cmd,
             portalViewDrawContext,
@@ -2043,6 +2064,7 @@ void VulkanEngine::draw_offscreen_portal_views(VkCommandBuffer cmd)
 
 void VulkanEngine::draw_portal_sky(
     VkCommandBuffer cmd,
+    const GPUSceneData& skyCamera,
     uint32_t stencilReference,
     uint32_t stencilCompareMask)
 {
@@ -2074,6 +2096,15 @@ void VulkanEngine::draw_portal_sky(
         cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
     vkCmdBindPipeline(
         cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _portalSkyPipeline.pipeline);
+    vkCmdBindDescriptorSets(
+        cmd,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        _portalSkyPipeline.layout,
+        0,
+        1,
+        &_skyboxDescriptor,
+        0,
+        nullptr);
     const ComputePushConstants& backgroundData =
         backgroundEffects[currentBackgroundEffect].data;
     PortalSkyPushConstants pushConstants{};
@@ -2084,6 +2115,13 @@ void VulkanEngine::draw_portal_sky(
         static_cast<float>(_drawExtent.width),
         static_cast<float>(_drawExtent.height),
         0.0f);
+    // The inverse view matrix is the camera's world transform.  Its first
+    // two columns are right/up; local -Z is the camera's forward direction.
+    const glm::mat4 cameraWorld = glm::inverse(skyCamera.view);
+    pushConstants.cameraRight = glm::vec4(glm::normalize(glm::vec3(cameraWorld[0])), 0.0f);
+    pushConstants.cameraUp = glm::vec4(glm::normalize(glm::vec3(cameraWorld[1])), 0.0f);
+    pushConstants.cameraForward = glm::vec4(
+        glm::normalize(-glm::vec3(cameraWorld[2])), 0.0f);
     vkCmdPushConstants(
         cmd,
         _portalSkyPipeline.layout,
@@ -2092,6 +2130,63 @@ void VulkanEngine::draw_portal_sky(
         sizeof(PortalSkyPushConstants),
         &pushConstants);
     vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRendering(cmd);
+}
+
+void VulkanEngine::draw_collider_debug_bounds(VkCommandBuffer cmd)
+{
+    VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
+        _drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
+        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
+    VkRenderingInfo renderInfo = vkinit::rendering_info(
+        _drawExtent, &colorAttachment, &depthAttachment);
+    renderInfo.pStencilAttachment = &stencilAttachment;
+
+    vkCmdBeginRendering(cmd, &renderInfo);
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(_drawExtent.width);
+    viewport.height = static_cast<float>(_drawExtent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    VkRect2D scissor{};
+    scissor.extent = _drawExtent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    vkCmdBindPipeline(
+        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _colliderDebugPipeline.pipeline);
+    for (const SceneObject& object : _scene.objects) {
+        if (!object.alive || !object.hasCollision ||
+            object.collisionShape != CollisionShape::Box) {
+            continue;
+        }
+
+        // Draw the final world AABB used by physics—not merely the object's
+        // local box—so a rotated object still shows the conservative bounds
+        // the player and portal raycast actually use.
+        const AABB collider = collider_from_object(_scene, object.id);
+        const glm::vec3 center = (collider.min + collider.max) * 0.5f;
+        const glm::vec3 fullExtents = (collider.max - collider.min) * 1.005f;
+        const glm::mat4 colliderTransform = glm::translate(
+            glm::mat4(1.0f), center) * glm::scale(
+            glm::mat4(1.0f), fullExtents);
+
+        ColliderDebugPushConstants pushConstants{};
+        pushConstants.viewProjection = sceneData.viewproj;
+        pushConstants.model = colliderTransform;
+        vkCmdPushConstants(
+            cmd,
+            _colliderDebugPipeline.layout,
+            VK_SHADER_STAGE_VERTEX_BIT,
+            0,
+            sizeof(ColliderDebugPushConstants),
+            &pushConstants);
+        vkCmdDraw(cmd, 24, 1, 0, 0);
+        ++stats.drawcall_count;
+    }
     vkCmdEndRendering(cmd);
 }
 
@@ -2144,6 +2239,8 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     VkShaderModule portalCompositeFragmentShader = VK_NULL_HANDLE;
     VkShaderModule portalSkyVertexShader = VK_NULL_HANDLE;
     VkShaderModule portalSkyFragmentShader = VK_NULL_HANDLE;
+    VkShaderModule colliderDebugVertexShader = VK_NULL_HANDLE;
+    VkShaderModule colliderDebugFragmentShader = VK_NULL_HANDLE;
     if (!vkutil::load_shader_module("../../shaders/mesh.frag.spv", engine->_device, &fragmentShader) ||
         !vkutil::load_shader_module("../../shaders/mesh.vert.spv", engine->_device, &vertexShader) ||
         !vkutil::load_shader_module("../../shaders/portal_mask.vert.spv", engine->_device, &portalMaskVertexShader) ||
@@ -2151,7 +2248,9 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
         !vkutil::load_shader_module("../../shaders/portal_view.frag.spv", engine->_device, &portalViewFragmentShader) ||
         !vkutil::load_shader_module("../../shaders/portal_composite.frag.spv", engine->_device, &portalCompositeFragmentShader) ||
         !vkutil::load_shader_module("../../shaders/portal_sky.vert.spv", engine->_device, &portalSkyVertexShader) ||
-        !vkutil::load_shader_module("../../shaders/portal_sky.frag.spv", engine->_device, &portalSkyFragmentShader)) {
+        !vkutil::load_shader_module("../../shaders/portal_sky.frag.spv", engine->_device, &portalSkyFragmentShader) ||
+        !vkutil::load_shader_module("../../shaders/collider_debug.vert.spv", engine->_device, &colliderDebugVertexShader) ||
+        !vkutil::load_shader_module("../../shaders/collider_debug.frag.spv", engine->_device, &colliderDebugFragmentShader)) {
         fmt::print("Error loading material shaders\n");
         if (fragmentShader != VK_NULL_HANDLE) {
             vkDestroyShaderModule(engine->_device, fragmentShader, nullptr);
@@ -2176,6 +2275,12 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
         }
         if (portalSkyFragmentShader != VK_NULL_HANDLE) {
             vkDestroyShaderModule(engine->_device, portalSkyFragmentShader, nullptr);
+        }
+        if (colliderDebugVertexShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(engine->_device, colliderDebugVertexShader, nullptr);
+        }
+        if (colliderDebugFragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(engine->_device, colliderDebugFragmentShader, nullptr);
         }
         return;
     }
@@ -2275,6 +2380,8 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     portalOffscreenPipeline.pipeline = builder.build_pipeline(engine->_device);
 
     VkPipelineLayoutCreateInfo portalSkyLayoutInfo = vkinit::pipeline_layout_create_info();
+    portalSkyLayoutInfo.setLayoutCount = 1;
+    portalSkyLayoutInfo.pSetLayouts = &engine->_singleImageDescriptorLayout;
     VkPushConstantRange portalSkyRange{
         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
@@ -2303,6 +2410,37 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     skyBuilder.set_stencil_format(engine->_depthImage.imageFormat);
     engine->_portalSkyPipeline.pipeline = skyBuilder.build_pipeline(engine->_device);
 
+    VkPipelineLayoutCreateInfo colliderDebugLayoutInfo =
+        vkinit::pipeline_layout_create_info();
+    VkPushConstantRange colliderDebugRange{
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = sizeof(ColliderDebugPushConstants),
+    };
+    colliderDebugLayoutInfo.pushConstantRangeCount = 1;
+    colliderDebugLayoutInfo.pPushConstantRanges = &colliderDebugRange;
+    VK_CHECK(vkCreatePipelineLayout(
+        engine->_device,
+        &colliderDebugLayoutInfo,
+        nullptr,
+        &engine->_colliderDebugPipeline.layout));
+
+    PipelineBuilder colliderDebugBuilder;
+    colliderDebugBuilder._pipelineLayout = engine->_colliderDebugPipeline.layout;
+    colliderDebugBuilder.set_shaders(
+        colliderDebugVertexShader, colliderDebugFragmentShader);
+    colliderDebugBuilder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_LINE_LIST);
+    colliderDebugBuilder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    colliderDebugBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    colliderDebugBuilder.set_multisampling_none();
+    colliderDebugBuilder.disable_blending();
+    colliderDebugBuilder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    colliderDebugBuilder.set_color_attachment_format(engine->_drawImage.imageFormat);
+    colliderDebugBuilder.set_depth_format(engine->_depthImage.imageFormat);
+    colliderDebugBuilder.set_stencil_format(engine->_depthImage.imageFormat);
+    engine->_colliderDebugPipeline.pipeline =
+        colliderDebugBuilder.build_pipeline(engine->_device);
+
     vkDestroyShaderModule(engine->_device, fragmentShader, nullptr);
     vkDestroyShaderModule(engine->_device, vertexShader, nullptr);
     vkDestroyShaderModule(engine->_device, portalMaskVertexShader, nullptr);
@@ -2311,6 +2449,8 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     vkDestroyShaderModule(engine->_device, portalCompositeFragmentShader, nullptr);
     vkDestroyShaderModule(engine->_device, portalSkyVertexShader, nullptr);
     vkDestroyShaderModule(engine->_device, portalSkyFragmentShader, nullptr);
+    vkDestroyShaderModule(engine->_device, colliderDebugVertexShader, nullptr);
+    vkDestroyShaderModule(engine->_device, colliderDebugFragmentShader, nullptr);
 
     engine->_mainDeletionQueue.push_function([this, engine]() {
         vkDestroyPipeline(engine->_device, opaquePipeline.pipeline, nullptr);
@@ -2322,8 +2462,10 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
         vkDestroyPipeline(engine->_device, portalOffscreenPipeline.pipeline, nullptr);
         vkDestroyPipeline(engine->_device, portalCompositePipeline.pipeline, nullptr);
         vkDestroyPipeline(engine->_device, engine->_portalSkyPipeline.pipeline, nullptr);
+        vkDestroyPipeline(engine->_device, engine->_colliderDebugPipeline.pipeline, nullptr);
         vkDestroyPipelineLayout(engine->_device, opaquePipeline.layout, nullptr);
         vkDestroyPipelineLayout(engine->_device, engine->_portalSkyPipeline.layout, nullptr);
+        vkDestroyPipelineLayout(engine->_device, engine->_colliderDebugPipeline.layout, nullptr);
         vkDestroyDescriptorSetLayout(engine->_device, materialLayout, nullptr);
     });
 }
@@ -2713,6 +2855,77 @@ void VulkanEngine::init_default_data()
     samplerInfo.magFilter = VK_FILTER_LINEAR;
     samplerInfo.minFilter = VK_FILTER_LINEAR;
     VK_CHECK(vkCreateSampler(_device, &samplerInfo, nullptr, &_defaultSamplerLinear));
+
+    // The supplied asset is a 2:1 equirectangular panorama.  Horizontal
+    // wrapping joins its left/right edges; clamping vertically avoids pulling
+    // texels from the opposite pole when looking straight up or down.
+    VkSamplerCreateInfo skyboxSamplerInfo{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    skyboxSamplerInfo.magFilter = VK_FILTER_LINEAR;
+    skyboxSamplerInfo.minFilter = VK_FILTER_LINEAR;
+    skyboxSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    skyboxSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    skyboxSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    skyboxSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    skyboxSamplerInfo.maxLod = 0.0f;
+    VK_CHECK(vkCreateSampler(_device, &skyboxSamplerInfo, nullptr, &_skyboxSampler));
+
+    constexpr const char* SkyboxPath = "../../assets/textures/skybox.png";
+    int skyboxWidth = 0;
+    int skyboxHeight = 0;
+    int skyboxChannels = 0;
+    stbi_uc* skyboxPixels = stbi_load(
+        SkyboxPath,
+        &skyboxWidth,
+        &skyboxHeight,
+        &skyboxChannels,
+        STBI_rgb_alpha);
+    if (skyboxPixels != nullptr) {
+        _skyboxImage = create_image(
+            skyboxPixels,
+            {static_cast<uint32_t>(skyboxWidth),
+             static_cast<uint32_t>(skyboxHeight),
+             1},
+            VK_FORMAT_R8G8B8A8_SRGB,
+            VK_IMAGE_USAGE_SAMPLED_BIT);
+        stbi_image_free(skyboxPixels);
+        fmt::print("Loaded equirectangular skybox: {} ({}x{})\n",
+                   SkyboxPath, skyboxWidth, skyboxHeight);
+    } else {
+        // Keep the descriptor valid even if an asset is missing on another
+        // machine.  The log tells the developer why the sky is plain blue.
+        fmt::print("Failed to load skybox {}: {}\n",
+                   SkyboxPath,
+                   stbi_failure_reason() != nullptr ? stbi_failure_reason() : "unknown");
+        const uint32_t fallbackSky = glm::packUnorm4x8(glm::vec4(0.25f, 0.45f, 0.75f, 1.0f));
+        _skyboxImage = create_image(
+            const_cast<uint32_t*>(&fallbackSky),
+            {1, 1, 1},
+            VK_FORMAT_R8G8B8A8_SRGB,
+            VK_IMAGE_USAGE_SAMPLED_BIT);
+    }
+
+    // The compute background needs the panorama at binding 1.  The portal
+    // graphics pass uses its own single-image descriptor at set 0.
+    DescriptorWriter skyboxWriter;
+    skyboxWriter.write_image(
+        1,
+        _skyboxImage.imageView,
+        _skyboxSampler,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    skyboxWriter.update_set(_device, _drawImageDescriptors);
+
+    _skyboxDescriptor = globalDescriptorAllocator.allocate(
+        _device, _singleImageDescriptorLayout);
+    skyboxWriter.clear();
+    skyboxWriter.write_image(
+        0,
+        _skyboxImage.imageView,
+        _skyboxSampler,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    skyboxWriter.update_set(_device, _skyboxDescriptor);
     
     _floorMaterialBuffer = create_buffer(
     sizeof(GLTFMetallic_Roughness::MaterialConstants),
@@ -2860,8 +3073,10 @@ void VulkanEngine::init_default_data()
         destroy_buffer(_floorMaterialBuffer);
         destroy_buffer(_floorMesh.vertexBuffer);
         destroy_buffer(_floorMesh.indexBuffer);
+        vkDestroySampler(_device, _skyboxSampler, nullptr);
         vkDestroySampler(_device, _defaultSamplerNearest, nullptr);
         vkDestroySampler(_device, _defaultSamplerLinear, nullptr);
+        destroy_image(_skyboxImage);
         destroy_image(_whiteImage);
         destroy_image(_greyImage);
         destroy_image(_blackImage);
@@ -3062,6 +3277,24 @@ void VulkanEngine::draw_inspector_panel()
             changed |= ImGui::Checkbox("Visible", &object->visible);
             changed |= ImGui::Checkbox("Has Collision", &object->hasCollision);
             changed |= ImGui::Checkbox("Portal Placeable", &object->portalPlaceable);
+            if (object->hasCollision &&
+                object->collisionShape == CollisionShape::Box) {
+                ImGui::SeparatorText("Box Collider");
+                changed |= ImGui::DragFloat3(
+                    "Center", &object->colliderCenter.x, 0.05f);
+                if (ImGui::DragFloat3(
+                        "Half Extents",
+                        &object->colliderHalfExtents.x,
+                        0.05f,
+                        0.01f,
+                        1000.0f)) {
+                    object->colliderHalfExtents = glm::max(
+                        object->colliderHalfExtents, glm::vec3(0.01f));
+                    changed = true;
+                }
+                ImGui::TextDisabled(
+                    "Center/size are local to this actor. Full size = half extents x 2.");
+            }
             if (changed && !driven) {
                 _sceneDirty = true;
                 rebuild_collision_from_scene();
@@ -3377,6 +3610,18 @@ void VulkanEngine::draw_editor_menu()
         ImGui::EndMenu();
     }
 
+    if (ImGui::BeginMenu("View")) {
+        ImGui::MenuItem(
+            "Show Collider Bounds",
+            nullptr,
+            &_showColliderBounds,
+            _editorMode);
+        if (!_editorMode) {
+            ImGui::TextDisabled("Enter Edit Mode to show collider bounds.");
+        }
+        ImGui::EndMenu();
+    }
+
     ImGui::Separator();
     if (ImGui::Button("Play")) {
         set_editor_mode(false);
@@ -3513,6 +3758,8 @@ bool VulkanEngine::duplicate_selected_scene_object()
     duplicate->portalPlaceable = source->portalPlaceable;
     duplicate->layer = source->layer;
     duplicate->collisionShape = source->collisionShape;
+    duplicate->colliderCenter = source->colliderCenter;
+    duplicate->colliderHalfExtents = source->colliderHalfExtents;
     duplicate->modelPath = source->modelPath;
     if (source->assetKind == SceneAssetKind::ImportedGLTF) {
         // Instances of the same imported scene can share its loaded GPU data.
@@ -3756,6 +4003,10 @@ bool VulkanEngine::save_editor_scene()
         writeVec3(object.localTransform.rotation);
         file << ", \"scale\": ";
         writeVec3(object.localTransform.scale);
+        file << ", \"colliderCenter\": ";
+        writeVec3(object.colliderCenter);
+        file << ", \"colliderHalfExtents\": ";
+        writeVec3(object.colliderHalfExtents);
         file << ", \"visible\": " << (object.visible ? "true" : "false")
              << ", \"hasCollision\": " << (object.hasCollision ? "true" : "false")
              << ", \"portalPlaceable\": "
@@ -3849,6 +4100,8 @@ bool VulkanEngine::load_editor_scene()
         simdjson::dom::element position;
         simdjson::dom::element rotation;
         simdjson::dom::element scale;
+        simdjson::dom::element colliderCenter;
+        simdjson::dom::element colliderHalfExtents;
         std::string_view name;
         std::string_view assetName;
         std::string_view modelPath;
@@ -3888,6 +4141,24 @@ bool VulkanEngine::load_editor_scene()
         saved.layer = static_cast<RenderLayer>(layer);
         saved.collisionShape = static_cast<CollisionShape>(collisionShape);
         saved.assetKind = *assetKind;
+
+        // Collider fields were added after the first saved scenes.  Missing
+        // values deliberately use the unit-cube defaults, so old levels load
+        // with exactly their original collision behaviour.
+        const bool hasColliderCenter =
+            jsonObject["colliderCenter"].get(colliderCenter) == simdjson::SUCCESS;
+        const bool hasColliderHalfExtents =
+            jsonObject["colliderHalfExtents"].get(colliderHalfExtents) == simdjson::SUCCESS;
+        if (hasColliderCenter != hasColliderHalfExtents ||
+            (hasColliderCenter &&
+             (!read_json_vec3(colliderCenter, saved.colliderCenter) ||
+              !read_json_vec3(colliderHalfExtents, saved.colliderHalfExtents))) ||
+            saved.colliderHalfExtents.x <= 0.0f ||
+            saved.colliderHalfExtents.y <= 0.0f ||
+            saved.colliderHalfExtents.z <= 0.0f) {
+            fmt::print("Invalid box collider in editor scene: {}\n", scenePath.string());
+            return false;
+        }
         if (saved.assetKind == SceneAssetKind::ImportedGLTF) {
             if (jsonObject["modelPath"].get_string().get(modelPath) ||
                 modelPath.empty()) {
@@ -3923,6 +4194,8 @@ bool VulkanEngine::load_editor_scene()
         object->portalPlaceable = saved.portalPlaceable;
         object->layer = saved.layer;
         object->collisionShape = saved.collisionShape;
+        object->colliderCenter = saved.colliderCenter;
+        object->colliderHalfExtents = saved.colliderHalfExtents;
         object->assetKind = saved.assetKind;
         object->modelPath = saved.modelPath;
     }
@@ -4162,6 +4435,23 @@ void VulkanEngine::update_scene(float deltaTime)
     const auto startTime = std::chrono::steady_clock::now();
     mainCamera.position = _playerMovement.position + glm::vec3(0.0f, 1.7f, 0.0f);
     const Camera& camera = render_camera();
+
+    // The main compute dispatch runs after update_scene().  Feed it the
+    // active camera's orientation here; translation intentionally never
+    // reaches the skybox shader, preventing parallax while walking.
+    if (backgroundEffects.size() > 1) {
+        const glm::mat4 rotation = camera.getRotationMatrix();
+        ComputeEffect& sky = backgroundEffects[1];
+        sky.data.data2 = glm::vec4(
+            glm::normalize(glm::vec3(rotation * glm::vec4(1.0f, 0.0f, 0.0f, 0.0f))),
+            0.0f);
+        sky.data.data3 = glm::vec4(
+            glm::normalize(glm::vec3(rotation * glm::vec4(0.0f, 1.0f, 0.0f, 0.0f))),
+            0.0f);
+        sky.data.data4 = glm::vec4(
+            glm::normalize(glm::vec3(rotation * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f))),
+            0.0f);
+    }
 
     mainDrawContext.OpaqueSurfaces.clear();
     mainDrawContext.TransparentSurfaces.clear();
