@@ -310,6 +310,9 @@ class VulkanEngine{
         void init_imgui();
         void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
         void update_physics(float deltaTime);
+        void update_time_trial(float deltaTime);
+        void reset_time_trial();
+        bool apply_scene_spawn_point();
         bool try_traverse_portal(
             const Portal& source,
             const Portal& destination,
@@ -337,7 +340,8 @@ class VulkanEngine{
             const char* baseName,
             SceneAssetKind assetKind,
             bool collidable,
-            bool portalPlaceable = false);
+            bool portalPlaceable = false,
+            TimeTrialRole timeTrialRole = TimeTrialRole::None);
         SceneObjectID import_gltf_actor(std::string_view modelPath);
         void set_mouse_capture(bool captured);
         void set_editor_mode(bool enabled);
@@ -365,6 +369,12 @@ class VulkanEngine{
         float _scaleSnap{0.1f};
         float _portalTraversalCooldown{0.0f};
         float _physicsAccumulator{0.0f};
+        float _timeTrialSeconds{0.0f};
+        float _timeTrialBestSeconds{-1.0f};
+        bool _timeTrialRunning{false};
+        bool _timeTrialFinished{false};
+        bool _playerInsideStartTrigger{false};
+        bool _playerInsideFinishTrigger{false};
         static constexpr float PhysicsDt = 1.0f / 120.0f;
         static constexpr int MaxPhysicsSteps = 8;
 

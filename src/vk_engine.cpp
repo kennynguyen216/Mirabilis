@@ -75,6 +75,7 @@ struct SavedSceneObject {
     glm::vec3 colliderCenter{0.0f};
     glm::vec3 colliderHalfExtents{0.5f};
     SceneAssetKind assetKind{SceneAssetKind::None};
+    TimeTrialRole timeTrialRole{TimeTrialRole::None};
     std::string modelPath;
 };
 
@@ -97,6 +98,26 @@ std::optional<SceneAssetKind> scene_asset_from_name(std::string_view name)
     if (name == "ramp") return SceneAssetKind::SurfRamp;
     if (name == "gltf") return SceneAssetKind::ImportedGLTF;
     if (name == "empty") return SceneAssetKind::None;
+    return std::nullopt;
+}
+
+const char* time_trial_role_name(TimeTrialRole role)
+{
+    switch (role) {
+    case TimeTrialRole::SpawnPoint: return "spawn";
+    case TimeTrialRole::StartTrigger: return "start";
+    case TimeTrialRole::FinishTrigger: return "finish";
+    case TimeTrialRole::None: return "none";
+    }
+    return "none";
+}
+
+std::optional<TimeTrialRole> time_trial_role_from_name(std::string_view name)
+{
+    if (name == "spawn") return TimeTrialRole::SpawnPoint;
+    if (name == "start") return TimeTrialRole::StartTrigger;
+    if (name == "finish") return TimeTrialRole::FinishTrigger;
+    if (name == "none") return TimeTrialRole::None;
     return std::nullopt;
 }
 
@@ -313,6 +334,8 @@ void VulkanEngine::init()
     init_default_data();
     init_imgui();
 
+    apply_scene_spawn_point();
+
     mainCamera.velocity = glm::vec3(0.0f);
     //mainCamera.position = glm::vec3(30.0f, 0.0f, -85.0f);
     //mainCamera.pitch = 0.0f;
@@ -334,6 +357,10 @@ void VulkanEngine::init()
 
 void VulkanEngine::update_physics(float deltaTime)
 {
+    // Keep the respawn target scene-authored. This happens before integrate()
+    // because integrate() owns the fall-reset check.
+    apply_scene_spawn_point();
+
     const glm::vec3 previousPosition = _playerMovement.position;
     _playerMovement.integrate(_playerInput, deltaTime);
 
@@ -349,7 +376,86 @@ void VulkanEngine::update_physics(float deltaTime)
     rebuild_collision_from_scene();
     _playerMovement.resolve_world_collision(
         _activeWallColliders, _activeGroundPlanes, _activeSurfRamps);
+    update_time_trial(deltaTime);
     _playerInput.jumpPressed = false;
+}
+
+bool VulkanEngine::apply_scene_spawn_point()
+{
+    for (const SceneObject& object : _scene.objects) {
+        if (object.alive && object.timeTrialRole == TimeTrialRole::SpawnPoint) {
+            _playerMovement.settings.spawnPosition = glm::vec3(
+                _scene.world_matrix(object.id)[3]);
+            return true;
+        }
+    }
+    return false;
+}
+
+void VulkanEngine::reset_time_trial()
+{
+    _timeTrialSeconds = 0.0f;
+    _timeTrialRunning = false;
+    _timeTrialFinished = false;
+    // Treat the next overlap as a fresh entry. This makes the editor's Reset
+    // button useful even when the player is currently standing in the start
+    // volume.
+    _playerInsideStartTrigger = false;
+    _playerInsideFinishTrigger = false;
+}
+
+void VulkanEngine::update_time_trial(float deltaTime)
+{
+    const float playerHalfWidth = _playerMovement.settings.playerHalfWidth;
+    const glm::vec3 playerMin = _playerMovement.position - glm::vec3(
+        playerHalfWidth, 0.0f, playerHalfWidth);
+    const glm::vec3 playerMax = _playerMovement.position + glm::vec3(
+        playerHalfWidth,
+        _playerMovement.settings.playerHeight,
+        playerHalfWidth);
+    const auto overlaps_player = [&](const AABB& volume) {
+        return playerMin.x <= volume.max.x && playerMax.x >= volume.min.x &&
+            playerMin.y <= volume.max.y && playerMax.y >= volume.min.y &&
+            playerMin.z <= volume.max.z && playerMax.z >= volume.min.z;
+    };
+
+    bool insideStart = false;
+    bool insideFinish = false;
+    for (const SceneObject& object : _scene.objects) {
+        if (!object.alive) {
+            continue;
+        }
+        if (object.timeTrialRole == TimeTrialRole::StartTrigger &&
+            overlaps_player(collider_from_object(_scene, object.id))) {
+            insideStart = true;
+        }
+        if (object.timeTrialRole == TimeTrialRole::FinishTrigger &&
+            overlaps_player(collider_from_object(_scene, object.id))) {
+            insideFinish = true;
+        }
+    }
+
+    if (insideStart && !_playerInsideStartTrigger) {
+        _timeTrialSeconds = 0.0f;
+        _timeTrialRunning = true;
+        _timeTrialFinished = false;
+    }
+
+    if (_timeTrialRunning) {
+        _timeTrialSeconds += deltaTime;
+    }
+
+    if (insideFinish && !_playerInsideFinishTrigger && _timeTrialRunning) {
+        _timeTrialRunning = false;
+        _timeTrialFinished = true;
+        if (_timeTrialBestSeconds < 0.0f ||
+            _timeTrialSeconds < _timeTrialBestSeconds) {
+            _timeTrialBestSeconds = _timeTrialSeconds;
+        }
+    }
+
+    _playerInsideStartTrigger = insideStart;
+    _playerInsideFinishTrigger = insideFinish;
 }
 
 bool VulkanEngine::try_traverse_portal(
@@ -551,6 +657,8 @@ void VulkanEngine::set_editor_mode(bool enabled)
     _editorMode = enabled;
     _editorCameraLooking = false;
     _physicsAccumulator = 0.0f;
+    _playerInsideStartTrigger = false;
+    _playerInsideFinishTrigger = false;
 
     if (enabled) {
         // Start where the player was looking, then let the editor camera move
@@ -562,6 +670,11 @@ void VulkanEngine::set_editor_mode(bool enabled)
         set_mouse_capture(false);
     } else {
         _editorCamera.velocity = glm::vec3(0.0f);
+        apply_scene_spawn_point();
+        _playerMovement.position = _playerMovement.settings.spawnPosition;
+        _playerMovement.velocity = glm::vec3(0.0f);
+        _playerMovement.grounded = false;
+        reset_time_trial();
         set_mouse_capture(true);
     }
 }
@@ -1226,6 +1339,33 @@ void VulkanEngine::run(){
                 ImVec2(18.0f, ImGui::GetIO().DisplaySize.y - 56.0f),
                 IM_COL32(150, 165, 185, 210),
                 "LMB Blue  |  RMB Orange  |  R Retract");
+
+            const char* timerState = _timeTrialRunning
+                ? "RUNNING"
+                : (_timeTrialFinished ? "FINISHED" : "READY");
+            const std::string timerLabel = fmt::format(
+                "{}  {:02}:{:06.3f}",
+                timerState,
+                static_cast<int>(_timeTrialSeconds / 60.0f),
+                std::fmod(_timeTrialSeconds, 60.0f));
+            const ImVec2 timerSize = ImGui::CalcTextSize(timerLabel.c_str());
+            crosshair->AddText(
+                ImVec2(center.x - timerSize.x * 0.5f, 26.0f),
+                _timeTrialFinished
+                    ? IM_COL32(100, 245, 155, 255)
+                    : IM_COL32(235, 240, 250, 255),
+                timerLabel.c_str());
+            if (_timeTrialBestSeconds >= 0.0f) {
+                const std::string bestLabel = fmt::format(
+                    "BEST {:02}:{:06.3f}",
+                    static_cast<int>(_timeTrialBestSeconds / 60.0f),
+                    std::fmod(_timeTrialBestSeconds, 60.0f));
+                const ImVec2 bestSize = ImGui::CalcTextSize(bestLabel.c_str());
+                crosshair->AddText(
+                    ImVec2(center.x - bestSize.x * 0.5f, 48.0f),
+                    IM_COL32(255, 210, 90, 255),
+                    bestLabel.c_str());
+            }
         }
 
         ImGui::Render();
@@ -3347,7 +3487,18 @@ void VulkanEngine::draw_inspector_panel()
             changed |= ImGui::Checkbox("Visible", &object->visible);
             changed |= ImGui::Checkbox("Has Collision", &object->hasCollision);
             changed |= ImGui::Checkbox("Portal Placeable", &object->portalPlaceable);
-            if (object->hasCollision &&
+            if (object->timeTrialRole != TimeTrialRole::None) {
+                const char* roleLabel = object->timeTrialRole == TimeTrialRole::SpawnPoint
+                    ? "Spawn Point"
+                    : (object->timeTrialRole == TimeTrialRole::StartTrigger
+                        ? "Start Timer Trigger"
+                        : "Finish Timer Trigger");
+                ImGui::TextDisabled("Time-trial role: %s", roleLabel);
+            }
+            const bool needsEditableBox = object->hasCollision ||
+                object->timeTrialRole == TimeTrialRole::StartTrigger ||
+                object->timeTrialRole == TimeTrialRole::FinishTrigger;
+            if (needsEditableBox &&
                 object->collisionShape == CollisionShape::Box) {
                 ImGui::SeparatorText("Box Collider");
                 changed |= ImGui::DragFloat3(
@@ -3620,6 +3771,29 @@ void VulkanEngine::draw_editor_menu()
             create_editor_actor("Surf Ramp", SceneAssetKind::SurfRamp, true);
         }
         ImGui::Separator();
+        if (ImGui::MenuItem("Spawn Point")) {
+            // This first time-trial loop uses one respawn marker. Replacing
+            // it leaves the old marker as an ordinary editable cube.
+            for (SceneObject& object : _scene.objects) {
+                if (object.alive && object.timeTrialRole == TimeTrialRole::SpawnPoint) {
+                    object.timeTrialRole = TimeTrialRole::None;
+                }
+            }
+            create_editor_actor(
+                "Spawn Point", SceneAssetKind::UnitCube, false, false,
+                TimeTrialRole::SpawnPoint);
+        }
+        if (ImGui::MenuItem("Start Timer Trigger")) {
+            create_editor_actor(
+                "Start Trigger", SceneAssetKind::UnitCube, false, false,
+                TimeTrialRole::StartTrigger);
+        }
+        if (ImGui::MenuItem("Finish Timer Trigger")) {
+            create_editor_actor(
+                "Finish Trigger", SceneAssetKind::UnitCube, false, false,
+                TimeTrialRole::FinishTrigger);
+        }
+        ImGui::Separator();
         if (ImGui::MenuItem("Import GLB/glTF...")) {
             _gltfPathInput.fill('\0');
             ImGui::OpenPopup("Import GLB/glTF");
@@ -3682,6 +3856,15 @@ void VulkanEngine::draw_editor_menu()
             nullptr,
             &_portalRecursionEnabled);
         ImGui::EndDisabled();
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Time Trial")) {
+        if (ImGui::MenuItem("Reset Run")) {
+            reset_time_trial();
+        }
+        ImGui::TextDisabled(
+            "Create Spawn Point, Start Timer Trigger, and Finish Timer Trigger.");
         ImGui::EndMenu();
     }
 
@@ -3843,6 +4026,7 @@ bool VulkanEngine::duplicate_selected_scene_object()
     duplicate->collisionShape = source->collisionShape;
     duplicate->colliderCenter = source->colliderCenter;
     duplicate->colliderHalfExtents = source->colliderHalfExtents;
+    duplicate->timeTrialRole = source->timeTrialRole;
     duplicate->modelPath = source->modelPath;
     if (source->assetKind == SceneAssetKind::ImportedGLTF) {
         // Instances of the same imported scene can share its loaded GPU data.
@@ -3862,7 +4046,8 @@ SceneObjectID VulkanEngine::create_editor_actor(
     const char* baseName,
     SceneAssetKind assetKind,
     bool collidable,
-    bool portalPlaceable)
+    bool portalPlaceable,
+    TimeTrialRole timeTrialRole)
 {
     const std::string name = std::string(baseName) + " " +
         std::to_string(_nextCreatedActorNumber++);
@@ -3871,6 +4056,7 @@ SceneObjectID VulkanEngine::create_editor_actor(
     if (object == nullptr) {
         return InvalidSceneObject;
     }
+    object->timeTrialRole = timeTrialRole;
 
     const Camera& camera = render_camera();
     const glm::vec3 forward = glm::normalize(glm::vec3(
@@ -3897,6 +4083,19 @@ SceneObjectID VulkanEngine::create_editor_actor(
         object->collisionShape = CollisionShape::SurfRamp;
         // Matches the wedge's local bounding box, for editor picking/debug.
         object->colliderCenter = glm::vec3(0.0f, 0.5f, 0.0f);
+        object->colliderHalfExtents = glm::vec3(0.5f);
+    }
+
+    if (timeTrialRole == TimeTrialRole::SpawnPoint) {
+        // A low marker shows the exact feet position used by fall reset.
+        object->localTransform.scale = glm::vec3(0.6f, 0.12f, 0.6f);
+    } else if (timeTrialRole == TimeTrialRole::StartTrigger ||
+               timeTrialRole == TimeTrialRole::FinishTrigger) {
+        // A trigger is a non-solid volume. Its visible cube and editable
+        // local box use the same dimensions, so what you see is what starts
+        // or finishes the run.
+        object->localTransform.scale = glm::vec3(2.0f, 1.0f, 2.0f);
+        object->colliderCenter = glm::vec3(0.0f);
         object->colliderHalfExtents = glm::vec3(0.5f);
     }
 
@@ -4003,6 +4202,19 @@ void VulkanEngine::assign_scene_asset(
     }
     case SceneAssetKind::None:
         break;
+    }
+
+    // Reuse the bright portal/player materials for level-authoring markers.
+    // Material pointers are rebuilt from the saved role every time a scene is
+    // loaded, just like the primitive itself.
+    if (object.primitive.valid()) {
+        if (object.timeTrialRole == TimeTrialRole::SpawnPoint) {
+            object.primitive.material = &_playerMaterial;
+        } else if (object.timeTrialRole == TimeTrialRole::StartTrigger) {
+            object.primitive.material = &_bluePortalMaterial;
+        } else if (object.timeTrialRole == TimeTrialRole::FinishTrigger) {
+            object.primitive.material = &_orangePortalMaterial;
+        }
     }
 }
 
@@ -4118,7 +4330,9 @@ bool VulkanEngine::save_editor_scene()
              << ", \"layer\": " << static_cast<int>(object.layer)
              << ", \"collisionShape\": "
              << static_cast<int>(object.collisionShape)
-             << ", \"asset\": \"" << scene_asset_name(object.assetKind)
+             << ", \"timeTrialRole\": \""
+             << time_trial_role_name(object.timeTrialRole)
+             << "\", \"asset\": \"" << scene_asset_name(object.assetKind)
              << "\", \"modelPath\": \""
              << json_escape(object.modelPath) << "\"}";
     }
@@ -4208,6 +4422,7 @@ bool VulkanEngine::load_editor_scene()
         simdjson::dom::element colliderHalfExtents;
         std::string_view name;
         std::string_view assetName;
+        std::string_view timeTrialRoleName;
         std::string_view modelPath;
         uint64_t id = 0;
         int64_t parent = -1;
@@ -4245,6 +4460,19 @@ bool VulkanEngine::load_editor_scene()
         saved.layer = static_cast<RenderLayer>(layer);
         saved.collisionShape = static_cast<CollisionShape>(collisionShape);
         saved.assetKind = *assetKind;
+
+        // This field was introduced after the first editor scenes.  Leaving
+        // it absent means the object remains an ordinary actor.
+        if (jsonObject["timeTrialRole"].get_string().get(timeTrialRoleName) ==
+            simdjson::SUCCESS) {
+            const std::optional<TimeTrialRole> role =
+                time_trial_role_from_name(timeTrialRoleName);
+            if (!role.has_value()) {
+                fmt::print("Unsupported time-trial role in editor scene: {}\n", scenePath.string());
+                return false;
+            }
+            saved.timeTrialRole = *role;
+        }
 
         // Collider fields were added after the first saved scenes.  Missing
         // values deliberately use the unit-cube defaults, so old levels load
@@ -4301,6 +4529,7 @@ bool VulkanEngine::load_editor_scene()
         object->colliderCenter = saved.colliderCenter;
         object->colliderHalfExtents = saved.colliderHalfExtents;
         object->assetKind = saved.assetKind;
+        object->timeTrialRole = saved.timeTrialRole;
         object->modelPath = saved.modelPath;
     }
     for (const SavedSceneObject& saved : savedObjects) {
@@ -4340,6 +4569,7 @@ bool VulkanEngine::load_editor_scene()
     }
     create_runtime_scene_objects();
     retract_portals();
+    reset_time_trial();
     _selectedSceneObject = InvalidSceneObject;
     _nextCreatedActorNumber = static_cast<uint32_t>(std::max<uint64_t>(nextActor, 1));
     _sceneDirty = false;

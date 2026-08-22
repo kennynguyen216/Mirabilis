@@ -69,6 +69,16 @@ enum class SceneAssetKind : uint8_t {
     ImportedGLTF,
 };
 
+// These roles turn ordinary saved scene actors into a simple time-trial
+// course.  The mesh remains an ordinary primitive; the role only controls
+// gameplay behaviour.
+enum class TimeTrialRole : uint8_t {
+    None,
+    SpawnPoint,
+    StartTrigger,
+    FinishTrigger,
+};
+
 struct SceneObject {
     SceneObjectID id{InvalidSceneObject};
     std::string name;
@@ -91,6 +101,7 @@ struct SceneObject {
     glm::vec3 colliderCenter{0.0f};
     glm::vec3 colliderHalfExtents{0.5f};
     SceneAssetKind assetKind{SceneAssetKind::None};
+    TimeTrialRole timeTrialRole{TimeTrialRole::None};
     // Set for objects whose transform is written every frame by another
     // system (physics, portal placement).  The inspector shows them read-only.
     bool transformDrivenExternally{false};
