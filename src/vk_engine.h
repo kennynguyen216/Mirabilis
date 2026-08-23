@@ -239,6 +239,8 @@ class VulkanEngine{
         friend struct LoadedGLTF;
         friend struct GLTFMetallic_Roughness;
         void init_vulkan();
+        bool process_event(const SDL_Event& event);
+        void draw_frame_ui(float deltaTime);
         void init_swapchain();
         void init_commands();
         void init_sync_structures();
@@ -250,6 +252,10 @@ class VulkanEngine{
         void init_pipelines();
         void init_background_pipelines();
         void init_default_data();
+        void init_default_images_and_samplers();
+        void init_default_meshes();
+        void init_default_materials();
+        void init_default_scene();
         void init_portal_camera_targets();
         void draw_geometry(
             VkCommandBuffer cmd,

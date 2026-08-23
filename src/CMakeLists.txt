@@ -13,6 +13,16 @@ add_executable (engine
   vk_pipelines.cpp
   vk_engine.h
   vk_engine.cpp
+  vk_engine_editor.cpp
+  vk_engine_gameplay.cpp
+  vk_engine_input.cpp
+  vk_engine_materials.cpp
+  vk_engine_portals.cpp
+  vk_engine_renderer.cpp
+  vk_engine_resources.cpp
+  vk_engine_scene.cpp
+  vk_engine_scene_io.cpp
+  vk_engine_ui.cpp
   vk_loader.h
   vk_loader.cpp
   camera.h
