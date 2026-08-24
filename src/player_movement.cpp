@@ -133,8 +133,15 @@ void PlayerMovement::resolve_world_collision(
                 ground.halfExtents.x + settings.playerHalfWidth &&
             std::abs(position.z - ground.center.y) <=
                 ground.halfExtents.y + settings.playerHalfWidth;
+        // A tiny slop keeps a portal transform or floating-point roundoff from
+        // placing the feet a millimetre below an otherwise valid platform.
+        // Requiring downward motion prevents this from pulling a rising player
+        // through the underside of a platform.
+        constexpr float GroundContactSlop = 0.03f;
         const bool crossedFromAbove =
-            previousPosition.y >= ground.height && position.y <= ground.height;
+            previousPosition.y >= ground.height - GroundContactSlop &&
+            position.y <= ground.height &&
+            velocity.y <= 0.0f;
         if (overlapsGround && crossedFromAbove && ground.height > landingHeight) {
             landingHeight = ground.height;
             landingNormal = glm::vec3(0.0f, 1.0f, 0.0f);

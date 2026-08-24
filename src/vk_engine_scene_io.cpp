@@ -45,6 +45,7 @@ struct SavedSceneObject {
     glm::vec3 colliderHalfExtents{0.5f};
     SceneAssetKind assetKind{SceneAssetKind::None};
     TimeTrialRole timeTrialRole{TimeTrialRole::None};
+    SceneMaterial material{};
     std::string modelPath;
 };
 
@@ -128,6 +129,48 @@ bool read_json_vec3(simdjson::dom::element element, glm::vec3& value)
     return valueIt == values.end();
 }
 
+bool read_json_vec2(simdjson::dom::element element, glm::vec2& value)
+{
+    simdjson::dom::array values;
+    if (element.get_array().get(values)) {
+        return false;
+    }
+    auto valueIt = values.begin();
+    for (int index = 0; index < 2; index++) {
+        if (valueIt == values.end()) {
+            return false;
+        }
+        double component = 0.0;
+        if ((*valueIt).get_double().get(component)) {
+            return false;
+        }
+        value[index] = static_cast<float>(component);
+        ++valueIt;
+    }
+    return valueIt == values.end();
+}
+
+bool read_json_vec4(simdjson::dom::element element, glm::vec4& value)
+{
+    simdjson::dom::array values;
+    if (element.get_array().get(values)) {
+        return false;
+    }
+    auto valueIt = values.begin();
+    for (int index = 0; index < 4; index++) {
+        if (valueIt == values.end()) {
+            return false;
+        }
+        double component = 0.0;
+        if ((*valueIt).get_double().get(component)) {
+            return false;
+        }
+        value[index] = static_cast<float>(component);
+        ++valueIt;
+    }
+    return valueIt == values.end();
+}
+
 } // namespace
 
 void VulkanEngine::create_runtime_scene_objects()
@@ -198,6 +241,13 @@ bool VulkanEngine::save_editor_scene()
     const auto writeVec3 = [&](const glm::vec3& value) {
         file << '[' << value.x << ", " << value.y << ", " << value.z << ']';
     };
+    const auto writeVec2 = [&](const glm::vec2& value) {
+        file << '[' << value.x << ", " << value.y << ']';
+    };
+    const auto writeVec4 = [&](const glm::vec4& value) {
+        file << '[' << value.x << ", " << value.y << ", "
+             << value.z << ", " << value.w << ']';
+    };
     const auto runtime_owned = [&](const SceneObject& object) {
         for (const SceneObject* current = &object;
              current != nullptr;
@@ -235,6 +285,16 @@ bool VulkanEngine::save_editor_scene()
         writeVec3(object.colliderCenter);
         file << ", \"colliderHalfExtents\": ";
         writeVec3(object.colliderHalfExtents);
+        file << ", \"materialEnabled\": "
+             << (object.material.enabled ? "true" : "false")
+             << ", \"baseColorTexture\": \""
+             << json_escape(object.material.baseColorTexturePath) << "\""
+             << ", \"materialTint\": ";
+        writeVec4(object.material.colorTint);
+        file << ", \"materialMetallic\": " << object.material.metallic
+             << ", \"materialRoughness\": " << object.material.roughness
+             << ", \"uvScale\": ";
+        writeVec2(object.material.uvScale);
         file << ", \"visible\": " << (object.visible ? "true" : "false")
              << ", \"hasCollision\": " << (object.hasCollision ? "true" : "false")
              << ", \"portalPlaceable\": "
@@ -332,10 +392,13 @@ bool VulkanEngine::load_editor_scene()
         simdjson::dom::element scale;
         simdjson::dom::element colliderCenter;
         simdjson::dom::element colliderHalfExtents;
+        simdjson::dom::element materialTint;
+        simdjson::dom::element uvScale;
         std::string_view name;
         std::string_view assetName;
         std::string_view timeTrialRoleName;
         std::string_view modelPath;
+        std::string_view baseColorTexture;
         uint64_t id = 0;
         int64_t parent = -1;
         int64_t layer = 0;
@@ -411,6 +474,37 @@ bool VulkanEngine::load_editor_scene()
             }
             saved.modelPath = modelPath;
         }
+
+        // Material fields are optional so every scene saved before this
+        // component existed remains loadable with its original defaults.
+        bool materialEnabled = false;
+        const simdjson::error_code materialResult =
+            jsonObject["materialEnabled"].get_bool().get(materialEnabled);
+        if (materialResult == simdjson::SUCCESS) {
+            double metallic = 0.0;
+            double roughness = 0.8;
+            if (jsonObject["baseColorTexture"].get_string().get(baseColorTexture) ||
+                jsonObject["materialTint"].get(materialTint) ||
+                jsonObject["uvScale"].get(uvScale) ||
+                !read_json_vec4(materialTint, saved.material.colorTint) ||
+                !read_json_vec2(uvScale, saved.material.uvScale) ||
+                jsonObject["materialMetallic"].get_double().get(metallic) ||
+                jsonObject["materialRoughness"].get_double().get(roughness) ||
+                saved.material.uvScale.x <= 0.0f ||
+                saved.material.uvScale.y <= 0.0f ||
+                metallic < 0.0 || metallic > 1.0 ||
+                roughness < 0.0 || roughness > 1.0) {
+                fmt::print("Invalid material in editor scene: {}\n", scenePath.string());
+                return false;
+            }
+            saved.material.enabled = materialEnabled;
+            saved.material.baseColorTexturePath = baseColorTexture;
+            saved.material.metallic = static_cast<float>(metallic);
+            saved.material.roughness = static_cast<float>(roughness);
+        } else if (materialResult != simdjson::NO_SUCH_FIELD) {
+            fmt::print("Invalid material flag in editor scene: {}\n", scenePath.string());
+            return false;
+        }
         // Version 1 accidentally wrote Player Model even though its Player
         // parent is runtime-only.  PortalViewOnly is reserved for that
         // runtime graph, so ignore those stale entries and preserve the
@@ -442,6 +536,7 @@ bool VulkanEngine::load_editor_scene()
         object->colliderHalfExtents = saved.colliderHalfExtents;
         object->assetKind = saved.assetKind;
         object->timeTrialRole = saved.timeTrialRole;
+        object->material = saved.material;
         object->modelPath = saved.modelPath;
     }
     for (const SavedSceneObject& saved : savedObjects) {
@@ -617,4 +712,3 @@ void VulkanEngine::build_sandbox_scene()
     // Give physics its ground plane before the first frame runs.
     rebuild_collision_from_scene();
 }
-

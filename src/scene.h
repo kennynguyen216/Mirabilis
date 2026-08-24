@@ -6,7 +6,9 @@
 #include <vector>
 
 #include <glm/mat4x4.hpp>
+#include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
 
 #include <vk_loader.h>
 #include <vk_types.h>
@@ -79,6 +81,18 @@ enum class TimeTrialRole : uint8_t {
     FinishTrigger,
 };
 
+// Serializable material settings for engine-owned primitives. Vulkan images,
+// buffers, and descriptor sets deliberately live in VulkanEngine's runtime
+// cache rather than in the scene graph.
+struct SceneMaterial {
+    bool enabled{false};
+    std::string baseColorTexturePath;
+    glm::vec4 colorTint{1.0f};
+    glm::vec2 uvScale{1.0f};
+    float metallic{0.0f};
+    float roughness{0.8f};
+};
+
 struct SceneObject {
     SceneObjectID id{InvalidSceneObject};
     std::string name;
@@ -102,6 +116,7 @@ struct SceneObject {
     glm::vec3 colliderHalfExtents{0.5f};
     SceneAssetKind assetKind{SceneAssetKind::None};
     TimeTrialRole timeTrialRole{TimeTrialRole::None};
+    SceneMaterial material{};
     // Set for objects whose transform is written every frame by another
     // system (physics, portal placement).  The inspector shows them read-only.
     bool transformDrivenExternally{false};

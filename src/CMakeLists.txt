@@ -21,6 +21,7 @@ add_executable (engine
   vk_engine_renderer.cpp
   vk_engine_resources.cpp
   vk_engine_scene.cpp
+  vk_engine_scene_materials.cpp
   vk_engine_scene_io.cpp
   vk_engine_ui.cpp
   vk_loader.h

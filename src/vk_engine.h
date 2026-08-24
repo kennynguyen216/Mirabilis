@@ -1,6 +1,8 @@
 #pragma once 
 
 #include <array>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <vk_types.h>
 #include <vk_descriptors.h>
@@ -84,6 +86,17 @@ struct EngineStats {
     int portal_drawcall_count{0};
     float scene_update_time{0.0f};
     float mesh_draw_time{0.0f};
+};
+
+struct SceneMaterialRuntime {
+    AllocatedBuffer constantsBuffer{};
+    MaterialInstance material{};
+    std::string texturePath;
+    glm::vec4 colorTint{1.0f};
+    glm::vec2 uvScale{1.0f};
+    float metallic{0.0f};
+    float roughness{0.8f};
+    bool initialized{false};
 };
 
 // Kept independent of ImGuizmo so the editor state remains engine-owned.
@@ -333,6 +346,9 @@ class VulkanEngine{
         void create_runtime_scene_objects();
         void sync_scene_driven_objects();
         void emit_scene_render_objects(RenderLayer layer, DrawContext& drawContext);
+        MaterialInstance* resolve_scene_material(const SceneObject& object);
+        const AllocatedImage& load_scene_texture(std::string_view texturePath);
+        void clear_scene_material_resources();
         void rebuild_collision_from_scene();
         void draw_hierarchy_panel();
         void draw_inspector_panel();
@@ -367,6 +383,8 @@ class VulkanEngine{
         std::string _activeSceneFilename{"sandbox.json"};
         std::array<char, 64> _sceneNameInput{};
         std::array<char, 260> _gltfPathInput{};
+        std::array<char, 260> _texturePathInput{};
+        SceneObjectID _materialEditorObject{InvalidSceneObject};
         EditorGizmoOperation _gizmoOperation{EditorGizmoOperation::Translate};
         bool _gizmoLocalSpace{false};
         bool _gizmoSnapping{true};
@@ -431,4 +449,7 @@ class VulkanEngine{
         std::vector<AABB> _activeWallColliders;
         std::vector<GroundPlane> _activeGroundPlanes;
         std::vector<SurfRamp> _activeSurfRamps;
+        std::unordered_map<SceneObjectID, SceneMaterialRuntime> _sceneMaterialRuntimes;
+        std::unordered_map<std::string, AllocatedImage> _sceneTextureCache;
+        std::unordered_set<std::string> _failedSceneTextures;
     };

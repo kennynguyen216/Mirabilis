@@ -433,15 +433,28 @@ void VulkanEngine::draw_collider_debug_bounds(VkCommandBuffer cmd)
     vkCmdBindPipeline(
         cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _colliderDebugPipeline.pipeline);
     for (const SceneObject& object : _scene.objects) {
-        if (!object.alive || !object.hasCollision ||
-            object.collisionShape == CollisionShape::GroundPlane) {
+        if (!object.alive || !object.hasCollision) {
             continue;
         }
 
         // Draw the final world AABB used by physics—not merely the object's
         // local box—so a rotated object still shows the conservative bounds
         // the player and portal raycast actually use.
-        const AABB collider = collider_from_object(_scene, object.id);
+        AABB collider{};
+        if (object.collisionShape == CollisionShape::GroundPlane) {
+            // Ground-plane physics is intentionally zero-thickness. Give it a
+            // thin debug-only box so platform colliders are still visible.
+            const glm::mat4 world = _scene.world_matrix(object.id);
+            const glm::vec3 planeCenter = glm::vec3(world[3]);
+            const glm::vec3 planeHalfExtents{
+                glm::length(glm::vec3(world[0])) * 0.5f,
+                0.01f,
+                glm::length(glm::vec3(world[2])) * 0.5f};
+            collider.min = planeCenter - planeHalfExtents;
+            collider.max = planeCenter + planeHalfExtents;
+        } else {
+            collider = collider_from_object(_scene, object.id);
+        }
         const glm::vec3 center = (collider.min + collider.max) * 0.5f;
         const glm::vec3 fullExtents = (collider.max - collider.min) * 1.005f;
         const glm::mat4 colliderTransform = glm::translate(
@@ -463,4 +476,3 @@ void VulkanEngine::draw_collider_debug_bounds(VkCommandBuffer cmd)
     }
     vkCmdEndRendering(cmd);
 }
-

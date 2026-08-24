@@ -425,6 +425,7 @@ void VulkanEngine::init_default_data()
     init_default_scene();
 
     _mainDeletionQueue.push_function([this]() {
+        clear_scene_material_resources();
         destroy_buffer(_orangePortalMaterialBuffer);
         destroy_buffer(_bluePortalMaterialBuffer);
         destroy_buffer(_portalMesh.vertexBuffer);

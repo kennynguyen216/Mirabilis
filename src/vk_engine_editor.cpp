@@ -201,6 +201,87 @@ void VulkanEngine::draw_inspector_panel()
                 ImGui::TextDisabled("Scale X/Y/Z controls width, height, and length.");
                 ImGui::TextDisabled("Steep ramps use surf physics; do not use a zero scale.");
             }
+
+            const bool supportsMaterialOverride =
+                object->assetKind == SceneAssetKind::FloorQuad ||
+                object->assetKind == SceneAssetKind::UnitCube ||
+                object->assetKind == SceneAssetKind::SurfRamp;
+            if (supportsMaterialOverride) {
+                ImGui::SeparatorText("Material");
+                changed |= ImGui::Checkbox(
+                    "Material Override", &object->material.enabled);
+                ImGui::BeginDisabled(!object->material.enabled);
+                changed |= ImGui::ColorEdit4(
+                    "Tint", &object->material.colorTint.x);
+                changed |= ImGui::DragFloat(
+                    "Metallic", &object->material.metallic,
+                    0.01f, 0.0f, 1.0f, "%.2f");
+                changed |= ImGui::DragFloat(
+                    "Roughness", &object->material.roughness,
+                    0.01f, 0.0f, 1.0f, "%.2f");
+                if (ImGui::DragFloat2(
+                        "UV Tiling", &object->material.uvScale.x,
+                        0.05f, 0.01f, 100.0f, "%.2f")) {
+                    object->material.uvScale = glm::max(
+                        object->material.uvScale, glm::vec2(0.01f));
+                    changed = true;
+                }
+                ImGui::TextWrapped(
+                    "Texture: %s",
+                    object->material.baseColorTexturePath.empty()
+                        ? "(white)"
+                        : object->material.baseColorTexturePath.c_str());
+                if (ImGui::Button("Choose Base Color Texture...")) {
+                    _materialEditorObject = object->id;
+                    std::fill(
+                        _texturePathInput.begin(), _texturePathInput.end(), '\0');
+                    const std::string& path = object->material.baseColorTexturePath;
+                    std::copy_n(
+                        path.data(),
+                        std::min(path.size(), _texturePathInput.size() - 1),
+                        _texturePathInput.data());
+                    ImGui::OpenPopup("Base Color Texture");
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Clear Texture")) {
+                    object->material.baseColorTexturePath.clear();
+                    changed = true;
+                }
+                ImGui::TextDisabled(
+                    "Project example: ../../assets/textures/portal_concrete.png");
+                ImGui::EndDisabled();
+            } else if (object->assetKind == SceneAssetKind::ImportedGLTF) {
+                ImGui::SeparatorText("Material");
+                ImGui::TextDisabled(
+                    "Imported glTF materials come from the model file.");
+            }
+
+            if (ImGui::BeginPopupModal(
+                    "Base Color Texture", nullptr,
+                    ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::TextUnformatted(
+                    "Enter a PNG/JPG path relative to bin/Debug.");
+                ImGui::InputText(
+                    "##TexturePath",
+                    _texturePathInput.data(),
+                    _texturePathInput.size());
+                SceneObject* materialObject =
+                    _scene.get(_materialEditorObject);
+                ImGui::BeginDisabled(materialObject == nullptr);
+                if (ImGui::Button("Apply")) {
+                    materialObject->material.enabled = true;
+                    materialObject->material.baseColorTexturePath =
+                        _texturePathInput.data();
+                    _sceneDirty = true;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel")) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
             if (changed && !driven) {
                 _sceneDirty = true;
                 rebuild_collision_from_scene();
@@ -706,6 +787,7 @@ bool VulkanEngine::duplicate_selected_scene_object()
     duplicate->colliderCenter = source->colliderCenter;
     duplicate->colliderHalfExtents = source->colliderHalfExtents;
     duplicate->timeTrialRole = source->timeTrialRole;
+    duplicate->material = source->material;
     duplicate->modelPath = source->modelPath;
     if (source->assetKind == SceneAssetKind::ImportedGLTF) {
         // Instances of the same imported scene can share its loaded GPU data.
@@ -1034,4 +1116,3 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
         }
     }
 }
-

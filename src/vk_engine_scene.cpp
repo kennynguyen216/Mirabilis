@@ -38,7 +38,7 @@ void VulkanEngine::emit_scene_render_objects(
     RenderLayer layer,
     DrawContext& drawContext)
 {
-    for (const SceneObject& object : _scene.objects) {
+    for (SceneObject& object : _scene.objects) {
         if (!object.alive || !object.visible || object.layer != layer) {
             continue;
         }
@@ -56,7 +56,9 @@ void VulkanEngine::emit_scene_render_objects(
         renderObject.indexCount = object.primitive.indexCount;
         renderObject.firstIndex = object.primitive.firstIndex;
         renderObject.indexBuffer = object.primitive.indexBuffer;
-        renderObject.material = object.primitive.material;
+        renderObject.material = object.material.enabled
+            ? resolve_scene_material(object)
+            : object.primitive.material;
         renderObject.bounds = object.primitive.bounds;
         renderObject.transform = world;
         renderObject.vertexBufferAddress = object.primitive.vertexBufferAddress;
@@ -204,4 +206,3 @@ void VulkanEngine::update_scene(float deltaTime)
     stats.scene_update_time = std::chrono::duration<float, std::milli>(
         std::chrono::steady_clock::now() - startTime).count();
 }
-

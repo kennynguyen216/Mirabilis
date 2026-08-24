@@ -12,6 +12,9 @@ layout(set = 0, binding = 0) uniform SceneData {
 layout(set = 1, binding = 0) uniform GLTFMaterialData {
     vec4 colorFactors;
     vec4 metal_rough_factors;
+    // xy = UV tiling, zw = UV offset. Legacy materials leave this zero and
+    // the vertex shaders interpret that as a 1x1 scale.
+    vec4 uvTransform;
 } materialData;
 
 layout(set = 1, binding = 1) uniform sampler2D colorTex;

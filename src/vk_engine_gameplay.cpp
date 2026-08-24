@@ -226,6 +226,12 @@ bool VulkanEngine::try_traverse_portal(
 
     _playerMovement.position = transform_position_through_portal(
         source, destination, _playerMovement.position);
+    // Collision tests compare the previous and current feet positions. Keep
+    // both endpoints in the same (destination) space; otherwise an elevated
+    // exit platform appears to have no collider because the old source-space
+    // Y value cannot prove that the player crossed its top from above.
+    _playerMovement.previousPosition = transform_position_through_portal(
+        source, destination, _playerMovement.previousPosition);
     _playerMovement.velocity = transform_direction_through_portal(
         source, destination, _playerMovement.velocity);
 
@@ -364,4 +370,3 @@ void VulkanEngine::retract_portals()
     _portalTraversalCooldown = 0.0f;
     rebuild_collision_from_scene();
 }
-

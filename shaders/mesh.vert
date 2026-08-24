@@ -33,5 +33,10 @@ void main()
     gl_Position = sceneData.viewproj * PushConstants.render_matrix * position;
     outNormal = normalize((PushConstants.render_matrix * vec4(vertex.normal, 0.0)).xyz);
     outColor = vertex.color * materialData.colorFactors;
-    outUV = vec2(vertex.uv_x, vertex.uv_y);
+    vec2 uvScale = materialData.uvTransform.xy;
+    if (all(lessThan(abs(uvScale), vec2(0.0001)))) {
+        uvScale = vec2(1.0);
+    }
+    outUV = vec2(vertex.uv_x, vertex.uv_y) * uvScale +
+        materialData.uvTransform.zw;
 }
