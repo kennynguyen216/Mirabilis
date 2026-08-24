@@ -1,9 +1,11 @@
 {
   "version": 1,
-  "nextActor": 3,
+  "nextActor": 5,
   "objects": [
-    {"id": 0, "parent": -1, "name": "Sandbox", "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1], "colliderCenter": [0, 0, 0], "colliderHalfExtents": [0.5, 0.5, 0.5], "visible": true, "hasCollision": false, "portalPlaceable": false, "layer": 0, "collisionShape": 0, "asset": "empty", "modelPath": ""},
-    {"id": 1, "parent": 0, "name": "Spawn Platform", "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [20, 1, 20], "colliderCenter": [0, 0, 0], "colliderHalfExtents": [0.5, 0.5, 0.5], "visible": true, "hasCollision": true, "portalPlaceable": false, "layer": 0, "collisionShape": 1, "asset": "floor", "modelPath": ""},
-    {"id": 2, "parent": 0, "name": "Surf Ramp 2", "position": [0.00755425543, -15.1699915, -28.6811523], "rotation": [-0, -1.53588974, 0], "scale": [35.9999924, 12, 11.9999981], "colliderCenter": [0, 0.5, 0], "colliderHalfExtents": [0.5, 0.5, 0.5], "visible": true, "hasCollision": true, "portalPlaceable": false, "layer": 0, "collisionShape": 2, "asset": "ramp", "modelPath": ""}
+    {"id": 0, "parent": -1, "name": "Sandbox", "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1], "colliderCenter": [0, 0, 0], "colliderHalfExtents": [0.5, 0.5, 0.5], "visible": true, "hasCollision": false, "portalPlaceable": false, "layer": 0, "collisionShape": 0, "timeTrialRole": "none", "asset": "empty", "modelPath": ""},
+    {"id": 1, "parent": 0, "name": "Spawn Platform", "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [20, 1, 20], "colliderCenter": [0, 0, 0], "colliderHalfExtents": [0.5, 0.5, 0.5], "visible": true, "hasCollision": true, "portalPlaceable": false, "layer": 0, "collisionShape": 1, "timeTrialRole": "none", "asset": "floor", "modelPath": ""},
+    {"id": 2, "parent": 0, "name": "Surf Ramp 2", "position": [0.00755425543, -15.1699915, -28.6811523], "rotation": [0, -1.53588974, 0], "scale": [35.9999924, 12, 11.9999981], "colliderCenter": [0, 0.5, 0], "colliderHalfExtents": [0.5, 0.5, 0.5], "visible": true, "hasCollision": true, "portalPlaceable": false, "layer": 0, "collisionShape": 2, "timeTrialRole": "none", "asset": "ramp", "modelPath": ""},
+    {"id": 7, "parent": 0, "name": "Wall 3", "position": [0.18068248, 1.10607326, 2.99653769], "rotation": [0, 0, 0], "scale": [4, 3, 0.5], "colliderCenter": [0, 0, 0], "colliderHalfExtents": [0.5, 0.5, 0.5], "visible": true, "hasCollision": true, "portalPlaceable": true, "layer": 0, "collisionShape": 0, "timeTrialRole": "none", "asset": "cube", "modelPath": ""},
+    {"id": 8, "parent": 0, "name": "Wall 4", "position": [0.269113541, 1.55468822, 0.10840708], "rotation": [0, 0, 0], "scale": [4, 3, 0.5], "colliderCenter": [0, 0, 0], "colliderHalfExtents": [0.5, 0.5, 0.5], "visible": true, "hasCollision": true, "portalPlaceable": true, "layer": 0, "collisionShape": 0, "timeTrialRole": "none", "asset": "cube", "modelPath": ""}
   ]
 }
