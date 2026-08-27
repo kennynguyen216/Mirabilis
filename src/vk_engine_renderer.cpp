@@ -184,7 +184,7 @@ void VulkanEngine::draw_geometry(
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
         _drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
-        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     depthAttachment.loadOp = clearDepthAndStencil
         ? VK_ATTACHMENT_LOAD_OP_CLEAR
         : VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -325,7 +325,9 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
         0.1f);
     data.proj[1][1] *= -1.0f;
     data.viewproj = data.proj * data.view;
-    data.ambientColor = glm::vec4(0.1f);
+    // Keep authored interiors readable even when a face is turned away from
+    // the single directional sun light.
+    data.ambientColor = glm::vec4(0.28f);
     data.sunlightDirection = glm::vec4(0.0f, 1.0f, 0.5f, 1.0f);
     data.sunlightColor = glm::vec4(1.0f);
     return data;
@@ -412,7 +414,7 @@ void VulkanEngine::draw_collider_debug_bounds(VkCommandBuffer cmd)
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
         _drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
-        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
     VkRenderingInfo renderInfo = vkinit::rendering_info(

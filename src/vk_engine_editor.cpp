@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -66,10 +67,15 @@ static void draw_hierarchy_node(
         return;
     }
 
+    // Snapshot this before drag/drop. Reparenting into an empty actor can add
+    // its first child while ImGui is drawing this node; using the mutated
+    // child list with a leaf node would call TreePop without a matching push.
+    const std::vector<SceneObjectID> childrenAtStart = object->children;
+    const bool hadChildren = !childrenAtStart.empty();
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
         ImGuiTreeNodeFlags_SpanAvailWidth |
         ImGuiTreeNodeFlags_DefaultOpen;
-    if (object->children.empty()) {
+    if (!hadChildren) {
         flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
     }
     if (id == selected) {
@@ -111,8 +117,8 @@ static void draw_hierarchy_node(
         ImGui::EndDragDropTarget();
     }
 
-    if (opened && !object->children.empty()) {
-        for (const SceneObjectID child : object->children) {
+    if (opened && hadChildren) {
+        for (const SceneObjectID child : childrenAtStart) {
             draw_hierarchy_node(scene, child, selected);
         }
         ImGui::TreePop();
@@ -307,7 +313,6 @@ void VulkanEngine::draw_inspector_panel()
 
             const bool isRequiredSandboxObject =
                 object->id == _sandboxRoot ||
-                object->id == _floorObject ||
                 object->transformDrivenExternally;
             const bool hostsPlacedPortal =
                 (_bluePortal.placed && _bluePortal.hostWallObject == object->id) ||
@@ -333,15 +338,23 @@ void VulkanEngine::draw_inspector_panel()
 void VulkanEngine::draw_editor_gizmo()
 {
     SceneObject* object = _scene.get(_selectedSceneObject);
-    if (object == nullptr || object->transformDrivenExternally) {
+    Portal* authoredPortal = nullptr;
+    if (object == nullptr && _selectedAuthoredPortalPair >= 0 &&
+        _selectedAuthoredPortalPair < static_cast<int>(_authoredPortalPairs.size())) {
+        AuthoredPortalPair& pair = _authoredPortalPairs[_selectedAuthoredPortalPair];
+        authoredPortal = _selectedAuthoredPortalSecond ? &pair.second : &pair.first;
+    }
+    if ((object == nullptr && authoredPortal == nullptr) ||
+        (object != nullptr && object->transformDrivenExternally)) {
         return;
     }
 
     // A portal's placement data is still owned by the portal system. Moving
     // its host wall while it has a placed portal would leave that portal off
     // the wall, so block the gizmo until portal parenting is introduced.
-    if ((_bluePortal.placed && _bluePortal.hostWallObject == object->id) ||
-        (_orangePortal.placed && _orangePortal.hostWallObject == object->id)) {
+    if (object != nullptr &&
+        ((_bluePortal.placed && _bluePortal.hostWallObject == object->id) ||
+        (_orangePortal.placed && _orangePortal.hostWallObject == object->id))) {
         return;
     }
 
@@ -356,7 +369,9 @@ void VulkanEngine::draw_editor_gizmo()
         displaySize.x / std::max(displaySize.y, 1.0f),
         0.1f,
         10000.0f);
-    glm::mat4 worldTransform = _scene.world_matrix(object->id);
+    glm::mat4 worldTransform = authoredPortal != nullptr
+        ? get_portal_frame(*authoredPortal)
+        : _scene.world_matrix(object->id);
 
     ImGuizmo::SetOrthographic(false);
     ImGuizmo::SetDrawlist(ImGui::GetForegroundDrawList());
@@ -386,6 +401,22 @@ void VulkanEngine::draw_editor_gizmo()
             glm::value_ptr(worldTransform),
             nullptr,
             _gizmoSnapping ? snapValues : nullptr)) {
+        return;
+    }
+
+    if (authoredPortal != nullptr) {
+        // Freestanding portal actors use their frame as the gizmo transform.
+        // Scaling X/Y changes the opening dimensions; Z is deliberately ignored
+        // because an aperture has no depth.
+        authoredPortal->position = glm::vec3(worldTransform[3]);
+        orient_portal(*authoredPortal, glm::vec3(worldTransform[2]));
+        if (_gizmoOperation == EditorGizmoOperation::Scale) {
+            authoredPortal->halfWidth = std::max(
+                0.1f, authoredPortal->halfWidth * glm::length(glm::vec3(worldTransform[0])));
+            authoredPortal->halfHeight = std::max(
+                0.1f, authoredPortal->halfHeight * glm::length(glm::vec3(worldTransform[1])));
+        }
+        _sceneDirty = true;
         return;
     }
 
@@ -453,8 +484,38 @@ void VulkanEngine::select_scene_object_at_screen_position(
         }
     }
 
-    if (closestObject != InvalidSceneObject) {
+    float closestDistance = closestHit.has_value()
+        ? closestHit->distance
+        : std::numeric_limits<float>::infinity();
+    int closestPortalPair = -1;
+    bool closestPortalSecond = false;
+    const auto testPortal = [&](const Portal& portal, int pairIndex, bool second) {
+        const float denominator = glm::dot(rayDirection, portal.normal);
+        if (std::abs(denominator) < 0.00001f) return;
+        const float distance = glm::dot(portal.position - rayOrigin, portal.normal) / denominator;
+        if (distance <= 0.0f || distance >= closestDistance) return;
+        const glm::vec3 hitPoint = rayOrigin + rayDirection * distance;
+        const glm::vec3 localPoint = glm::vec3(
+            glm::inverse(get_portal_frame(portal)) * glm::vec4(hitPoint, 1.0f));
+        if (std::abs(localPoint.x) <= portal.halfWidth &&
+            std::abs(localPoint.y) <= portal.halfHeight) {
+            closestDistance = distance;
+            closestPortalPair = pairIndex;
+            closestPortalSecond = second;
+        }
+    };
+    for (size_t pairIndex = 0; pairIndex < _authoredPortalPairs.size(); ++pairIndex) {
+        testPortal(_authoredPortalPairs[pairIndex].first, static_cast<int>(pairIndex), false);
+        testPortal(_authoredPortalPairs[pairIndex].second, static_cast<int>(pairIndex), true);
+    }
+
+    if (closestPortalPair >= 0) {
+        _selectedSceneObject = InvalidSceneObject;
+        _selectedAuthoredPortalPair = closestPortalPair;
+        _selectedAuthoredPortalSecond = closestPortalSecond;
+    } else if (closestObject != InvalidSceneObject) {
         _selectedSceneObject = closestObject;
+        _selectedAuthoredPortalPair = -1;
     }
 }
 
@@ -514,6 +575,19 @@ void VulkanEngine::draw_editor_menu()
     }
 
     if (ImGui::BeginMenu("Create")) {
+        const auto createPortraitProp = [&](const char* name,
+                                            const char* texturePath,
+                                            const glm::vec3& scale) {
+            const SceneObjectID id = create_editor_actor(
+                name, SceneAssetKind::UnitCube, false);
+            if (SceneObject* portrait = _scene.get(id)) {
+                portrait->localTransform.scale = scale;
+                portrait->material.enabled = true;
+                portrait->material.baseColorTexturePath = texturePath;
+                portrait->material.metallic = 0.0f;
+                portrait->material.roughness = 0.9f;
+            }
+        };
         if (ImGui::MenuItem("Empty Actor")) {
             create_editor_actor("Actor", SceneAssetKind::None, false);
         }
@@ -529,6 +603,29 @@ void VulkanEngine::draw_editor_menu()
         }
         if (ImGui::MenuItem("Surf Ramp")) {
             create_editor_actor("Surf Ramp", SceneAssetKind::SurfRamp, true);
+        }
+        ImGui::SeparatorText("Prefabs");
+        if (ImGui::MenuItem("Room with Center Pole")) {
+            create_room_with_center_pole_prefab();
+        }
+        if (ImGui::MenuItem("Long Closed Room")) {
+            create_closed_long_room_prefab();
+        }
+        ImGui::SeparatorText("Portrait Props");
+        if (ImGui::MenuItem("Jayden Standee")) {
+            createPortraitProp(
+                "Jayden Standee", "../../assets/textures/jayden.png",
+                glm::vec3(1.25f, 2.2f, 0.08f));
+        }
+        if (ImGui::MenuItem("Tamely Swag Standee")) {
+            createPortraitProp(
+                "Tamely Swag Standee", "../../assets/textures/tamely_swag.png",
+                glm::vec3(1.6f, 1.6f, 0.08f));
+        }
+        if (ImGui::MenuItem("Ricky Standee")) {
+            createPortraitProp(
+                "Ricky Standee", "../../assets/textures/ricky.png",
+                glm::vec3(1.35f, 1.8f, 0.08f));
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Spawn Point")) {
@@ -592,7 +689,7 @@ void VulkanEngine::draw_editor_menu()
             }
             ImGui::EndMenu();
         }
-        if (ImGui::MenuItem("Duplicate Selected", "Ctrl+D", false, hasSelection)) {
+        if (ImGui::MenuItem("Duplicate Selected Hierarchy", "Ctrl+D", false, hasSelection)) {
             duplicate_selected_scene_object();
         }
         if (ImGui::MenuItem("Delete Selected", "Delete", false, hasSelection)) {
@@ -604,6 +701,81 @@ void VulkanEngine::draw_editor_menu()
     if (ImGui::BeginMenu("Portals")) {
         if (ImGui::MenuItem("Retract Both", "R")) {
             retract_portals();
+        }
+        ImGui::SeparatorText("Authored Portal Links");
+        ImGui::TextDisabled("Endpoints are freestanding; they appear five metres ahead of the editor camera.");
+        ImGui::BeginDisabled(_authoredPortalPairs.size() >= MaxAuthoredPortalPairs);
+        if (ImGui::MenuItem(
+                _authoredPortalDraft.has_value()
+                    ? "Place Second Endpoint"
+                    : "Place First Endpoint")) {
+            place_authored_portal_endpoint();
+        }
+        ImGui::EndDisabled();
+        if (ImGui::MenuItem("Clear Authored Links", nullptr, false,
+                            !_authoredPortalPairs.empty() || _authoredPortalDraft.has_value())) {
+            clear_authored_portals();
+        }
+        if (ImGui::MenuItem("Set Up Three-Room Pole Chain", nullptr, false,
+                            _authoredPortalPairs.empty())) {
+            create_three_room_pole_chain();
+        }
+        ImGui::TextDisabled("Creates Room 1 -> 2 -> 3 links at their center poles.");
+        ImGui::TextDisabled("Links: %zu / %zu%s", _authoredPortalPairs.size(),
+                            MaxAuthoredPortalPairs,
+                            _authoredPortalDraft.has_value() ? " (one endpoint waiting)" : "");
+        for (size_t pairIndex = 0; pairIndex < _authoredPortalPairs.size(); ++pairIndex) {
+            AuthoredPortalPair& pair = _authoredPortalPairs[pairIndex];
+            ImGui::PushID(static_cast<int>(pairIndex));
+            if (_selectedAuthoredPortalPair == static_cast<int>(pairIndex)) {
+                ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+            }
+            if (ImGui::TreeNode("Link", "Link %zu", pairIndex + 1)) {
+                const auto editEndpoint = [&](const char* label, Portal& portal) {
+                    ImGui::TextUnformatted(label);
+                    ImGui::PushID(label);
+                    bool changed = ImGui::DragFloat3("Position", &portal.position.x, 0.1f);
+                    glm::vec3 normal = portal.normal;
+                    if (ImGui::DragFloat3("Facing", &normal.x, 0.02f, -1.0f, 1.0f) &&
+                        glm::length(normal) > 0.01f) {
+                        orient_portal(portal, normal);
+                        changed = true;
+                    }
+                    changed |= ImGui::DragFloat("Half Width", &portal.halfWidth, 0.02f, 0.1f, 20.0f);
+                    changed |= ImGui::DragFloat("Half Height", &portal.halfHeight, 0.02f, 0.1f, 20.0f);
+                    if (changed) _sceneDirty = true;
+                    ImGui::TextDisabled("Ctrl-click a numeric field to type an exact value.");
+                    const glm::vec3 right = glm::normalize(
+                        glm::cross(portal.up, portal.normal));
+                    const glm::vec3 bottomLeft = portal.position -
+                        right * portal.halfWidth - portal.up * portal.halfHeight;
+                    const glm::vec3 bottomRight = portal.position +
+                        right * portal.halfWidth - portal.up * portal.halfHeight;
+                    const glm::vec3 topLeft = portal.position -
+                        right * portal.halfWidth + portal.up * portal.halfHeight;
+                    const glm::vec3 topRight = portal.position +
+                        right * portal.halfWidth + portal.up * portal.halfHeight;
+                    ImGui::SeparatorText("World-space corners");
+                    ImGui::Text("Top Left     %.3f, %.3f, %.3f",
+                                topLeft.x, topLeft.y, topLeft.z);
+                    ImGui::Text("Top Right    %.3f, %.3f, %.3f",
+                                topRight.x, topRight.y, topRight.z);
+                    ImGui::Text("Bottom Left  %.3f, %.3f, %.3f",
+                                bottomLeft.x, bottomLeft.y, bottomLeft.z);
+                    ImGui::Text("Bottom Right %.3f, %.3f, %.3f",
+                                bottomRight.x, bottomRight.y, bottomRight.z);
+                    ImGui::PopID();
+                };
+                editEndpoint("First endpoint", pair.first);
+                ImGui::Separator();
+                editEndpoint("Second endpoint", pair.second);
+                if (_selectedAuthoredPortalPair == static_cast<int>(pairIndex)) {
+                    ImGui::TextDisabled("Selected: %s endpoint",
+                        _selectedAuthoredPortalSecond ? "second" : "first");
+                }
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
         }
         ImGui::Separator();
         ImGui::MenuItem(
@@ -732,7 +904,6 @@ bool VulkanEngine::delete_selected_scene_object()
     // need a dedicated replacement workflow rather than a generic delete.
     const bool isRequiredSandboxObject =
         object->id == _sandboxRoot ||
-        object->id == _floorObject ||
         object->transformDrivenExternally;
     const bool hostsPlacedPortal =
         (_bluePortal.placed && _bluePortal.hostWallObject == object->id) ||
@@ -755,7 +926,7 @@ bool VulkanEngine::duplicate_selected_scene_object()
 {
     const SceneObject* source = _scene.get(_selectedSceneObject);
     if (source == nullptr || source->id == _sandboxRoot ||
-        source->id == _floorObject || source->transformDrivenExternally) {
+        source->transformDrivenExternally) {
         return false;
     }
     for (const SceneObject* current = source;
@@ -766,36 +937,63 @@ bool VulkanEngine::duplicate_selected_scene_object()
         }
     }
 
-    // Copy the scene-facing data, then rebuild the primitive from its stable
-    // asset kind. Copying raw VkBuffer/material pointers is unnecessary and
-    // would make persistence harder to reason about.
-    const SceneObjectID duplicateID = _scene.create_object(
-        source->name + " Copy " + std::to_string(_nextCreatedActorNumber++),
-        source->parent);
-    SceneObject* duplicate = _scene.get(duplicateID);
-    if (duplicate == nullptr) {
-        return false;
-    }
+    // A hierarchy root is a scene-native prefab: duplicating it clones the
+    // entire subtree, preserving child-local transforms. This makes a house
+    // assembled from walls, roof, doors, and props reusable as one unit.
+    const auto duplicateBranch = [&](auto&& self,
+                                     SceneObjectID sourceID,
+                                     SceneObjectID parentID,
+                                     bool isRoot) -> SceneObjectID {
+        const SceneObject* branchSource = _scene.get(sourceID);
+        if (branchSource == nullptr) return InvalidSceneObject;
+        const std::string sourceName = branchSource->name;
+        const Transform sourceTransform = branchSource->localTransform;
+        const bool visible = branchSource->visible;
+        const bool hasCollision = branchSource->hasCollision;
+        const bool portalPlaceable = branchSource->portalPlaceable;
+        const RenderLayer layer = branchSource->layer;
+        const CollisionShape collisionShape = branchSource->collisionShape;
+        const glm::vec3 colliderCenter = branchSource->colliderCenter;
+        const glm::vec3 colliderHalfExtents = branchSource->colliderHalfExtents;
+        const SceneAssetKind assetKind = branchSource->assetKind;
+        const TimeTrialRole timeTrialRole = branchSource->timeTrialRole;
+        const SceneMaterial material = branchSource->material;
+        const std::string modelPath = branchSource->modelPath;
+        const std::shared_ptr<LoadedGLTF> model = branchSource->model;
+        const std::vector<SceneObjectID> children = branchSource->children;
 
-    duplicate->localTransform = source->localTransform;
-    duplicate->localTransform.position += glm::vec3(0.5f, 0.0f, 0.5f);
-    duplicate->visible = source->visible;
-    duplicate->hasCollision = source->hasCollision;
-    duplicate->portalPlaceable = source->portalPlaceable;
-    duplicate->layer = source->layer;
-    duplicate->collisionShape = source->collisionShape;
-    duplicate->colliderCenter = source->colliderCenter;
-    duplicate->colliderHalfExtents = source->colliderHalfExtents;
-    duplicate->timeTrialRole = source->timeTrialRole;
-    duplicate->material = source->material;
-    duplicate->modelPath = source->modelPath;
-    if (source->assetKind == SceneAssetKind::ImportedGLTF) {
-        // Instances of the same imported scene can share its loaded GPU data.
-        duplicate->assetKind = SceneAssetKind::ImportedGLTF;
-        duplicate->model = source->model;
-    } else {
-        assign_scene_asset(*duplicate, source->assetKind);
-    }
+        const SceneObjectID duplicateID = _scene.create_object(
+            isRoot ? sourceName + " Prefab " + std::to_string(_nextCreatedActorNumber++)
+                   : sourceName,
+            parentID);
+        SceneObject* duplicate = _scene.get(duplicateID);
+        if (duplicate == nullptr) return InvalidSceneObject;
+        duplicate->localTransform = sourceTransform;
+        if (isRoot) duplicate->localTransform.position += glm::vec3(0.5f, 0.0f, 0.5f);
+        duplicate->visible = visible;
+        duplicate->hasCollision = hasCollision;
+        duplicate->portalPlaceable = portalPlaceable;
+        duplicate->layer = layer;
+        duplicate->collisionShape = collisionShape;
+        duplicate->colliderCenter = colliderCenter;
+        duplicate->colliderHalfExtents = colliderHalfExtents;
+        duplicate->timeTrialRole = timeTrialRole;
+        duplicate->material = material;
+        duplicate->modelPath = modelPath;
+        if (assetKind == SceneAssetKind::ImportedGLTF) {
+            duplicate->assetKind = assetKind;
+            duplicate->model = model;
+        } else {
+            assign_scene_asset(*duplicate, assetKind);
+        }
+        for (SceneObjectID child : children) {
+            self(self, child, duplicateID, false);
+        }
+        return duplicateID;
+    };
+    const SceneObjectID duplicateID = duplicateBranch(
+        duplicateBranch, source->id, source->parent, true);
+    if (duplicateID == InvalidSceneObject) return false;
 
     _selectedSceneObject = duplicateID;
     _sceneDirty = true;
@@ -866,6 +1064,180 @@ SceneObjectID VulkanEngine::create_editor_actor(
     _sceneDirty = true;
     rebuild_collision_from_scene();
     return id;
+}
+
+SceneObjectID VulkanEngine::create_room_with_center_pole_prefab()
+{
+    // Keep every part local to one empty root, so the room is movable,
+    // duplicable, and saveable as a single hierarchy prefab.
+    const SceneObjectID rootID = _scene.create_object(
+        "Room with Center Pole " + std::to_string(_nextCreatedActorNumber++),
+        _sandboxRoot);
+    SceneObject* root = _scene.get(rootID);
+    if (root == nullptr) return InvalidSceneObject;
+
+    const Camera& camera = render_camera();
+    const glm::vec3 forward = glm::normalize(glm::vec3(
+        camera.getRotationMatrix() * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+    glm::vec3 spawnWorldPosition = camera.position + forward * 5.0f;
+    // A room is authored from its floor upward. Keep it on the world ground
+    // instead of centring it at the editor camera's height.
+    spawnWorldPosition.y = 0.0f;
+    const glm::mat4 parentWorld = _sandboxRoot == InvalidSceneObject
+        ? glm::mat4(1.0f)
+        : _scene.world_matrix(_sandboxRoot);
+    root->localTransform.position = glm::vec3(
+        glm::inverse(parentWorld) * glm::vec4(spawnWorldPosition, 1.0f));
+
+    const auto addPart = [&](const char* name, SceneAssetKind assetKind,
+                             const glm::vec3& position,
+                             const glm::vec3& scale, bool collidable,
+                             bool portalPlaceable) {
+        const SceneObjectID partID = _scene.create_object(name, rootID);
+        SceneObject* part = _scene.get(partID);
+        if (part == nullptr) return;
+        assign_scene_asset(*part, assetKind);
+        part->localTransform.position = position;
+        part->localTransform.scale = scale;
+        part->hasCollision = collidable;
+        part->portalPlaceable = portalPlaceable;
+        if (assetKind == SceneAssetKind::FloorQuad) {
+            // FloorQuad is a walkable horizontal platform, not a paper-thin
+            // box collider. Without this the player falls through a prefab
+            // room's floor and immediately hits the respawn safeguard.
+            part->collisionShape = CollisionShape::GroundPlane;
+        }
+        if (assetKind == SceneAssetKind::UnitCube) {
+            part->material.enabled = true;
+            part->material.colorTint = glm::vec4(1.0f);
+            part->material.baseColorTexturePath =
+                "../../assets/textures/room_concrete.png";
+            part->material.uvScale = glm::vec2(4.0f);
+            part->material.metallic = 0.0f;
+            part->material.roughness = 0.9f;
+        }
+    };
+
+    // Twelve-metre square interior, six metres high. UnitCube spans one
+    // metre at scale 1, so these are full dimensions (not half extents).
+    addPart("Floor", SceneAssetKind::FloorQuad,
+            glm::vec3(0.0f), glm::vec3(12.0f, 1.0f, 12.0f), true, false);
+    addPart("Ceiling", SceneAssetKind::FloorQuad,
+            glm::vec3(0.0f, 6.0f, 0.0f), glm::vec3(12.0f, 1.0f, 12.0f), false, false);
+    addPart("North Wall", SceneAssetKind::UnitCube,
+            glm::vec3(0.0f, 3.0f, -6.0f), glm::vec3(12.0f, 6.0f, 0.3f), true, true);
+    // Leave a generous central doorway in the south wall so this prefab can
+    // be entered normally instead of requiring a portal to get inside.
+    addPart("South Wall Left", SceneAssetKind::UnitCube,
+            glm::vec3(-3.625f, 3.0f, 6.0f), glm::vec3(4.75f, 6.0f, 0.3f), true, true);
+    addPart("South Wall Right", SceneAssetKind::UnitCube,
+            glm::vec3(3.625f, 3.0f, 6.0f), glm::vec3(4.75f, 6.0f, 0.3f), true, true);
+    addPart("Doorway Header", SceneAssetKind::UnitCube,
+            glm::vec3(0.0f, 4.5f, 6.0f), glm::vec3(2.5f, 3.0f, 0.3f), true, true);
+    addPart("West Wall", SceneAssetKind::UnitCube,
+            glm::vec3(-6.0f, 3.0f, 0.0f), glm::vec3(0.3f, 6.0f, 12.0f), true, true);
+    addPart("East Wall", SceneAssetKind::UnitCube,
+            glm::vec3( 6.0f, 3.0f, 0.0f), glm::vec3(0.3f, 6.0f, 12.0f), true, true);
+    addPart("Center Pole", SceneAssetKind::UnitCube,
+            glm::vec3(0.0f, 3.0f, 0.0f), glm::vec3(0.5f, 6.0f, 0.5f), true, true);
+
+    // The prefab is immediately playable: it has its own active spawn just
+    // inside the room. Keep the engine rule of one active spawn point.
+    for (SceneObject& object : _scene.objects) {
+        if (object.alive && object.timeTrialRole == TimeTrialRole::SpawnPoint) {
+            object.timeTrialRole = TimeTrialRole::None;
+        }
+    }
+    const SceneObjectID spawnID = _scene.create_object("Room Spawn Point", rootID);
+    if (SceneObject* spawn = _scene.get(spawnID)) {
+        spawn->timeTrialRole = TimeTrialRole::SpawnPoint;
+        assign_scene_asset(*spawn, SceneAssetKind::UnitCube);
+        spawn->localTransform.position = glm::vec3(0.0f, 0.05f, -3.0f);
+        spawn->localTransform.scale = glm::vec3(0.6f, 0.12f, 0.6f);
+        spawn->hasCollision = false;
+    }
+
+    _selectedSceneObject = rootID;
+    _sceneDirty = true;
+    rebuild_collision_from_scene();
+    return rootID;
+}
+
+SceneObjectID VulkanEngine::create_closed_long_room_prefab()
+{
+    const SceneObjectID rootID = _scene.create_object(
+        "Long Closed Room " + std::to_string(_nextCreatedActorNumber++),
+        _sandboxRoot);
+    SceneObject* root = _scene.get(rootID);
+    if (root == nullptr) return InvalidSceneObject;
+
+    const Camera& camera = render_camera();
+    const glm::vec3 forward = glm::normalize(glm::vec3(
+        camera.getRotationMatrix() * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+    glm::vec3 spawnWorldPosition = camera.position + forward * 8.0f;
+    spawnWorldPosition.y = 0.0f;
+    const glm::mat4 parentWorld = _sandboxRoot == InvalidSceneObject
+        ? glm::mat4(1.0f)
+        : _scene.world_matrix(_sandboxRoot);
+    root->localTransform.position = glm::vec3(
+        glm::inverse(parentWorld) * glm::vec4(spawnWorldPosition, 1.0f));
+
+    const auto addPart = [&](const char* name, SceneAssetKind assetKind,
+                             const glm::vec3& position,
+                             const glm::vec3& scale, bool collidable,
+                             bool portalPlaceable) {
+        const SceneObjectID partID = _scene.create_object(name, rootID);
+        SceneObject* part = _scene.get(partID);
+        if (part == nullptr) return;
+        assign_scene_asset(*part, assetKind);
+        part->localTransform.position = position;
+        part->localTransform.scale = scale;
+        part->hasCollision = collidable;
+        part->portalPlaceable = portalPlaceable;
+        if (assetKind == SceneAssetKind::FloorQuad) {
+            part->collisionShape = CollisionShape::GroundPlane;
+        } else {
+            part->material.enabled = true;
+            part->material.baseColorTexturePath =
+                "../../assets/textures/room_concrete.png";
+            part->material.uvScale = glm::vec2(5.0f, 4.0f);
+            part->material.metallic = 0.0f;
+            part->material.roughness = 0.9f;
+        }
+    };
+
+    // A sealed 12 x 20 x 6 metre room for portal/non-Euclidean experiments.
+    addPart("Floor", SceneAssetKind::FloorQuad,
+            glm::vec3(0.0f), glm::vec3(12.0f, 1.0f, 20.0f), true, false);
+    addPart("Ceiling", SceneAssetKind::FloorQuad,
+            glm::vec3(0.0f, 6.0f, 0.0f), glm::vec3(12.0f, 1.0f, 20.0f), false, false);
+    addPart("North Wall", SceneAssetKind::UnitCube,
+            glm::vec3(0.0f, 3.0f, -10.0f), glm::vec3(12.0f, 6.0f, 0.3f), true, true);
+    addPart("South Wall", SceneAssetKind::UnitCube,
+            glm::vec3(0.0f, 3.0f, 10.0f), glm::vec3(12.0f, 6.0f, 0.3f), true, true);
+    addPart("West Wall", SceneAssetKind::UnitCube,
+            glm::vec3(-6.0f, 3.0f, 0.0f), glm::vec3(0.3f, 6.0f, 20.0f), true, true);
+    addPart("East Wall", SceneAssetKind::UnitCube,
+            glm::vec3(6.0f, 3.0f, 0.0f), glm::vec3(0.3f, 6.0f, 20.0f), true, true);
+
+    for (SceneObject& object : _scene.objects) {
+        if (object.alive && object.timeTrialRole == TimeTrialRole::SpawnPoint) {
+            object.timeTrialRole = TimeTrialRole::None;
+        }
+    }
+    const SceneObjectID spawnID = _scene.create_object("Long Room Spawn Point", rootID);
+    if (SceneObject* spawn = _scene.get(spawnID)) {
+        spawn->timeTrialRole = TimeTrialRole::SpawnPoint;
+        assign_scene_asset(*spawn, SceneAssetKind::UnitCube);
+        spawn->localTransform.position = glm::vec3(0.0f, 0.05f, -7.0f);
+        spawn->localTransform.scale = glm::vec3(0.6f, 0.12f, 0.6f);
+        spawn->hasCollision = false;
+    }
+
+    _selectedSceneObject = rootID;
+    _sceneDirty = true;
+    rebuild_collision_from_scene();
+    return rootID;
 }
 
 SceneObjectID VulkanEngine::import_gltf_actor(std::string_view modelPath)
@@ -1061,6 +1433,31 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
     }
     
     if (!_editorMode) {
+        ImGui::SetNextWindowPos(
+            ImVec2(ImGui::GetIO().DisplaySize.x - 18.0f, 18.0f),
+            ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+        ImGui::SetNextWindowBgAlpha(0.78f);
+        if (ImGui::Begin("Play Controls", nullptr,
+                ImGuiWindowFlags_AlwaysAutoResize |
+                ImGuiWindowFlags_NoCollapse |
+                ImGuiWindowFlags_NoSavedSettings)) {
+            if (ImGui::Button("Respawn (F1)")) respawn_player();
+            ImGui::SameLine();
+            if (ImGui::Button(_noClipMode
+                    ? "Disable No Clip (F2)"
+                    : "Enable No Clip (F2)")) {
+                _noClipMode = !_noClipMode;
+                _noClipUp = false;
+                _noClipDown = false;
+                _playerMovement.velocity = glm::vec3(0.0f);
+            }
+            if (_noClipMode) {
+                ImGui::SliderFloat("No Clip Speed", &_noClipSpeed, 2.0f, 40.0f);
+                ImGui::TextDisabled("WASD move, Space up, Ctrl down");
+            }
+        }
+        ImGui::End();
+
         const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
         ImDrawList* crosshair = ImGui::GetForegroundDrawList();
         // Portal-style status reticle: blue is left mouse and orange is
@@ -1086,7 +1483,7 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
         crosshair->AddText(
             ImVec2(18.0f, ImGui::GetIO().DisplaySize.y - 56.0f),
             IM_COL32(150, 165, 185, 210),
-            "LMB Blue  |  RMB Orange  |  R Retract");
+            "LMB Blue | RMB Orange | R Retract | F1 Respawn | F2 No Clip");
     
         const char* timerState = _timeTrialRunning
             ? "RUNNING"

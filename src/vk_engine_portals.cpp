@@ -32,14 +32,15 @@ RenderObject VulkanEngine::make_portal_render_object(
 
 void VulkanEngine::draw_portal_masks(VkCommandBuffer cmd)
 {
-    if (!_bluePortal.placed || !_orangePortal.placed) {
+    const bool hasPlayerPair = _bluePortal.placed && _orangePortal.placed;
+    if (!hasPlayerPair && _authoredPortalPairs.empty()) {
         return;
     }
 
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
         _drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
-        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
     VkRenderingInfo renderInfo = vkinit::rendering_info(
@@ -87,35 +88,44 @@ void VulkanEngine::draw_portal_masks(VkCommandBuffer cmd)
         vkCmdDrawIndexed(cmd, object.indexCount, 1, object.firstIndex, 0, 0);
     };
 
-    // First mark only portal pixels that passed the main scene's depth test.
-    // This prevents a portal hidden behind a nearer panel from drawing over it.
-    drawMask(
-        metalRoughMaterial.portalStencilPipeline,
-        _bluePortal,
-        _bluePortalMaterial,
-        BluePortalView + 1,
-        0xff);
-    drawMask(
-        metalRoughMaterial.portalStencilPipeline,
-        _orangePortal,
-        _orangePortalMaterial,
-        OrangePortalView + 1,
-        0xff);
+    const auto drawPair = [&](const Portal& first, const Portal& second,
+                              uint32_t& viewIndex, MaterialInstance& firstMaterial,
+                              MaterialInstance& secondMaterial) {
+        drawMask(metalRoughMaterial.portalStencilPipeline, first, firstMaterial,
+                 ++viewIndex, 0xff);
+        drawMask(metalRoughMaterial.portalStencilPipeline, second, secondMaterial,
+                 ++viewIndex, 0xff);
+    };
+    // Scene update permanently reserves 0/1 for the player portal pair.
+    // Keep authored links at 2+ even while the player pair is absent.
+    uint32_t viewIndex = hasPlayerPair ? 0 : 2;
+    if (hasPlayerPair) {
+        drawPair(_bluePortal, _orangePortal, viewIndex,
+                 _bluePortalMaterial, _orangePortalMaterial);
+    }
+    for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+        drawPair(pair.first, pair.second, viewIndex,
+                 _bluePortalMaterial, _orangePortalMaterial);
+    }
 
-    // Then set far depth only inside each already-visible stencil silhouette,
-    // opening room for its virtual scene without touching foreground depth.
-    drawMask(
-        metalRoughMaterial.portalMaskPipeline,
-        _bluePortal,
-        _bluePortalMaterial,
-        BluePortalView + 1,
-        0x00);
-    drawMask(
-        metalRoughMaterial.portalMaskPipeline,
-        _orangePortal,
-        _orangePortalMaterial,
-        OrangePortalView + 1,
-        0x00);
+    // Set far depth only inside the already-visible stencil silhouettes.
+    viewIndex = hasPlayerPair ? 0 : 2;
+    const auto clearPairDepth = [&](const Portal& first, const Portal& second,
+                                    MaterialInstance& firstMaterial,
+                                    MaterialInstance& secondMaterial) {
+        drawMask(metalRoughMaterial.portalMaskPipeline, first, firstMaterial,
+                 ++viewIndex, 0x00);
+        drawMask(metalRoughMaterial.portalMaskPipeline, second, secondMaterial,
+                 ++viewIndex, 0x00);
+    };
+    if (hasPlayerPair) {
+        clearPairDepth(_bluePortal, _orangePortal,
+                       _bluePortalMaterial, _orangePortalMaterial);
+    }
+    for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+        clearPairDepth(pair.first, pair.second,
+                       _bluePortalMaterial, _orangePortalMaterial);
+    }
     vkCmdEndRendering(cmd);
 }
 
@@ -131,7 +141,7 @@ void VulkanEngine::draw_recursive_portal_mask(
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
         _drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
-        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
     VkRenderingInfo renderInfo = vkinit::rendering_info(
@@ -191,88 +201,51 @@ void VulkanEngine::draw_recursive_portal_mask(
 
 void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
 {
-    if (!_bluePortal.placed || !_orangePortal.placed) {
+    const bool hasPlayerPair = _bluePortal.placed && _orangePortal.placed;
+    if (!hasPlayerPair && _authoredPortalPairs.empty()) {
         return;
     }
 
     FrameData& frame = get_current_frame();
-    constexpr uint32_t BluePrimaryStencil = 0x01;
-    constexpr uint32_t OrangePrimaryStencil = 0x02;
-    constexpr uint32_t BlueRecursiveBit = 0x04;
-    constexpr uint32_t OrangeRecursiveBit = 0x08;
-    constexpr uint32_t BlueRecursiveStencil = BluePrimaryStencil | BlueRecursiveBit;
-    constexpr uint32_t OrangeRecursiveStencil = OrangePrimaryStencil | OrangeRecursiveBit;
+    uint32_t surfaceIndex = hasPlayerPair ? 0 : 2;
+    const auto drawSurface = [&](const Portal& source, MaterialInstance& material) {
+        const uint32_t primaryStencil = surfaceIndex + 1;
+        const uint32_t baseViewIndex = surfaceIndex * PortalRecursionDepth;
+        draw_portal_sky(cmd, _portalSceneData[baseViewIndex], primaryStencil);
+        draw_geometry(cmd, portalViewDrawContext,
+                      _portalSceneData[baseViewIndex].viewproj,
+                      frame.portalSceneDescriptors[baseViewIndex], false,
+                      &metalRoughMaterial.portalViewPipeline, primaryStencil, false);
 
-    draw_portal_sky(cmd, _portalSceneData[BluePortalView], BluePrimaryStencil);
-    draw_geometry(
-        cmd,
-        portalViewDrawContext,
-        _portalSceneData[BluePortalView].viewproj,
-        frame.portalSceneDescriptors[BluePortalView],
-        false,
-        &metalRoughMaterial.portalViewPipeline,
-        BluePrimaryStencil,
-        false);
-    if (_portalRecursionEnabled) {
-        draw_recursive_portal_mask(
-            cmd,
-            _bluePortal,
-            _bluePortalMaterial,
-            frame.portalSceneDescriptors[BluePortalView],
-            BluePrimaryStencil,
-            BlueRecursiveStencil,
-            BlueRecursiveBit);
-        draw_portal_sky(
-            cmd,
-            _portalSceneData[BluePortalRecursiveView],
-            BlueRecursiveStencil,
-            BlueRecursiveStencil);
-        draw_geometry(
-            cmd,
-            portalViewDrawContext,
-            _portalSceneData[BluePortalRecursiveView].viewproj,
-            frame.portalSceneDescriptors[BluePortalRecursiveView],
-            false,
-            &metalRoughMaterial.portalViewPipeline,
-            BlueRecursiveStencil,
-            false,
-            BlueRecursiveStencil);
+        // Each extra level is the same portal seen again through its linked
+        // view. Two high stencil bits keep the recursive aperture constrained
+        // to its parent without consuming a stencil value per scene portal.
+        uint32_t parentStencil = primaryStencil;
+        for (uint32_t level = 1; level < PortalRecursionDepth; ++level) {
+            const uint32_t recursionBit = 1u << (4u + level);
+            const uint32_t recursiveStencil = parentStencil | recursionBit;
+            draw_recursive_portal_mask(
+                cmd, source, material,
+                frame.portalSceneDescriptors[baseViewIndex + level - 1],
+                parentStencil, recursiveStencil, recursionBit);
+            draw_portal_sky(cmd, _portalSceneData[baseViewIndex + level],
+                            recursiveStencil, recursiveStencil);
+            draw_geometry(cmd, portalViewDrawContext,
+                          _portalSceneData[baseViewIndex + level].viewproj,
+                          frame.portalSceneDescriptors[baseViewIndex + level], false,
+                          &metalRoughMaterial.portalViewPipeline, recursiveStencil,
+                          false, recursiveStencil);
+            parentStencil = recursiveStencil;
+        }
+        ++surfaceIndex;
+    };
+    if (hasPlayerPair) {
+        drawSurface(_bluePortal, _bluePortalMaterial);
+        drawSurface(_orangePortal, _orangePortalMaterial);
     }
-
-    draw_portal_sky(cmd, _portalSceneData[OrangePortalView], OrangePrimaryStencil);
-    draw_geometry(
-        cmd,
-        portalViewDrawContext,
-        _portalSceneData[OrangePortalView].viewproj,
-        frame.portalSceneDescriptors[OrangePortalView],
-        false,
-        &metalRoughMaterial.portalViewPipeline,
-        OrangePrimaryStencil,
-        false);
-    if (_portalRecursionEnabled) {
-        draw_recursive_portal_mask(
-            cmd,
-            _orangePortal,
-            _orangePortalMaterial,
-            frame.portalSceneDescriptors[OrangePortalView],
-            OrangePrimaryStencil,
-            OrangeRecursiveStencil,
-            OrangeRecursiveBit);
-        draw_portal_sky(
-            cmd,
-            _portalSceneData[OrangePortalRecursiveView],
-            OrangeRecursiveStencil,
-            OrangeRecursiveStencil);
-        draw_geometry(
-            cmd,
-            portalViewDrawContext,
-            _portalSceneData[OrangePortalRecursiveView].viewproj,
-            frame.portalSceneDescriptors[OrangePortalRecursiveView],
-            false,
-            &metalRoughMaterial.portalViewPipeline,
-            OrangeRecursiveStencil,
-            false,
-            OrangeRecursiveStencil);
+    for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+        drawSurface(pair.first, _bluePortalMaterial);
+        drawSurface(pair.second, _orangePortalMaterial);
     }
 }
 
@@ -290,7 +263,7 @@ void VulkanEngine::draw_geometry_to_portal_camera(
         colorTarget.imageView, &clearColor, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
         _portalCameraDepthImage.imageView,
-        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
     VkRenderingInfo renderInfo = vkinit::rendering_info(
         _portalCameraExtent, &colorAttachment, &depthAttachment);
@@ -383,7 +356,7 @@ void VulkanEngine::draw_offscreen_portal_views(VkCommandBuffer cmd)
             cmd,
             _portalCameraDepthImage.image,
             VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
         draw_geometry_to_portal_camera(
             cmd,
             portalViewDrawContext,
@@ -438,7 +411,7 @@ void VulkanEngine::draw_portal_sky(
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
         _drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
-        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
     VkRenderingInfo renderInfo = vkinit::rendering_info(
@@ -506,10 +479,19 @@ GPUSceneData VulkanEngine::build_portal_scene_data(
 {
     GPUSceneData data = build_scene_data(view);
 
-    // Keep the room-facing side of the destination portal and clip the
-    // outside/behind-wall side. A tiny offset avoids a precision fight with
-    // the wall face. This is performed in the portal fragment shader rather
-    // than by mutating the reversed-Z projection matrix.
+    // Wall-mounted portals need a clip plane to hide the host wall's back
+    // side. A freestanding authored link has no host wall, though; applying
+    // that same plane can cut away its entire destination room and leave an
+    // aperture that shows only sky. Let freestanding links render the whole
+    // destination world.
+    if (destination.hostWallObject == InvalidSceneObject) {
+        data.portalClipEnabled = glm::vec4(0.0f);
+        return data;
+    }
+
+    // Keep the room-facing side of a wall-mounted destination portal. A tiny
+    // offset avoids a precision fight with the wall face. This is performed
+    // in the portal vertex shader rather than by mutating reversed-Z data.
     constexpr float ClipEpsilon = 0.01f;
     const glm::vec3 clipPoint = destination.position +
         destination.normal * ClipEpsilon;
@@ -572,4 +554,3 @@ void VulkanEngine::init_portal_camera_targets()
         destroy_image(_portalCameraDepthImage);
     });
 }
-

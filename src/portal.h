@@ -25,6 +25,13 @@ struct Portal {
     float halfHeight{1.2f};
 };
 
+// A permanent, editor-authored link. These never replace the player's
+// blue/orange portal-gun pair.
+struct AuthoredPortalPair {
+    Portal first{};
+    Portal second{};
+};
+
 // Projects a reference up vector onto the portal plane, guaranteeing that
 // normal/up/right form an orthonormal portal frame.
 inline void orient_portal(Portal& portal, const glm::vec3& normal)

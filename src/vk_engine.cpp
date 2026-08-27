@@ -115,6 +115,11 @@ void VulkanEngine::set_editor_mode(bool enabled)
     }
 
     _editorMode = enabled;
+    if (enabled) {
+        _noClipMode = false;
+        _noClipUp = false;
+        _noClipDown = false;
+    }
     _editorCameraLooking = false;
     _physicsAccumulator = 0.0f;
     _playerInsideStartTrigger = false;
@@ -399,7 +404,7 @@ void VulkanEngine::draw(float deltaTime)
 		static_cast<uint32_t>(std::ceil(_drawExtent.height / 16.0)), 1);
 
 	vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-	vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+	vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 	stats.drawcall_count = 0;
 	stats.triangle_count = 0;
 	stats.world_drawcall_count = 0;
@@ -416,7 +421,7 @@ void VulkanEngine::draw(float deltaTime)
     // it for a frame-rate-sized safety band exposed the solid host wall before
     // physics teleported the player, causing the black flash.
     draw_portal_masks(cmd);
-    if (_useOffscreenPortalCameras) {
+    if (_useOffscreenPortalCameras && _authoredPortalPairs.empty()) {
         draw_offscreen_portal_views(cmd);
     } else {
         draw_portal_views(cmd);

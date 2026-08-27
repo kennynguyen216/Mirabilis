@@ -49,6 +49,14 @@ struct SavedSceneObject {
     std::string modelPath;
 };
 
+// Portal actors are runtime objects, but a level can carry their authored
+// placement.  Host IDs refer to the serialized scene IDs and are remapped
+// when the scene is loaded.
+struct SavedPreloadedPortal {
+    uint32_t oldHostWallObject{InvalidSceneObject};
+    Portal portal{};
+};
+
 const char* scene_asset_name(SceneAssetKind kind)
 {
     switch (kind) {
@@ -308,7 +316,27 @@ bool VulkanEngine::save_editor_scene()
              << "\", \"modelPath\": \""
              << json_escape(object.modelPath) << "\"}";
     }
-    file << "\n  ]\n}\n";
+    file << "\n  ],\n  \"authoredPortals\": [";
+    const auto writePortal = [&](const Portal& portal) {
+        file << "{\"hostWallObject\": " << portal.hostWallObject
+             << ", \"position\": ";
+        writeVec3(portal.position);
+        file << ", \"normal\": ";
+        writeVec3(portal.normal);
+        file << ", \"up\": ";
+        writeVec3(portal.up);
+        file << ", \"halfWidth\": " << portal.halfWidth
+             << ", \"halfHeight\": " << portal.halfHeight << '}';
+    };
+    bool firstPortal = true;
+    for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+        if (!firstPortal) file << ", ";
+        writePortal(pair.first);
+        file << ", ";
+        writePortal(pair.second);
+        firstPortal = false;
+    }
+    file << "]\n}\n";
     if (!file) {
         fmt::print("Could not finish writing scene: {}\n", scenePath.string());
         return false;
@@ -382,6 +410,53 @@ bool VulkanEngine::load_editor_scene()
 
     uint64_t nextActor = 1;
     document["nextActor"].get_uint64().get(nextActor);
+
+    std::vector<SavedPreloadedPortal> savedPreloadedPortals;
+    simdjson::dom::array jsonPreloadedPortals;
+    const simdjson::error_code preloadResult =
+        document["authoredPortals"].get_array().get(jsonPreloadedPortals);
+    if (preloadResult == simdjson::SUCCESS) {
+        for (simdjson::dom::element jsonPortalElement : jsonPreloadedPortals) {
+            simdjson::dom::object jsonPortal;
+            SavedPreloadedPortal saved{};
+            simdjson::dom::element position;
+            simdjson::dom::element normal;
+            simdjson::dom::element up;
+            uint64_t hostWallObject = InvalidSceneObject;
+            double halfWidth = 0.0;
+            double halfHeight = 0.0;
+            if (jsonPortalElement.get_object().get(jsonPortal) ||
+                jsonPortal["hostWallObject"].get_uint64().get(hostWallObject) ||
+                jsonPortal["position"].get(position) ||
+                jsonPortal["normal"].get(normal) ||
+                jsonPortal["up"].get(up) ||
+                !read_json_vec3(position, saved.portal.position) ||
+                !read_json_vec3(normal, saved.portal.normal) ||
+                !read_json_vec3(up, saved.portal.up) ||
+                jsonPortal["halfWidth"].get_double().get(halfWidth) ||
+                jsonPortal["halfHeight"].get_double().get(halfHeight) ||
+                hostWallObject > UINT32_MAX || halfWidth <= 0.0 ||
+                halfHeight <= 0.0 || glm::length(saved.portal.normal) < 0.99f ||
+                glm::length(saved.portal.up) < 0.99f) {
+                fmt::print("Invalid preloaded portal in editor scene: {}\n", scenePath.string());
+                return false;
+            }
+            saved.oldHostWallObject = static_cast<uint32_t>(hostWallObject);
+            saved.portal.placed = true;
+            saved.portal.halfWidth = static_cast<float>(halfWidth);
+            saved.portal.halfHeight = static_cast<float>(halfHeight);
+            orient_portal(saved.portal, saved.portal.normal);
+            savedPreloadedPortals.push_back(std::move(saved));
+        }
+        if (savedPreloadedPortals.size() % 2 != 0 ||
+            savedPreloadedPortals.size() / 2 > MaxAuthoredPortalPairs) {
+            fmt::print("Authored portals must be complete linked pairs: {}\n", scenePath.string());
+            return false;
+        }
+    } else if (preloadResult != simdjson::NO_SUCH_FIELD) {
+        fmt::print("Invalid preloaded portals in editor scene: {}\n", scenePath.string());
+        return false;
+    }
 
     std::vector<SavedSceneObject> savedObjects;
     for (simdjson::dom::element jsonObjectElement : jsonObjects) {
@@ -576,6 +651,37 @@ bool VulkanEngine::load_editor_scene()
     }
     create_runtime_scene_objects();
     retract_portals();
+    _authoredPortalPairs.clear();
+    _authoredPortalDraft.reset();
+    for (size_t portalIndex = 0; portalIndex < savedPreloadedPortals.size(); portalIndex += 2) {
+        const auto blueHost = restoredIDs.find(savedPreloadedPortals[portalIndex].oldHostWallObject);
+        const auto orangeHost = restoredIDs.find(savedPreloadedPortals[portalIndex + 1].oldHostWallObject);
+        const auto validHost = [&](const auto& host) {
+            const SceneObject* object = host == restoredIDs.end()
+                ? nullptr
+                : _scene.get(host->second);
+            return object != nullptr && object->alive && object->portalPlaceable &&
+                object->hasCollision && object->collisionShape == CollisionShape::Box;
+        };
+        const bool blueIsFreestanding =
+            savedPreloadedPortals[portalIndex].oldHostWallObject == InvalidSceneObject;
+        const bool orangeIsFreestanding =
+            savedPreloadedPortals[portalIndex + 1].oldHostWallObject == InvalidSceneObject;
+        if ((!blueIsFreestanding && !validHost(blueHost)) ||
+            (!orangeIsFreestanding && !validHost(orangeHost))) {
+            fmt::print("Preloaded portal host is missing or not placeable: {}\n", scenePath.string());
+            return false;
+        }
+        AuthoredPortalPair pair{savedPreloadedPortals[portalIndex].portal,
+                                savedPreloadedPortals[portalIndex + 1].portal};
+        pair.first.hostWallObject = blueIsFreestanding
+            ? InvalidSceneObject
+            : blueHost->second;
+        pair.second.hostWallObject = orangeIsFreestanding
+            ? InvalidSceneObject
+            : orangeHost->second;
+        _authoredPortalPairs.push_back(std::move(pair));
+    }
     reset_time_trial();
     _selectedSceneObject = InvalidSceneObject;
     _nextCreatedActorNumber = static_cast<uint32_t>(std::max<uint64_t>(nextActor, 1));

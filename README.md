@@ -18,6 +18,7 @@ Mirabilis is a C++ Vulkan-based real-time engine prototype focused on editor-aut
 - Includes an experimental recursive stencil path for a linked portal visible through another portal.
 - Places portals on eligible walls, carves portal-shaped openings from collision, and rejects overlapping or invalid placements.
 - Transforms player position, velocity, and view orientation through linked portal frames while preserving momentum.
+- Keeps the player’s blue/orange portal-gun pair transient, while scene-authored freestanding portal links persist independently. Up to seven linked editor pairs can be placed and loaded per scene.
 
 ### Scene editor and tooling
 
@@ -72,7 +73,9 @@ cmake --build build --config Debug --parallel
 ### Run
 
 ```powershell
-.\bin\Debug\engine.exe
+Push-Location .\bin\Debug
+.\engine.exe
+Pop-Location
 ```
 
 Press `Esc` or close the window to exit.

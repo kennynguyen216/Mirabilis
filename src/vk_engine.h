@@ -332,6 +332,7 @@ class VulkanEngine{
         void update_time_trial(float deltaTime);
         void reset_time_trial();
         bool apply_scene_spawn_point();
+        void respawn_player();
         bool try_traverse_portal(
             const Portal& source,
             const Portal& destination,
@@ -358,6 +359,8 @@ class VulkanEngine{
         void setup_default_dock_layout(uint32_t dockspaceID);
         bool delete_selected_scene_object();
         bool duplicate_selected_scene_object();
+        SceneObjectID create_room_with_center_pole_prefab();
+        SceneObjectID create_closed_long_room_prefab();
         SceneObjectID create_editor_actor(
             const char* baseName,
             SceneAssetKind assetKind,
@@ -370,11 +373,18 @@ class VulkanEngine{
         const Camera& render_camera() const;
         void retract_portals();
         void place_portal(Portal& portal, const Portal& otherPortal);
+        void place_authored_portal_endpoint();
+        void clear_authored_portals();
+        bool create_three_room_pole_chain();
 
         PlayerInput _playerInput{};
         PlayerMovement _playerMovement{};
         bool _mouseCaptured{true};
         bool _editorMode{false};
+        bool _noClipMode{false};
+        bool _noClipUp{false};
+        bool _noClipDown{false};
+        float _noClipSpeed{12.0f};
         bool _editorCameraLooking{false};
         bool _showDebugPanels{false};
         bool _showColliderBounds{false};
@@ -423,6 +433,11 @@ class VulkanEngine{
         Bounds _portalBounds;
         Portal _bluePortal;
         Portal _orangePortal;
+        static constexpr size_t MaxAuthoredPortalPairs = (MaxPortalSurfaces - 2) / 2;
+        std::vector<AuthoredPortalPair> _authoredPortalPairs;
+        std::optional<Portal> _authoredPortalDraft;
+        int _selectedAuthoredPortalPair{-1};
+        bool _selectedAuthoredPortalSecond{false};
         static constexpr uint32_t PortalCameraTargetCount = 2;
         VkExtent2D _portalCameraExtent{640, 360};
         std::array<AllocatedImage, PortalCameraTargetCount> _portalCameraImages{};

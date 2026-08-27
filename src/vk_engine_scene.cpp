@@ -132,7 +132,10 @@ void VulkanEngine::update_scene(float deltaTime)
         &sceneData,
         sizeof(sceneData));
 
-    if (_bluePortal.placed && _orangePortal.placed) {
+    // Each linked surface receives its own virtual camera and stencil value.
+    // The first two slots remain reserved for the portal gun; subsequent
+    // slots are editor-authored links stored with the scene.
+    {
         const glm::vec3 cameraForward = glm::normalize(glm::vec3(
             camera.getRotationMatrix() * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
         const glm::vec3 cameraUp = glm::normalize(glm::vec3(
@@ -140,67 +143,58 @@ void VulkanEngine::update_scene(float deltaTime)
 
         const auto updatePortalView = [&](const Portal& source,
                                           const Portal& destination,
-                                          uint32_t viewIndex,
-                                          uint32_t recursiveViewIndex) {
+                                          uint32_t surfaceIndex) {
+            // Freestanding portal actors are transparent from both sides. If
+            // the camera is behind this endpoint, reverse both frames exactly
+            // as traversal does. This keeps the linked image continuous while
+            // walking around the pole instead of popping at the portal plane.
+            Portal viewSource = source;
+            Portal viewDestination = destination;
+            if (portal_signed_distance(source, camera.position) < 0.0f) {
+                orient_portal(viewSource, -source.normal);
+                orient_portal(viewDestination, -destination.normal);
+            }
             const glm::mat4 transfer = get_portal_transfer_transform(
-                source, destination);
+                viewSource, viewDestination);
             // At the instant we cross a portal, the mathematically exact
             // virtual camera lies on the exit portal plane.  Keep it a tiny
             // distance behind that plane for rendering only so the clip and
             // depth passes never leave a one-frame black aperture.
-            const glm::vec3 virtualPosition = stabilize_portal_view_camera(
-                destination,
+            glm::vec3 virtualPosition = stabilize_portal_view_camera(
+                viewDestination,
                 glm::vec3(transfer * glm::vec4(camera.position, 1.0f)));
-            const glm::vec3 virtualForward = glm::normalize(glm::vec3(
+            glm::vec3 virtualForward = glm::normalize(glm::vec3(
                 transfer * glm::vec4(cameraForward, 0.0f)));
-            const glm::vec3 virtualUp = glm::normalize(glm::vec3(
+            glm::vec3 virtualUp = glm::normalize(glm::vec3(
                 transfer * glm::vec4(cameraUp, 0.0f)));
 
-            _portalSceneData[viewIndex] = build_portal_scene_data(
-                glm::lookAt(
-                    virtualPosition,
-                    virtualPosition + virtualForward,
-                    virtualUp),
-                destination);
-            std::memcpy(
-                get_current_frame().portalSceneBuffers[viewIndex].info.pMappedData,
-                &_portalSceneData[viewIndex],
-                sizeof(GPUSceneData));
+            for (uint32_t level = 0; level < PortalRecursionDepth; ++level) {
+                const uint32_t viewIndex = surfaceIndex * PortalRecursionDepth + level;
+                _portalSceneData[viewIndex] = build_portal_scene_data(
+                    glm::lookAt(virtualPosition, virtualPosition + virtualForward, virtualUp),
+                    viewDestination);
+                std::memcpy(
+                    get_current_frame().portalSceneBuffers[viewIndex].info.pMappedData,
+                    &_portalSceneData[viewIndex], sizeof(GPUSceneData));
+                virtualPosition = stabilize_portal_view_camera(viewDestination,
+                    glm::vec3(transfer * glm::vec4(virtualPosition, 1.0f)));
+                virtualForward = glm::normalize(glm::vec3(
+                    transfer * glm::vec4(virtualForward, 0.0f)));
+                virtualUp = glm::normalize(glm::vec3(
+                    transfer * glm::vec4(virtualUp, 0.0f)));
+            }
 
-            // One additional application of the same transform is the view
-            // seen when this portal appears inside its own primary portal
-            // view. Deeper recursion would repeat this same operation.
-            const glm::vec3 recursivePosition = stabilize_portal_view_camera(
-                destination,
-                glm::vec3(transfer * glm::vec4(virtualPosition, 1.0f)));
-            const glm::vec3 recursiveForward = glm::normalize(glm::vec3(
-                transfer * glm::vec4(virtualForward, 0.0f)));
-            const glm::vec3 recursiveUp = glm::normalize(glm::vec3(
-                transfer * glm::vec4(virtualUp, 0.0f)));
-            _portalSceneData[recursiveViewIndex] = build_portal_scene_data(
-                glm::lookAt(
-                    recursivePosition,
-                    recursivePosition + recursiveForward,
-                    recursiveUp),
-                destination);
-            std::memcpy(
-                get_current_frame().portalSceneBuffers[recursiveViewIndex].info.pMappedData,
-                &_portalSceneData[recursiveViewIndex],
-                sizeof(GPUSceneData));
         };
 
-        // Looking into blue means rendering the world as seen after exiting
-        // orange; looking into orange is the inverse relation.
-        updatePortalView(
-            _bluePortal,
-            _orangePortal,
-            BluePortalView,
-            BluePortalRecursiveView);
-        updatePortalView(
-            _orangePortal,
-            _bluePortal,
-            OrangePortalView,
-            OrangePortalRecursiveView);
+        if (_bluePortal.placed && _orangePortal.placed) {
+            updatePortalView(_bluePortal, _orangePortal, BluePortalView);
+            updatePortalView(_orangePortal, _bluePortal, OrangePortalView);
+        }
+        uint32_t viewIndex = 2;
+        for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+            updatePortalView(pair.first, pair.second, viewIndex++);
+            updatePortalView(pair.second, pair.first, viewIndex++);
+        }
     }
 
     stats.scene_update_time = std::chrono::duration<float, std::milli>(

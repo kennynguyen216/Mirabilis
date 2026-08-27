@@ -95,12 +95,13 @@ struct GPUSceneData {
     glm::vec4 portalClipEnabled;
 };
 
-// Two primary portal views plus one recursive view for each colour.
-constexpr uint32_t PortalViewCount = 4;
+// Sixteen visible surfaces (the player pair plus seven authored links), with
+// three virtual-camera levels per surface for recursive portal views.
+constexpr uint32_t MaxPortalSurfaces = 16;
+constexpr uint32_t PortalRecursionDepth = 3;
+constexpr uint32_t PortalViewCount = MaxPortalSurfaces * PortalRecursionDepth;
 constexpr uint32_t BluePortalView = 0;
 constexpr uint32_t OrangePortalView = 1;
-constexpr uint32_t BluePortalRecursiveView = 2;
-constexpr uint32_t OrangePortalRecursiveView = 3;
 
 struct Bounds {
     glm::vec3 origin{0.0f};

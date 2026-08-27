@@ -53,7 +53,7 @@ namespace vkinit
 
     VkRenderingAttachmentInfo depth_attachment_info(
         VkImageView view,
-        VkImageLayout layout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+        VkImageLayout layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
     VkRenderingInfo rendering_info(
         VkExtent2D renderExtent,

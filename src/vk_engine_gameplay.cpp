@@ -81,15 +81,61 @@ void VulkanEngine::update_physics(float deltaTime)
     // because integrate() owns the fall-reset check.
     apply_scene_spawn_point();
 
+    if (_noClipMode) {
+        _playerMovement.previousPosition = _playerMovement.position;
+        const glm::mat4 rotation = mainCamera.getRotationMatrix();
+        const glm::vec3 forward = glm::normalize(glm::vec3(
+            rotation * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+        const glm::vec3 right = glm::normalize(glm::vec3(
+            rotation * glm::vec4(1.0f, 0.0f, 0.0f, 0.0f)));
+        glm::vec3 direction =
+            forward * ((_playerInput.forward ? 1.0f : 0.0f) -
+                       (_playerInput.backward ? 1.0f : 0.0f)) +
+            right * ((_playerInput.right ? 1.0f : 0.0f) -
+                     (_playerInput.left ? 1.0f : 0.0f)) +
+            glm::vec3(0.0f, 1.0f, 0.0f) *
+                ((_noClipUp ? 1.0f : 0.0f) - (_noClipDown ? 1.0f : 0.0f));
+        if (glm::length(direction) > 0.001f) direction = glm::normalize(direction);
+        _playerMovement.velocity = direction * _noClipSpeed;
+        _playerMovement.position += _playerMovement.velocity * deltaTime;
+        _playerMovement.grounded = false;
+        _playerInput.jumpPressed = false;
+        return;
+    }
+
     const glm::vec3 previousPosition = _playerMovement.position;
     _playerMovement.integrate(_playerInput, deltaTime);
 
     _portalTraversalCooldown = std::max(
         0.0f, _portalTraversalCooldown - deltaTime);
-    if (_portalTraversalCooldown <= 0.0f &&
-        _bluePortal.placed && _orangePortal.placed) {
-        if (!try_traverse_portal(_bluePortal, _orangePortal, previousPosition)) {
-            try_traverse_portal(_orangePortal, _bluePortal, previousPosition);
+    if (_portalTraversalCooldown <= 0.0f) {
+        bool traversed = false;
+        const auto tryBidirectionalPair = [&](const Portal& first,
+                                               const Portal& second) {
+            if (try_traverse_portal(first, second, previousPosition) ||
+                try_traverse_portal(second, first, previousPosition)) {
+                return true;
+            }
+
+            // Portal stencil surfaces already render with culling disabled.
+            // Mirror their gameplay behavior so a link is transparent and
+            // walkable from its reverse face too.
+            Portal reverseFirst = first;
+            Portal reverseSecond = second;
+            orient_portal(reverseFirst, -first.normal);
+            orient_portal(reverseSecond, -second.normal);
+            return try_traverse_portal(
+                       reverseFirst, reverseSecond, previousPosition) ||
+                try_traverse_portal(
+                    reverseSecond, reverseFirst, previousPosition);
+        };
+        if (_bluePortal.placed && _orangePortal.placed) {
+            traversed = tryBidirectionalPair(_bluePortal, _orangePortal);
+        }
+        for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+            if (!traversed) {
+                traversed = tryBidirectionalPair(pair.first, pair.second);
+            }
         }
     }
 
@@ -110,6 +156,18 @@ bool VulkanEngine::apply_scene_spawn_point()
         }
     }
     return false;
+}
+
+void VulkanEngine::respawn_player()
+{
+    apply_scene_spawn_point();
+    _playerMovement.position = _playerMovement.settings.spawnPosition;
+    _playerMovement.previousPosition = _playerMovement.position;
+    _playerMovement.velocity = glm::vec3(0.0f);
+    _playerMovement.grounded = false;
+    _playerMovement.jumpBufferRemaining = 0.0f;
+    _portalTraversalCooldown = 0.0f;
+    reset_time_trial();
 }
 
 void VulkanEngine::reset_time_trial()
@@ -309,6 +367,10 @@ void VulkanEngine::rebuild_collision_from_scene()
         if (_orangePortal.placed && _orangePortal.hostWallObject == object.id) {
             carve_portal_opening(wallPieces, _orangePortal);
         }
+        for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+            if (pair.first.hostWallObject == object.id) carve_portal_opening(wallPieces, pair.first);
+            if (pair.second.hostWallObject == object.id) carve_portal_opening(wallPieces, pair.second);
+        }
         for (const AABB& piece : wallPieces) {
             add_collider_if_nonempty(_activeWallColliders, piece);
         }
@@ -369,4 +431,140 @@ void VulkanEngine::retract_portals()
     _orangePortal = Portal{};
     _portalTraversalCooldown = 0.0f;
     rebuild_collision_from_scene();
+}
+
+void VulkanEngine::place_authored_portal_endpoint()
+{
+    if (_authoredPortalPairs.size() >= MaxAuthoredPortalPairs) {
+        return;
+    }
+    const Camera& camera = render_camera();
+    const glm::vec3 rayDirection = glm::normalize(glm::vec3(
+        camera.getRotationMatrix() * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+
+    Portal candidate{};
+    candidate.placed = true;
+    // Authored links are proper freestanding actors.  The portal faces the
+    // editor camera at a comfortable authoring distance; its transform can
+    // then be refined in the Portals menu without any host-wall dependency.
+    constexpr float DefaultPlacementDistance = 5.0f;
+    candidate.position = camera.position + rayDirection * DefaultPlacementDistance;
+    orient_portal(candidate, -rayDirection);
+    const auto overlapsExisting = [&](const Portal& existing) {
+        return portals_overlap(candidate, existing);
+    };
+    if (overlapsExisting(_bluePortal) || overlapsExisting(_orangePortal) ||
+        (_authoredPortalDraft.has_value() && overlapsExisting(*_authoredPortalDraft))) {
+        return;
+    }
+    for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+        if (overlapsExisting(pair.first) || overlapsExisting(pair.second)) return;
+    }
+    if (_authoredPortalDraft.has_value()) {
+        _authoredPortalPairs.push_back(AuthoredPortalPair{*_authoredPortalDraft, candidate});
+        _authoredPortalDraft.reset();
+    } else {
+        _authoredPortalDraft = candidate;
+    }
+    _sceneDirty = true;
+    rebuild_collision_from_scene();
+}
+
+void VulkanEngine::clear_authored_portals()
+{
+    _authoredPortalPairs.clear();
+    _authoredPortalDraft.reset();
+    _sceneDirty = true;
+    rebuild_collision_from_scene();
+}
+
+bool VulkanEngine::create_three_room_pole_chain()
+{
+    struct RoomPole {
+        SceneObjectID root{InvalidSceneObject};
+        glm::vec3 roomCenter{0.0f};
+        glm::vec3 polePosition{0.0f};
+    };
+    std::vector<RoomPole> rooms;
+    for (const SceneObject& root : _scene.objects) {
+        if (!root.alive || root.parent != _sandboxRoot ||
+            !root.name.starts_with("Long Closed Room")) {
+            continue;
+        }
+        for (const SceneObjectID childID : root.children) {
+            const SceneObject* child = _scene.get(childID);
+            if (child != nullptr && child->name == "Center Pole") {
+                rooms.push_back(RoomPole{root.id,
+                    glm::vec3(_scene.world_matrix(root.id)[3]),
+                    glm::vec3(_scene.world_matrix(childID)[3])});
+                break;
+            }
+        }
+    }
+    if (rooms.size() < 3) return false;
+
+    // The current level has its rooms arranged left-to-right. Sorting by X
+    // makes the setup deterministic even after selecting the roots in a
+    // different order.
+    std::sort(rooms.begin(), rooms.end(), [](const RoomPole& lhs,
+                                              const RoomPole& rhs) {
+        return lhs.polePosition.x > rhs.polePosition.x;
+    });
+
+    const auto makeEndpoint = [](glm::vec3 position, const glm::vec3& normal,
+                                 float halfWidth) {
+        Portal portal{};
+        portal.placed = true;
+        portal.hostWallObject = InvalidSceneObject;
+        portal.position = position;
+        portal.halfWidth = halfWidth;
+        portal.halfHeight = 2.98f;
+        orient_portal(portal, normal);
+        return portal;
+    };
+    struct Opening {
+        glm::vec3 leftCenter{0.0f};
+        glm::vec3 rightCenter{0.0f};
+        float leftHalfWidth{1.0f};
+        float rightHalfWidth{1.0f};
+    };
+    const auto openingForRoom = [](const RoomPole& room) {
+        constexpr float WallInnerOffset = 5.84f;
+        constexpr float PoleHalfWidth = 0.25f;
+        // Keep the rasterized portal edge just inside the architectural gap.
+        // The stencil pass intentionally ignores depth, so an exactly shared
+        // edge can otherwise leak one pixel across the pole or side wall.
+        constexpr float EdgeInset = 0.02f;
+        constexpr float SurfaceOffsetPastPole = 0.28f;
+        const float leftEdge = room.roomCenter.x - WallInnerOffset + EdgeInset;
+        const float poleLeft = room.polePosition.x - PoleHalfWidth - EdgeInset;
+        const float poleRight = room.polePosition.x + PoleHalfWidth + EdgeInset;
+        const float rightEdge = room.roomCenter.x + WallInnerOffset - EdgeInset;
+        const float y = room.roomCenter.y + 3.0f;
+        const float z = room.polePosition.z + SurfaceOffsetPastPole;
+        return Opening{
+            .leftCenter = glm::vec3((leftEdge + poleLeft) * 0.5f, y, z),
+            .rightCenter = glm::vec3((poleRight + rightEdge) * 0.5f, y, z),
+            .leftHalfWidth = (poleLeft - leftEdge) * 0.5f,
+            .rightHalfWidth = (rightEdge - poleRight) * 0.5f,
+        };
+    };
+    const Opening firstOpening = openingForRoom(rooms[0]);
+    const Opening secondOpening = openingForRoom(rooms[1]);
+    const Opening thirdOpening = openingForRoom(rooms[2]);
+    _authoredPortalPairs.clear();
+    _authoredPortalDraft.reset();
+    _authoredPortalPairs.push_back(AuthoredPortalPair{
+        makeEndpoint(firstOpening.leftCenter, glm::vec3(0, 0, -1),
+                     firstOpening.leftHalfWidth),
+        makeEndpoint(secondOpening.leftCenter, glm::vec3(0, 0, 1),
+                     secondOpening.leftHalfWidth)});
+    _authoredPortalPairs.push_back(AuthoredPortalPair{
+        makeEndpoint(secondOpening.rightCenter, glm::vec3(0, 0, -1),
+                     secondOpening.rightHalfWidth),
+        makeEndpoint(thirdOpening.rightCenter, glm::vec3(0, 0, 1),
+                     thirdOpening.rightHalfWidth)});
+    _sceneDirty = true;
+    rebuild_collision_from_scene();
+    return true;
 }

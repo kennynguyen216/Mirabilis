@@ -59,6 +59,17 @@ bool VulkanEngine::process_event(const SDL_Event& e)
         retract_portals();
     }
 
+    if (!_editorMode && e.type == SDL_KEYDOWN && e.key.repeat == 0) {
+        if (e.key.keysym.sym == SDLK_F1) {
+            respawn_player();
+        } else if (e.key.keysym.sym == SDLK_F2) {
+            _noClipMode = !_noClipMode;
+            _noClipUp = false;
+            _noClipDown = false;
+            _playerMovement.velocity = glm::vec3(0.0f);
+        }
+    }
+
     if (_editorMode) {
         // Match the conventional ImGuizmo/Unity-style transform
         // bindings, but leave W/A/S/D to the fly camera while
@@ -127,8 +138,13 @@ bool VulkanEngine::process_event(const SDL_Event& e)
             if (e.key.keysym.sym == SDLK_s) _playerInput.backward = true;
             if (e.key.keysym.sym == SDLK_a) _playerInput.left = true;
             if (e.key.keysym.sym == SDLK_d) _playerInput.right = true;
-            if (e.key.keysym.sym == SDLK_SPACE && e.key.repeat == 0) {
-                _playerInput.jumpPressed = true;
+            if (e.key.keysym.sym == SDLK_SPACE) {
+                if (_noClipMode) _noClipUp = true;
+                else if (e.key.repeat == 0) _playerInput.jumpPressed = true;
+            }
+            if (_noClipMode && (e.key.keysym.sym == SDLK_LCTRL ||
+                                e.key.keysym.sym == SDLK_RCTRL)) {
+                _noClipDown = true;
             }
         }
 
@@ -155,6 +171,9 @@ bool VulkanEngine::process_event(const SDL_Event& e)
             if (e.key.keysym.sym == SDLK_s) _playerInput.backward = false;
             if (e.key.keysym.sym == SDLK_a) _playerInput.left = false;
             if (e.key.keysym.sym == SDLK_d) _playerInput.right = false;
+            if (e.key.keysym.sym == SDLK_SPACE) _noClipUp = false;
+            if (e.key.keysym.sym == SDLK_LCTRL ||
+                e.key.keysym.sym == SDLK_RCTRL) _noClipDown = false;
         }
     }
 
