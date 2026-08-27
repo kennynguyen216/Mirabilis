@@ -63,7 +63,7 @@ const AllocatedImage& VulkanEngine::load_scene_texture(
             1},
         VK_FORMAT_R8G8B8A8_SRGB,
         VK_IMAGE_USAGE_SAMPLED_BIT,
-        false);
+        true);
     stbi_image_free(pixels);
 
     auto [inserted, unused] = _sceneTextureCache.emplace(key, image);

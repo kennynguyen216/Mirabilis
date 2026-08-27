@@ -479,19 +479,12 @@ GPUSceneData VulkanEngine::build_portal_scene_data(
 {
     GPUSceneData data = build_scene_data(view);
 
-    // Wall-mounted portals need a clip plane to hide the host wall's back
-    // side. A freestanding authored link has no host wall, though; applying
-    // that same plane can cut away its entire destination room and leave an
-    // aperture that shows only sky. Let freestanding links render the whole
-    // destination world.
-    if (destination.hostWallObject == InvalidSceneObject) {
-        data.portalClipEnabled = glm::vec4(0.0f);
-        return data;
-    }
-
-    // Keep the room-facing side of a wall-mounted destination portal. A tiny
-    // offset avoids a precision fight with the wall face. This is performed
-    // in the portal vertex shader rather than by mutating reversed-Z data.
+    // Keep only the world beyond the destination aperture. This is required
+    // for freestanding links too: all authored rooms coexist in world space,
+    // so disabling the plane lets geometry behind the virtual camera leak
+    // into the portal and depth-fight at its edges. update_scene() has already
+    // reversed a two-sided destination when needed, so this plane always has
+    // the correct sign for the current side of the portal.
     constexpr float ClipEpsilon = 0.01f;
     const glm::vec3 clipPoint = destination.position +
         destination.normal * ClipEpsilon;
