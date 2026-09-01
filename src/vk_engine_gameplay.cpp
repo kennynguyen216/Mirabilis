@@ -155,6 +155,9 @@ bool VulkanEngine::apply_scene_spawn_point()
             return true;
         }
     }
+    // A scene with no spawn marker must not inherit the prior scene's player
+    // position. The empty sandbox is centred on this safe fallback.
+    _playerMovement.settings.spawnPosition = glm::vec3(0.0f);
     return false;
 }
 
@@ -165,6 +168,8 @@ void VulkanEngine::respawn_player()
     _playerMovement.previousPosition = _playerMovement.position;
     _playerMovement.velocity = glm::vec3(0.0f);
     _playerMovement.grounded = false;
+    mainCamera.position = _playerMovement.position + glm::vec3(0.0f, 1.7f, 0.0f);
+    mainCamera.velocity = glm::vec3(0.0f);
     _playerMovement.jumpBufferRemaining = 0.0f;
     _portalTraversalCooldown = 0.0f;
     reset_time_trial();

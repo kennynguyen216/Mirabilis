@@ -8,9 +8,11 @@
 #include <vk_images.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <thread>
 
 #define VMA_IMPLEMENTATION
@@ -404,7 +406,9 @@ void VulkanEngine::draw(float deltaTime)
 		static_cast<uint32_t>(std::ceil(_drawExtent.height / 16.0)), 1);
 
 	vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-	vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+	vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
 	stats.drawcall_count = 0;
 	stats.triangle_count = 0;
 	stats.world_drawcall_count = 0;
@@ -609,9 +613,28 @@ void VulkanEngine::init_swapchain()
 
     VK_CHECK(vkCreateImageView(_device, &rview_info, nullptr, &_drawImage.imageView));
 
+    // Depth/stencil formats are not interchangeable across Vulkan devices.
+    // Select one the active GPU explicitly advertises for attachment use
+    // rather than assuming D32_SFLOAT_S8_UINT is always available.
+    static constexpr std::array<VkFormat, 2> depthFormats{
+        VK_FORMAT_D32_SFLOAT_S8_UINT,
+        VK_FORMAT_D24_UNORM_S8_UINT};
+    _depthImage.imageFormat = VK_FORMAT_UNDEFINED;
+    for (VkFormat candidate : depthFormats) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(_chosenGPU, candidate, &properties);
+        if ((properties.optimalTilingFeatures &
+                VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0) {
+            _depthImage.imageFormat = candidate;
+            break;
+        }
+    }
+    if (_depthImage.imageFormat == VK_FORMAT_UNDEFINED) {
+        fmt::print("No supported depth/stencil attachment format was found.\n");
+        std::abort();
+    }
     // Real portal rendering uses the stencil half of this image to mark each
     // portal opening. Depth still handles normal world visibility.
-    _depthImage.imageFormat = VK_FORMAT_D32_SFLOAT_S8_UINT;
     _depthImage.imageExtent = drawImageExtent;
 
     VkImageUsageFlags depthImageUsages = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;

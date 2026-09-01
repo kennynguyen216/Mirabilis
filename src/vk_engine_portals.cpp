@@ -356,7 +356,8 @@ void VulkanEngine::draw_offscreen_portal_views(VkCommandBuffer cmd)
             cmd,
             _portalCameraDepthImage.image,
             VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
         draw_geometry_to_portal_camera(
             cmd,
             portalViewDrawContext,

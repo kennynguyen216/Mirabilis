@@ -17,6 +17,9 @@ add_subdirectory(src)
 
 find_program(GLSL_VALIDATOR glslangValidator HINTS /usr/bin /usr/local/bin $ENV{VULKAN_SDK}/Bin/ $ENV{VULKAN_SDK}/Bin32/)
 
+# Shared includes are not shaders themselves, but a change to one must
+# rebuild every shader that includes it.
+file(GLOB GLSL_INCLUDE_FILES "${PROJECT_SOURCE_DIR}/shaders/*.glsl")
 
 
 
@@ -34,7 +37,7 @@ foreach(GLSL ${GLSL_SOURCE_FILES})
   add_custom_command(
     OUTPUT ${SPIRV}
     COMMAND ${GLSL_VALIDATOR} -V ${GLSL} -o ${SPIRV}
-    DEPENDS ${GLSL})
+    DEPENDS ${GLSL} ${GLSL_INCLUDE_FILES})
   list(APPEND SPIRV_BINARY_FILES ${SPIRV})
 endforeach(GLSL)
 
@@ -42,3 +45,5 @@ add_custom_target(
     Shaders 
     DEPENDS ${SPIRV_BINARY_FILES}
     )
+
+add_dependencies(engine Shaders)
