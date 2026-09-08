@@ -80,6 +80,17 @@ Pop-Location
 
 Press `Esc` or close the window to exit.
 
+### Included bhop course
+
+`assets/scenes/momentum_bhop_tutorial_adapted.json` is a native Mirabilis
+adaptation of Momentum Mod's public `bhop_tutorial` source layout. Open it from
+the editor's **File > Open Scene** menu. It progresses from wide, low pads to
+tighter rising diagonal jumps and ends at a timed finish platform.
+
+The original Source `.vmf`/`.bsp` cannot be loaded directly by Mirabilis, so
+the course is rebuilt with the engine's own floor primitives, colliders, spawn,
+and time-trial triggers. Source reference: https://github.com/momentum-mod/level-design
+
 ## Status
 
 Mirabilis is an active engine and rendering prototype. Features, controls, and scene formats may change as portal rendering, movement, and editor tooling evolve.
