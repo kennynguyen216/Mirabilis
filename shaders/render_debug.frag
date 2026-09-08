@@ -11,6 +11,13 @@ layout(location = 0) out vec4 outFragColor;
 layout(set = 1, binding = 0) uniform sampler2D prepassDepth;
 layout(set = 1, binding = 1) uniform sampler2D prepassNormal;
 
+// The three occlusion stages, at half resolution.  They are read with
+// texelFetch too, so what appears on screen is the stored texel rather than a
+// filtered version of it.
+layout(set = 2, binding = 0) uniform sampler2D occlusionRaw;
+layout(set = 2, binding = 1) uniform sampler2D occlusionBlurred;
+layout(set = 2, binding = 2) uniform sampler2D occlusionFinal;
+
 layout(push_constant) uniform constants {
     // x = debug mode, yz = rendered extent, w = distance that maps to white
     // in the depth view.
@@ -21,10 +28,35 @@ const int ModeDepth = 1;
 const int ModeViewNormal = 2;
 const int ModeViewPosition = 3;
 const int ModeWorldPosition = 4;
+const int ModeOcclusionRaw = 5;
+const int ModeOcclusionBlurred = 6;
+const int ModeOcclusionFinal = 7;
 
 void main()
 {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
+    int mode = int(PushConstants.settings.x + 0.5);
+
+    // The occlusion views come first because they must show the background as
+    // white.  The reconstruction below returns early on background depth, and
+    // black there would look exactly like full occlusion.
+    if (mode >= ModeOcclusionRaw) {
+        // Half resolution, so each occlusion texel covers a 2x2 block.  The
+        // allocation is half the draw image in the same way, which is why the
+        // active region needs no scaling here.
+        ivec2 occlusionPixel = pixel / 2;
+        float occlusion = 1.0;
+        if (mode == ModeOcclusionRaw) {
+            occlusion = texelFetch(occlusionRaw, occlusionPixel, 0).r;
+        } else if (mode == ModeOcclusionBlurred) {
+            occlusion = texelFetch(occlusionBlurred, occlusionPixel, 0).r;
+        } else {
+            occlusion = texelFetch(occlusionFinal, occlusionPixel, 0).r;
+        }
+        outFragColor = vec4(vec3(occlusion), 1.0);
+        return;
+    }
+
     float depth = texelFetch(prepassDepth, pixel, 0).r;
 
     // The camera's depth is reversed, so the cleared far value is 0.  Nothing
@@ -43,7 +75,6 @@ void main()
     vec4 viewPosition = sceneData.inverseProjection * clipPosition;
     viewPosition.xyz /= viewPosition.w;
 
-    int mode = int(PushConstants.settings.x + 0.5);
     vec3 color = vec3(0.0);
     if (mode == ModeDepth) {
         // Metres in front of the camera rather than the raw non-linear value,

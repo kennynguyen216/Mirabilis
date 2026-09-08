@@ -1,5 +1,6 @@
 #include "vk_engine.h"
 
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -348,6 +349,16 @@ bool VulkanEngine::save_editor_scene()
          << ", \"shadowRadius\": " << _shadowRadius
          << ", \"shadowDepthBias\": " << _shadowDepthBias
          << ", \"shadowNormalBias\": " << _shadowNormalBias << '}';
+    // Ambient occlusion is lighting too: the radius that reads correctly
+    // depends on the scale this level was authored at.  The sample count and
+    // the resolution are absent for the same reason the shadow map size is -
+    // they describe a machine, not a level.
+    file << ",\n  \"ssao\": {\"enabled\": "
+         << (_ssaoSettings.enabled ? "true" : "false")
+         << ", \"radius\": " << _ssaoSettings.radius
+         << ", \"bias\": " << _ssaoSettings.bias
+         << ", \"intensity\": " << _ssaoSettings.intensity
+         << ", \"power\": " << _ssaoSettings.power << '}';
     file << "\n}\n";
     if (!file) {
         fmt::print("Could not finish writing scene: {}\n", scenePath.string());
@@ -455,6 +466,47 @@ bool VulkanEngine::load_editor_scene()
             simdjson::SUCCESS) {
             _shadowNormalBias = static_cast<float>(numeric);
         }
+    }
+
+    // Parsed into a local and committed at the very end, so a scene that
+    // fails to load halfway through leaves the current occlusion settings
+    // exactly as they were.  Starting from a default-constructed value is
+    // also what gives a legacy scene with no block the documented defaults
+    // rather than whatever the previous level happened to set.
+    SSAOSettings pendingSSAO{};
+    simdjson::dom::object jsonSSAO;
+    if (document["ssao"].get_object().get(jsonSSAO) == simdjson::SUCCESS) {
+        bool ssaoEnabled = pendingSSAO.enabled;
+        if (jsonSSAO["enabled"].get_bool().get(ssaoEnabled) == simdjson::SUCCESS) {
+            pendingSSAO.enabled = ssaoEnabled;
+        }
+        // Every value is range-checked before it is kept.  A radius of zero or
+        // a non-finite power would not merely look wrong, it would divide or
+        // exponentiate its way into NaNs across the whole occlusion image.
+        const auto readPositive = [&](const char* key, float& target) {
+            double numeric = 0.0;
+            if (jsonSSAO[key].get_double().get(numeric) != simdjson::SUCCESS) {
+                return;
+            }
+            const float value = static_cast<float>(numeric);
+            if (std::isfinite(value) && value > 0.0f) {
+                target = value;
+            }
+        };
+        const auto readNonNegative = [&](const char* key, float& target) {
+            double numeric = 0.0;
+            if (jsonSSAO[key].get_double().get(numeric) != simdjson::SUCCESS) {
+                return;
+            }
+            const float value = static_cast<float>(numeric);
+            if (std::isfinite(value) && value >= 0.0f) {
+                target = value;
+            }
+        };
+        readPositive("radius", pendingSSAO.radius);
+        readNonNegative("bias", pendingSSAO.bias);
+        readNonNegative("intensity", pendingSSAO.intensity);
+        readPositive("power", pendingSSAO.power);
     }
 
     std::vector<SavedPreloadedPortal> savedPreloadedPortals;
@@ -731,6 +783,8 @@ bool VulkanEngine::load_editor_scene()
     reset_time_trial();
     _selectedSceneObject = InvalidSceneObject;
     _nextCreatedActorNumber = static_cast<uint32_t>(std::max<uint64_t>(nextActor, 1));
+    // Past every path that could still have failed.
+    _ssaoSettings = pendingSSAO;
     _sceneDirty = false;
     std::ofstream lastSceneFile(LastEditorScenePath, std::ios::trunc);
     if (lastSceneFile) {

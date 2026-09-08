@@ -73,6 +73,10 @@ void VulkanEngine::init()
     // Same reason: the anti-aliasing pass needs its sampler before the set
     // that pairs it with the draw image can be written.
     init_post_process_resources();
+    // And again: the occlusion images and their sampler are named by the
+    // scene descriptor set, which init_descriptors() writes.
+    init_ssao_resources();
+    init_gpu_timestamps();
     init_descriptors();
     init_pipelines();
     init_default_data();
@@ -90,7 +94,7 @@ void VulkanEngine::init()
     _playerMovement.position = _playerMovement.settings.spawnPosition;
     _playerMovement.velocity = glm::vec3(0.0f);
     _playerMovement.grounded = true;
-    
+
     //evverything went fine
     _isInitialized = true;
 
@@ -193,6 +197,10 @@ void VulkanEngine::init_vulkan()
     // portal is removed before rasterization/depth testing.
     VkPhysicalDeviceFeatures features10{};
     features10.shaderClipDistance = VK_TRUE;
+    // The occlusion passes declare their output image without a format
+    // qualifier, so that the engine can pick the occlusion format from what
+    // the device advertises instead of baking one choice into the shader.
+    features10.shaderStorageImageWriteWithoutFormat = VK_TRUE;
 
     // use vkbootstrap to select a gpu
     // we want a gpu that can write tot eh sdl surfance and supporters vulkan 1.3 with correct features
@@ -348,6 +356,9 @@ void VulkanEngine::draw(float deltaTime)
 
     //wait until the gpu has finished rendering the last frame. timeout of 1 second
     VK_CHECK(vkWaitForFences(_device, 1, &get_current_frame()._renderFence, true, 1000000000));
+    // The fence has passed, so any timestamps this slot recorded belong to a
+    // submission that has finished and can be read without stalling.
+    read_gpu_timestamps(_frameNumber % FRAME_OVERLAP);
     get_current_frame()._deletionQueue.flush();
     get_current_frame()._frameDescriptors.clear_pools(_device);
     //request image from the swapchain 
@@ -388,6 +399,16 @@ void VulkanEngine::draw(float deltaTime)
 
     VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
 
+	// Timestamps have to be reset before they are written again, and this
+	// slot's results were read above.
+	if (_gpuTimingSupported) {
+		vkCmdResetQueryPool(
+			cmd,
+			_timestampPool,
+			(_frameNumber % FRAME_OVERLAP) * TimestampsPerFrame,
+			TimestampsPerFrame);
+	}
+
 	// The shadow and prepass counters are recorded before the main pass
 	// resets its own, so they are cleared here instead.
 	stats.shadow_drawcall_count = 0;
@@ -401,10 +422,28 @@ void VulkanEngine::draw(float deltaTime)
 	draw_shadow_map(cmd);
 
 	// Camera depth and view-space normals for the screen-space passes.  A
-	// debug view samples those images, so it also forces the pass to run.
+	// debug view samples those images, so it also forces the pass to run, and
+	// so does ambient occlusion, which is built entirely out of them.
 	const bool showRenderDebugView = _renderDebugView != RenderDebugView::None;
-	if (_depthNormalPrepassEnabled || showRenderDebugView) {
+	const bool occlusionActive = ssao_active();
+	if (_depthNormalPrepassEnabled || showRenderDebugView || occlusionActive) {
 		draw_depth_normal_prepass(cmd);
+	}
+
+	// Ambient occlusion reads the prepass and is finished before any shading
+	// starts, because every lit surface in the frame samples its result.
+	// Skipped entirely when disabled: the images keep the neutral 1.0 they
+	// were cleared to, so nothing downstream needs a second code path.
+	if (occlusionActive) {
+		draw_ssao(cmd);
+	} else {
+		stats.ssao_width = 0;
+		stats.ssao_height = 0;
+		stats.ssao_kernel_samples = 0;
+		stats.ssao_raw_time = 0.0f;
+		stats.ssao_blur_horizontal_time = 0.0f;
+		stats.ssao_blur_vertical_time = 0.0f;
+		stats.ssao_total_time = 0.0f;
 	}
 
 	// transition our main draw image into general layout so we can write into it

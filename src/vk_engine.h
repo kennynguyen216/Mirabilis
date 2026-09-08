@@ -102,6 +102,45 @@ struct FXAAPushConstants {
     glm::vec4 limits{0.0f};
 };
 
+// Shared by the occlusion sampling pass and both blur directions.  The field
+// meanings are documented once, in shaders/ssao_common.glsl.
+struct SSAOPushConstants {
+    glm::ivec4 extents{0};
+    glm::vec4 texelSize{0.0f};
+    glm::vec4 activeFraction{0.0f};
+    glm::vec4 screenTexel{0.0f};
+    glm::vec4 settings{0.0f};
+};
+
+// The occlusion kernel is a fixed set of points in the +Z hemisphere, sent to
+// the GPU once.  vec4 rather than vec3 because std140 pads an array element
+// out to sixteen bytes either way.
+constexpr uint32_t MaxSSAOKernelSize = 64;
+struct SSAOKernelBlock {
+    std::array<glm::vec4, MaxSSAOKernelSize> samples{};
+};
+
+// How much of the surrounding hemisphere reaches a surface.  These describe
+// the lighting of a level, so they travel with the scene; the sample count and
+// resolution below them describe what a machine can afford and do not.
+struct SSAOSettings {
+    bool enabled{true};
+    // The size of the neighbourhood that can occlude a point, in world units.
+    // It depends entirely on the scale the level was authored at.
+    float radius{0.75f};
+    // How far a sample must be behind a surface before it counts as blocked.
+    // Too little and surfaces shadow themselves into speckle; too much and
+    // occlusion detaches from the corners that produced it.
+    float bias{0.025f};
+    float intensity{1.0f};
+    float power{1.5f};
+};
+
+// Sample counts, cheapest first.  Each is a separate pipeline built from the
+// same shader with a different specialization constant, so a lower quality
+// really does less work rather than skipping loop iterations.
+constexpr std::array<int, 3> SSAOKernelSizes{16, 32, 64};
+
 // The collider overlay has no vertex buffer or descriptors.  Its vertex
 // shader contains the 12 unit-cube edges and expands them with this matrix.
 struct ColliderDebugPushConstants {
@@ -125,6 +164,17 @@ struct EngineStats {
     int prepass_drawcall_count{0};
     int prepass_triangle_count{0};
     float prepass_record_time{0.0f};
+    // Ambient occlusion runs entirely on the GPU in three dispatches, so CPU
+    // recording time says nothing about what it costs.  These come from
+    // timestamp queries when the device supports them.
+    int ssao_width{0};
+    int ssao_height{0};
+    int ssao_kernel_samples{0};
+    float ssao_raw_time{0.0f};
+    float ssao_blur_horizontal_time{0.0f};
+    float ssao_blur_vertical_time{0.0f};
+    float ssao_total_time{0.0f};
+    bool ssao_time_is_gpu{false};
 };
 
 // Which intermediate buffer to show instead of the shaded image.  These are
@@ -136,6 +186,12 @@ enum class RenderDebugView : int {
     ViewNormals = 2,
     ViewPosition = 3,
     WorldPosition = 4,
+    // Each occlusion stage on its own.  Seeing the raw pass separately from
+    // the filtered one is the only way to tell noise apart from a blur that
+    // is smearing occlusion across a silhouette.
+    OcclusionRaw = 5,
+    OcclusionBlurred = 6,
+    OcclusionFinal = 7,
 };
 
 struct SceneMaterialRuntime {
@@ -332,7 +388,17 @@ class VulkanEngine{
         void init_render_debug_pipeline();
         void init_post_process_resources();
         void init_fxaa_pipeline();
+        void init_ssao_resources();
+        void init_ssao_pipelines();
+        void init_gpu_timestamps();
+        void read_gpu_timestamps(uint32_t frameIndex);
         void draw_depth_normal_prepass(VkCommandBuffer cmd);
+        void draw_ssao(VkCommandBuffer cmd);
+        SSAOPushConstants build_ssao_push_constants() const;
+        // Half the rendered region, rounded up, which is what the dispatches
+        // cover.  The images themselves stay allocated at half the window.
+        VkExtent2D active_ssao_extent() const;
+        bool ssao_active() const;
         void draw_render_debug(VkCommandBuffer cmd);
         void draw_fxaa(VkCommandBuffer cmd);
         glm::mat4 compute_sun_view_projection(const glm::vec3& focusPoint) const;
@@ -553,6 +619,55 @@ class VulkanEngine{
         MaterialPipeline _depthNormalPipeline;
         MaterialPipeline _renderDebugPipeline;
         bool _depthNormalPrepassEnabled{true};
+        // Ambient occlusion, at half resolution.  Three images rather than
+        // one because a compute pass cannot read and write the same storage
+        // image, and because each stage is then separately inspectable.
+        AllocatedImage _ssaoRawImage;
+        AllocatedImage _ssaoBlurImage;
+        AllocatedImage _ssaoFinalImage;
+        // 16x16 tiled rotation vectors.  Turning the kernel differently at
+        // neighbouring pixels converts a visible banding pattern into noise,
+        // which the bilateral blur can then remove.
+        AllocatedImage _ssaoNoiseImage;
+        AllocatedBuffer _ssaoKernelBuffer;
+        // Linear and clamped: material shading samples the half-resolution
+        // result at full resolution, so the taps land between texels.
+        VkSampler _ssaoSampler{};
+        VkSampler _ssaoNoiseSampler{};
+        VkDescriptorSetLayout _ssaoDescriptorLayout{};
+        VkDescriptorSetLayout _ssaoBlurDescriptorLayout{};
+        VkDescriptorSetLayout _ssaoDebugDescriptorLayout{};
+        VkDescriptorSet _ssaoDescriptor{};
+        VkDescriptorSet _ssaoBlurHorizontalDescriptor{};
+        VkDescriptorSet _ssaoBlurVerticalDescriptor{};
+        VkDescriptorSet _ssaoDebugDescriptor{};
+        VkPipelineLayout _ssaoPipelineLayout{};
+        VkPipelineLayout _ssaoBlurPipelineLayout{};
+        // One per entry in SSAOKernelSizes.
+        std::array<VkPipeline, SSAOKernelSizes.size()> _ssaoPipelines{};
+        VkPipeline _ssaoBlurPipeline{};
+        VkExtent2D _ssaoExtent{0, 0};
+        VkFormat _ssaoFormat{VK_FORMAT_UNDEFINED};
+        const char* _ssaoFormatName{"none"};
+        SSAOSettings _ssaoSettings{};
+        // A machine setting, not a scene one: it buys quality with GPU time
+        // and says nothing about how the level is lit.
+        int _ssaoQuality{1};
+        // Drops the sunlight term so occlusion can be judged on its own.  With
+        // ambient light at zero as well, a correct implementation produces no
+        // visible difference at all.
+        bool _ssaoAmbientOnly{false};
+        // How sharply the blur rejects a neighbour on a different surface.
+        float _ssaoDepthFalloff{12.0f};
+        float _ssaoNormalFalloff{16.0f};
+        // Four marks per frame - before the sampling pass and after each of
+        // the three dispatches - read back once the frame's fence has passed.
+        static constexpr uint32_t TimestampsPerFrame = 4;
+        VkQueryPool _timestampPool{VK_NULL_HANDLE};
+        // Nanoseconds per timestamp tick, from the device.
+        float _timestampPeriod{0.0f};
+        bool _gpuTimingSupported{false};
+        std::array<bool, FRAME_OVERLAP> _timestampsPending{};
         // Anti-aliasing runs last, on the composed colour, so one filter
         // covers world geometry, portal contents, and the debug overlays
         // without any pass needing to know about it.  It cannot read and

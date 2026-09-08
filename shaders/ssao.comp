@@ -1,0 +1,141 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Kernel-based hemisphere ambient occlusion over the depth/normal prepass.
+// It answers a different question from the shadow map: the shadow map says
+// whether the sun reaches a surface, this says how much of the surrounding
+// hemisphere is blocked by nearby geometry.  Only the ambient term uses it.
+#include "scene_data.glsl"
+#include "ssao_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// The sample count is a specialization constant, so each quality level is its
+// own pipeline with its own loop bound.  A push-constant bound would leave
+// one shader compiled for the maximum and merely skip the later iterations.
+layout(constant_id = 0) const int KernelSize = 32;
+
+// The prepass targets, read through the nearest/clamped sampler: filtering
+// depth or normals across a silhouette invents a surface that exists nowhere.
+layout(set = 1, binding = 0) uniform sampler2D prepassDepth;
+layout(set = 1, binding = 1) uniform sampler2D prepassNormal;
+// 16x16 tiled rotation vectors, nearest and repeating.  Rotating the kernel
+// differently at neighbouring pixels turns a visible directional pattern into
+// noise the bilateral blur can then remove.
+layout(set = 1, binding = 2) uniform sampler2D rotationNoise;
+// Deliberately declared without a format qualifier.  The engine picks the
+// occlusion format from what the device advertises for storage-plus-sampled
+// use, and a hard-coded qualifier here would have to match that choice.
+layout(set = 1, binding = 3) uniform writeonly image2D outputAO;
+layout(set = 1, binding = 4) uniform SSAOKernel {
+    // xyz = a point in the +Z hemisphere, already biased towards the origin.
+    vec4 samples[64];
+} kernelData;
+
+const float NoiseTextureSize = 16.0;
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    // The dispatch is rounded up to whole workgroups and the extent is not
+    // required to divide by eight.
+    if (any(greaterThanEqual(pixel, PushConstants.extents.xy))) {
+        return;
+    }
+
+    vec2 screenUV = screen_uv_for(pixel);
+    float depth = texture(prepassDepth, prepass_uv(screenUV)).r;
+
+    // Nothing was drawn here, so there is no surface to occlude.  Leaving the
+    // background fully visible is what keeps the sky out of the effect.
+    if (depth <= BackgroundDepth) {
+        imageStore(outputAO, pixel, vec4(1.0));
+        return;
+    }
+
+    // The prepass writes signed view-space normals into a float attachment,
+    // so there is nothing to decode here.  It clears to zero, which is how a
+    // pixel no surface covered is recognised.
+    vec3 rawNormal = texture(prepassNormal, prepass_uv(screenUV)).xyz;
+    if (dot(rawNormal, rawNormal) < 1e-8) {
+        imageStore(outputAO, pixel, vec4(1.0));
+        return;
+    }
+    vec3 normal = normalize(rawNormal);
+    vec3 viewPosition = view_position_from_depth(screenUV, depth);
+
+    // The noise tiles across the occlusion grid rather than the window,
+    // because this pass runs at half resolution.
+    vec2 noiseUV = (vec2(pixel) + 0.5) / NoiseTextureSize;
+    vec3 randomVector = texture(rotationNoise, noiseUV).xyz * 2.0 - 1.0;
+    randomVector.z = 0.0;
+
+    // Gram-Schmidt against the normal.  If the stored vector happens to lie
+    // along the normal the result collapses, so fall back to whichever axis
+    // is furthest from it instead of building a degenerate basis.
+    vec3 tangent = randomVector - normal * dot(randomVector, normal);
+    if (dot(tangent, tangent) < 1e-6) {
+        vec3 fallback = abs(normal.x) < 0.9
+            ? vec3(1.0, 0.0, 0.0)
+            : vec3(0.0, 1.0, 0.0);
+        tangent = fallback - normal * dot(fallback, normal);
+    }
+    tangent = normalize(tangent);
+    vec3 bitangent = cross(normal, tangent);
+    mat3 tangentToView = mat3(tangent, bitangent, normal);
+
+    float radius = PushConstants.settings.x;
+    float bias = PushConstants.settings.y;
+    // Distance in front of the camera, which grows as a surface recedes.
+    // The engine's view space looks down -Z.
+    float centerDistance = -viewPosition.z;
+
+    float occlusion = 0.0;
+    for (int i = 0; i < KernelSize; ++i) {
+        vec3 samplePosition =
+            viewPosition + tangentToView * kernelData.samples[i].xyz * radius;
+
+        vec4 clipPosition = sceneData.proj * vec4(samplePosition, 1.0);
+        // Behind or on the plane of the camera: there is no screen position
+        // to look this sample up at.
+        if (clipPosition.w <= 1e-6) {
+            continue;
+        }
+        vec2 sampleScreenUV = (clipPosition.xy / clipPosition.w) * 0.5 + 0.5;
+        // A sample that left the frame has no depth to compare against.
+        // Skipping it rather than counting it as blocked is what stops a dark
+        // band forming along the edges of the screen.
+        if (any(lessThan(sampleScreenUV, vec2(0.0))) ||
+            any(greaterThan(sampleScreenUV, vec2(1.0)))) {
+            continue;
+        }
+
+        float sampledDepth = texture(prepassDepth, prepass_uv(sampleScreenUV)).r;
+        if (sampledDepth <= BackgroundDepth) {
+            continue;
+        }
+        // Reconstructing the position is less error-prone than comparing raw
+        // reversed-depth values, which are both non-linear and inverted.
+        vec3 sampledPosition =
+            view_position_from_depth(sampleScreenUV, sampledDepth);
+
+        float sampleDistance = -samplePosition.z;
+        float surfaceDistance = -sampledPosition.z;
+        // The surface actually visible along this ray sits nearer the camera
+        // than the hemisphere point, so it blocks it.
+        bool blocked = surfaceDistance < sampleDistance - bias;
+
+        // Without this a distant wall would occlude a surface purely because
+        // it is nearer the camera than a sample floating out in the open.
+        float delta = abs(centerDistance - surfaceDistance);
+        float rangeWeight = smoothstep(0.0, 1.0, radius / max(delta, 1e-4));
+        occlusion += (blocked ? 1.0 : 0.0) * rangeWeight;
+    }
+
+    float visibility = 1.0 - occlusion / float(KernelSize);
+    visibility = pow(clamp(visibility, 0.0, 1.0), PushConstants.settings.z);
+    // Scaling the occluded part rather than the visibility keeps 1.0 neutral,
+    // so intensity can never darken a surface nothing was blocking.
+    visibility = 1.0 - (1.0 - visibility) * PushConstants.settings.w;
+    imageStore(outputAO, pixel, vec4(clamp(visibility, 0.0, 1.0)));
+}

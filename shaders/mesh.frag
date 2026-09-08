@@ -27,10 +27,19 @@ void main()
     vec3 lightDirection = normalize(sceneData.sunlightDirection.xyz);
     float diffuse = max(dot(normal, lightDirection), 0.0);
     // Ambient light is deliberately left unshadowed; without it an occluded
-    // surface would be pure black rather than merely out of the sun.
+    // surface would be pure black rather than merely out of the sun.  What it
+    // does get is ambient occlusion, which asks the different question of how
+    // much of the surrounding hemisphere nearby geometry blocks.
     float visibility = sunlight_visibility(inWorldPosition, normal);
-    vec3 lighting = sceneData.ambientColor.rgb +
-        visibility * diffuse * sceneData.sunlightColor.rgb;
+    float occlusion = ambient_occlusion(gl_FragCoord.xy);
+    vec3 ambient = sceneData.ambientColor.rgb * occlusion;
+    // The sun term is left alone: it already has its own visibility test, and
+    // scaling it here would darken contact points standing in full sunlight.
+    vec3 direct = visibility * diffuse * sceneData.sunlightColor.rgb;
+    if (sceneData.screenSpaceSettings.y > 0.5) {
+        direct = vec3(0.0);
+    }
+    vec3 lighting = ambient + direct;
 
     outFragColor = vec4(baseColor.rgb * lighting, 1.0);
 }

@@ -1400,6 +1400,66 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                         _sceneDirty = true;
                     }
                 }
+                if (ImGui::CollapsingHeader("Ambient Occlusion")) {
+                    if (_ssaoFormat == VK_FORMAT_UNDEFINED) {
+                        ImGui::TextDisabled(
+                            "Unavailable: no storage-capable occlusion format.");
+                    } else {
+                        // Radius, bias, intensity and power describe how this
+                        // level is lit and travel with the scene.  Quality
+                        // describes what the machine can afford and does not.
+                        bool occlusionEdited = false;
+                        occlusionEdited |=
+                            ImGui::Checkbox("Enabled", &_ssaoSettings.enabled);
+                        occlusionEdited |= ImGui::SliderFloat(
+                            "Radius",
+                            &_ssaoSettings.radius,
+                            0.05f,
+                            5.0f,
+                            "%.3f");
+                        occlusionEdited |= ImGui::SliderFloat(
+                            "Bias", &_ssaoSettings.bias, 0.0f, 0.1f, "%.4f");
+                        occlusionEdited |= ImGui::SliderFloat(
+                            "Intensity", &_ssaoSettings.intensity, 0.0f, 2.0f);
+                        occlusionEdited |= ImGui::SliderFloat(
+                            "Power", &_ssaoSettings.power, 0.25f, 4.0f);
+                        if (occlusionEdited) {
+                            _sceneDirty = true;
+                        }
+
+                        const char* qualityNames[] = {"Low", "Medium", "High"};
+                        if (ImGui::Combo(
+                                "Quality",
+                                &_ssaoQuality,
+                                qualityNames,
+                                IM_ARRAYSIZE(qualityNames))) {
+                            // Not a scene edit: it buys quality with GPU time.
+                        }
+                        ImGui::TextDisabled(
+                            "%d samples", SSAOKernelSizes[_ssaoQuality]);
+
+                        // How readily the blur accepts a neighbour as being on
+                        // the same surface.  Both depend on world scale, but
+                        // they are filter tuning rather than lighting.
+                        ImGui::SliderFloat(
+                            "Blur Depth Falloff",
+                            &_ssaoDepthFalloff,
+                            5.0f,
+                            120.0f);
+                        ImGui::SliderFloat(
+                            "Blur Normal Falloff",
+                            &_ssaoNormalFalloff,
+                            1.0f,
+                            48.0f);
+
+                        // With the sun off, occlusion is the only thing
+                        // shaping the image.  Setting ambient to zero as well
+                        // should then produce no visible difference at all,
+                        // which is the check that it touches nothing else.
+                        ImGui::Checkbox(
+                            "Ambient Only (occlusion check)", &_ssaoAmbientOnly);
+                    }
+                }
                 if (ImGui::CollapsingHeader("Anti-Aliasing")) {
                     // A session preference rather than a scene property, so
                     // none of this marks the level dirty.
@@ -1445,7 +1505,10 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                         "Camera depth",
                         "View normals",
                         "View position",
-                        "World position"};
+                        "World position",
+                        "Occlusion (raw)",
+                        "Occlusion (blurred once)",
+                        "Occlusion (final)"};
                     int debugView = static_cast<int>(_renderDebugView);
                     if (ImGui::Combo(
                             "Debug View",
@@ -1531,6 +1594,29 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                 stats.prepass_drawcall_count,
                 stats.prepass_triangle_count);
             ImGui::Text("Prepass record %.3f ms", stats.prepass_record_time);
+            ImGui::Separator();
+            if (stats.ssao_kernel_samples == 0) {
+                ImGui::Text("Ambient occlusion: off");
+            } else {
+                ImGui::Text(
+                    "AO %dx%d %s, %d samples",
+                    stats.ssao_width,
+                    stats.ssao_height,
+                    _ssaoFormatName,
+                    stats.ssao_kernel_samples);
+                // Three dispatches take microseconds to record and
+                // milliseconds to run, so a CPU number here would be
+                // actively misleading.  It is labelled when that is all
+                // the device can provide.
+                const char* unit = stats.ssao_time_is_gpu ? "ms" : "ms CPU";
+                ImGui::Text("  sample  %.3f %s", stats.ssao_raw_time, unit);
+                ImGui::Text(
+                    "  blur H  %.3f %s", stats.ssao_blur_horizontal_time, unit);
+                ImGui::Text(
+                    "  blur V  %.3f %s", stats.ssao_blur_vertical_time, unit);
+                ImGui::Text("  total   %.3f %s", stats.ssao_total_time, unit);
+            }
+            ImGui::Separator();
             ImGui::Text(
                 "Portal mode: %s",
                 _useOffscreenPortalCameras

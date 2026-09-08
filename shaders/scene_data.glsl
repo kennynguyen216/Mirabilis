@@ -25,4 +25,12 @@ layout(set = 0, binding = 0) uniform SceneData {
     // work needs the whole transform.
     mat4 inverseProjection;
     mat4 inverseViewProjection;
+    // x = 1 while the ambient-occlusion image describes this camera's view.
+    //     Portal cameras are bound the same image but see different geometry,
+    //     so they set 0 and shade with unoccluded ambient light instead.
+    // y = 1 suppresses the sunlight term, leaving ambient only.
+    vec4 screenSpaceSettings;
+    // xy = the occlusion texture coordinate that one screen pixel advances
+    //      by, zw = the largest coordinate the rendered region reaches.
+    vec4 ambientOcclusionUV;
 } sceneData;
