@@ -1372,23 +1372,95 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
             if (ImGui::Begin("Render Settings")) {
                 ImGui::SliderFloat("Resolution Scale", &renderScale, 0.3f, 1.0f);
                 if (ImGui::CollapsingHeader("Sun & Shadows")) {
-                    ImGui::Checkbox("Cast Shadows", &_shadowsEnabled);
+                    // These are saved with the scene, so editing one is an
+                    // edit to the level rather than a session preference.
+                    bool lightingEdited = false;
+                    lightingEdited |=
+                        ImGui::Checkbox("Cast Shadows", &_shadowsEnabled);
                     // The direction points from a surface towards the sun.
                     if (ImGui::SliderFloat3(
-                            "Sun Direction", &_sunlightDirection.x, -1.0f, 1.0f) &&
-                        glm::dot(_sunlightDirection, _sunlightDirection) < 0.000001f) {
-                        // A zero direction cannot define a light camera.
-                        _sunlightDirection = glm::vec3(0.0f, 1.0f, 0.5f);
+                            "Sun Direction", &_sunlightDirection.x, -1.0f, 1.0f)) {
+                        lightingEdited = true;
+                        if (glm::dot(_sunlightDirection, _sunlightDirection) <
+                            0.000001f) {
+                            // A zero direction cannot define a light camera.
+                            _sunlightDirection = glm::vec3(0.0f, 1.0f, 0.5f);
+                        }
                     }
-                    ImGui::SliderFloat(
+                    lightingEdited |= ImGui::SliderFloat(
                         "Shadow Radius", &_shadowRadius, 10.0f, 200.0f);
                     ImGui::Checkbox("Show Shadow Bounds", &_showShadowBounds);
                     // Too little bias and surfaces shadow themselves; too
                     // much and a shadow detaches from the object casting it.
-                    ImGui::SliderFloat(
+                    lightingEdited |= ImGui::SliderFloat(
                         "Depth Bias", &_shadowDepthBias, 0.0f, 0.005f, "%.5f");
-                    ImGui::SliderFloat(
+                    lightingEdited |= ImGui::SliderFloat(
                         "Normal Bias", &_shadowNormalBias, 0.0f, 0.5f, "%.3f");
+                    if (lightingEdited) {
+                        _sceneDirty = true;
+                    }
+                }
+                if (ImGui::CollapsingHeader("Anti-Aliasing")) {
+                    // A session preference rather than a scene property, so
+                    // none of this marks the level dirty.
+                    const char* modeNames[] = {"Off", "FXAA"};
+                    int mode = _fxaaEnabled ? 1 : 0;
+                    if (ImGui::Combo(
+                            "Mode", &mode, modeNames, IM_ARRAYSIZE(modeNames))) {
+                        _fxaaEnabled = mode == 1;
+                    }
+                    if (_fxaaEnabled) {
+                        // Lower catches more edges; too low and the filter
+                        // starts softening texture detail that never aliased.
+                        ImGui::SliderFloat(
+                            "Edge Threshold",
+                            &_fxaaEdgeThreshold,
+                            0.03f,
+                            0.25f,
+                            "%.3f");
+                        ImGui::SliderFloat(
+                            "Subpixel Strength",
+                            &_fxaaSubpixelStrength,
+                            0.0f,
+                            1.0f,
+                            "%.2f");
+                        // White marks every pixel the threshold accepted.
+                        // Tuning against this is far easier than judging the
+                        // threshold from the finished image.
+                        ImGui::Checkbox("Debug Edges", &_fxaaShowEdges);
+                        if (_renderDebugView != RenderDebugView::None) {
+                            ImGui::TextDisabled(
+                                "Suspended while a debug view is shown.");
+                        }
+                    }
+                }
+                if (ImGui::CollapsingHeader("Screen-Space Buffers")) {
+                    ImGui::Checkbox(
+                        "Depth/Normal Prepass", &_depthNormalPrepassEnabled);
+                    // Reading a half-finished buffer directly is far more
+                    // informative than trying to infer a projection or
+                    // orientation mistake from a finished effect.
+                    const char* debugViewNames[] = {
+                        "Final lighting",
+                        "Camera depth",
+                        "View normals",
+                        "View position",
+                        "World position"};
+                    int debugView = static_cast<int>(_renderDebugView);
+                    if (ImGui::Combo(
+                            "Debug View",
+                            &debugView,
+                            debugViewNames,
+                            IM_ARRAYSIZE(debugViewNames))) {
+                        _renderDebugView = static_cast<RenderDebugView>(debugView);
+                    }
+                    if (_renderDebugView == RenderDebugView::Depth) {
+                        ImGui::SliderFloat(
+                            "Depth View Range",
+                            &_renderDebugDepthRange,
+                            5.0f,
+                            500.0f);
+                    }
                 }
                 if (!backgroundEffects.empty()) {
                     ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
@@ -1440,6 +1512,25 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
             ImGui::Text("World draw calls %d", stats.world_drawcall_count);
             ImGui::Text("Portal draw calls %d", stats.portal_drawcall_count);
             ImGui::Text("Total draw calls %d", stats.drawcall_count);
+            ImGui::Separator();
+            // The shadow and prepass passes walk the scene again with their
+            // own culling, so none of their cost appears in the counters
+            // above.
+            ImGui::Text(
+                "Shadow map %ux%u %s",
+                ShadowMapResolution,
+                ShadowMapResolution,
+                _shadowFormatName);
+            ImGui::Text(
+                "Shadow draws %d (%d tris)",
+                stats.shadow_drawcall_count,
+                stats.shadow_triangle_count);
+            ImGui::Text("Shadow record %.3f ms", stats.shadow_record_time);
+            ImGui::Text(
+                "Prepass draws %d (%d tris)",
+                stats.prepass_drawcall_count,
+                stats.prepass_triangle_count);
+            ImGui::Text("Prepass record %.3f ms", stats.prepass_record_time);
             ImGui::Text(
                 "Portal mode: %s",
                 _useOffscreenPortalCameras

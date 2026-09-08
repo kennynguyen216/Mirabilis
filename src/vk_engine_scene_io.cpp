@@ -336,7 +336,19 @@ bool VulkanEngine::save_editor_scene()
         writePortal(pair.second);
         firstPortal = false;
     }
-    file << "]\n}\n";
+    file << "]";
+    // The sun belongs to the level: how a course reads depends on where its
+    // light comes from.  The shadow tuning travels with it because the right
+    // bias depends on the scale of the geometry in this particular scene.
+    // Map resolution is deliberately not here; that is a quality setting for
+    // the machine, not a property of the level.
+    file << ",\n  \"lighting\": {\"sunDirection\": ";
+    writeVec3(_sunlightDirection);
+    file << ", \"shadowsEnabled\": " << (_shadowsEnabled ? "true" : "false")
+         << ", \"shadowRadius\": " << _shadowRadius
+         << ", \"shadowDepthBias\": " << _shadowDepthBias
+         << ", \"shadowNormalBias\": " << _shadowNormalBias << '}';
+    file << "\n}\n";
     if (!file) {
         fmt::print("Could not finish writing scene: {}\n", scenePath.string());
         return false;
@@ -410,6 +422,40 @@ bool VulkanEngine::load_editor_scene()
 
     uint64_t nextActor = 1;
     document["nextActor"].get_uint64().get(nextActor);
+
+    // Absent in scenes saved before lighting was stored, and in that case
+    // every value below keeps whatever the engine already had.  That is why
+    // adding the block does not need a scene version bump.
+    simdjson::dom::object jsonLighting;
+    if (document["lighting"].get_object().get(jsonLighting) == simdjson::SUCCESS) {
+        simdjson::dom::element sunDirection;
+        glm::vec3 loadedSunDirection{0.0f};
+        if (jsonLighting["sunDirection"].get(sunDirection) == simdjson::SUCCESS &&
+            read_json_vec3(sunDirection, loadedSunDirection) &&
+            glm::dot(loadedSunDirection, loadedSunDirection) >= 0.000001f) {
+            // A zero direction cannot define a light camera, so a scene
+            // carrying one is ignored rather than allowed to break the pass.
+            _sunlightDirection = loadedSunDirection;
+        }
+        bool shadowsEnabled = _shadowsEnabled;
+        if (jsonLighting["shadowsEnabled"].get_bool().get(shadowsEnabled) ==
+            simdjson::SUCCESS) {
+            _shadowsEnabled = shadowsEnabled;
+        }
+        double numeric = 0.0;
+        if (jsonLighting["shadowRadius"].get_double().get(numeric) ==
+            simdjson::SUCCESS) {
+            _shadowRadius = static_cast<float>(numeric);
+        }
+        if (jsonLighting["shadowDepthBias"].get_double().get(numeric) ==
+            simdjson::SUCCESS) {
+            _shadowDepthBias = static_cast<float>(numeric);
+        }
+        if (jsonLighting["shadowNormalBias"].get_double().get(numeric) ==
+            simdjson::SUCCESS) {
+            _shadowNormalBias = static_cast<float>(numeric);
+        }
+    }
 
     std::vector<SavedPreloadedPortal> savedPreloadedPortals;
     simdjson::dom::array jsonPreloadedPortals;

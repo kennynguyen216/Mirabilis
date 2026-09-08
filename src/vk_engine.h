@@ -28,7 +28,11 @@ struct DeletionQueue
     }
 };
 struct FrameData {
-        VkSemaphore _swapchainSemaphore, _renderSemaphore;
+        // Only the acquire semaphore belongs to the frame.  The one the
+        // presentation engine waits on is owned per swapchain image instead,
+        // because how long it stays in use depends on the image, not on
+        // which of the two frames in flight rendered it.
+        VkSemaphore _swapchainSemaphore;
         VkFence _renderFence;
         VkCommandPool _commandPool;
         VkCommandBuffer _mainCommandBuffer;
@@ -79,6 +83,25 @@ struct ShadowPushConstants {
     VkDeviceAddress vertexBuffer;
 };
 
+// The debug view is a fullscreen triangle over the finished image.
+struct RenderDebugPushConstants {
+    // x = RenderDebugView, yz = rendered extent in pixels, w = the distance
+    // that reads as white in the depth view.
+    glm::vec4 settings{0.0f};
+};
+
+// The anti-aliasing pass is a fullscreen filter over the composed image.
+struct FXAAPushConstants {
+    // xy = one texel in UV space, taken from the draw image allocation
+    // rather than the rendered region.  z = edge contrast threshold,
+    // w = subpixel aliasing removal strength.
+    glm::vec4 settings{0.0f};
+    // xy = the largest UV the current render scale rendered into, so an edge
+    // search cannot walk into the part of the image this frame never touched.
+    // z = 1 while the detected edges are shown instead of the image.
+    glm::vec4 limits{0.0f};
+};
+
 // The collider overlay has no vertex buffer or descriptors.  Its vertex
 // shader contains the 12 unit-cube edges and expands them with this matrix.
 struct ColliderDebugPushConstants {
@@ -94,6 +117,25 @@ struct EngineStats {
     int portal_drawcall_count{0};
     float scene_update_time{0.0f};
     float mesh_draw_time{0.0f};
+    // The shadow and prepass passes draw the world again with their own
+    // culling, so their cost is invisible in the counters above.
+    int shadow_drawcall_count{0};
+    int shadow_triangle_count{0};
+    float shadow_record_time{0.0f};
+    int prepass_drawcall_count{0};
+    int prepass_triangle_count{0};
+    float prepass_record_time{0.0f};
+};
+
+// Which intermediate buffer to show instead of the shaded image.  These are
+// the inputs screen-space effects consume, and a mistake in one of them is
+// far easier to see here than in a finished ambient-occlusion term.
+enum class RenderDebugView : int {
+    None = 0,
+    Depth = 1,
+    ViewNormals = 2,
+    ViewPosition = 3,
+    WorldPosition = 4,
 };
 
 struct SceneMaterialRuntime {
@@ -227,6 +269,10 @@ class VulkanEngine{
 
     std::vector<VkImage> _swapchainImages;
     std::vector<VkImageView> _swapchainImageViews;
+    // One render-finished semaphore per swapchain image.  With two frames in
+    // flight and three images, a per-frame semaphore could be signalled again
+    // while an earlier presentation of a different image still waited on it.
+    std::vector<VkSemaphore> _swapchainRenderSemaphores;
     VkExtent2D _swapchainExtent;
     VmaAllocator _allocator;
 
@@ -281,6 +327,14 @@ class VulkanEngine{
         void init_shadow_resources();
         void init_shadow_pipeline();
         void draw_shadow_map(VkCommandBuffer cmd);
+        void init_depth_normal_resources();
+        void init_depth_normal_pipeline();
+        void init_render_debug_pipeline();
+        void init_post_process_resources();
+        void init_fxaa_pipeline();
+        void draw_depth_normal_prepass(VkCommandBuffer cmd);
+        void draw_render_debug(VkCommandBuffer cmd);
+        void draw_fxaa(VkCommandBuffer cmd);
         glm::mat4 compute_sun_view_projection(const glm::vec3& focusPoint) const;
         void draw_geometry(
             VkCommandBuffer cmd,
@@ -481,6 +535,48 @@ class VulkanEngine{
         float _shadowDepthMargin{120.0f};
         float _shadowDepthBias{0.0006f};
         float _shadowNormalBias{0.08f};
+        // Reported in the statistics panel; chosen from what the GPU
+        // actually supports rather than assumed.
+        const char* _shadowFormatName{"none"};
+        // Depth and view-space normals for the main camera, written before
+        // the colour pass.  Ambient occlusion is the first consumer, but
+        // reflections, outlines, and depth-aware fog need the same two
+        // images.  They are deliberately separate from _depthImage, whose
+        // depth and stencil contents the portal passes overwrite.
+        AllocatedImage _prepassDepthImage;
+        AllocatedImage _prepassNormalImage;
+        VkSampler _prepassSampler{};
+        VkDescriptorSetLayout _prepassImageDescriptorLayout{};
+        // The prepass targets are allocated once at window size, so one
+        // persistent set describes them for the whole run.
+        VkDescriptorSet _prepassImageDescriptor{};
+        MaterialPipeline _depthNormalPipeline;
+        MaterialPipeline _renderDebugPipeline;
+        bool _depthNormalPrepassEnabled{true};
+        // Anti-aliasing runs last, on the composed colour, so one filter
+        // covers world geometry, portal contents, and the debug overlays
+        // without any pass needing to know about it.  It cannot read and
+        // write _drawImage at once, so it resolves into this second image and
+        // that is what reaches the swapchain while it is enabled.
+        AllocatedImage _postProcessImage;
+        VkSampler _postProcessSampler{};
+        // _drawImage bound as a texture.  It is allocated once, so this set
+        // is written once and never revisited.
+        VkDescriptorSet _fxaaInputDescriptor{};
+        MaterialPipeline _fxaaPipeline;
+        bool _fxaaEnabled{true};
+        // The fraction of the local maximum luma a pixel must differ by
+        // before it counts as an edge.  Lower catches more, at the cost of
+        // filtering detail that was never aliased.
+        float _fxaaEdgeThreshold{0.08f};
+        // How strongly features too small for the edge search to trace - a
+        // thin pole, a specular sparkle - are blended towards their
+        // neighbourhood.
+        float _fxaaSubpixelStrength{0.75f};
+        bool _fxaaShowEdges{false};
+        RenderDebugView _renderDebugView{RenderDebugView::None};
+        // How far from the camera reads as white in the depth debug view.
+        float _renderDebugDepthRange{60.0f};
         // The sandbox level lives here: the floor, the boundary walls, the
         // portal test panels, and the player body all render and collide from
         // these objects.  Nothing about the level is hard-coded twice.

@@ -99,6 +99,12 @@ struct GPUSceneData {
     // x = constant depth bias, y = world-space normal offset,
     // z = one shadow-map texel in UV, w = 0 disables shadowing.
     glm::vec4 shadowSettings{0.0f};
+    // Screen-space passes are given a depth buffer, not a position per
+    // fragment, so they rebuild the position these undo.  Kept here rather
+    // than recomputed per pass because every camera in the frame, portal
+    // cameras included, already fills this block once.
+    glm::mat4 inverseProjection{1.0f};
+    glm::mat4 inverseViewProjection{1.0f};
 };
 
 // Sixteen visible surfaces (the player pair plus seven authored links), with

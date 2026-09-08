@@ -1,20 +1,4 @@
-layout(set = 0, binding = 0) uniform SceneData {
-    mat4 view;
-    mat4 proj;
-    mat4 viewproj;
-    vec4 ambientColor;
-    vec4 sunlightDirection;
-    vec4 sunlightColor;
-    vec4 portalClipPlane;
-    vec4 portalClipEnabled;
-    // World space -> sunlight clip space for the directional shadow map.
-    // It is built from world-space positions only, so portal views sample
-    // exactly the same shadows as the main camera.
-    mat4 sunViewProjection;
-    // x = constant depth bias, y = world-space normal offset,
-    // z = one shadow-map texel in UV, w = 0 disables shadowing.
-    vec4 shadowSettings;
-} sceneData;
+#include "scene_data.glsl"
 
 // The sunlight depth map. Unlike the main camera this uses conventional
 // depth (near = 0, far = 1), so the comparison below is LESS_OR_EQUAL and
