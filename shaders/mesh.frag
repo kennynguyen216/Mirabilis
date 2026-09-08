@@ -6,6 +6,7 @@
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec4 inColor;
 layout(location = 2) in vec2 inUV;
+layout(location = 3) in vec3 inWorldPosition;
 layout(location = 0) out vec4 outFragColor;
 
 void main()
@@ -25,8 +26,11 @@ void main()
     vec3 normal = normalize(inNormal);
     vec3 lightDirection = normalize(sceneData.sunlightDirection.xyz);
     float diffuse = max(dot(normal, lightDirection), 0.0);
+    // Ambient light is deliberately left unshadowed; without it an occluded
+    // surface would be pure black rather than merely out of the sun.
+    float visibility = sunlight_visibility(inWorldPosition, normal);
     vec3 lighting = sceneData.ambientColor.rgb +
-        diffuse * sceneData.sunlightColor.rgb;
+        visibility * diffuse * sceneData.sunlightColor.rgb;
 
     outFragColor = vec4(baseColor.rgb * lighting, 1.0);
 }

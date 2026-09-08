@@ -76,7 +76,7 @@ VkPipeline PipelineBuilder::build_pipeline(VkDevice device)
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .logicOpEnable = VK_FALSE,
         .logicOp = VK_LOGIC_OP_COPY,
-        .attachmentCount = 1,
+        .attachmentCount = _renderInfo.colorAttachmentCount,
         .pAttachments = &_colorBlendAttachment
     };
 
@@ -126,6 +126,12 @@ void PipelineBuilder::set_shaders(VkShaderModule vertexShader, VkShaderModule fr
     _shaderStages.clear();
     _shaderStages.push_back(vkinit::pipeline_shader_stage_create_info(VK_SHADER_STAGE_VERTEX_BIT, vertexShader));
     _shaderStages.push_back(vkinit::pipeline_shader_stage_create_info(VK_SHADER_STAGE_FRAGMENT_BIT, fragmentShader));
+}
+
+void PipelineBuilder::set_vertex_only_shader(VkShaderModule vertexShader)
+{
+    _shaderStages.clear();
+    _shaderStages.push_back(vkinit::pipeline_shader_stage_create_info(VK_SHADER_STAGE_VERTEX_BIT, vertexShader));
 }
 
 void PipelineBuilder::set_input_topology(VkPrimitiveTopology topology)
@@ -211,6 +217,24 @@ void PipelineBuilder::set_stencil_format(VkFormat format)
 void PipelineBuilder::set_color_write_mask(VkColorComponentFlags mask)
 {
     _colorBlendAttachment.colorWriteMask = mask;
+}
+
+void PipelineBuilder::disable_color_attachment()
+{
+    _colorAttachmentFormat = VK_FORMAT_UNDEFINED;
+    _renderInfo.colorAttachmentCount = 0;
+    _renderInfo.pColorAttachmentFormats = nullptr;
+}
+
+// Slope-scaled bias is applied by the rasterizer, before the depth test, so
+// it corrects the depth a shadow caster actually writes rather than nudging
+// the comparison afterwards.
+void PipelineBuilder::enable_depth_bias(float constantFactor, float slopeFactor)
+{
+    _rasterizer.depthBiasEnable = VK_TRUE;
+    _rasterizer.depthBiasConstantFactor = constantFactor;
+    _rasterizer.depthBiasClamp = 0.0f;
+    _rasterizer.depthBiasSlopeFactor = slopeFactor;
 }
 
 void PipelineBuilder::disable_depthtest()

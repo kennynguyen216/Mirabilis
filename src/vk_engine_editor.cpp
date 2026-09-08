@@ -1371,6 +1371,25 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
         if (_showDebugPanels) {
             if (ImGui::Begin("Render Settings")) {
                 ImGui::SliderFloat("Resolution Scale", &renderScale, 0.3f, 1.0f);
+                if (ImGui::CollapsingHeader("Sun & Shadows")) {
+                    ImGui::Checkbox("Cast Shadows", &_shadowsEnabled);
+                    // The direction points from a surface towards the sun.
+                    if (ImGui::SliderFloat3(
+                            "Sun Direction", &_sunlightDirection.x, -1.0f, 1.0f) &&
+                        glm::dot(_sunlightDirection, _sunlightDirection) < 0.000001f) {
+                        // A zero direction cannot define a light camera.
+                        _sunlightDirection = glm::vec3(0.0f, 1.0f, 0.5f);
+                    }
+                    ImGui::SliderFloat(
+                        "Shadow Radius", &_shadowRadius, 10.0f, 200.0f);
+                    ImGui::Checkbox("Show Shadow Bounds", &_showShadowBounds);
+                    // Too little bias and surfaces shadow themselves; too
+                    // much and a shadow detaches from the object casting it.
+                    ImGui::SliderFloat(
+                        "Depth Bias", &_shadowDepthBias, 0.0f, 0.005f, "%.5f");
+                    ImGui::SliderFloat(
+                        "Normal Bias", &_shadowNormalBias, 0.0f, 0.5f, "%.3f");
+                }
                 if (!backgroundEffects.empty()) {
                     ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
                     ImGui::Text("Effect: %s", selected.name);

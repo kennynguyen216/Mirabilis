@@ -93,6 +93,12 @@ struct GPUSceneData {
     // leaves portalClipEnabled at zero.
     glm::vec4 portalClipPlane;
     glm::vec4 portalClipEnabled;
+    // World space -> sunlight clip space.  Every camera in the frame shares
+    // one shadow map, so portal views need no separate shadow pass.
+    glm::mat4 sunViewProjection{1.0f};
+    // x = constant depth bias, y = world-space normal offset,
+    // z = one shadow-map texel in UV, w = 0 disables shadowing.
+    glm::vec4 shadowSettings{0.0f};
 };
 
 // Sixteen visible surfaces (the player pair plus seven authored links), with

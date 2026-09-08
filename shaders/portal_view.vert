@@ -7,6 +7,7 @@
 layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec4 outColor;
 layout(location = 2) out vec2 outUV;
+layout(location = 3) out vec3 outWorldPosition;
 
 struct Vertex {
     vec3 position;
@@ -30,13 +31,16 @@ void main()
     Vertex vertex = PushConstants.vertexBuffer.vertices[gl_VertexIndex];
     vec4 worldPosition = PushConstants.render_matrix * vec4(vertex.position, 1.0);
     gl_Position = sceneData.viewproj * worldPosition;
+    outWorldPosition = worldPosition.xyz;
     // Clip before rasterization. Doing this in the fragment shader with
     // discard lets the rejected wall fragments reach depth/stencil first,
     // which is exactly what can leave a black aperture at a portal crossing.
     gl_ClipDistance[0] = sceneData.portalClipEnabled.x > 0.5
         ? dot(worldPosition, sceneData.portalClipPlane)
         : 1.0;
-    outNormal = normalize((PushConstants.render_matrix * vec4(vertex.normal, 0.0)).xyz);
+    // Keep lighting and shadow bias correct under non-uniform object scale.
+    mat3 normalMatrix = transpose(inverse(mat3(PushConstants.render_matrix)));
+    outNormal = normalize(normalMatrix * vertex.normal);
     outColor = vertex.color * materialData.colorFactors;
     vec2 uvScale = materialData.uvTransform.xy;
     if (all(lessThan(abs(uvScale), vec2(0.0001)))) {

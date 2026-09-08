@@ -64,6 +64,9 @@ void VulkanEngine::init()
     init_commands(); // allocates memory and strucures needed to record and submit rendering isntructions to the gpu command poo and command buffer
     // * opengl draw commands instantly while vulkan have to record the rawing isntrucitons into a buffer first
     init_sync_structures(); // creates traffic cops that sync timing between cpu and gpu. fences and semaphores
+    // The scene descriptor set holds the shadow map, so the image and its
+    // comparison sampler have to exist before those sets are written.
+    init_shadow_resources();
     init_descriptors();
     init_pipelines();
     init_default_data();
@@ -385,6 +388,10 @@ void VulkanEngine::draw(float deltaTime)
 
     VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
 
+	// Render the sunlight depth map first: every later pass, main camera and
+	// portal cameras alike, samples it while shading.
+	draw_shadow_map(cmd);
+
 	// transition our main draw image into general layout so we can write into it
 	// we will overwrite it all so we dont care about what was the older layout
 	vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
@@ -435,7 +442,7 @@ void VulkanEngine::draw(float deltaTime)
     // Collider bounds are an editor-only overlay.  They are intentionally
     // drawn after portal composition, so they never affect playable portal
     // views or the saved scene itself.
-    if (_editorMode && _showColliderBounds) {
+    if (_editorMode && (_showColliderBounds || _showShadowBounds)) {
         draw_collider_debug_bounds(cmd);
     }
 

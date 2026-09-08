@@ -23,6 +23,8 @@ public:
     void clear();
     VkPipeline build_pipeline(VkDevice device);
     void set_shaders(VkShaderModule vertexShader, VkShaderModule fragmentShader);
+    // A depth-only pass needs no fragment stage at all.
+    void set_vertex_only_shader(VkShaderModule vertexShader);
     void set_input_topology(VkPrimitiveTopology topology);
     void set_polygon_mode(VkPolygonMode mode);
     void set_cull_mode(VkCullModeFlags cullMode, VkFrontFace frontFace);
@@ -34,6 +36,8 @@ public:
     void set_depth_format(VkFormat format);
     void set_stencil_format(VkFormat format);
     void set_color_write_mask(VkColorComponentFlags mask);
+    void disable_color_attachment();
+    void enable_depth_bias(float constantFactor, float slopeFactor);
     void disable_depthtest();
     void enable_depthtest(bool depthWriteEnable, VkCompareOp op);
     void enable_stenciltest(VkCompareOp compareOp, VkStencilOp passOp);

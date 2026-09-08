@@ -71,6 +71,14 @@ struct PortalSkyPushConstants {
     glm::vec4 cameraForward;
 };
 
+// The sunlight depth pass binds no descriptor sets.  Folding the light's
+// view-projection into the model matrix on the CPU keeps its vertex shader
+// free of scene and material data.
+struct ShadowPushConstants {
+    glm::mat4 lightMatrix;
+    VkDeviceAddress vertexBuffer;
+};
+
 // The collider overlay has no vertex buffer or descriptors.  Its vertex
 // shader contains the 12 unit-cube edges and expands them with this matrix.
 struct ColliderDebugPushConstants {
@@ -270,6 +278,10 @@ class VulkanEngine{
         void init_default_materials();
         void init_default_scene();
         void init_portal_camera_targets();
+        void init_shadow_resources();
+        void init_shadow_pipeline();
+        void draw_shadow_map(VkCommandBuffer cmd);
+        glm::mat4 compute_sun_view_projection(const glm::vec3& focusPoint) const;
         void draw_geometry(
             VkCommandBuffer cmd,
             const DrawContext& drawContext,
@@ -449,6 +461,26 @@ class VulkanEngine{
         std::array<GPUSceneData, PortalViewCount> _portalSceneData{};
         MaterialPipeline _portalSkyPipeline;
         MaterialPipeline _colliderDebugPipeline;
+        // One directional shadow map covers a box centred on the active
+        // camera.  Every camera in the frame - main and portal - samples it,
+        // because the lookup is done from world-space positions.
+        static constexpr uint32_t ShadowMapResolution = 2048;
+        AllocatedImage _shadowMapImage;
+        VkSampler _shadowSampler{};
+        MaterialPipeline _shadowPipeline;
+        glm::mat4 _sunViewProjection{1.0f};
+        // Points from a surface towards the sun, matching how the fragment
+        // shaders use it.  The light itself travels along its negation.
+        glm::vec3 _sunlightDirection{0.0f, 1.0f, 0.5f};
+        bool _shadowsEnabled{true};
+        bool _showShadowBounds{false};
+        // Half-width of the shadowed box, in world units.
+        float _shadowRadius{60.0f};
+        // Extra depth in front of and behind that box, so a caster standing
+        // outside the lit region still reaches the map.
+        float _shadowDepthMargin{120.0f};
+        float _shadowDepthBias{0.0006f};
+        float _shadowNormalBias{0.08f};
         // The sandbox level lives here: the floor, the boundary walls, the
         // portal test panels, and the player body all render and collide from
         // these objects.  Nothing about the level is hard-coded twice.
