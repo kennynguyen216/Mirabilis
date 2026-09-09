@@ -7,6 +7,7 @@
 layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec4 outColor;
 layout(location = 2) out vec2 outUV;
+layout(location = 3) out vec3 outWorldPosition;
 
 struct Vertex {
     vec3 position;
@@ -28,10 +29,16 @@ layout(push_constant) uniform constants {
 void main()
 {
     Vertex vertex = PushConstants.vertexBuffer.vertices[gl_VertexIndex];
-    vec4 position = vec4(vertex.position, 1.0);
+    vec4 worldPosition = PushConstants.render_matrix * vec4(vertex.position, 1.0);
 
-    gl_Position = sceneData.viewproj * PushConstants.render_matrix * position;
-    outNormal = normalize((PushConstants.render_matrix * vec4(vertex.normal, 0.0)).xyz);
+    gl_Position = sceneData.viewproj * worldPosition;
+    // The shadow lookup happens in world space, so it works unchanged for
+    // the main camera and for every portal camera.
+    outWorldPosition = worldPosition.xyz;
+    // Normals use the inverse transpose so editor-authored non-uniform scale
+    // does not skew either diffuse lighting or the shadow normal offset.
+    mat3 normalMatrix = transpose(inverse(mat3(PushConstants.render_matrix)));
+    outNormal = normalize(normalMatrix * vertex.normal);
     outColor = vertex.color * materialData.colorFactors;
     vec2 uvScale = materialData.uvTransform.xy;
     if (all(lessThan(abs(uvScale), vec2(0.0001)))) {

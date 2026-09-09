@@ -93,6 +93,30 @@ struct GPUSceneData {
     // leaves portalClipEnabled at zero.
     glm::vec4 portalClipPlane;
     glm::vec4 portalClipEnabled;
+    // World space -> sunlight clip space.  Every camera in the frame shares
+    // one shadow map, so portal views need no separate shadow pass.
+    glm::mat4 sunViewProjection{1.0f};
+    // x = constant depth bias, y = world-space normal offset,
+    // z = one shadow-map texel in UV, w = 0 disables shadowing.
+    glm::vec4 shadowSettings{0.0f};
+    // Screen-space passes are given a depth buffer, not a position per
+    // fragment, so they rebuild the position these undo.  Kept here rather
+    // than recomputed per pass because every camera in the frame, portal
+    // cameras included, already fills this block once.
+    glm::mat4 inverseProjection{1.0f};
+    glm::mat4 inverseViewProjection{1.0f};
+    // x = 1 while the ambient-occlusion image describes this camera's view.
+    //     Portal cameras are bound the same image but see different geometry,
+    //     so they set 0 and shade with unoccluded ambient light instead.
+    // y = 1 suppresses the sunlight term, leaving ambient only.  It exists to
+    //     make occlusion visible on its own while tuning it.
+    glm::vec4 screenSpaceSettings{0.0f};
+    // xy = the occlusion texture coordinate that one screen pixel advances
+    //      by, zw = the largest coordinate the rendered region reaches.  The
+    //      occlusion image is half resolution and stays allocated at window
+    //      size while the render scale moves the live region inside it, so a
+    //      fragment cannot simply divide by the render extent.
+    glm::vec4 ambientOcclusionUV{0.0f};
 };
 
 // Sixteen visible surfaces (the player pair plus seven authored links), with

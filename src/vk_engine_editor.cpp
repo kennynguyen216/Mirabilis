@@ -1373,6 +1373,160 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
         if (_showDebugPanels) {
             if (ImGui::Begin("Render Settings")) {
                 ImGui::SliderFloat("Resolution Scale", &renderScale, 0.3f, 1.0f);
+                if (ImGui::CollapsingHeader("Sun & Shadows")) {
+                    // These are saved with the scene, so editing one is an
+                    // edit to the level rather than a session preference.
+                    bool lightingEdited = false;
+                    lightingEdited |=
+                        ImGui::Checkbox("Cast Shadows", &_shadowsEnabled);
+                    // The direction points from a surface towards the sun.
+                    if (ImGui::SliderFloat3(
+                            "Sun Direction", &_sunlightDirection.x, -1.0f, 1.0f)) {
+                        lightingEdited = true;
+                        if (glm::dot(_sunlightDirection, _sunlightDirection) <
+                            0.000001f) {
+                            // A zero direction cannot define a light camera.
+                            _sunlightDirection = glm::vec3(0.0f, 1.0f, 0.5f);
+                        }
+                    }
+                    lightingEdited |= ImGui::SliderFloat(
+                        "Shadow Radius", &_shadowRadius, 10.0f, 200.0f);
+                    ImGui::Checkbox("Show Shadow Bounds", &_showShadowBounds);
+                    // Too little bias and surfaces shadow themselves; too
+                    // much and a shadow detaches from the object casting it.
+                    lightingEdited |= ImGui::SliderFloat(
+                        "Depth Bias", &_shadowDepthBias, 0.0f, 0.005f, "%.5f");
+                    lightingEdited |= ImGui::SliderFloat(
+                        "Normal Bias", &_shadowNormalBias, 0.0f, 0.5f, "%.3f");
+                    if (lightingEdited) {
+                        _sceneDirty = true;
+                    }
+                }
+                if (ImGui::CollapsingHeader("Ambient Occlusion")) {
+                    if (_ssaoFormat == VK_FORMAT_UNDEFINED) {
+                        ImGui::TextDisabled(
+                            "Unavailable: no storage-capable occlusion format.");
+                    } else {
+                        // Radius, bias, intensity and power describe how this
+                        // level is lit and travel with the scene.  Quality
+                        // describes what the machine can afford and does not.
+                        bool occlusionEdited = false;
+                        occlusionEdited |=
+                            ImGui::Checkbox("Enabled", &_ssaoSettings.enabled);
+                        occlusionEdited |= ImGui::SliderFloat(
+                            "Radius",
+                            &_ssaoSettings.radius,
+                            0.05f,
+                            5.0f,
+                            "%.3f");
+                        occlusionEdited |= ImGui::SliderFloat(
+                            "Bias", &_ssaoSettings.bias, 0.0f, 0.1f, "%.4f");
+                        occlusionEdited |= ImGui::SliderFloat(
+                            "Intensity", &_ssaoSettings.intensity, 0.0f, 2.0f);
+                        occlusionEdited |= ImGui::SliderFloat(
+                            "Power", &_ssaoSettings.power, 0.25f, 4.0f);
+                        if (occlusionEdited) {
+                            _sceneDirty = true;
+                        }
+
+                        const char* qualityNames[] = {"Low", "Medium", "High"};
+                        if (ImGui::Combo(
+                                "Quality",
+                                &_ssaoQuality,
+                                qualityNames,
+                                IM_ARRAYSIZE(qualityNames))) {
+                            // Not a scene edit: it buys quality with GPU time.
+                        }
+                        ImGui::TextDisabled(
+                            "%d samples", SSAOKernelSizes[_ssaoQuality]);
+
+                        // How readily the blur accepts a neighbour as being on
+                        // the same surface.  Both depend on world scale, but
+                        // they are filter tuning rather than lighting.
+                        ImGui::SliderFloat(
+                            "Blur Depth Falloff",
+                            &_ssaoDepthFalloff,
+                            5.0f,
+                            120.0f);
+                        ImGui::SliderFloat(
+                            "Blur Normal Falloff",
+                            &_ssaoNormalFalloff,
+                            1.0f,
+                            48.0f);
+
+                        // With the sun off, occlusion is the only thing
+                        // shaping the image.  Setting ambient to zero as well
+                        // should then produce no visible difference at all,
+                        // which is the check that it touches nothing else.
+                        ImGui::Checkbox(
+                            "Ambient Only (occlusion check)", &_ssaoAmbientOnly);
+                    }
+                }
+                if (ImGui::CollapsingHeader("Anti-Aliasing")) {
+                    // A session preference rather than a scene property, so
+                    // none of this marks the level dirty.
+                    const char* modeNames[] = {"Off", "FXAA"};
+                    int mode = _fxaaEnabled ? 1 : 0;
+                    if (ImGui::Combo(
+                            "Mode", &mode, modeNames, IM_ARRAYSIZE(modeNames))) {
+                        _fxaaEnabled = mode == 1;
+                    }
+                    if (_fxaaEnabled) {
+                        // Lower catches more edges; too low and the filter
+                        // starts softening texture detail that never aliased.
+                        ImGui::SliderFloat(
+                            "Edge Threshold",
+                            &_fxaaEdgeThreshold,
+                            0.03f,
+                            0.25f,
+                            "%.3f");
+                        ImGui::SliderFloat(
+                            "Subpixel Strength",
+                            &_fxaaSubpixelStrength,
+                            0.0f,
+                            1.0f,
+                            "%.2f");
+                        // White marks every pixel the threshold accepted.
+                        // Tuning against this is far easier than judging the
+                        // threshold from the finished image.
+                        ImGui::Checkbox("Debug Edges", &_fxaaShowEdges);
+                        if (_renderDebugView != RenderDebugView::None) {
+                            ImGui::TextDisabled(
+                                "Suspended while a debug view is shown.");
+                        }
+                    }
+                }
+                if (ImGui::CollapsingHeader("Screen-Space Buffers")) {
+                    ImGui::Checkbox(
+                        "Depth/Normal Prepass", &_depthNormalPrepassEnabled);
+                    // Reading a half-finished buffer directly is far more
+                    // informative than trying to infer a projection or
+                    // orientation mistake from a finished effect.
+                    const char* debugViewNames[] = {
+                        "Final lighting",
+                        "Camera depth",
+                        "View normals",
+                        "View position",
+                        "World position",
+                        "Occlusion (raw)",
+                        "Occlusion (blurred once)",
+                        "Occlusion (final)"};
+                    int debugView = static_cast<int>(_renderDebugView);
+                    if (ImGui::Combo(
+                            "Debug View",
+                            &debugView,
+                            debugViewNames,
+                            IM_ARRAYSIZE(debugViewNames))) {
+                        _renderDebugView = static_cast<RenderDebugView>(debugView);
+                    }
+                    if (_renderDebugView == RenderDebugView::Depth) {
+                        ImGui::SliderFloat(
+                            "Depth View Range",
+                            &_renderDebugDepthRange,
+                            5.0f,
+                            500.0f);
+                    }
+                }
                 if (!backgroundEffects.empty()) {
                     ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
                     ImGui::Text("Effect: %s", selected.name);
@@ -1423,6 +1577,48 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
             ImGui::Text("World draw calls %d", stats.world_drawcall_count);
             ImGui::Text("Portal draw calls %d", stats.portal_drawcall_count);
             ImGui::Text("Total draw calls %d", stats.drawcall_count);
+            ImGui::Separator();
+            // The shadow and prepass passes walk the scene again with their
+            // own culling, so none of their cost appears in the counters
+            // above.
+            ImGui::Text(
+                "Shadow map %ux%u %s",
+                ShadowMapResolution,
+                ShadowMapResolution,
+                _shadowFormatName);
+            ImGui::Text(
+                "Shadow draws %d (%d tris)",
+                stats.shadow_drawcall_count,
+                stats.shadow_triangle_count);
+            ImGui::Text("Shadow record %.3f ms", stats.shadow_record_time);
+            ImGui::Text(
+                "Prepass draws %d (%d tris)",
+                stats.prepass_drawcall_count,
+                stats.prepass_triangle_count);
+            ImGui::Text("Prepass record %.3f ms", stats.prepass_record_time);
+            ImGui::Separator();
+            if (stats.ssao_kernel_samples == 0) {
+                ImGui::Text("Ambient occlusion: off");
+            } else {
+                ImGui::Text(
+                    "AO %dx%d %s, %d samples",
+                    stats.ssao_width,
+                    stats.ssao_height,
+                    _ssaoFormatName,
+                    stats.ssao_kernel_samples);
+                // Three dispatches take microseconds to record and
+                // milliseconds to run, so a CPU number here would be
+                // actively misleading.  It is labelled when that is all
+                // the device can provide.
+                const char* unit = stats.ssao_time_is_gpu ? "ms" : "ms CPU";
+                ImGui::Text("  sample  %.3f %s", stats.ssao_raw_time, unit);
+                ImGui::Text(
+                    "  blur H  %.3f %s", stats.ssao_blur_horizontal_time, unit);
+                ImGui::Text(
+                    "  blur V  %.3f %s", stats.ssao_blur_vertical_time, unit);
+                ImGui::Text("  total   %.3f %s", stats.ssao_total_time, unit);
+            }
+            ImGui::Separator();
             ImGui::Text(
                 "Portal mode: %s",
                 _useOffscreenPortalCameras

@@ -493,6 +493,12 @@ GPUSceneData VulkanEngine::build_portal_scene_data(
         destination.normal,
         -glm::dot(destination.normal, clipPoint));
     data.portalClipEnabled = glm::vec4(1.0f);
+    // The occlusion image was built from the main camera's depth and normals,
+    // which describe the room the player is standing in rather than the one
+    // visible through this opening.  Reusing it would stamp the near room's
+    // contact shadows onto the far one, so this camera shades unoccluded.
+    // Portal-specific occlusion would need its own prepass per virtual camera.
+    data.screenSpaceSettings.x = 0.0f;
     return data;
 }
 

@@ -64,6 +64,19 @@ void VulkanEngine::init()
     init_commands(); // allocates memory and strucures needed to record and submit rendering isntructions to the gpu command poo and command buffer
     // * opengl draw commands instantly while vulkan have to record the rawing isntrucitons into a buffer first
     init_sync_structures(); // creates traffic cops that sync timing between cpu and gpu. fences and semaphores
+    // The scene descriptor set holds the shadow map, so the image and its
+    // comparison sampler have to exist before those sets are written.
+    init_shadow_resources();
+    // Sized from the draw image, and referenced by a descriptor set that
+    // init_descriptors() writes, so both have to exist by this point.
+    init_depth_normal_resources();
+    // Same reason: the anti-aliasing pass needs its sampler before the set
+    // that pairs it with the draw image can be written.
+    init_post_process_resources();
+    // And again: the occlusion images and their sampler are named by the
+    // scene descriptor set, which init_descriptors() writes.
+    init_ssao_resources();
+    init_gpu_timestamps();
     init_descriptors();
     init_pipelines();
     init_default_data();
@@ -81,7 +94,7 @@ void VulkanEngine::init()
     _playerMovement.position = _playerMovement.settings.spawnPosition;
     _playerMovement.velocity = glm::vec3(0.0f);
     _playerMovement.grounded = true;
-    
+
     //evverything went fine
     _isInitialized = true;
 
@@ -184,6 +197,10 @@ void VulkanEngine::init_vulkan()
     // portal is removed before rasterization/depth testing.
     VkPhysicalDeviceFeatures features10{};
     features10.shaderClipDistance = VK_TRUE;
+    // The occlusion passes declare their output image without a format
+    // qualifier, so that the engine can pick the occlusion format from what
+    // the device advertises instead of baking one choice into the shader.
+    features10.shaderStorageImageWriteWithoutFormat = VK_TRUE;
 
     // use vkbootstrap to select a gpu
     // we want a gpu that can write tot eh sdl surfance and supporters vulkan 1.3 with correct features
@@ -277,7 +294,6 @@ void VulkanEngine::init_sync_structures()
 		VK_CHECK(vkCreateFence(_device, &fenceCreateInfo, nullptr, &_frames[i]._renderFence));
 
 		VK_CHECK(vkCreateSemaphore(_device, &semaphoreCreateInfo, nullptr, &_frames[i]._swapchainSemaphore));
-		VK_CHECK(vkCreateSemaphore(_device, &semaphoreCreateInfo, nullptr, &_frames[i]._renderSemaphore));
 	}
     VK_CHECK(vkCreateFence(_device, &fenceCreateInfo, nullptr, &_immFence));
     _mainDeletionQueue.push_function([=]() {vkDestroyFence(_device, _immFence, nullptr); });
@@ -304,11 +320,6 @@ void VulkanEngine::cleanup()
         vkDestroyFence(
             _device,
             _frames[i]._renderFence,
-            nullptr);
-
-        vkDestroySemaphore(
-            _device,
-            _frames[i]._renderSemaphore,
             nullptr);
 
         vkDestroySemaphore(
@@ -345,6 +356,9 @@ void VulkanEngine::draw(float deltaTime)
 
     //wait until the gpu has finished rendering the last frame. timeout of 1 second
     VK_CHECK(vkWaitForFences(_device, 1, &get_current_frame()._renderFence, true, 1000000000));
+    // The fence has passed, so any timestamps this slot recorded belong to a
+    // submission that has finished and can be read without stalling.
+    read_gpu_timestamps(_frameNumber % FRAME_OVERLAP);
     get_current_frame()._deletionQueue.flush();
     get_current_frame()._frameDescriptors.clear_pools(_device);
     //request image from the swapchain 
@@ -384,6 +398,53 @@ void VulkanEngine::draw(float deltaTime)
     update_scene(deltaTime);
 
     VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
+
+	// Timestamps have to be reset before they are written again, and this
+	// slot's results were read above.
+	if (_gpuTimingSupported) {
+		vkCmdResetQueryPool(
+			cmd,
+			_timestampPool,
+			(_frameNumber % FRAME_OVERLAP) * TimestampsPerFrame,
+			TimestampsPerFrame);
+	}
+
+	// The shadow and prepass counters are recorded before the main pass
+	// resets its own, so they are cleared here instead.
+	stats.shadow_drawcall_count = 0;
+	stats.shadow_triangle_count = 0;
+	stats.prepass_drawcall_count = 0;
+	stats.prepass_triangle_count = 0;
+	stats.prepass_record_time = 0.0f;
+
+	// Render the sunlight depth map first: every later pass, main camera and
+	// portal cameras alike, samples it while shading.
+	draw_shadow_map(cmd);
+
+	// Camera depth and view-space normals for the screen-space passes.  A
+	// debug view samples those images, so it also forces the pass to run, and
+	// so does ambient occlusion, which is built entirely out of them.
+	const bool showRenderDebugView = _renderDebugView != RenderDebugView::None;
+	const bool occlusionActive = ssao_active();
+	if (_depthNormalPrepassEnabled || showRenderDebugView || occlusionActive) {
+		draw_depth_normal_prepass(cmd);
+	}
+
+	// Ambient occlusion reads the prepass and is finished before any shading
+	// starts, because every lit surface in the frame samples its result.
+	// Skipped entirely when disabled: the images keep the neutral 1.0 they
+	// were cleared to, so nothing downstream needs a second code path.
+	if (occlusionActive) {
+		draw_ssao(cmd);
+	} else {
+		stats.ssao_width = 0;
+		stats.ssao_height = 0;
+		stats.ssao_kernel_samples = 0;
+		stats.ssao_raw_time = 0.0f;
+		stats.ssao_blur_horizontal_time = 0.0f;
+		stats.ssao_blur_vertical_time = 0.0f;
+		stats.ssao_total_time = 0.0f;
+	}
 
 	// transition our main draw image into general layout so we can write into it
 	// we will overwrite it all so we dont care about what was the older layout
@@ -432,19 +493,39 @@ void VulkanEngine::draw(float deltaTime)
     }
 	stats.portal_drawcall_count = stats.drawcall_count - stats.world_drawcall_count;
 
+    // Replaces the shaded image with one of the buffers behind it.  Editor
+    // overlays are still drawn on top, so shadow and collider bounds can be
+    // read against the depth or normals they were built from.
+    if (showRenderDebugView) {
+        draw_render_debug(cmd);
+    }
+
     // Collider bounds are an editor-only overlay.  They are intentionally
     // drawn after portal composition, so they never affect playable portal
     // views or the saved scene itself.
-    if (_editorMode && _showColliderBounds) {
+    if (_editorMode && (_showColliderBounds || _showShadowBounds)) {
         draw_collider_debug_bounds(cmd);
     }
 
-	// transition the draw image and the swapchain image into their correct transfer layouts
-	vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    // Anti-aliasing sees the whole composed frame, so it smooths world
+    // silhouettes, portal contents, and the overlay lines in one pass.  ImGui
+    // is drawn after the copy, straight into the swapchain, and stays sharp.
+    // A debug view is exempt: those images carry per-pixel data whose value is
+    // that it has not been filtered.
+    VkImage presentSource = _drawImage.image;
+    if (_fxaaEnabled && !showRenderDebugView &&
+        _fxaaPipeline.pipeline != VK_NULL_HANDLE) {
+        draw_fxaa(cmd);
+        presentSource = _postProcessImage.image;
+    } else {
+        vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    }
+
+	// transition the swapchain image into its correct transfer layout
 	vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-	// execute a copy from the draw image into the swapchain
-	vkutil::copy_image_to_image(cmd, _drawImage.image, _swapchainImages[swapchainImageIndex], _drawExtent, _swapchainExtent);
+	// execute a copy from whichever image finished the frame into the swapchain
+	vkutil::copy_image_to_image(cmd, presentSource, _swapchainImages[swapchainImageIndex], _drawExtent, _swapchainExtent);
 
 	// Draw ImGui directly into the swapchain image with dynamic rendering.
 	vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -462,9 +543,13 @@ void VulkanEngine::draw(float deltaTime)
 	VkSemaphoreSubmitInfo waitInfo = vkinit::semaphore_submit_info(
 		VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
 		get_current_frame()._swapchainSemaphore);
+	// Indexed by image, not by frame: presentation holds this semaphore
+	// until the image comes back around, which need not happen within the
+	// two frames a per-frame semaphore would allow.
+	VkSemaphore renderSemaphore = _swapchainRenderSemaphores[swapchainImageIndex];
 	VkSemaphoreSubmitInfo signalInfo = vkinit::semaphore_submit_info(
 		VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-		get_current_frame()._renderSemaphore);
+		renderSemaphore);
 
 	VkSubmitInfo2 submit = vkinit::submit_info(&cmdinfo, &signalInfo, &waitInfo);
 
@@ -473,7 +558,7 @@ void VulkanEngine::draw(float deltaTime)
 
     //prepare present
 	// this will put the image we just rendered to into the visible window.
-	// we want to wait on the _renderSemaphore for that, 
+	// we want to wait on this image's render semaphore for that, 
 	// as its necessary that drawing commands have finished before the image is displayed to the user
     VkPresentInfoKHR presentInfo = {};
 	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -481,7 +566,7 @@ void VulkanEngine::draw(float deltaTime)
 	presentInfo.pSwapchains = &_swapchain;
 	presentInfo.swapchainCount = 1;
 
-	presentInfo.pWaitSemaphores = &get_current_frame()._renderSemaphore;
+	presentInfo.pWaitSemaphores = &renderSemaphore;
 	presentInfo.waitSemaphoreCount = 1;
 
 	presentInfo.pImageIndices = &swapchainImageIndex;
@@ -574,6 +659,14 @@ void VulkanEngine::create_swapchain(uint32_t width, uint32_t height)
     _swapchain = vkbSwapchain.swapchain;
     _swapchainImages = vkbSwapchain.get_images().value();
     _swapchainImageViews = vkbSwapchain.get_image_views().value();
+
+    // Created here rather than in init_sync_structures() because the count
+    // is the swapchain's, and a resize rebuilds them with it.
+    VkSemaphoreCreateInfo semaphoreCreateInfo = vkinit::semaphore_create_info();
+    _swapchainRenderSemaphores.resize(_swapchainImages.size());
+    for (VkSemaphore& semaphore : _swapchainRenderSemaphores) {
+        VK_CHECK(vkCreateSemaphore(_device, &semaphoreCreateInfo, nullptr, &semaphore));
+    }
 }
 
 void VulkanEngine::init_swapchain() 
@@ -596,6 +689,8 @@ void VulkanEngine::init_swapchain()
     drawImageUsages |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     drawImageUsages |= VK_IMAGE_USAGE_STORAGE_BIT;
     drawImageUsages |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    // The anti-aliasing pass reads the finished image as a texture.
+    drawImageUsages |= VK_IMAGE_USAGE_SAMPLED_BIT;
 
     VkImageCreateInfo rimg_info = vkinit::image_create_info(_drawImage.imageFormat, drawImageUsages, drawImageExtent);
 
@@ -666,6 +761,11 @@ void VulkanEngine::init_swapchain()
 void VulkanEngine::destroy_swapchain()
 {
     vkDestroySwapchainKHR(_device, _swapchain, nullptr);
+
+    for (VkSemaphore semaphore : _swapchainRenderSemaphores) {
+        vkDestroySemaphore(_device, semaphore, nullptr);
+    }
+    _swapchainRenderSemaphores.clear();
 
     // destroy swapchain resoruces
 
