@@ -86,6 +86,7 @@ enum class TimeTrialRole : uint8_t {
 // cache rather than in the scene graph.
 struct SceneMaterial {
     bool enabled{false};
+    bool debugChecker{false};
     std::string baseColorTexturePath;
     glm::vec4 colorTint{1.0f};
     glm::vec2 uvScale{1.0f};

@@ -301,6 +301,8 @@ bool VulkanEngine::save_editor_scene()
         writeVec4(object.material.colorTint);
         file << ", \"materialMetallic\": " << object.material.metallic
              << ", \"materialRoughness\": " << object.material.roughness
+             << ", \"materialDebugChecker\": "
+             << (object.material.debugChecker ? "true" : "false")
              << ", \"uvScale\": ";
         writeVec2(object.material.uvScale);
         file << ", \"visible\": " << (object.visible ? "true" : "false")
@@ -576,6 +578,16 @@ bool VulkanEngine::load_editor_scene()
             saved.material.baseColorTexturePath = baseColorTexture;
             saved.material.metallic = static_cast<float>(metallic);
             saved.material.roughness = static_cast<float>(roughness);
+            bool debugChecker = false;
+            const simdjson::error_code checkerResult =
+                jsonObject["materialDebugChecker"].get_bool().get(debugChecker);
+            if (checkerResult != simdjson::SUCCESS &&
+                checkerResult != simdjson::NO_SUCH_FIELD) {
+                fmt::print("Invalid checker material flag in editor scene: {}\n",
+                    scenePath.string());
+                return false;
+            }
+            saved.material.debugChecker = debugChecker;
         } else if (materialResult != simdjson::NO_SUCH_FIELD) {
             fmt::print("Invalid material flag in editor scene: {}\n", scenePath.string());
             return false;

@@ -219,6 +219,8 @@ void VulkanEngine::draw_inspector_panel()
                 ImGui::BeginDisabled(!object->material.enabled);
                 changed |= ImGui::ColorEdit4(
                     "Tint", &object->material.colorTint.x);
+                changed |= ImGui::Checkbox(
+                    "Debug Checker Grid", &object->material.debugChecker);
                 changed |= ImGui::DragFloat(
                     "Metallic", &object->material.metallic,
                     0.01f, 0.0f, 1.0f, "%.2f");

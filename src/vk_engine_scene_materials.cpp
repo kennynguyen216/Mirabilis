@@ -80,7 +80,8 @@ MaterialInstance* VulkanEngine::resolve_scene_material(const SceneObject& object
         !nearly_equal(runtime.colorTint, source.colorTint) ||
         !nearly_equal(runtime.uvScale, source.uvScale) ||
         !nearly_equal(runtime.metallic, source.metallic) ||
-        !nearly_equal(runtime.roughness, source.roughness);
+        !nearly_equal(runtime.roughness, source.roughness) ||
+        runtime.debugChecker != source.debugChecker;
     if (!changed) {
         return &runtime.material;
     }
@@ -102,7 +103,8 @@ MaterialInstance* VulkanEngine::resolve_scene_material(const SceneObject& object
     *constants = {};
     constants->colorFactors = source.colorTint;
     constants->metal_rough_factors = glm::vec4(
-        source.metallic, source.roughness, 0.0f, 0.0f);
+        source.metallic, source.roughness,
+        source.debugChecker ? 1.0f : 0.0f, 0.0f);
     constants->extra[0] = glm::vec4(source.uvScale, 0.0f, 0.0f);
 
     const AllocatedImage& colorImage =
@@ -150,6 +152,7 @@ MaterialInstance* VulkanEngine::resolve_scene_material(const SceneObject& object
     runtime.uvScale = source.uvScale;
     runtime.metallic = source.metallic;
     runtime.roughness = source.roughness;
+    runtime.debugChecker = source.debugChecker;
     runtime.initialized = true;
     return &runtime.material;
 }

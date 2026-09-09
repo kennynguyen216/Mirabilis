@@ -96,6 +96,7 @@ struct SceneMaterialRuntime {
     glm::vec2 uvScale{1.0f};
     float metallic{0.0f};
     float roughness{0.8f};
+    bool debugChecker{false};
     bool initialized{false};
 };
 
