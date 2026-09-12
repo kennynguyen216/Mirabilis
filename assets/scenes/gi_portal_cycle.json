@@ -1,0 +1,412 @@
+{
+    "version":  1,
+    "lighting":  {
+                     "shadowsEnabled":  true,
+                     "sunDirection":  [
+                                          0,
+                                          1,
+                                          0.5
+                                      ]
+                 },
+    "objects":  [
+                    {
+                        "id":  0,
+                        "parent":  -1,
+                        "name":  "Sandbox",
+                        "position":  [
+                                         0,
+                                         0,
+                                         0
+                                     ],
+                        "rotation":  [
+                                         0,
+                                         0,
+                                         0
+                                     ],
+                        "scale":  [
+                                      1,
+                                      1,
+                                      1
+                                  ],
+                        "colliderCenter":  [
+                                               0,
+                                               0,
+                                               0
+                                           ],
+                        "colliderHalfExtents":  [
+                                                    0.5,
+                                                    0.5,
+                                                    0.5
+                                                ],
+                        "materialEnabled":  false,
+                        "baseColorTexture":  "",
+                        "materialTint":  [
+                                             1,
+                                             1,
+                                             1,
+                                             1
+                                         ],
+                        "materialMetallic":  0,
+                        "materialRoughness":  0.800000012,
+                        "uvScale":  [
+                                        1,
+                                        1
+                                    ],
+                        "visible":  true,
+                        "hasCollision":  false,
+                        "portalPlaceable":  false,
+                        "layer":  0,
+                        "collisionShape":  0,
+                        "timeTrialRole":  "none",
+                        "asset":  "empty",
+                        "modelPath":  ""
+                    },
+                    {
+                        "scale":  [
+                                      8,
+                                      1,
+                                      8
+                                  ],
+                        "id":  1,
+                        "materialRoughness":  0.8,
+                        "layer":  0,
+                        "visible":  true,
+                        "materialEnabled":  true,
+                        "name":  "Neutral floor",
+                        "parent":  0,
+                        "asset":  "floor",
+                        "materialTint":  [
+                                             0.75,
+                                             0.75,
+                                             0.75,
+                                             1
+                                         ],
+                        "materialMetallic":  0,
+                        "hasCollision":  false,
+                        "portalPlaceable":  false,
+                        "modelPath":  "",
+                        "rotation":  [
+                                         0,
+                                         0,
+                                         0
+                                     ],
+                        "position":  [
+                                         0,
+                                         0,
+                                         0
+                                     ],
+                        "collisionShape":  1,
+                        "baseColorTexture":  "",
+                        "uvScale":  [
+                                        1,
+                                        1
+                                    ]
+                    },
+                    {
+                        "scale":  [
+                                      0.2,
+                                      4,
+                                      8
+                                  ],
+                        "id":  2,
+                        "materialRoughness":  0.8,
+                        "layer":  0,
+                        "visible":  true,
+                        "materialEnabled":  true,
+                        "name":  "Red wall",
+                        "parent":  0,
+                        "asset":  "cube",
+                        "materialTint":  [
+                                             0.75,
+                                             0.06,
+                                             0.04,
+                                             1
+                                         ],
+                        "materialMetallic":  0,
+                        "hasCollision":  false,
+                        "portalPlaceable":  false,
+                        "modelPath":  "",
+                        "rotation":  [
+                                         0,
+                                         0,
+                                         0
+                                     ],
+                        "position":  [
+                                         -4,
+                                         2,
+                                         0
+                                     ],
+                        "collisionShape":  0,
+                        "baseColorTexture":  "",
+                        "uvScale":  [
+                                        1,
+                                        1
+                                    ]
+                    },
+                    {
+                        "scale":  [
+                                      0.2,
+                                      4,
+                                      8
+                                  ],
+                        "id":  3,
+                        "materialRoughness":  0.8,
+                        "layer":  0,
+                        "visible":  true,
+                        "materialEnabled":  true,
+                        "name":  "Green wall",
+                        "parent":  0,
+                        "asset":  "cube",
+                        "materialTint":  [
+                                             0.05,
+                                             0.65,
+                                             0.09,
+                                             1
+                                         ],
+                        "materialMetallic":  0,
+                        "hasCollision":  false,
+                        "portalPlaceable":  false,
+                        "modelPath":  "",
+                        "rotation":  [
+                                         0,
+                                         0,
+                                         0
+                                     ],
+                        "position":  [
+                                         4,
+                                         2,
+                                         0
+                                     ],
+                        "collisionShape":  0,
+                        "baseColorTexture":  "",
+                        "uvScale":  [
+                                        1,
+                                        1
+                                    ]
+                    },
+                    {
+                        "scale":  [
+                                      8,
+                                      4,
+                                      0.2
+                                  ],
+                        "id":  4,
+                        "materialRoughness":  0.8,
+                        "layer":  0,
+                        "visible":  true,
+                        "materialEnabled":  true,
+                        "name":  "Back wall",
+                        "parent":  0,
+                        "asset":  "cube",
+                        "materialTint":  [
+                                             0.75,
+                                             0.75,
+                                             0.75,
+                                             1
+                                         ],
+                        "materialMetallic":  0,
+                        "hasCollision":  false,
+                        "portalPlaceable":  false,
+                        "modelPath":  "",
+                        "rotation":  [
+                                         0,
+                                         0,
+                                         0
+                                     ],
+                        "position":  [
+                                         0,
+                                         2,
+                                         -4
+                                     ],
+                        "collisionShape":  0,
+                        "baseColorTexture":  "",
+                        "uvScale":  [
+                                        1,
+                                        1
+                                    ]
+                    },
+                    {
+                        "scale":  [
+                                      2,
+                                      0.2,
+                                      8
+                                  ],
+                        "id":  5,
+                        "materialRoughness":  0.8,
+                        "layer":  0,
+                        "visible":  true,
+                        "materialEnabled":  true,
+                        "name":  "Left ceiling piece",
+                        "parent":  0,
+                        "asset":  "cube",
+                        "materialTint":  [
+                                             0.75,
+                                             0.75,
+                                             0.75,
+                                             1
+                                         ],
+                        "materialMetallic":  0,
+                        "hasCollision":  false,
+                        "portalPlaceable":  false,
+                        "modelPath":  "",
+                        "rotation":  [
+                                         0,
+                                         0,
+                                         0
+                                     ],
+                        "position":  [
+                                         -3,
+                                         4,
+                                         0
+                                     ],
+                        "collisionShape":  0,
+                        "baseColorTexture":  "",
+                        "uvScale":  [
+                                        1,
+                                        1
+                                    ]
+                    },
+                    {
+                        "scale":  [
+                                      1.5,
+                                      2.2,
+                                      1.5
+                                  ],
+                        "id":  6,
+                        "materialRoughness":  0.8,
+                        "layer":  0,
+                        "visible":  true,
+                        "materialEnabled":  true,
+                        "name":  "Tall neutral block",
+                        "parent":  0,
+                        "asset":  "cube",
+                        "materialTint":  [
+                                             0.7,
+                                             0.7,
+                                             0.7,
+                                             1
+                                         ],
+                        "materialMetallic":  0,
+                        "hasCollision":  false,
+                        "portalPlaceable":  false,
+                        "modelPath":  "",
+                        "rotation":  [
+                                         0,
+                                         0,
+                                         0
+                                     ],
+                        "position":  [
+                                         -1.4,
+                                         1.1,
+                                         -0.8
+                                     ],
+                        "collisionShape":  0,
+                        "baseColorTexture":  "",
+                        "uvScale":  [
+                                        1,
+                                        1
+                                    ]
+                    },
+                    {
+                        "scale":  [
+                                      1.5,
+                                      1.1,
+                                      1.5
+                                  ],
+                        "id":  7,
+                        "materialRoughness":  0.8,
+                        "layer":  0,
+                        "visible":  true,
+                        "materialEnabled":  true,
+                        "name":  "Low neutral block",
+                        "parent":  0,
+                        "asset":  "cube",
+                        "materialTint":  [
+                                             0.7,
+                                             0.7,
+                                             0.7,
+                                             1
+                                         ],
+                        "materialMetallic":  0,
+                        "hasCollision":  false,
+                        "portalPlaceable":  false,
+                        "modelPath":  "",
+                        "rotation":  [
+                                         0,
+                                         0,
+                                         0
+                                     ],
+                        "position":  [
+                                         1.4,
+                                         0.55,
+                                         1
+                                     ],
+                        "collisionShape":  0,
+                        "baseColorTexture":  "",
+                        "uvScale":  [
+                                        1,
+                                        1
+                                    ]
+                    },
+{"id": 100, "parent": 0, "name": "Gameplay Spawn", "position": [0, 0.0, 2.5], "rotation": [0, 0, 0], "scale": [0.6, 0.1, 0.6], "colliderCenter": [0, 0, 0], "colliderHalfExtents": [0.5, 0.5, 0.5], "visible": false, "hasCollision": false, "portalPlaceable": false, "layer": 0, "collisionShape": 0, "timeTrialRole": "spawn", "asset": "empty", "modelPath": "", "materialEnabled": false, "baseColorTexture": "", "materialTint": [1, 1, 1, 1], "materialMetallic": 0, "materialRoughness": 0.8, "uvScale": [1, 1]}
+                ],
+    "nextActor":  101,
+    "ssao":  {
+                 "radius":  0.75,
+                 "intensity":  1,
+                 "power":  1.5,
+                 "bias":  0.025,
+                 "enabled":  false
+             },
+    "authoredPortals":  [
+                            {
+                                "position":  [
+                                                 0,
+                                                 2,
+                                                 0
+                                             ],
+                                "up":  [
+                                           0,
+                                           1,
+                                           0
+                                       ],
+                                "halfWidth":  0.8,
+                                "halfHeight":  1.2,
+                                "hostWallObject":  4294967295,
+                                "normal":  [
+                                               0,
+                                               0,
+                                               1
+                                           ]
+                            },
+                            {
+                                "position":  [
+                                                 0,
+                                                 2,
+                                                 3
+                                             ],
+                                "up":  [
+                                           0,
+                                           1,
+                                           0
+                                       ],
+                                "halfWidth":  0.8,
+                                "halfHeight":  1.2,
+                                "hostWallObject":  4294967295,
+                                "normal":  [
+                                               0,
+                                               0,
+                                               -1
+                                           ]
+                            }
+                        ],
+    "referenceLighting":  {
+                              "blackEnvironment":  false,
+                              "environmentIntensity":  1,
+                              "sunRadiance":  [
+                                                  0,
+                                                  0,
+                                                  0
+                                              ]
+                          }
+}

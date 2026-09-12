@@ -57,8 +57,13 @@ float sunlight_visibility(vec3 worldPosition, vec3 normal)
     // Pushing the sample point along the normal before projecting removes
     // most self-shadowing acne on surfaces that face the sun edge-on, and it
     // does far less to detach contact shadows than depth bias alone.
+    // Scene files can tune above these values, but older maps often contain
+    // biases that are too small for their long, non-uniformly scaled walls.
+    // Enforce a safe engine-wide floor so switching maps cannot bring the
+    // striped self-shadow pattern back.
+    float normalBias = max(sceneData.shadowSettings.y, 0.15);
     vec4 lightClip = sceneData.sunViewProjection *
-        vec4(worldPosition + normal * sceneData.shadowSettings.y, 1.0);
+        vec4(worldPosition + normal * normalBias, 1.0);
     vec3 projected = lightClip.xyz / lightClip.w;
     // Beyond the shadow camera's depth range there is nothing recorded to
     // compare against, so treat the surface as lit rather than shadowed.
@@ -67,7 +72,13 @@ float sunlight_visibility(vec3 worldPosition, vec3 normal)
     }
 
     vec2 shadowUV = projected.xy * 0.5 + 0.5;
-    float reference = projected.z - sceneData.shadowSettings.x;
+    // Surfaces facing across the light direction need more receiver bias than
+    // ones facing it head-on. This slope-aware term removes the regular
+    // columns caused by tiny depth changes across large grazing-angle faces.
+    vec3 lightDirection = normalize(sceneData.sunlightDirection.xyz);
+    float grazing = 1.0 - abs(dot(normalize(normal), lightDirection));
+    float depthBias = max(sceneData.shadowSettings.x, 0.0012);
+    float reference = projected.z - depthBias * mix(1.0, 2.5, grazing);
     float texel = sceneData.shadowSettings.z;
 
     // Percentage-closer filtering: nine comparisons instead of one turn the

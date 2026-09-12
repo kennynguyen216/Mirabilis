@@ -1,4 +1,5 @@
-#pragma once 
+#pragma once
+#include "path_trace_scene.h"
 
 #include <array>
 #include <unordered_map>
@@ -124,7 +125,9 @@ struct SSAOKernelBlock {
 // the lighting of a level, so they travel with the scene; the sample count and
 // resolution below them describe what a machine can afford and do not.
 struct SSAOSettings {
-    bool enabled{true};
+    // Disabled by default while the screen-space pass still exhibits planar
+    // banding. It remains available in the rendering controls for debugging.
+    bool enabled{false};
     // The size of the neighbourhood that can occlude a point, in world units.
     // It depends entirely on the scale the level was authored at.
     float radius{0.75f};
@@ -263,6 +266,53 @@ class VulkanEngine{
     bool stop_rendering {false};
     bool resize_requested {false};
     float renderScale {1.0f};
+    enum class RendererMode { Raster, SoftwarePathTrace };
+    RendererMode _rendererMode{RendererMode::Raster};
+    bool _traceSupported{false};
+    std::string _traceStatus{"Software tracer not initialized"};
+    VkPipeline _tracePipeline{};
+    VkPipelineLayout _traceLayout{};
+    VkDescriptorSetLayout _traceSetLayout{};
+    DescriptorAllocator _tracePool{};
+    VkDescriptorSet _traceSet{};
+    AllocatedImage _traceAccum{};
+    bool _traceImageInitialized{false};
+    void init_path_trace();
+    void destroy_path_trace();
+    void draw_path_trace(VkCommandBuffer cmd);
+    void draw_path_trace_ui();
+    void validate_path_trace();
+    std::unordered_map<VkDeviceAddress,std::weak_ptr<TraceMeshSource>> _traceMeshSources;
+    std::vector<TraceTriangle> _traceTriangles;
+    std::vector<TraceMaterial> _traceMaterials;
+    AllocatedBuffer _traceTriangleBuffer{}, _traceMaterialBuffer{};
+    uint64_t _traceSceneRevision{0}, _traceSceneHash{0};
+    void update_trace_scene();
+    std::vector<TraceBVHNode> _traceNodes;
+    AllocatedBuffer _traceNodeBuffer{};
+    int _traceDebugView{8};
+    int _traceMaxDepth{2};
+    int _traceBaseSeed{1337};
+    void capture_path_trace(const char* filename);
+    uint32_t _traceSamples{0};
+    uint64_t _traceInputHash{0};
+    bool _traceWasActive{false};
+    float _traceExposure{0};
+    VkQueryPool _traceTimestampPool{};
+    bool _traceTimingWritten[FRAME_OVERLAP]{};
+    float _traceGpuMs{0}, _traceMaxGpuMs{0};
+    TraceLighting _traceLighting{};
+    AllocatedBuffer _traceLightBuffer{}, _traceEmitterBuffer{};
+    AllocatedImage _traceDirect{}, _traceIndirect{};
+    std::vector<uint32_t> _traceEmitters;
+    std::vector<glm::vec4> read_trace_image(const AllocatedImage& image);
+    std::vector<uint32_t> _traceTexels;
+    AllocatedBuffer _traceTexelBuffer{};
+    int _traceMaterialModel{1};
+    uint64_t _traceDrawHash{0};
+    std::vector<TracePortal> _tracePortals;
+    AllocatedBuffer _tracePortalBuffer{};
+    int _tracePortalLimit{2};
     VkExtent2D _windowExtent{1280, 720};
 
     FrameData _frames[FRAME_OVERLAP];
@@ -684,11 +734,13 @@ class VulkanEngine{
         // The fraction of the local maximum luma a pixel must differ by
         // before it counts as an edge.  Lower catches more, at the cost of
         // filtering detail that was never aliased.
-        float _fxaaEdgeThreshold{0.08f};
+        // Preserve more fine surface detail while still smoothing strong
+        // silhouette edges. The previous settings softened the whole image.
+        float _fxaaEdgeThreshold{0.10f};
         // How strongly features too small for the edge search to trace - a
         // thin pole, a specular sparkle - are blended towards their
         // neighbourhood.
-        float _fxaaSubpixelStrength{0.75f};
+        float _fxaaSubpixelStrength{0.30f};
         bool _fxaaShowEdges{false};
         RenderDebugView _renderDebugView{RenderDebugView::None};
         // How far from the camera reads as white in the depth debug view.

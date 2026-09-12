@@ -32,12 +32,17 @@ struct DrawContext;
         }                                                                  \
     } while (0)
 
+struct TraceTextureSource {
+    uint32_t width{},height{};
+    std::vector<uint32_t> rgba;
+};
 struct AllocatedImage{
     VkImage image;
     VkImageView imageView;
     VmaAllocation allocation;
     VkExtent3D imageExtent;
     VkFormat imageFormat;
+    std::shared_ptr<TraceTextureSource> traceSource;
 };
 
 struct AllocatedBuffer {
@@ -54,7 +59,13 @@ struct Vertex {
     glm::vec4 color;
 };
 
+struct TraceMeshSource {
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+};
+
 struct GPUMeshBuffers {
+    std::shared_ptr<TraceMeshSource> traceSource;
     AllocatedBuffer indexBuffer;
     AllocatedBuffer vertexBuffer;
     VkDeviceAddress vertexBufferAddress{};
@@ -77,6 +88,11 @@ struct MaterialPipeline {
 };
 
 struct MaterialInstance {
+    std::shared_ptr<TraceTextureSource> traceTexture;
+    glm::vec2 traceUVScale{1};
+    glm::vec4 traceBaseColor{1.0f};
+    glm::vec4 traceParameters{0.0f,0.8f,0.0f,1.5f};
+    glm::vec4 traceEmission{0.0f};
     MaterialPipeline* pipeline{};
     VkDescriptorSet materialSet{};
     MaterialPass passType{MaterialPass::MainColor};

@@ -266,6 +266,7 @@ MaterialInstance GLTFMetallic_Roughness::write_material(
     DescriptorAllocatorGrowable& descriptorAllocator)
 {
     MaterialInstance material{};
+    material.traceTexture=resources.colorImage.traceSource;
     material.passType = pass;
     material.pipeline = pass == MaterialPass::Transparent
         ? &transparentPipeline

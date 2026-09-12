@@ -219,6 +219,12 @@ void VulkanEngine::draw_inspector_panel()
                 ImGui::BeginDisabled(!object->material.enabled);
                 changed |= ImGui::ColorEdit4(
                     "Tint", &object->material.colorTint.x);
+                if(_rendererMode==RendererMode::SoftwarePathTrace) {
+                    changed |= ImGui::ColorEdit3("Emission color",&object->material.emissionColor.x);
+                    changed |= ImGui::DragFloat("Emission strength",&object->material.emissionStrength,0.05f,0,10000);
+                    changed |= ImGui::SliderFloat("Dielectric transmission",&object->material.transmission,0,1);
+                    changed |= ImGui::SliderFloat("Index of refraction",&object->material.ior,1,3);
+                }
                 changed |= ImGui::Checkbox(
                     "Debug Checker Grid", &object->material.debugChecker);
                 changed |= ImGui::DragFloat(
@@ -1372,6 +1378,7 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
     
         if (_showDebugPanels) {
             if (ImGui::Begin("Render Settings")) {
+                draw_path_trace_ui();
                 ImGui::SliderFloat("Resolution Scale", &renderScale, 0.3f, 1.0f);
                 if (ImGui::CollapsingHeader("Sun & Shadows")) {
                     // These are saved with the scene, so editing one is an

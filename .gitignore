@@ -40,3 +40,6 @@
 
 # Local Gradle caches
 .gradle/
+
+# Local software-tracing checkpoints, logs and GPU captures
+/tmp/gi-checkpoints/

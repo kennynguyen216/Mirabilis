@@ -300,6 +300,9 @@ bool VulkanEngine::save_editor_scene()
              << json_escape(object.material.baseColorTexturePath) << "\""
              << ", \"materialTint\": ";
         writeVec4(object.material.colorTint);
+        file << ", \"emissionColor\": "; writeVec3(object.material.emissionColor);
+        file << ", \"emissionStrength\": " << object.material.emissionStrength;
+        file << ", \"transmission\": " << object.material.transmission << ", \"ior\": " << object.material.ior;
         file << ", \"materialMetallic\": " << object.material.metallic
              << ", \"materialRoughness\": " << object.material.roughness
              << ", \"materialDebugChecker\": "
@@ -345,6 +348,10 @@ bool VulkanEngine::save_editor_scene()
     // bias depends on the scale of the geometry in this particular scene.
     // Map resolution is deliberately not here; that is a quality setting for
     // the machine, not a property of the level.
+    file << ",\n  \"referenceLighting\": {\"sunRadiance\": ";
+    writeVec3(glm::vec3(_traceLighting.sunRadiance));
+    file << ", \"environmentIntensity\": " << _traceLighting.environment.x
+         << ", \"blackEnvironment\": " << (_traceLighting.environment.y>0.5f?"true":"false") << '}';
     file << ",\n  \"lighting\": {\"sunDirection\": ";
     writeVec3(_sunlightDirection);
     file << ", \"shadowsEnabled\": " << (_shadowsEnabled ? "true" : "false")
@@ -368,9 +375,9 @@ bool VulkanEngine::save_editor_scene()
     }
 
     _sceneDirty = false;
-    std::ofstream lastSceneFile(LastEditorScenePath, std::ios::trunc);
-    if (lastSceneFile) {
-        lastSceneFile << _activeSceneFilename << '\n';
+    if (!SDL_getenv("MIRABILIS_TEST_FRAMES")) {
+        std::ofstream lastSceneFile(LastEditorScenePath, std::ios::trunc);
+        if (lastSceneFile) lastSceneFile << _activeSceneFilename << '\n';
     }
     fmt::print("Saved editor scene: {}\n", scenePath.string());
     return true;
@@ -475,6 +482,18 @@ bool VulkanEngine::load_editor_scene()
     // exactly as they were.  Starting from a default-constructed value is
     // also what gives a legacy scene with no block the documented defaults
     // rather than whatever the previous level happened to set.
+    TraceLighting pendingReference{};
+    simdjson::dom::object reference;
+    if(document["referenceLighting"].get_object().get(reference)==simdjson::SUCCESS) {
+        simdjson::dom::element color; glm::vec3 radiance;
+        if(reference["sunRadiance"].get(color)==simdjson::SUCCESS&&read_json_vec3(color,radiance))
+            pendingReference.sunRadiance=glm::vec4(glm::clamp(radiance,glm::vec3(0),glm::vec3(10000)),0);
+        double value=1;
+        if(reference["environmentIntensity"].get_double().get(value)==simdjson::SUCCESS&&std::isfinite(value))
+            pendingReference.environment.x=float(std::clamp(value,0.0,10000.0));
+        bool black=false;
+        if(reference["blackEnvironment"].get_bool().get(black)==simdjson::SUCCESS) pendingReference.environment.y=black?1.f:0.f;
+    }
     SSAOSettings pendingSSAO{};
     simdjson::dom::object jsonSSAO;
     if (document["ssao"].get_object().get(jsonSSAO) == simdjson::SUCCESS) {
@@ -676,6 +695,19 @@ bool VulkanEngine::load_editor_scene()
             saved.material.baseColorTexturePath = baseColorTexture;
             saved.material.metallic = static_cast<float>(metallic);
             saved.material.roughness = static_cast<float>(roughness);
+            double transmission=0,ior=1.5;
+            if(jsonObject["transmission"].get_double().get(transmission)==simdjson::SUCCESS&&std::isfinite(transmission))
+                saved.material.transmission=float(std::clamp(transmission,0.0,1.0));
+            if(jsonObject["ior"].get_double().get(ior)==simdjson::SUCCESS&&std::isfinite(ior))
+                saved.material.ior=float(std::clamp(ior,1.0,3.0));
+            simdjson::dom::element emission;
+            if(jsonObject["emissionColor"].get(emission)==simdjson::SUCCESS) {
+                if(!read_json_vec3(emission,saved.material.emissionColor)) return false;
+                saved.material.emissionColor=glm::clamp(saved.material.emissionColor,glm::vec3(0),glm::vec3(10000));
+            }
+            double strength=0;
+            if(jsonObject["emissionStrength"].get_double().get(strength)==simdjson::SUCCESS&&std::isfinite(strength))
+                saved.material.emissionStrength=float(std::clamp(strength,0.0,10000.0));
             bool debugChecker = false;
             const simdjson::error_code checkerResult =
                 jsonObject["materialDebugChecker"].get_bool().get(debugChecker);
@@ -707,13 +739,24 @@ bool VulkanEngine::load_editor_scene()
 
     Scene restoredScene{};
     std::unordered_map<uint32_t, SceneObjectID> restoredIDs;
+    const bool isGIPlaytest = scenePath.filename().string().rfind("gi_", 0) == 0;
     for (const SavedSceneObject& saved : savedObjects) {
         const SceneObjectID newID = restoredScene.create_object(saved.name);
         restoredIDs.emplace(saved.oldID, newID);
         SceneObject* object = restoredScene.get(newID);
         object->localTransform = saved.transform;
         object->visible = saved.visible;
-        object->hasCollision = saved.hasCollision;
+        // GI fixtures are also useful as small gameplay rooms. Their trace
+        // validation scenes historically left collision disabled because the
+        // automated tracer uses the editor camera. Keep authored collision
+        // values authoritative everywhere else, while giving these fixtures
+        // a floor and solid cube boundaries for F1/F2 gameplay inspection.
+        const bool giFloor = isGIPlaytest &&
+            saved.assetKind == SceneAssetKind::FloorQuad &&
+            saved.collisionShape == CollisionShape::GroundPlane &&
+            std::abs(saved.transform.position.y) <= 0.01f;
+        const bool giCube = isGIPlaytest && saved.assetKind == SceneAssetKind::UnitCube;
+        object->hasCollision = saved.hasCollision || giFloor || giCube;
         object->portalPlaceable = saved.portalPlaceable;
         object->layer = saved.layer;
         object->collisionShape = saved.collisionShape;
@@ -797,10 +840,14 @@ bool VulkanEngine::load_editor_scene()
     _nextCreatedActorNumber = static_cast<uint32_t>(std::max<uint64_t>(nextActor, 1));
     // Past every path that could still have failed.
     _ssaoSettings = pendingSSAO;
+    _traceLighting = pendingReference;
+    // A newly loaded scene supplies the gameplay spawn. Ordinary editor/play
+    // toggles can then preserve the paused player's position.
+    respawn_player();
     _sceneDirty = false;
-    std::ofstream lastSceneFile(LastEditorScenePath, std::ios::trunc);
-    if (lastSceneFile) {
-        lastSceneFile << _activeSceneFilename << '\n';
+    if (!SDL_getenv("MIRABILIS_TEST_FRAMES")) {
+        std::ofstream lastSceneFile(LastEditorScenePath, std::ios::trunc);
+        if (lastSceneFile) lastSceneFile << _activeSceneFilename << '\n';
     }
     rebuild_collision_from_scene();
     fmt::print("Loaded editor scene: {}\n", scenePath.string());

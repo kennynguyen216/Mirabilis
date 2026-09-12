@@ -308,6 +308,8 @@ void VulkanEngine::init_default_materials()
         MaterialPass::MainColor,
         floorResources,
         globalDescriptorAllocator);
+    _floorMaterial.traceBaseColor = floorConstants->colorFactors;
+    _floorMaterial.traceParameters = floorConstants->metal_rough_factors;
     
     _wallMaterialBuffer = create_buffer(
         sizeof(GLTFMetallic_Roughness::MaterialConstants),
@@ -326,6 +328,8 @@ void VulkanEngine::init_default_materials()
         MaterialPass::MainColor,
         wallResources,
         globalDescriptorAllocator);
+    _wallMaterial.traceBaseColor = wallConstants->colorFactors;
+    _wallMaterial.traceParameters = wallConstants->metal_rough_factors;
     
     // There is no character asset in assets/ yet, so start with a visible
     // collision-sized proxy.  It is rendered only by portal cameras; the
@@ -348,6 +352,8 @@ void VulkanEngine::init_default_materials()
         MaterialPass::MainColor,
         playerResources,
         globalDescriptorAllocator);
+    _playerMaterial.traceBaseColor = playerConstants->colorFactors;
+    _playerMaterial.traceParameters = playerConstants->metal_rough_factors;
     
     _bluePortalMaterialBuffer = create_buffer(
         sizeof(GLTFMetallic_Roughness::MaterialConstants),
@@ -368,6 +374,8 @@ void VulkanEngine::init_default_materials()
         MaterialPass::MainColor,
         bluePortalResources,
         globalDescriptorAllocator);
+    _bluePortalMaterial.traceBaseColor = bluePortalConstants->colorFactors;
+    _bluePortalMaterial.traceParameters = bluePortalConstants->metal_rough_factors;
     
     _orangePortalMaterialBuffer = create_buffer(
         sizeof(GLTFMetallic_Roughness::MaterialConstants),
@@ -386,6 +394,8 @@ void VulkanEngine::init_default_materials()
         MaterialPass::MainColor,
         orangePortalResources,
         globalDescriptorAllocator);
+    _orangePortalMaterial.traceBaseColor = orangePortalConstants->colorFactors;
+    _orangePortalMaterial.traceParameters = orangePortalConstants->metal_rough_factors;
     
     init_portal_camera_targets();
 }
@@ -417,6 +427,7 @@ void VulkanEngine::init_default_scene()
     // A missing file simply leaves the starter sandbox intact on the first
     // launch.  After the first File > Save Scene, this restores the level.
     restore_last_editor_scene_name();
+    if (const char* testScene = SDL_getenv("MIRABILIS_TEST_SCENE")) _activeSceneFilename = testScene;
     load_editor_scene();
 }
 
@@ -505,6 +516,10 @@ GPUMeshBuffers VulkanEngine::uploadMesh(
         .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
         .buffer = newSurface.vertexBuffer.buffer};
     newSurface.vertexBufferAddress = vkGetBufferDeviceAddress(_device, &addressInfo);
+    newSurface.traceSource = std::make_shared<TraceMeshSource>();
+    newSurface.traceSource->vertices.assign(vertices.begin(), vertices.end());
+    newSurface.traceSource->indices.assign(indices.begin(), indices.end());
+    _traceMeshSources[newSurface.vertexBufferAddress] = newSurface.traceSource;
 
     newSurface.indexBuffer = create_buffer(
         indexBufferSize,
@@ -637,6 +652,12 @@ AllocatedImage VulkanEngine::create_image(
     });
 
     destroy_buffer(uploadBuffer);
+    if(format==VK_FORMAT_R8G8B8A8_UNORM||format==VK_FORMAT_R8G8B8A8_SRGB) {
+        image.traceSource=std::make_shared<TraceTextureSource>();
+        image.traceSource->width=size.width; image.traceSource->height=size.height;
+        image.traceSource->rgba.resize(size_t(size.width)*size.height);
+        std::memcpy(image.traceSource->rgba.data(),data,image.traceSource->rgba.size()*sizeof(uint32_t));
+    }
     return image;
 }
 

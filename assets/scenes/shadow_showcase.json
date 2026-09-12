@@ -30,5 +30,5 @@
   ],
   "authoredPortals": [{"hostWallObject": 4294967295, "position": [-14, 1.20000005, 14], "normal": [0, 0, 1], "up": [0, 1, 0], "halfWidth": 1.35000002, "halfHeight": 1.79999995}, {"hostWallObject": 4294967295, "position": [23, 1.20000005, -19], "normal": [-1, 0, 0], "up": [0, 1, 0], "halfWidth": 1.35000002, "halfHeight": 1.79999995}],
   "lighting": {"sunDirection": [0, 1, 0.5], "shadowsEnabled": true, "shadowRadius": 60, "shadowDepthBias": 0.000600000028, "shadowNormalBias": 0.0799999982},
-  "ssao": {"enabled": true, "radius": 0.75, "bias": 0.0250000004, "intensity": 1, "power": 1.5}
+  "ssao": {"enabled": false, "radius": 0.75, "bias": 0.0250000004, "intensity": 1, "power": 1.5}
 }

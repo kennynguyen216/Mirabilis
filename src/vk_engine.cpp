@@ -81,6 +81,7 @@ void VulkanEngine::init()
     init_pipelines();
     init_default_data();
     init_imgui();
+    init_path_trace();
 
     apply_scene_spawn_point();
 
@@ -150,10 +151,11 @@ void VulkanEngine::set_editor_mode(bool enabled)
         set_mouse_capture(false);
     } else {
         _editorCamera.velocity = glm::vec3(0.0f);
-        apply_scene_spawn_point();
-        _playerMovement.position = _playerMovement.settings.spawnPosition;
+        // Resume the player where gameplay paused. Scene loading and F1 own
+        // respawning; opening the settings must not teleport the player.
+        _playerMovement.previousPosition = _playerMovement.position;
         _playerMovement.velocity = glm::vec3(0.0f);
-        _playerMovement.grounded = false;
+        _playerMovement.jumpBufferRemaining = 0.0f;
         reset_time_trial();
         set_mouse_capture(true);
     }
@@ -303,11 +305,12 @@ void VulkanEngine::cleanup()
 {
     if(_isInitialized) {
         vkDeviceWaitIdle(_device);
+        destroy_path_trace();
 
         // The explicit File > Save Scene command is still useful for named
         // checkpoints, but closing the editor should not discard unsaved
         // level construction work.
-        if (_sceneDirty) {
+        if (_sceneDirty && !SDL_getenv("MIRABILIS_TEST_FRAMES")) {
             save_editor_scene();
         }
 
@@ -370,12 +373,15 @@ void VulkanEngine::draw(float deltaTime)
         get_current_frame()._swapchainSemaphore,
         nullptr,
         &swapchainImageIndex);
-    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR ||
-        acquireResult == VK_SUBOPTIMAL_KHR) {
+    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
         resize_requested = true;
         return;
     }
-    VK_CHECK(acquireResult);
+    // SUBOPTIMAL still acquires an image and signals the semaphore. Consume
+    // it in this submission before rebuilding; returning would reuse a
+    // signaled acquire semaphore on the next frame.
+    if (acquireResult == VK_SUBOPTIMAL_KHR) resize_requested = true;
+    else VK_CHECK(acquireResult);
 	VK_CHECK(vkResetFences(_device, 1, &get_current_frame()._renderFence));
     VkCommandBuffer cmd = get_current_frame()._mainCommandBuffer;
 
@@ -417,6 +423,11 @@ void VulkanEngine::draw(float deltaTime)
 	stats.prepass_triangle_count = 0;
 	stats.prepass_record_time = 0.0f;
 
+    VkImage presentSource = _drawImage.image;
+    if (_rendererMode == RendererMode::SoftwarePathTrace && _traceSupported) {
+        draw_path_trace(cmd);
+    } else {
+    _traceWasActive=false;
 	// Render the sunlight depth map first: every later pass, main camera and
 	// portal cameras alike, samples it while shading.
 	draw_shadow_map(cmd);
@@ -512,7 +523,6 @@ void VulkanEngine::draw(float deltaTime)
     // is drawn after the copy, straight into the swapchain, and stays sharp.
     // A debug view is exempt: those images carry per-pixel data whose value is
     // that it has not been filtered.
-    VkImage presentSource = _drawImage.image;
     if (_fxaaEnabled && !showRenderDebugView &&
         _fxaaPipeline.pipeline != VK_NULL_HANDLE) {
         draw_fxaa(cmd);
@@ -521,6 +531,7 @@ void VulkanEngine::draw(float deltaTime)
         vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     }
 
+    }
 	// transition the swapchain image into its correct transfer layout
 	vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
@@ -586,6 +597,70 @@ void VulkanEngine::draw(float deltaTime)
 void VulkanEngine::run(){
     SDL_Event e; 
     bool bQuit = false;
+    bool testRestored=false;
+    bool testMinimized=false;
+    // Opt-in unattended validation; ordinary interactive sessions are unchanged.
+    const char* frameLimitText = std::getenv("MIRABILIS_TEST_FRAMES");
+    const int frameLimit = frameLimitText ? std::max(1, std::atoi(frameLimitText)) : 0;
+    if (frameLimit) {
+        if (SDL_getenv("MIRABILIS_TEST_EDITOR_RESUME")) {
+            const auto require = [](bool condition, const char* message) {
+                if (!condition) {fmt::print("GI TEST FAIL: {}\n", message); std::abort();}
+            };
+            const auto key = [&](SDL_Keycode code) {
+                SDL_Event event{}; event.type = SDL_KEYDOWN;
+                event.key.keysym.sym = code;
+                process_event(event);
+            };
+            const std::string originalScene = _activeSceneFilename;
+            respawn_player();
+            _playerMovement.position.x += 0.4f;
+            _playerMovement.previousPosition = _playerMovement.position;
+            mainCamera.position = _playerMovement.position + glm::vec3(0, 1.7f, 0);
+            const glm::vec3 pausedPosition = _playerMovement.position;
+            const Camera pausedCamera = mainCamera;
+            for (int cycle = 0; cycle < 3; ++cycle) {
+                key(SDLK_TAB);
+                require(_editorMode, "Tab did not enter editor");
+                require(glm::length(_editorCamera.position - pausedCamera.position) < 1e-6f,
+                    "Editor did not start at gameplay camera");
+                _editorCamera.position += glm::vec3(2, 1, 0);
+                key(SDLK_TAB);
+                require(!_editorMode, "Tab did not return to gameplay");
+                require(glm::length(_playerMovement.position - pausedPosition) < 1e-6f,
+                    "Tab respawned or moved the player");
+                require(glm::length(mainCamera.position - pausedCamera.position) < 1e-6f &&
+                    mainCamera.pitch == pausedCamera.pitch && mainCamera.yaw == pausedCamera.yaw,
+                    "Tab changed the gameplay camera");
+            }
+            for (int tick = 0; tick < 240; ++tick) update_physics(1.0f / 120.0f);
+            require(_playerMovement.grounded &&
+                glm::length(_playerMovement.position - pausedPosition) < 1e-4f,
+                "Resumed player did not remain supported by the floor");
+            key(SDLK_F1);
+            require(glm::length(_playerMovement.position - _playerMovement.settings.spawnPosition) < 1e-6f,
+                "F1 did not respawn the player");
+            key(SDLK_TAB);
+            _playerMovement.position = glm::vec3(50, 50, 50);
+            require(load_editor_scene_named("gi_cornell_box_dark.json"), "Scene load failed during Tab test");
+            key(SDLK_TAB);
+            require(glm::length(_playerMovement.position - glm::vec3(0, 0, 2.5f)) < 1e-6f,
+                "New scene did not use its authored spawn");
+            require(load_editor_scene_named(originalScene), "Could not restore test scene");
+            fmt::print("GI editor resume: three Tab cycles, camera, floor support, F1 and new-scene spawn PASS\n");
+        }
+        set_editor_mode(true);
+        set_mouse_capture(false);
+        ImGui::GetIO().IniFilename = nullptr;
+        if(const char* camera=SDL_getenv("MIRABILIS_TEST_CAMERA")) {
+            std::sscanf(camera,"%f %f %f %f %f",&_editorCamera.position.x,&_editorCamera.position.y,&_editorCamera.position.z,&_editorCamera.pitch,&_editorCamera.yaw);
+        }
+        if (std::getenv("MIRABILIS_TEST_TRACE")) {
+            _rendererMode = _traceSupported ? RendererMode::SoftwarePathTrace : RendererMode::Raster;
+            if(_traceSupported) validate_path_trace();
+            else if(!std::getenv("MIRABILIS_TEST_DISABLE_TRACE")) std::abort();
+        }
+    }
     auto previousTime = std::chrono::steady_clock::now();
 
     //main loop
@@ -602,6 +677,10 @@ void VulkanEngine::run(){
         }
         // do not draw if we are minimized
         if(stop_rendering) {
+            if(frameLimit&&std::getenv("MIRABILIS_TEST_CYCLE")&&testMinimized&&!testRestored) {
+                SDL_RestoreWindow(_window); testRestored=true;
+                fmt::print("GI lifecycle: minimized and restore requested\n");
+            }
             //throttle the speed to avoid endless spinning
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
@@ -634,7 +713,55 @@ void VulkanEngine::run(){
         draw_frame_ui(deltaTime);
 
         ImGui::Render();
+        if (frameLimit && std::getenv("MIRABILIS_TEST_CYCLE")) {
+            if (_frameNumber == 4) _rendererMode = RendererMode::Raster;
+            if (_frameNumber == 8) _rendererMode = RendererMode::SoftwarePathTrace;
+            if (_frameNumber == 10) SDL_SetWindowSize(_window, 803, 457);
+            if (_frameNumber == 12) renderScale = 0.7f;
+            if (_frameNumber >= 14&&!testMinimized) {SDL_MinimizeWindow(_window);testMinimized=true;}
+        }
+        const bool testInvalidation=frameLimit&&SDL_getenv("MIRABILIS_TEST_INVALIDATION");
+        const int testFrame=_frameNumber;
+        if(testInvalidation) {
+            if(testFrame==2) _traceExposure+=1;
+            if(testFrame==3) ++_traceBaseSeed;
+            if(testFrame==4) _editorCamera.position.x+=0.1f;
+            if(testFrame==5) _traceMaxDepth=1;
+            if(testFrame>=6&&testFrame<=8) {
+                for(auto& object:_scene.objects) if(object.alive&&object.visible&&object.material.enabled) {
+                    if(testFrame==6) object.material.colorTint.r*=0.5f;
+                    if(testFrame==7) object.visible=false;
+                    if(testFrame==8) object.localTransform.position.x+=0.125f;
+                    break;
+                }
+            }
+            if(testFrame==9) renderScale=0.75f;
+            if(testFrame==10) _traceWasActive=false;
+            if(testFrame==11) _traceLighting.sunRadiance.x+=1;
+            if(testFrame==12) _traceLighting.environment.x+=0.25f;
+            if(testFrame==13) _traceMaterialModel=1-_traceMaterialModel;
+            if(testFrame==14) _tracePortalLimit=1;
+            if(testFrame==15) _sunlightDirection.x+=0.25f;
+            if(testFrame==16) {
+                for(auto& object:_scene.objects) if(object.alive&&object.visible&&object.material.enabled) {
+                    object.material.emissionColor=glm::vec3(1);
+                    object.material.emissionStrength+=1; break;
+                }
+            }
+            if(testFrame==17&&!_authoredPortalPairs.empty()) _authoredPortalPairs[0].first.position.x+=0.125f;
+        }
         draw(deltaTime);
+        if(testInvalidation&&testFrame>=2&&testFrame<=17) {
+            const uint32_t expected=testFrame==2?3:1;
+            fmt::print("GI invalidation frame {}: samples={} expected={}\n",testFrame,_traceSamples,expected);
+            if(_traceSamples!=expected) std::abort();
+        }
+        if (frameLimit && _frameNumber >= frameLimit) {
+            if (const char* capture=SDL_getenv("MIRABILIS_CAPTURE")) capture_path_trace(capture);
+            fmt::print("GI bounded run complete: frames={} renderer={}\n",_frameNumber,
+                _rendererMode==RendererMode::SoftwarePathTrace&&_traceSupported?"software":"raster");
+            bQuit = true;
+        }
     }
 }
 

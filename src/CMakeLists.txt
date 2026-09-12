@@ -13,6 +13,8 @@ add_executable (engine
   vk_pipelines.cpp
   vk_engine.h
   vk_engine.cpp
+  vk_engine_path_trace.cpp
+  path_trace_scene.cpp
   vk_engine_editor.cpp
   vk_engine_gameplay.cpp
   vk_engine_input.cpp

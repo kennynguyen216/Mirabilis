@@ -32,8 +32,6 @@ layout(set = 1, binding = 4) uniform SSAOKernel {
     vec4 samples[64];
 } kernelData;
 
-const float NoiseTextureSize = 16.0;
-
 void main()
 {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
@@ -64,11 +62,15 @@ void main()
     vec3 normal = normalize(rawNormal);
     vec3 viewPosition = view_position_from_depth(screenUV, depth);
 
-    // The noise tiles across the occlusion grid rather than the window,
-    // because this pass runs at half resolution.
-    vec2 noiseUV = (vec2(pixel) + 0.5) / NoiseTextureSize;
-    vec3 randomVector = texture(rotationNoise, noiseUV).xyz * 2.0 - 1.0;
-    randomVector.z = 0.0;
+    // Generate a decorrelated rotation for every AO pixel. The old 16x16
+    // texture repeated often enough that its pattern survived the bilateral
+    // blur as visible vertical columns on large, flat walls. Interleaved
+    // gradient noise has no short tile boundary for the eye to pick out.
+    vec2 pixelCenter = vec2(pixel) + 0.5;
+    float randomUnit = fract(
+        52.9829189 * fract(dot(pixelCenter, vec2(0.06711056, 0.00583715))));
+    float randomAngle = randomUnit * 6.28318530718;
+    vec3 randomVector = vec3(cos(randomAngle), sin(randomAngle), 0.0);
 
     // Gram-Schmidt against the normal.  If the stored vector happens to lie
     // along the normal the result collapses, so fall back to whichever axis
@@ -123,7 +125,14 @@ void main()
         float surfaceDistance = -sampledPosition.z;
         // The surface actually visible along this ray sits nearer the camera
         // than the hemisphere point, so it blocks it.
-        bool blocked = surfaceDistance < sampleDistance - bias;
+        // A depth comparison alone can mistake another point on this same
+        // plane for an occluder when a large wall is viewed at a grazing
+        // angle. That produced the evenly spaced vertical bands visible on
+        // flat walls. A real occluder must also sit measurably above the
+        // tangent plane through the centre point, in the normal hemisphere.
+        float normalSeparation = dot(normal, sampledPosition - viewPosition);
+        bool blocked = surfaceDistance < sampleDistance - bias &&
+            normalSeparation > bias;
 
         // Without this a distant wall would occlude a surface purely because
         // it is nearer the camera than a sample floating out in the open.
