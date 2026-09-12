@@ -3,6 +3,7 @@
 #include "vk_pipelines.h"
 #include "imgui.h"
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/packing.hpp>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -574,4 +575,154 @@ void VulkanEngine::capture_path_trace(const char* filename) {
     if(std::getenv("MIRABILIS_EXPECT_BLACK")&&sum!=0) std::abort();
     if(std::getenv("MIRABILIS_EXPECT_LIT")&&(directSum<=0||indirectSum<=0)) std::abort();
     if(!linear||!bitmap||!metadata||invalid) std::abort();
+}
+
+std::vector<glm::vec4> VulkanEngine::read_ssgi_image(
+    const AllocatedImage& image, VkExtent2D extent)
+{
+    VK_CHECK(vkDeviceWaitIdle(_device));
+    const size_t pixels = size_t(extent.width) * extent.height;
+    auto buffer = create_buffer(
+        pixels * 4 * sizeof(uint16_t), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VMA_MEMORY_USAGE_GPU_TO_CPU);
+    immediate_submit([&](VkCommandBuffer cmd) {
+        vkutil::transition_image(cmd, image.image, VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {extent.width, extent.height, 1};
+        vkCmdCopyImageToBuffer(cmd, image.image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer.buffer, 1, &copy);
+        vkutil::transition_image(cmd, image.image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    });
+    void* mapped = nullptr;
+    VK_CHECK(vmaMapMemory(_allocator, buffer.allocation, &mapped));
+    vmaInvalidateAllocation(_allocator, buffer.allocation, 0, VK_WHOLE_SIZE);
+    const auto* packed = static_cast<const uint16_t*>(mapped);
+    std::vector<glm::vec4> values(pixels);
+    for (size_t pixel = 0; pixel < pixels; ++pixel) {
+        values[pixel] = glm::vec4(
+            glm::unpackHalf1x16(packed[pixel * 4 + 0]),
+            glm::unpackHalf1x16(packed[pixel * 4 + 1]),
+            glm::unpackHalf1x16(packed[pixel * 4 + 2]),
+            glm::unpackHalf1x16(packed[pixel * 4 + 3]));
+    }
+    vmaUnmapMemory(_allocator, buffer.allocation);
+    destroy_buffer(buffer);
+    return values;
+}
+
+void VulkanEngine::capture_ssgi(const char* filename)
+{
+    if (_rendererMode == RendererMode::SoftwarePathTrace || !_ssgiEnabled) {
+        fmt::print("SSGI capture skipped: raster SSGI is not active\n");
+        return;
+    }
+    const VkExtent2D extent = active_ssgi_extent();
+    const size_t pixels = size_t(extent.width) * extent.height;
+    const auto values = read_ssgi_image(_ssgiFilteredImage, extent);
+    double sum = 0.0;
+    uint32_t invalid = 0;
+    for (const glm::vec4& value : values) {
+        if (!std::isfinite(value.x) || !std::isfinite(value.y) ||
+            !std::isfinite(value.z)) {
+            ++invalid;
+        } else {
+            sum += (value.x + value.y + value.z) / 3.0;
+        }
+    }
+
+    const auto writePfm = [&](const std::string& path,
+                              const std::vector<glm::vec4>& data) {
+        std::ofstream file(path, std::ios::binary);
+        file << "PF\n" << extent.width << " " << extent.height << "\n-1.0\n";
+        for (int y = int(extent.height) - 1; y >= 0; --y) {
+            for (uint32_t x = 0; x < extent.width; ++x) {
+                const glm::vec4& value = data[size_t(y) * extent.width + x];
+                file.write(reinterpret_cast<const char*>(&value),
+                    3 * sizeof(float));
+            }
+        }
+        if (!file) std::abort();
+    };
+    writePfm(std::string(filename) + ".indirect.pfm", values);
+
+    std::ofstream metadata(std::string(filename) + ".txt");
+    metadata << "Scene: " << _activeSceneFilename
+        << "\nDimensions: " << extent.width << " x " << extent.height
+        << "\nFull draw dimensions: " << _drawExtent.width << " x "
+        << _drawExtent.height << "\nPreset: " << _ssgiQualityPreset
+        << "\nRays per pixel: " << _ssgiRaysPerPixel
+        << "\nRay steps: " << _ssgiStepCount
+        << "\nRay length: " << _ssgiRayLength
+        << "\nThickness: " << _ssgiThickness
+        << "\nHistory weight: " << _ssgiHistoryWeight
+        << "\nFilter enabled: " << _ssgiSpatialFilterEnabled
+        << "\nFilter radius: " << _ssgiFilterRadius
+        << "\nIntensity: " << _ssgiIntensity
+        << "\nLinear indirect mean: " << sum / pixels
+        << "\nNonfinite pixels: " << invalid << "\nCamera: "
+        << render_camera().position.x << "," << render_camera().position.y
+        << "," << render_camera().position.z << " pitch="
+        << render_camera().pitch << " yaw=" << render_camera().yaw << "\n";
+
+    if (const char* referencePath = std::getenv("MIRABILIS_SSGI_REFERENCE")) {
+        std::ifstream referenceFile(referencePath, std::ios::binary);
+        std::string magic;
+        uint32_t width = 0, height = 0;
+        float scale = 0.0f;
+        referenceFile >> magic >> width >> height >> scale;
+        referenceFile.get();
+        if (!referenceFile || magic != "PF" || width != extent.width ||
+            height != extent.height || scale >= 0.0f) {
+            fmt::print("SSGI reference is not a matching little-endian RGB PFM: {}\n",
+                referencePath);
+            std::abort();
+        }
+        std::vector<glm::vec4> reference(pixels, glm::vec4(0.0f));
+        for (int y = int(height) - 1; y >= 0; --y) {
+            for (uint32_t x = 0; x < width; ++x) {
+                glm::vec3 rgb{};
+                referenceFile.read(reinterpret_cast<char*>(&rgb),
+                    3 * sizeof(float));
+                reference[size_t(y) * width + x] = glm::vec4(rgb, 1.0f);
+            }
+        }
+        if (!referenceFile) std::abort();
+
+        std::vector<glm::vec4> difference(pixels);
+        double absoluteError = 0.0;
+        double squaredError = 0.0;
+        double referenceMagnitude = 0.0;
+        float maximumError = 0.0f;
+        for (size_t pixel = 0; pixel < pixels; ++pixel) {
+            const glm::vec3 delta = glm::vec3(values[pixel] - reference[pixel]);
+            const glm::vec3 absolute = glm::abs(delta);
+            difference[pixel] = glm::vec4(absolute, 1.0f);
+            for (int channel = 0; channel < 3; ++channel) {
+                absoluteError += absolute[channel];
+                squaredError += delta[channel] * delta[channel];
+                referenceMagnitude += std::abs(reference[pixel][channel]);
+                maximumError = std::max(maximumError, absolute[channel]);
+            }
+        }
+        const double samples = static_cast<double>(pixels) * 3.0;
+        const double mae = absoluteError / samples;
+        const double rmse = std::sqrt(squaredError / samples);
+        const double relativeMae = absoluteError /
+            std::max(referenceMagnitude, 1e-12);
+        writePfm(std::string(filename) + ".difference.pfm", difference);
+        metadata << "Reference: " << referencePath
+            << "\nMAE: " << mae << "\nRMSE: " << rmse
+            << "\nRelative MAE: " << relativeMae
+            << "\nMaximum absolute channel error: " << maximumError << "\n";
+        fmt::print(
+            "SSGI comparison: MAE={} RMSE={} relative-MAE={} max={}",
+            mae, rmse, relativeMae, maximumError);
+        fmt::print("\n");
+    }
+    if (!metadata || invalid != 0) std::abort();
+    fmt::print("SSGI capture {}: {}x{} linear indirect mean={} nonfinite={}\n",
+        filename, extent.width, extent.height, sum / pixels, invalid);
 }

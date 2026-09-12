@@ -113,6 +113,30 @@ struct SSAOPushConstants {
     glm::vec4 settings{0.0f};
 };
 
+// One unfiltered SSGI sample per pixel. extents.xy is the live render size;
+// settings are ray length, thickness, start offset, and step count.
+struct SSGIPushConstants {
+    glm::uvec4 control{0};
+    glm::vec4 settings{0.0f};
+    // x = temporal history weight, y = depth rejection threshold,
+    // z = normal dot threshold, w = velocity rejection threshold.
+    glm::vec4 temporal{0.0f};
+    // x = rays per pixel; remaining components reserved.
+    glm::uvec4 quality{1u, 0u, 0u, 0u};
+};
+
+struct SSGIFilterPushConstants {
+    glm::ivec4 control{0};
+    glm::vec4 settings{0.0f};
+};
+
+struct SSGICompositePushConstants {
+    // xy = full render extent, zw = active SSGI extent.
+    glm::vec4 extents{0.0f};
+    // x = indirect intensity, y = half-resolution flag.
+    glm::vec4 settings{0.0f};
+};
+
 // The occlusion kernel is a fixed set of points in the +Z hemisphere, sent to
 // the GPU once.  vec4 rather than vec3 because std140 pads an array element
 // out to sixteen bytes either way.
@@ -178,6 +202,12 @@ struct EngineStats {
     float ssao_blur_vertical_time{0.0f};
     float ssao_total_time{0.0f};
     bool ssao_time_is_gpu{false};
+    float ssgi_raw_time{0.0f};
+    float ssgi_temporal_time{0.0f};
+    float ssgi_filter_time{0.0f};
+    float ssgi_composite_time{0.0f};
+    float ssgi_total_time{0.0f};
+    bool ssgi_time_is_gpu{false};
 };
 
 // Which intermediate buffer to show instead of the shaded image.  These are
@@ -195,6 +225,19 @@ enum class RenderDebugView : int {
     OcclusionRaw = 5,
     OcclusionBlurred = 6,
     OcclusionFinal = 7,
+    Albedo = 8,
+    MotionVectors = 9,
+    PortalMask = 10,
+    DirectLighting = 11,
+    SSGIRaw = 12,
+    SSGIHitMiss = 13,
+    SSGISteps = 14,
+    SSGITemporal = 15,
+    SSGIHistoryRejection = 16,
+    SSGIReprojection = 17,
+    SSGIFiltered = 18,
+    SSGIFallback = 19,
+    SSGIReferenceDifference = 20,
 };
 
 struct SceneMaterialRuntime {
@@ -294,6 +337,9 @@ class VulkanEngine{
     int _traceMaxDepth{2};
     int _traceBaseSeed{1337};
     void capture_path_trace(const char* filename);
+    void capture_ssgi(const char* filename);
+    std::vector<glm::vec4> read_ssgi_image(
+        const AllocatedImage& image, VkExtent2D extent);
     uint32_t _traceSamples{0};
     uint64_t _traceInputHash{0};
     bool _traceWasActive{false};
@@ -435,16 +481,24 @@ class VulkanEngine{
         void init_shadow_pipeline();
         void draw_shadow_map(VkCommandBuffer cmd);
         void init_depth_normal_resources();
+        void init_ssgi_resources();
         void init_depth_normal_pipeline();
         void init_render_debug_pipeline();
         void init_post_process_resources();
         void init_fxaa_pipeline();
         void init_ssao_resources();
         void init_ssao_pipelines();
+        void init_ssgi_pipelines();
         void init_gpu_timestamps();
         void read_gpu_timestamps(uint32_t frameIndex);
         void draw_depth_normal_prepass(VkCommandBuffer cmd);
         void draw_ssao(VkCommandBuffer cmd);
+        void draw_ssgi_portal_mask(VkCommandBuffer cmd);
+        void draw_ssgi(VkCommandBuffer cmd);
+        void draw_ssgi_composite(VkCommandBuffer cmd);
+        VkExtent2D active_ssgi_extent() const;
+        void apply_ssgi_quality_preset(int preset);
+        void apply_max_fidelity_settings();
         SSAOPushConstants build_ssao_push_constants() const;
         // Half the rendered region, rounded up, which is what the dispatches
         // cover.  The images themselves stay allocated at half the window.
@@ -462,7 +516,8 @@ class VulkanEngine{
             MaterialPipeline* overridePipeline = nullptr,
             uint32_t stencilReference = 0,
             bool useFrustumCulling = true,
-            uint32_t stencilCompareMask = 0xff);
+            uint32_t stencilCompareMask = 0xff,
+            bool writeGBuffer = false);
         void draw_portal_masks(VkCommandBuffer cmd);
         void draw_recursive_portal_mask(
             VkCommandBuffer cmd,
@@ -635,11 +690,13 @@ class VulkanEngine{
         // One directional shadow map covers a box centred on the active
         // camera.  Every camera in the frame - main and portal - samples it,
         // because the lookup is done from world-space positions.
-        static constexpr uint32_t ShadowMapResolution = 2048;
+        static constexpr uint32_t ShadowMapResolution = 4096;
         AllocatedImage _shadowMapImage;
         VkSampler _shadowSampler{};
         MaterialPipeline _shadowPipeline;
         glm::mat4 _sunViewProjection{1.0f};
+        glm::mat4 _previousMainViewProjection{1.0f};
+        bool _previousMainViewProjectionValid{false};
         // Points from a surface towards the sun, matching how the fragment
         // shaders use it.  The light itself travels along its negation.
         glm::vec3 _sunlightDirection{0.0f, 1.0f, 0.5f};
@@ -652,6 +709,7 @@ class VulkanEngine{
         float _shadowDepthMargin{120.0f};
         float _shadowDepthBias{0.0006f};
         float _shadowNormalBias{0.08f};
+        float _shadowFilterRadius{3.0f};
         // Reported in the statistics panel; chosen from what the GPU
         // actually supports rather than assumed.
         const char* _shadowFormatName{"none"};
@@ -662,13 +720,63 @@ class VulkanEngine{
         // depth and stencil contents the portal passes overwrite.
         AllocatedImage _prepassDepthImage;
         AllocatedImage _prepassNormalImage;
+        AllocatedImage _gbufferAlbedoImage;
+        AllocatedImage _gbufferVelocityImage;
+        AllocatedImage _directLightingImage;
+        AllocatedImage _portalMaskImage;
+        AllocatedImage _ssgiRawImage;
+        AllocatedImage _ssgiDebugImage;
+        AllocatedImage _ssgiFallbackImage;
+        std::array<AllocatedImage, 2> _ssgiTemporalHistory{};
+        std::array<AllocatedImage, 2> _ssgiMetadataHistory{};
+        AllocatedImage _ssgiTemporalDiagnosticImage;
+        AllocatedImage _ssgiFilterScratchImage;
+        AllocatedImage _ssgiFilteredImage;
+        AllocatedImage _ssgiReferenceImage;
+        bool _ssgiReferenceLoaded{false};
+        std::array<AllocatedImage, 2> _directLightingHistory{};
         VkSampler _prepassSampler{};
         VkDescriptorSetLayout _prepassImageDescriptorLayout{};
         // The prepass targets are allocated once at window size, so one
         // persistent set describes them for the whole run.
         VkDescriptorSet _prepassImageDescriptor{};
+        VkDescriptorSetLayout _ssgiDescriptorLayout{};
+        std::array<VkDescriptorSet, 2> _ssgiDescriptors{};
+        VkDescriptorSetLayout _ssgiDebugDescriptorLayout{};
+        std::array<VkDescriptorSet, 2> _ssgiDebugDescriptors{};
+        VkDescriptorSetLayout _ssgiFilterDescriptorLayout{};
+        std::array<VkDescriptorSet, 3> _ssgiFilterDescriptors{};
         MaterialPipeline _depthNormalPipeline;
         MaterialPipeline _renderDebugPipeline;
+        MaterialPipeline _ssgiPortalMaskPipeline;
+        VkPipelineLayout _ssgiPipelineLayout{};
+        VkPipeline _ssgiPipeline{};
+        VkPipeline _ssgiTemporalPipeline{};
+        VkPipelineLayout _ssgiFilterPipelineLayout{};
+        VkPipeline _ssgiFilterPipeline{};
+        VkDescriptorSetLayout _ssgiCompositeDescriptorLayout{};
+        std::array<VkDescriptorSet, 2> _ssgiCompositeDescriptors{};
+        MaterialPipeline _ssgiCompositePipeline;
+        bool _ssgiEnabled{true};
+        bool _ssgiHistoryValid{false};
+        uint32_t _ssgiHistoryWriteIndex{0};
+        VkExtent2D _ssgiHistoryExtent{0, 0};
+        int _ssgiStepCount{32};
+        int _ssgiRaysPerPixel{4};
+        float _ssgiRayLength{12.0f};
+        float _ssgiThickness{0.35f};
+        float _ssgiStartOffset{0.08f};
+        float _ssgiHistoryWeight{0.92f};
+        float _ssgiDepthRejection{0.003f};
+        float _ssgiNormalRejection{0.85f};
+        float _ssgiVelocityRejection{0.10f};
+        bool _ssgiSpatialFilterEnabled{true};
+        int _ssgiFilterRadius{3};
+        float _ssgiFilterDepthFalloff{800.0f};
+        float _ssgiFilterNormalPower{32.0f};
+        float _ssgiIntensity{1.0f};
+        bool _ssgiHalfResolution{false};
+        int _ssgiQualityPreset{0};
         bool _depthNormalPrepassEnabled{true};
         // Ambient occlusion, at half resolution.  Three images rather than
         // one because a compute pass cannot read and write the same storage
@@ -719,6 +827,9 @@ class VulkanEngine{
         float _timestampPeriod{0.0f};
         bool _gpuTimingSupported{false};
         std::array<bool, FRAME_OVERLAP> _timestampsPending{};
+        static constexpr uint32_t SSGITimestampsPerFrame = 5;
+        VkQueryPool _ssgiTimestampPool{VK_NULL_HANDLE};
+        std::array<bool, FRAME_OVERLAP> _ssgiTimingWritten{};
         // Anti-aliasing runs last, on the composed colour, so one filter
         // covers world geometry, portal contents, and the debug overlays
         // without any pass needing to know about it.  It cannot read and
@@ -761,6 +872,7 @@ class VulkanEngine{
         std::vector<GroundPlane> _activeGroundPlanes;
         std::vector<SurfRamp> _activeSurfRamps;
         std::unordered_map<SceneObjectID, SceneMaterialRuntime> _sceneMaterialRuntimes;
+        std::unordered_map<SceneObjectID, glm::mat4> _previousSceneObjectTransforms;
         std::unordered_map<std::string, AllocatedImage> _sceneTextureCache;
         std::unordered_set<std::string> _failedSceneTextures;
     };

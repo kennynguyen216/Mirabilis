@@ -61,6 +61,13 @@ void VulkanEngine::emit_scene_render_objects(
             : object.primitive.material;
         renderObject.bounds = object.primitive.bounds;
         renderObject.transform = world;
+        if (const auto previous = _previousSceneObjectTransforms.find(object.id);
+            previous != _previousSceneObjectTransforms.end()) {
+            renderObject.previousTransform = previous->second;
+        } else {
+            renderObject.previousTransform = world;
+        }
+        _previousSceneObjectTransforms[object.id] = world;
         renderObject.vertexBufferAddress = object.primitive.vertexBufferAddress;
         drawContext.OpaqueSurfaces.push_back(renderObject);
     }
@@ -130,6 +137,11 @@ void VulkanEngine::update_scene(float deltaTime)
     _sunViewProjection = compute_sun_view_projection(camera.position);
 
     sceneData = build_scene_data(camera.getViewMatrix());
+    sceneData.previousViewProjection = _previousMainViewProjectionValid
+        ? _previousMainViewProjection
+        : sceneData.viewproj;
+    _previousMainViewProjection = sceneData.viewproj;
+    _previousMainViewProjectionValid = true;
 
     std::memcpy(
         get_current_frame().sceneBuffer.info.pMappedData,

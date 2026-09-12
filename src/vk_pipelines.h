@@ -11,12 +11,12 @@ public:
     std::vector<VkPipelineShaderStageCreateInfo> _shaderStages;
     VkPipelineInputAssemblyStateCreateInfo _inputAssembly;
     VkPipelineRasterizationStateCreateInfo _rasterizer;
-    VkPipelineColorBlendAttachmentState _colorBlendAttachment;
+    std::vector<VkPipelineColorBlendAttachmentState> _colorBlendAttachments;
     VkPipelineMultisampleStateCreateInfo _multisampling;
     VkPipelineLayout _pipelineLayout;
     VkPipelineDepthStencilStateCreateInfo _depthStencil;
     VkPipelineRenderingCreateInfo _renderInfo;
-    VkFormat _colorAttachmentFormat;
+    std::vector<VkFormat> _colorAttachmentFormats;
 
     PipelineBuilder() { clear(); }
 
@@ -33,9 +33,10 @@ public:
     void enable_blending_additive();
     void enable_blending_alphablend();
     void set_color_attachment_format(VkFormat format);
+    void set_color_attachment_formats(std::span<const VkFormat> formats);
     void set_depth_format(VkFormat format);
     void set_stencil_format(VkFormat format);
-    void set_color_write_mask(VkColorComponentFlags mask);
+    void set_color_write_mask(VkColorComponentFlags mask, size_t attachment = 0);
     void disable_color_attachment();
     void enable_depth_bias(float constantFactor, float slopeFactor);
     void disable_depthtest();

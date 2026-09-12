@@ -74,7 +74,15 @@ struct GPUMeshBuffers {
 struct GPUDrawPushConstants {
     glm::mat4 worldMatrix;
     VkDeviceAddress vertexBuffer;
+    // Three rows of the previous affine object transform. Together with the
+    // implicit final row (0,0,0,1), this fits the guaranteed 128-byte Vulkan
+    // push-constant budget while still supporting object motion vectors.
+    uint64_t alignmentPadding{};
+    glm::vec4 previousWorldRow0{1.0f, 0.0f, 0.0f, 0.0f};
+    glm::vec4 previousWorldRow1{0.0f, 1.0f, 0.0f, 0.0f};
+    glm::vec4 previousWorldRow2{0.0f, 0.0f, 1.0f, 0.0f};
 };
+static_assert(sizeof(GPUDrawPushConstants) == 128);
 
 enum class MaterialPass : uint8_t {
     MainColor,
@@ -102,6 +110,7 @@ struct GPUSceneData {
     glm::mat4 view;
     glm::mat4 proj;
     glm::mat4 viewproj;
+    glm::mat4 previousViewProjection;
     glm::vec4 ambientColor;
     glm::vec4 sunlightDirection;
     glm::vec4 sunlightColor;
@@ -133,6 +142,10 @@ struct GPUSceneData {
     //      size while the render scale moves the live region inside it, so a
     //      fragment cannot simply divide by the render extent.
     glm::vec4 ambientOcclusionUV{0.0f};
+    // x = reference-compatible environment intensity, y = 1 for black.
+    glm::vec4 ssgiFallbackSettings{1.0f, 0.0f, 0.0f, 0.0f};
+    // x = PCF footprint radius in shadow-map texels.
+    glm::vec4 shadowFilterSettings{3.0f, 0.0f, 0.0f, 0.0f};
 };
 
 // Sixteen visible surfaces (the player pair plus seven authored links), with
@@ -162,6 +175,7 @@ struct RenderObject {
     MaterialInstance* material{};
     Bounds bounds{};
     glm::mat4 transform{1.0f};
+    glm::mat4 previousTransform{1.0f};
     VkDeviceAddress vertexBufferAddress{};
 };
 
@@ -175,6 +189,8 @@ struct Node : public IRenderable {
     std::vector<std::shared_ptr<Node>> children;
     glm::mat4 localTransform{1.0f};
     glm::mat4 worldTransform{1.0f};
+    glm::mat4 previousDrawTransform{1.0f};
+    bool hasPreviousDrawTransform{false};
 
     void refreshTransform(const glm::mat4& parentMatrix)
     {

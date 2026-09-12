@@ -36,6 +36,107 @@ constexpr bool bUseValidationLayers = true;
 VulkanEngine* loadedEngine = nullptr;
 
 VulkanEngine& VulkanEngine::Get() {return *loadedEngine;}
+
+void VulkanEngine::apply_ssgi_quality_preset(int preset)
+{
+    _ssgiQualityPreset = std::clamp(preset, 0, 4);
+    switch (_ssgiQualityPreset) {
+    case 0: // Full-resolution validation baseline.
+        _ssgiHalfResolution = false;
+        _ssgiRaysPerPixel = 4;
+        _ssgiStepCount = 32;
+        _ssgiRayLength = 12.0f;
+        _ssgiThickness = 0.35f;
+        _ssgiStartOffset = 0.08f;
+        _ssgiFilterRadius = 3;
+        _ssgiFilterDepthFalloff = 800.0f;
+        _ssgiFilterNormalPower = 32.0f;
+        _ssgiHistoryWeight = 0.92f;
+        break;
+    case 1: // High: spend saved pixels on longer rays.
+        _ssgiHalfResolution = true;
+        _ssgiRaysPerPixel = 4;
+        _ssgiStepCount = 48;
+        _ssgiRayLength = 16.0f;
+        _ssgiThickness = 0.30f;
+        _ssgiStartOffset = 0.06f;
+        _ssgiFilterRadius = 4;
+        _ssgiFilterDepthFalloff = 700.0f;
+        _ssgiFilterNormalPower = 28.0f;
+        _ssgiHistoryWeight = 0.94f;
+        break;
+    case 2: // Balanced.
+        _ssgiHalfResolution = true;
+        _ssgiRaysPerPixel = 2;
+        _ssgiStepCount = 32;
+        _ssgiRayLength = 12.0f;
+        _ssgiThickness = 0.35f;
+        _ssgiStartOffset = 0.08f;
+        _ssgiFilterRadius = 3;
+        _ssgiFilterDepthFalloff = 800.0f;
+        _ssgiFilterNormalPower = 32.0f;
+        _ssgiHistoryWeight = 0.92f;
+        break;
+    case 3: // Performance.
+        _ssgiHalfResolution = true;
+        _ssgiRaysPerPixel = 1;
+        _ssgiStepCount = 16;
+        _ssgiRayLength = 8.0f;
+        _ssgiThickness = 0.45f;
+        _ssgiStartOffset = 0.10f;
+        _ssgiFilterRadius = 2;
+        _ssgiFilterDepthFalloff = 900.0f;
+        _ssgiFilterNormalPower = 36.0f;
+        _ssgiHistoryWeight = 0.90f;
+        break;
+    default: // Peak: maximum samples and march precision at full resolution.
+        _ssgiHalfResolution = false;
+        _ssgiRaysPerPixel = 8;
+        _ssgiStepCount = 96;
+        _ssgiRayLength = 20.0f;
+        _ssgiThickness = 0.25f;
+        _ssgiStartOffset = 0.05f;
+        _ssgiFilterRadius = 5;
+        _ssgiFilterDepthFalloff = 800.0f;
+        _ssgiFilterNormalPower = 32.0f;
+        _ssgiHistoryWeight = 0.96f;
+        break;
+    }
+    _ssgiSpatialFilterEnabled = true;
+    _ssgiHistoryValid = false;
+}
+
+void VulkanEngine::apply_max_fidelity_settings()
+{
+    renderScale = 1.0f;
+    _shadowsEnabled = true;
+    _showShadowBounds = false;
+    _shadowDepthBias = 0.0012f;
+    _shadowNormalBias = 0.15f;
+    _shadowFilterRadius = 6.0f;
+
+    // SSAO is deliberately not run beside SSGI: its ambient contribution is
+    // bypassed by the SSGI composite, so enabling it would spend GPU time
+    // without changing the final image. Keep its best sampling preset ready
+    // for comparison if SSGI is later disabled.
+    _ssaoSettings.enabled = false;
+    _ssaoQuality = static_cast<int>(SSAOKernelSizes.size()) - 1;
+    _ssaoDepthFalloff = 24.0f;
+    _ssaoNormalFalloff = 24.0f;
+    _ssaoAmbientOnly = false;
+
+    _fxaaEnabled = true;
+    _fxaaEdgeThreshold = 0.063f;
+    _fxaaSubpixelStrength = 0.25f;
+    _fxaaShowEdges = false;
+
+    _depthNormalPrepassEnabled = true;
+    _ssgiEnabled = true;
+    apply_ssgi_quality_preset(4);
+    _ssgiIntensity = 0.35f;
+    _renderDebugView = RenderDebugView::None;
+}
+
 void VulkanEngine::init() 
 {
     //only one engine init is allowed with the application
@@ -70,6 +171,7 @@ void VulkanEngine::init()
     // Sized from the draw image, and referenced by a descriptor set that
     // init_descriptors() writes, so both have to exist by this point.
     init_depth_normal_resources();
+    init_ssgi_resources();
     // Same reason: the anti-aliasing pass needs its sampler before the set
     // that pairs it with the draw image can be written.
     init_post_process_resources();
@@ -82,6 +184,22 @@ void VulkanEngine::init()
     init_default_data();
     init_imgui();
     init_path_trace();
+
+    // Automation and capture runs can open directly on one intermediate
+    // buffer without synthesizing editor UI input. Values match
+    // RenderDebugView; ordinary launches remain on final lighting.
+    if (const char* debugView = SDL_getenv("MIRABILIS_RENDER_DEBUG_VIEW")) {
+        const int value = std::clamp(std::atoi(debugView),
+            static_cast<int>(RenderDebugView::None),
+            static_cast<int>(RenderDebugView::SSGIReferenceDifference));
+        _renderDebugView = static_cast<RenderDebugView>(value);
+    }
+    if (const char* preset = SDL_getenv("MIRABILIS_SSGI_PRESET")) {
+        apply_ssgi_quality_preset(std::atoi(preset));
+    }
+    if (SDL_getenv("MIRABILIS_MAX_FIDELITY")) {
+        apply_max_fidelity_settings();
+    }
 
     apply_scene_spawn_point();
 
@@ -413,6 +531,12 @@ void VulkanEngine::draw(float deltaTime)
 			_timestampPool,
 			(_frameNumber % FRAME_OVERLAP) * TimestampsPerFrame,
 			TimestampsPerFrame);
+		vkCmdResetQueryPool(
+			cmd,
+			_ssgiTimestampPool,
+			(_frameNumber % FRAME_OVERLAP) * SSGITimestampsPerFrame,
+			SSGITimestampsPerFrame);
+		_ssgiTimingWritten[_frameNumber % FRAME_OVERLAP] = false;
 	}
 
 	// The shadow and prepass counters are recorded before the main pass
@@ -437,7 +561,8 @@ void VulkanEngine::draw(float deltaTime)
 	// so does ambient occlusion, which is built entirely out of them.
 	const bool showRenderDebugView = _renderDebugView != RenderDebugView::None;
 	const bool occlusionActive = ssao_active();
-	if (_depthNormalPrepassEnabled || showRenderDebugView || occlusionActive) {
+	if (_depthNormalPrepassEnabled || showRenderDebugView || occlusionActive ||
+        _ssgiEnabled) {
 		draw_depth_normal_prepass(cmd);
 	}
 
@@ -481,6 +606,15 @@ void VulkanEngine::draw(float deltaTime)
 	vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
+    vkutil::transition_image(cmd, _gbufferAlbedoImage.image,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    vkutil::transition_image(cmd, _gbufferVelocityImage.image,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    vkutil::transition_image(cmd, _directLightingImage.image,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 	stats.drawcall_count = 0;
 	stats.triangle_count = 0;
 	stats.world_drawcall_count = 0;
@@ -491,8 +625,16 @@ void VulkanEngine::draw(float deltaTime)
         mainDrawContext,
         sceneData.viewproj,
         get_current_frame().sceneDescriptor,
+        true,
+        nullptr,
+        0,
+        true,
+        0xff,
         true);
 	stats.world_drawcall_count = stats.drawcall_count;
+    draw_ssgi_portal_mask(cmd);
+    draw_ssgi(cmd);
+    draw_ssgi_composite(cmd);
     // The portal view remains live all the way to the crossing plane.  Hiding
     // it for a frame-rate-sized safety band exposed the solid host wall before
     // physics teleported the player, causing the black flash.
@@ -599,6 +741,9 @@ void VulkanEngine::run(){
     bool bQuit = false;
     bool testRestored=false;
     bool testMinimized=false;
+    double benchmarkMilliseconds = 0.0;
+    double benchmarkSsgiMilliseconds = 0.0;
+    uint32_t benchmarkFrames = 0;
     // Opt-in unattended validation; ordinary interactive sessions are unchanged.
     const char* frameLimitText = std::getenv("MIRABILIS_TEST_FRAMES");
     const int frameLimit = frameLimitText ? std::max(1, std::atoi(frameLimitText)) : 0;
@@ -751,13 +896,29 @@ void VulkanEngine::run(){
             if(testFrame==17&&!_authoredPortalPairs.empty()) _authoredPortalPairs[0].first.position.x+=0.125f;
         }
         draw(deltaTime);
+        if (frameLimit && SDL_getenv("MIRABILIS_SSGI_BENCHMARK") &&
+            _frameNumber > 5) {
+            benchmarkMilliseconds += static_cast<double>(deltaTime) * 1000.0;
+            benchmarkSsgiMilliseconds += stats.ssgi_total_time;
+            ++benchmarkFrames;
+        }
         if(testInvalidation&&testFrame>=2&&testFrame<=17) {
             const uint32_t expected=testFrame==2?3:1;
             fmt::print("GI invalidation frame {}: samples={} expected={}\n",testFrame,_traceSamples,expected);
             if(_traceSamples!=expected) std::abort();
         }
         if (frameLimit && _frameNumber >= frameLimit) {
+            if (benchmarkFrames > 0) {
+                const VkExtent2D extent = active_ssgi_extent();
+                fmt::print(
+                    "SSGI benchmark: preset={} extent={}x{} average-frame-ms={:.3f} average-ssgi-gpu-ms={:.3f} samples={}\n",
+                    _ssgiQualityPreset, extent.width, extent.height,
+                    benchmarkMilliseconds / benchmarkFrames,
+                    benchmarkSsgiMilliseconds / benchmarkFrames,
+                    benchmarkFrames);
+            }
             if (const char* capture=SDL_getenv("MIRABILIS_CAPTURE")) capture_path_trace(capture);
+            if (const char* capture=SDL_getenv("MIRABILIS_SSGI_CAPTURE")) capture_ssgi(capture);
             fmt::print("GI bounded run complete: frames={} renderer={}\n",_frameNumber,
                 _rendererMode==RendererMode::SoftwarePathTrace&&_traceSupported?"software":"raster");
             bQuit = true;
@@ -996,6 +1157,9 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
         object.material = surface.material ? &surface.material->data : nullptr;
         object.bounds = surface.bounds;
         object.transform = nodeMatrix;
+        object.previousTransform = hasPreviousDrawTransform
+            ? previousDrawTransform
+            : nodeMatrix;
         object.vertexBufferAddress = mesh->meshBuffers.vertexBufferAddress;
         if (object.material != nullptr) {
             if (object.material->passType == MaterialPass::Transparent) {
@@ -1005,6 +1169,8 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
             }
         }
     }
+    previousDrawTransform = nodeMatrix;
+    hasPreviousDrawTransform = true;
     Node::Draw(topMatrix, ctx);
 }
 

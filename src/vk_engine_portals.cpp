@@ -30,6 +30,83 @@ RenderObject VulkanEngine::make_portal_render_object(
     };
 }
 
+void VulkanEngine::draw_ssgi_portal_mask(VkCommandBuffer cmd)
+{
+    vkutil::transition_image(
+        cmd, _portalMaskImage.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
+    VkClearValue clear{};
+    VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
+        _portalMaskImage.imageView, &clear,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
+        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    VkRenderingInfo renderInfo = vkinit::rendering_info(
+        _drawExtent, &colorAttachment, &depthAttachment);
+    vkCmdBeginRendering(cmd, &renderInfo);
+
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(_drawExtent.width);
+    viewport.height = static_cast<float>(_drawExtent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    VkRect2D scissor{};
+    scissor.extent = _drawExtent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+    vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
+    vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
+
+    if (_ssgiPortalMaskPipeline.pipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(
+            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            _ssgiPortalMaskPipeline.pipeline);
+        const VkDescriptorSet sceneDescriptor =
+            get_current_frame().sceneDescriptor;
+        vkCmdBindDescriptorSets(
+            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            _ssgiPortalMaskPipeline.layout, 0, 1,
+            &sceneDescriptor, 0, nullptr);
+
+        const auto drawPortal = [&](const Portal& portal,
+                                    MaterialInstance& material) {
+            const RenderObject object = make_portal_render_object(portal, material);
+            vkCmdBindDescriptorSets(
+                cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                _ssgiPortalMaskPipeline.layout, 1, 1,
+                &material.materialSet, 0, nullptr);
+            vkCmdBindIndexBuffer(
+                cmd, object.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            GPUDrawPushConstants pushConstants{};
+            pushConstants.worldMatrix = object.transform;
+            pushConstants.vertexBuffer = object.vertexBufferAddress;
+            vkCmdPushConstants(
+                cmd, _ssgiPortalMaskPipeline.layout,
+                VK_SHADER_STAGE_VERTEX_BIT, 0,
+                sizeof(pushConstants), &pushConstants);
+            vkCmdDrawIndexed(
+                cmd, object.indexCount, 1, object.firstIndex, 0, 0);
+        };
+
+        if (_bluePortal.placed && _orangePortal.placed) {
+            drawPortal(_bluePortal, _bluePortalMaterial);
+            drawPortal(_orangePortal, _orangePortalMaterial);
+        }
+        for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+            drawPortal(pair.first, _bluePortalMaterial);
+            drawPortal(pair.second, _orangePortalMaterial);
+        }
+    }
+
+    vkCmdEndRendering(cmd);
+    vkutil::transition_image(
+        cmd, _portalMaskImage.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
+
 void VulkanEngine::draw_portal_masks(VkCommandBuffer cmd)
 {
     const bool hasPlayerPair = _bluePortal.placed && _orangePortal.placed;
@@ -499,6 +576,8 @@ GPUSceneData VulkanEngine::build_portal_scene_data(
     // contact shadows onto the far one, so this camera shades unoccluded.
     // Portal-specific occlusion would need its own prepass per virtual camera.
     data.screenSpaceSettings.x = 0.0f;
+    data.screenSpaceSettings.z = 0.0f;
+    data.screenSpaceSettings.w = 0.0f;
     return data;
 }
 

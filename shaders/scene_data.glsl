@@ -7,6 +7,7 @@ layout(set = 0, binding = 0) uniform SceneData {
     mat4 view;
     mat4 proj;
     mat4 viewproj;
+    mat4 previousViewProjection;
     vec4 ambientColor;
     vec4 sunlightDirection;
     vec4 sunlightColor;
@@ -33,4 +34,8 @@ layout(set = 0, binding = 0) uniform SceneData {
     // xy = the occlusion texture coordinate that one screen pixel advances
     //      by, zw = the largest coordinate the rendered region reaches.
     vec4 ambientOcclusionUV;
+    // x = environment intensity, y = 1 for an intentionally black fallback.
+    vec4 ssgiFallbackSettings;
+    // x = PCF footprint radius in shadow-map texels.
+    vec4 shadowFilterSettings;
 } sceneData;

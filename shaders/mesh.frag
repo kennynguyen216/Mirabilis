@@ -7,7 +7,12 @@ layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec4 inColor;
 layout(location = 2) in vec2 inUV;
 layout(location = 3) in vec3 inWorldPosition;
+layout(location = 4) in vec4 inCurrentClip;
+layout(location = 5) in vec4 inPreviousClip;
 layout(location = 0) out vec4 outFragColor;
+layout(location = 1) out vec4 outAlbedo;
+layout(location = 2) out vec4 outVelocity;
+layout(location = 3) out vec4 outDirectLighting;
 
 void main()
 {
@@ -32,7 +37,12 @@ void main()
     // much of the surrounding hemisphere nearby geometry blocks.
     float visibility = sunlight_visibility(inWorldPosition, normal);
     float occlusion = ambient_occlusion(gl_FragCoord.xy);
-    vec3 ambient = sceneData.ambientColor.rgb * occlusion;
+    // Once SSGI is composited, the flat ambient stand-in must not count the
+    // same indirect light a second time. Portal cameras clear this flag and
+    // retain ambient until they receive their own screen-space pass.
+    vec3 ambient = sceneData.screenSpaceSettings.z > 0.5
+        ? vec3(0.0)
+        : sceneData.ambientColor.rgb * occlusion;
     // The sun term is left alone: it already has its own visibility test, and
     // scaling it here would darken contact points standing in full sunlight.
     vec3 direct = visibility * diffuse * sceneData.sunlightColor.rgb;
@@ -42,4 +52,11 @@ void main()
     vec3 lighting = ambient + direct;
 
     outFragColor = vec4(baseColor.rgb * lighting, 1.0);
+    outAlbedo = vec4(baseColor.rgb, 1.0);
+    vec2 currentUV = inCurrentClip.xy / max(inCurrentClip.w, 0.00001) * 0.5 + 0.5;
+    vec2 previousUV = inPreviousClip.xy / max(inPreviousClip.w, 0.00001) * 0.5 + 0.5;
+    // Add this displacement to a current UV to find the same point in the
+    // previous frame.
+    outVelocity = vec4(previousUV - currentUV, 0.0, 1.0);
+    outDirectLighting = vec4(baseColor.rgb * direct, 1.0);
 }

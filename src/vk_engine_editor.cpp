@@ -1380,6 +1380,12 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
             if (ImGui::Begin("Render Settings")) {
                 draw_path_trace_ui();
                 ImGui::SliderFloat("Resolution Scale", &renderScale, 0.3f, 1.0f);
+                if (ImGui::Button("Apply Maximum Fidelity")) {
+                    apply_max_fidelity_settings();
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled(
+                    "4K shadows, full-res 8-ray SSGI, high SSAO sampling, quality FXAA");
                 if (ImGui::CollapsingHeader("Sun & Shadows")) {
                     // These are saved with the scene, so editing one is an
                     // edit to the level rather than a session preference.
@@ -1405,6 +1411,9 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                         "Depth Bias", &_shadowDepthBias, 0.0f, 0.005f, "%.5f");
                     lightingEdited |= ImGui::SliderFloat(
                         "Normal Bias", &_shadowNormalBias, 0.0f, 0.5f, "%.3f");
+                    ImGui::SliderFloat(
+                        "Shadow Softness", &_shadowFilterRadius,
+                        0.0f, 12.0f, "%.2f texels");
                     if (lightingEdited) {
                         _sceneDirty = true;
                     }
@@ -1517,7 +1526,20 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                         "World position",
                         "Occlusion (raw)",
                         "Occlusion (blurred once)",
-                        "Occlusion (final)"};
+                        "Occlusion (final)",
+                        "Albedo (linear)",
+                        "Motion vectors",
+                        "Portal mask",
+                        "Direct lighting source",
+                        "SSGI (raw noisy indirect)",
+                        "SSGI hit/miss",
+                        "SSGI steps",
+                        "SSGI (temporal)",
+                        "SSGI history rejection",
+                        "SSGI reprojection",
+                        "SSGI (filtered)",
+                        "SSGI fallback only",
+                        "SSGI vs loaded reference (difference)"};
                     int debugView = static_cast<int>(_renderDebugView);
                     if (ImGui::Combo(
                             "Debug View",
@@ -1533,6 +1555,73 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                             5.0f,
                             500.0f);
                     }
+                    ImGui::SeparatorText("SSGI Milestone 5");
+                    ImGui::Checkbox("Run SSGI", &_ssgiEnabled);
+                    const char* ssgiPresets[] = {
+                        "Validation (full resolution)",
+                        "High (half resolution)",
+                        "Balanced (half resolution)",
+                        "Performance (half resolution)",
+                        "Peak (full resolution, 8 rays)"};
+                    int ssgiPreset = _ssgiQualityPreset;
+                    if (ImGui::Combo("Quality Preset", &ssgiPreset,
+                            ssgiPresets, IM_ARRAYSIZE(ssgiPresets))) {
+                        apply_ssgi_quality_preset(ssgiPreset);
+                    }
+                    ImGui::SliderInt(
+                        "Ray Steps", &_ssgiStepCount, 8, 96);
+                    ImGui::SliderInt(
+                        "Rays Per Pixel", &_ssgiRaysPerPixel, 1, 8);
+                    ImGui::SliderFloat(
+                        "Ray Length", &_ssgiRayLength, 1.0f, 40.0f, "%.2f");
+                    ImGui::SliderFloat(
+                        "Thickness", &_ssgiThickness, 0.01f, 2.0f, "%.3f");
+                    ImGui::SliderFloat(
+                        "Start Offset", &_ssgiStartOffset, 0.001f, 0.5f, "%.3f");
+                    ImGui::SliderFloat(
+                        "History Weight", &_ssgiHistoryWeight, 0.0f, 0.98f, "%.3f");
+                    ImGui::SliderFloat(
+                        "History Depth Reject", &_ssgiDepthRejection,
+                        0.0001f, 0.02f, "%.4f");
+                    ImGui::SliderFloat(
+                        "History Normal Reject", &_ssgiNormalRejection,
+                        0.0f, 1.0f, "%.3f");
+                    ImGui::SliderFloat(
+                        "History Velocity Reject", &_ssgiVelocityRejection,
+                        0.005f, 0.5f, "%.3f");
+                    ImGui::SeparatorText("SSGI Milestone 6");
+                    ImGui::Checkbox(
+                        "Spatial Filter", &_ssgiSpatialFilterEnabled);
+                    ImGui::SliderInt(
+                        "Filter Radius", &_ssgiFilterRadius, 1, 8);
+                    ImGui::SliderFloat(
+                        "Filter Depth Falloff", &_ssgiFilterDepthFalloff,
+                        10.0f, 4000.0f, "%.1f");
+                    ImGui::SliderFloat(
+                        "Filter Normal Power", &_ssgiFilterNormalPower,
+                        1.0f, 128.0f, "%.1f");
+                    ImGui::SeparatorText("SSGI Milestone 7");
+                    ImGui::SliderFloat(
+                        "Indirect Intensity", &_ssgiIntensity,
+                        0.0f, 2.0f, "%.2f");
+                    ImGui::TextDisabled(
+                        "At 1.0, SSGI replaces flat ambient; SSAO ambient is bypassed.");
+                    if (stats.ssgi_time_is_gpu) {
+                        const VkExtent2D ssgiExtent = active_ssgi_extent();
+                        ImGui::Text(
+                            "SSGI GPU %.3f ms (%ux%u)",
+                            stats.ssgi_total_time,
+                            ssgiExtent.width,
+                            ssgiExtent.height);
+                        ImGui::TextDisabled(
+                            "Trace %.3f | temporal %.3f | filter %.3f | composite %.3f ms",
+                            stats.ssgi_raw_time,
+                            stats.ssgi_temporal_time,
+                            stats.ssgi_filter_time,
+                            stats.ssgi_composite_time);
+                    }
+                    ImGui::TextDisabled(
+                        "Green rejection view pixels accepted history.");
                 }
                 if (!backgroundEffects.empty()) {
                     ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
