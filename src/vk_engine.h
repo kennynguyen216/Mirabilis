@@ -1,6 +1,7 @@
 #pragma once
 #include "path_trace_scene.h"
 
+#include <algorithm>
 #include <array>
 #include <unordered_map>
 #include <unordered_set>
@@ -391,6 +392,23 @@ class VulkanEngine{
     VkSampler _defaultSamplerLinear{};
     VkSampler _defaultSamplerNearest{};
     VkSampler _skyboxSampler{};
+    // Anisotropic filtering is an optional device feature, so nothing may
+    // request it before init_vulkan has both confirmed support and read the
+    // device's ceiling.  _textureAnisotropy is the preset's requested level;
+    // material_anisotropy() is what a sampler is actually allowed to ask for.
+    bool _samplerAnisotropySupported{false};
+    float _maxSamplerAnisotropy{1.0f};
+    float _textureAnisotropy{16.0f};
+    // Clamped to the device limit and to 1 when the feature is missing, so a
+    // caller can assign the result unconditionally: 1.0 means "off", which is
+    // exactly what anisotropyEnable = VK_FALSE would have produced.
+    float material_anisotropy() const
+    {
+        if (!_samplerAnisotropySupported) {
+            return 1.0f;
+        }
+        return std::clamp(_textureAnisotropy, 1.0f, _maxSamplerAnisotropy);
+    }
     VkDescriptorSet _skyboxDescriptor{};
     DrawContext mainDrawContext;
     DrawContext worldDrawContext;

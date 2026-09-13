@@ -356,6 +356,16 @@ void VulkanEngine::init_vulkan()
         .select()
         .value();
 
+    // Anisotropic filtering is requested rather than required: it is a large
+    // quality win on Sponza's oblique floors and arches, but it is an optional
+    // Vulkan feature and a device that lacks it should still run with plain
+    // trilinear filtering instead of failing selection.  The samplers read
+    // material_anisotropy(), which collapses to 1.0 when this does not take.
+    VkPhysicalDeviceFeatures anisotropyFeature{};
+    anisotropyFeature.samplerAnisotropy = VK_TRUE;
+    _samplerAnisotropySupported =
+        physicalDevice.enable_features_if_present(anisotropyFeature);
+
     // create the vulkan device now
 
     vkb::DeviceBuilder deviceBuilder {physicalDevice};
@@ -366,6 +376,25 @@ void VulkanEngine::init_vulkan()
     _chosenGPU = physicalDevice.physical_device;
     _graphicsQueue = vkbDevice.get_queue(vkb::QueueType::graphics).value();
     _graphicsQueueFamily = vkbDevice.get_queue_index(vkb::QueueType::graphics).value();
+
+    // maxSamplerAnisotropy is only meaningful once the feature is on; a device
+    // that reports 16 while the feature is off still rejects any sampler that
+    // asks for more than 1.
+    VkPhysicalDeviceProperties deviceProperties{};
+    vkGetPhysicalDeviceProperties(_chosenGPU, &deviceProperties);
+    _maxSamplerAnisotropy = _samplerAnisotropySupported
+        ? deviceProperties.limits.maxSamplerAnisotropy
+        : 1.0f;
+    if (_samplerAnisotropySupported) {
+        fmt::print(
+            "GPU: {} (anisotropy up to {}x)\n",
+            deviceProperties.deviceName,
+            _maxSamplerAnisotropy);
+    } else {
+        fmt::print(
+            "GPU: {} (anisotropy unsupported, using trilinear)\n",
+            deviceProperties.deviceName);
+    }
 
     VmaAllocatorCreateInfo allocatorInfo = {};
     allocatorInfo.physicalDevice = _chosenGPU;

@@ -45,7 +45,16 @@ void VulkanEngine::init_default_images_and_samplers()
     samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     samplerInfo.minLod = 0.0f;
     samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
+    // This is the fallback material sampler for every glTF texture whose
+    // sampler index is absent, so it needs the same anisotropy the explicit
+    // ones get; without it a Sponza material with no sampler declaration
+    // would blur at exactly the grazing angles the others stay sharp at.
+    const float anisotropy = material_anisotropy();
+    samplerInfo.anisotropyEnable = anisotropy > 1.0f ? VK_TRUE : VK_FALSE;
+    samplerInfo.maxAnisotropy = anisotropy;
     VK_CHECK(vkCreateSampler(_device, &samplerInfo, nullptr, &_defaultSamplerLinear));
+    samplerInfo.anisotropyEnable = VK_FALSE;
+    samplerInfo.maxAnisotropy = 1.0f;
     
     // The supplied asset is a 2:1 equirectangular panorama.  Horizontal
     // wrapping joins its left/right edges; clamping vertically avoids pulling
