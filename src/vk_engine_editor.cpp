@@ -1428,7 +1428,7 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                         // describes what the machine can afford and does not.
                         bool occlusionEdited = false;
                         occlusionEdited |=
-                            ImGui::Checkbox("Enabled", &_ssaoSettings.enabled);
+                            ImGui::Checkbox("Enabled##SSAO", &_ssaoSettings.enabled);
                         occlusionEdited |= ImGui::SliderFloat(
                             "Radius",
                             &_ssaoSettings.radius,
