@@ -23,12 +23,25 @@ layout(push_constant) uniform constants {
     uvec4 quality;
 } PushConstants;
 
-vec2 allocation_uv(vec2 screenUV, sampler2D source)
+// Every source is allocated at the full window size and only partly written:
+// the G-buffer and prepass over the draw extent, the SSGI history over the
+// SSGI extent, which is half of it on the half-resolution presets.
+vec2 live_uv(vec2 screenUV, sampler2D source, vec2 liveExtent)
 {
     vec2 allocation = vec2(textureSize(source, 0));
-    vec2 liveFraction = vec2(PushConstants.control.xy) / allocation;
+    vec2 liveFraction = liveExtent / allocation;
     return clamp(screenUV * liveFraction, vec2(0.5) / allocation,
         liveFraction - vec2(0.5) / allocation);
+}
+
+vec2 frame_uv(vec2 screenUV, sampler2D source)
+{
+    return live_uv(screenUV, source, vec2(PushConstants.quality.yz));
+}
+
+vec2 ssgi_uv(vec2 screenUV, sampler2D source)
+{
+    return live_uv(screenUV, source, vec2(PushConstants.control.xy));
 }
 
 vec2 encode_octahedron(vec3 n)
@@ -55,7 +68,7 @@ void main()
 
     vec2 screenUV = (vec2(pixel) + 0.5) / vec2(extent);
     float depth = texture(prepassDepth,
-        allocation_uv(screenUV, prepassDepth)).r;
+        frame_uv(screenUV, prepassDepth)).r;
     if (depth <= 1e-6) {
         imageStore(temporalIndirectImage, pixel, vec4(0.0));
         imageStore(temporalDiagnosticImage, pixel,
@@ -66,12 +79,12 @@ void main()
 
     vec3 current = imageLoad(rawIndirectImage, pixel).rgb;
     vec3 normal = normalize(texture(prepassNormal,
-        allocation_uv(screenUV, prepassNormal)).xyz);
+        frame_uv(screenUV, prepassNormal)).xyz);
     vec2 velocity = texture(gbufferVelocity,
-        allocation_uv(screenUV, gbufferVelocity)).xy;
+        frame_uv(screenUV, gbufferVelocity)).xy;
     vec2 previousUV = screenUV + velocity;
     float currentPortal = texture(portalMask,
-        allocation_uv(screenUV, portalMask)).r;
+        frame_uv(screenUV, portalMask)).r;
     float rejection = 0.0;
     bool accepted = PushConstants.control.z != 0u;
     if (!accepted || any(lessThan(previousUV, vec2(0.0))) ||
@@ -83,7 +96,7 @@ void main()
     vec4 priorMetadata = vec4(0.0);
     if (accepted) {
         priorMetadata = texture(previousMetadata,
-            allocation_uv(previousUV, previousMetadata));
+            ssgi_uv(previousUV, previousMetadata));
         vec4 worldPosition = sceneData.inverseViewProjection *
             vec4(screenUV * 2.0 - 1.0, depth, 1.0);
         worldPosition /= worldPosition.w;
@@ -118,7 +131,7 @@ void main()
             }
         }
         vec3 history = texture(previousTemporalIndirect,
-            allocation_uv(previousUV, previousTemporalIndirect)).rgb;
+            ssgi_uv(previousUV, previousTemporalIndirect)).rgb;
         history = clamp(history, neighborhoodMin, neighborhoodMax);
         result = mix(current, history,
             clamp(PushConstants.temporal.x, 0.0, 0.99));
