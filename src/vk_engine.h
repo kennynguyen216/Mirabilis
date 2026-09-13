@@ -323,7 +323,10 @@ class VulkanEngine{
     int _frameNumber {0};
     bool stop_rendering {false};
     bool resize_requested {false};
-    float renderScale {1.0f};
+    // Render internally below the window size by default.  The swapchain
+    // remains 1280x720, while the expensive prepass/SSGI work starts at 75%
+    // resolution and is upscaled for presentation.
+    float renderScale {0.75f};
     enum class RendererMode { Raster, SoftwarePathTrace };
     RendererMode _rendererMode{RendererMode::Raster};
     bool _traceSupported{false};
