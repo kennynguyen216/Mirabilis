@@ -33,9 +33,130 @@ constexpr bool bUseValidationLayers = false;
 constexpr bool bUseValidationLayers = true;
 #endif
 
+namespace {
+
+// Interpolates between two yaw angles along the shorter arc.  Yaw is
+// accumulated from mouse motion and is never wrapped, so the raw difference
+// between two samples can be several turns' worth even when the player barely
+// moved; folding it into (-pi, pi] first keeps the step small and in the
+// direction they actually turned.
+float lerp_yaw(float from, float to, float t)
+{
+    constexpr float Pi = 3.14159265358979323846f;
+    constexpr float TwoPi = 2.0f * Pi;
+    float delta = std::fmod(to - from + Pi, TwoPi);
+    if (delta < 0.0f) {
+        delta += TwoPi;
+    }
+    return from + (delta - Pi) * t;
+}
+
+} // namespace
+
 VulkanEngine* loadedEngine = nullptr;
 
 VulkanEngine& VulkanEngine::Get() {return *loadedEngine;}
+
+void VulkanEngine::apply_ssgi_quality_preset(int preset)
+{
+    _ssgiQualityPreset = std::clamp(preset, 0, 4);
+    switch (_ssgiQualityPreset) {
+    case 0: // Full-resolution validation baseline.
+        _ssgiHalfResolution = false;
+        _ssgiRaysPerPixel = 4;
+        _ssgiStepCount = 32;
+        _ssgiRayLength = 12.0f;
+        _ssgiThickness = 0.35f;
+        _ssgiStartOffset = 0.08f;
+        _ssgiFilterRadius = 3;
+        _ssgiFilterDepthFalloff = 800.0f;
+        _ssgiFilterNormalPower = 32.0f;
+        _ssgiHistoryWeight = 0.92f;
+        break;
+    case 1: // High: spend saved pixels on longer rays.
+        _ssgiHalfResolution = true;
+        _ssgiRaysPerPixel = 4;
+        _ssgiStepCount = 48;
+        _ssgiRayLength = 16.0f;
+        _ssgiThickness = 0.30f;
+        _ssgiStartOffset = 0.06f;
+        _ssgiFilterRadius = 4;
+        _ssgiFilterDepthFalloff = 700.0f;
+        _ssgiFilterNormalPower = 28.0f;
+        _ssgiHistoryWeight = 0.94f;
+        break;
+    case 2: // Balanced.
+        _ssgiHalfResolution = true;
+        _ssgiRaysPerPixel = 2;
+        _ssgiStepCount = 32;
+        _ssgiRayLength = 12.0f;
+        _ssgiThickness = 0.35f;
+        _ssgiStartOffset = 0.08f;
+        _ssgiFilterRadius = 3;
+        _ssgiFilterDepthFalloff = 800.0f;
+        _ssgiFilterNormalPower = 32.0f;
+        _ssgiHistoryWeight = 0.92f;
+        break;
+    case 3: // Performance.
+        _ssgiHalfResolution = true;
+        _ssgiRaysPerPixel = 1;
+        _ssgiStepCount = 16;
+        _ssgiRayLength = 8.0f;
+        _ssgiThickness = 0.45f;
+        _ssgiStartOffset = 0.10f;
+        _ssgiFilterRadius = 2;
+        _ssgiFilterDepthFalloff = 900.0f;
+        _ssgiFilterNormalPower = 36.0f;
+        _ssgiHistoryWeight = 0.90f;
+        break;
+    default: // Peak: maximum samples and march precision at full resolution.
+        _ssgiHalfResolution = false;
+        _ssgiRaysPerPixel = 8;
+        _ssgiStepCount = 96;
+        _ssgiRayLength = 20.0f;
+        _ssgiThickness = 0.25f;
+        _ssgiStartOffset = 0.05f;
+        _ssgiFilterRadius = 5;
+        _ssgiFilterDepthFalloff = 800.0f;
+        _ssgiFilterNormalPower = 32.0f;
+        _ssgiHistoryWeight = 0.96f;
+        break;
+    }
+    _ssgiSpatialFilterEnabled = true;
+    _ssgiHistoryValid = false;
+}
+
+void VulkanEngine::apply_max_fidelity_settings()
+{
+    renderScale = 1.0f;
+    _shadowsEnabled = true;
+    _showShadowBounds = false;
+    _shadowDepthBias = 0.0012f;
+    _shadowNormalBias = 0.15f;
+    _shadowFilterRadius = 6.0f;
+
+    // SSAO is deliberately not run beside SSGI: its ambient contribution is
+    // bypassed by the SSGI composite, so enabling it would spend GPU time
+    // without changing the final image. Keep its best sampling preset ready
+    // for comparison if SSGI is later disabled.
+    _ssaoSettings.enabled = false;
+    _ssaoQuality = static_cast<int>(SSAOKernelSizes.size()) - 1;
+    _ssaoDepthFalloff = 24.0f;
+    _ssaoNormalFalloff = 24.0f;
+    _ssaoAmbientOnly = false;
+
+    _fxaaEnabled = true;
+    _fxaaEdgeThreshold = 0.063f;
+    _fxaaSubpixelStrength = 0.25f;
+    _fxaaShowEdges = false;
+
+    _depthNormalPrepassEnabled = true;
+    _ssgiEnabled = true;
+    apply_ssgi_quality_preset(4);
+    _ssgiIntensity = 0.35f;
+    _renderDebugView = RenderDebugView::None;
+}
+
 void VulkanEngine::init() 
 {
     //only one engine init is allowed with the application
@@ -71,6 +192,7 @@ void VulkanEngine::init()
     // Sized from the draw image, and referenced by a descriptor set that
     // init_descriptors() writes, so both have to exist by this point.
     init_depth_normal_resources();
+    init_ssgi_resources();
     // Same reason: the anti-aliasing pass needs its sampler before the set
     // that pairs it with the draw image can be written.
     init_post_process_resources();
@@ -82,6 +204,23 @@ void VulkanEngine::init()
     init_pipelines();
     init_default_data();
     init_imgui();
+    init_path_trace();
+
+    // Automation and capture runs can open directly on one intermediate
+    // buffer without synthesizing editor UI input. Values match
+    // RenderDebugView; ordinary launches remain on final lighting.
+    if (const char* debugView = SDL_getenv("MIRABILIS_RENDER_DEBUG_VIEW")) {
+        const int value = std::clamp(std::atoi(debugView),
+            static_cast<int>(RenderDebugView::None),
+            static_cast<int>(RenderDebugView::SSGIReferenceDifference));
+        _renderDebugView = static_cast<RenderDebugView>(value);
+    }
+    if (const char* preset = SDL_getenv("MIRABILIS_SSGI_PRESET")) {
+        apply_ssgi_quality_preset(std::atoi(preset));
+    }
+    if (SDL_getenv("MIRABILIS_MAX_FIDELITY")) {
+        apply_max_fidelity_settings();
+    }
 
     apply_scene_spawn_point();
 
@@ -91,6 +230,8 @@ void VulkanEngine::init()
     mainCamera.position = glm::vec3(0.0f, 5.0f, 12.0f);
     mainCamera.pitch = glm::radians(-20.0f);
     mainCamera.yaw = 0.0f;
+    _previousPlayerYaw = mainCamera.yaw;
+    _targetPlayerYaw = mainCamera.yaw;
 
     _playerMovement.position = _playerMovement.settings.spawnPosition;
     _playerMovement.velocity = glm::vec3(0.0f);
@@ -151,10 +292,11 @@ void VulkanEngine::set_editor_mode(bool enabled)
         set_mouse_capture(false);
     } else {
         _editorCamera.velocity = glm::vec3(0.0f);
-        apply_scene_spawn_point();
-        _playerMovement.position = _playerMovement.settings.spawnPosition;
+        // Resume the player where gameplay paused. Scene loading and F1 own
+        // respawning; opening the settings must not teleport the player.
+        _playerMovement.previousPosition = _playerMovement.position;
         _playerMovement.velocity = glm::vec3(0.0f);
-        _playerMovement.grounded = false;
+        _playerMovement.jumpBufferRemaining = 0.0f;
         reset_time_trial();
         set_mouse_capture(true);
     }
@@ -215,6 +357,16 @@ void VulkanEngine::init_vulkan()
         .select()
         .value();
 
+    // Anisotropic filtering is requested rather than required: it is a large
+    // quality win on Sponza's oblique floors and arches, but it is an optional
+    // Vulkan feature and a device that lacks it should still run with plain
+    // trilinear filtering instead of failing selection.  The samplers read
+    // material_anisotropy(), which collapses to 1.0 when this does not take.
+    VkPhysicalDeviceFeatures anisotropyFeature{};
+    anisotropyFeature.samplerAnisotropy = VK_TRUE;
+    _samplerAnisotropySupported =
+        physicalDevice.enable_features_if_present(anisotropyFeature);
+
     // create the vulkan device now
 
     vkb::DeviceBuilder deviceBuilder {physicalDevice};
@@ -225,6 +377,25 @@ void VulkanEngine::init_vulkan()
     _chosenGPU = physicalDevice.physical_device;
     _graphicsQueue = vkbDevice.get_queue(vkb::QueueType::graphics).value();
     _graphicsQueueFamily = vkbDevice.get_queue_index(vkb::QueueType::graphics).value();
+
+    // maxSamplerAnisotropy is only meaningful once the feature is on; a device
+    // that reports 16 while the feature is off still rejects any sampler that
+    // asks for more than 1.
+    VkPhysicalDeviceProperties deviceProperties{};
+    vkGetPhysicalDeviceProperties(_chosenGPU, &deviceProperties);
+    _maxSamplerAnisotropy = _samplerAnisotropySupported
+        ? deviceProperties.limits.maxSamplerAnisotropy
+        : 1.0f;
+    if (_samplerAnisotropySupported) {
+        fmt::print(
+            "GPU: {} (anisotropy up to {}x)\n",
+            deviceProperties.deviceName,
+            _maxSamplerAnisotropy);
+    } else {
+        fmt::print(
+            "GPU: {} (anisotropy unsupported, using trilinear)\n",
+            deviceProperties.deviceName);
+    }
 
     VmaAllocatorCreateInfo allocatorInfo = {};
     allocatorInfo.physicalDevice = _chosenGPU;
@@ -304,11 +475,12 @@ void VulkanEngine::cleanup()
 {
     if(_isInitialized) {
         vkDeviceWaitIdle(_device);
+        destroy_path_trace();
 
         // The explicit File > Save Scene command is still useful for named
         // checkpoints, but closing the editor should not discard unsaved
         // level construction work.
-        if (_sceneDirty) {
+        if (_sceneDirty && !SDL_getenv("MIRABILIS_TEST_FRAMES")) {
             save_editor_scene();
         }
 
@@ -371,12 +543,15 @@ void VulkanEngine::draw(float deltaTime)
         get_current_frame()._swapchainSemaphore,
         nullptr,
         &swapchainImageIndex);
-    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR ||
-        acquireResult == VK_SUBOPTIMAL_KHR) {
+    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
         resize_requested = true;
         return;
     }
-    VK_CHECK(acquireResult);
+    // SUBOPTIMAL still acquires an image and signals the semaphore. Consume
+    // it in this submission before rebuilding; returning would reuse a
+    // signaled acquire semaphore on the next frame.
+    if (acquireResult == VK_SUBOPTIMAL_KHR) resize_requested = true;
+    else VK_CHECK(acquireResult);
 	VK_CHECK(vkResetFences(_device, 1, &get_current_frame()._renderFence));
     VkCommandBuffer cmd = get_current_frame()._mainCommandBuffer;
 
@@ -408,6 +583,12 @@ void VulkanEngine::draw(float deltaTime)
 			_timestampPool,
 			(_frameNumber % FRAME_OVERLAP) * TimestampsPerFrame,
 			TimestampsPerFrame);
+		vkCmdResetQueryPool(
+			cmd,
+			_ssgiTimestampPool,
+			(_frameNumber % FRAME_OVERLAP) * SSGITimestampsPerFrame,
+			SSGITimestampsPerFrame);
+		_ssgiTimingWritten[_frameNumber % FRAME_OVERLAP] = false;
 	}
 
 	// The shadow and prepass counters are recorded before the main pass
@@ -418,6 +599,11 @@ void VulkanEngine::draw(float deltaTime)
 	stats.prepass_triangle_count = 0;
 	stats.prepass_record_time = 0.0f;
 
+    VkImage presentSource = _drawImage.image;
+    if (_rendererMode == RendererMode::SoftwarePathTrace && _traceSupported) {
+        draw_path_trace(cmd);
+    } else {
+    _traceWasActive=false;
 	// Render the sunlight depth map first: every later pass, main camera and
 	// portal cameras alike, samples it while shading.
 	draw_shadow_map(cmd);
@@ -427,7 +613,8 @@ void VulkanEngine::draw(float deltaTime)
 	// so does ambient occlusion, which is built entirely out of them.
 	const bool showRenderDebugView = _renderDebugView != RenderDebugView::None;
 	const bool occlusionActive = ssao_active();
-	if (_depthNormalPrepassEnabled || showRenderDebugView || occlusionActive) {
+	if (_depthNormalPrepassEnabled || showRenderDebugView || occlusionActive ||
+        _ssgiEnabled) {
 		draw_depth_normal_prepass(cmd);
 	}
 
@@ -471,6 +658,15 @@ void VulkanEngine::draw(float deltaTime)
 	vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
+    vkutil::transition_image(cmd, _gbufferAlbedoImage.image,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    vkutil::transition_image(cmd, _gbufferVelocityImage.image,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    vkutil::transition_image(cmd, _directLightingImage.image,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 	stats.drawcall_count = 0;
 	stats.triangle_count = 0;
 	stats.world_drawcall_count = 0;
@@ -481,8 +677,17 @@ void VulkanEngine::draw(float deltaTime)
         mainDrawContext,
         sceneData.viewproj,
         get_current_frame().sceneDescriptor,
+        true,
+        nullptr,
+        nullptr,
+        0,
+        true,
+        0xff,
         true);
 	stats.world_drawcall_count = stats.drawcall_count;
+    draw_ssgi_portal_mask(cmd);
+    draw_ssgi(cmd);
+    draw_ssgi_composite(cmd);
     // The portal view remains live all the way to the crossing plane.  Hiding
     // it for a frame-rate-sized safety band exposed the solid host wall before
     // physics teleported the player, causing the black flash.
@@ -508,20 +713,42 @@ void VulkanEngine::draw(float deltaTime)
         draw_collider_debug_bounds(cmd);
     }
 
+    // Everything above this point works in unbounded linear radiance.  The
+    // tonemap is what turns that into something a display can show, and it has
+    // to run before anti-aliasing: FXAA thresholds luma differences against
+    // fixed constants, which only describe visible contrast once the values
+    // are in display range.
+    //
+    // A debug view skips both.  Those images carry per-pixel data - normals,
+    // depth, velocity - whose whole value is that nothing has reshaped it, and
+    // a tone curve would do exactly that.  They present from the draw image on
+    // the untouched path below, as they always have.
+    const bool tonemapping = _tonemapEnabled && !showRenderDebugView &&
+        _tonemapPipeline.pipeline != VK_NULL_HANDLE;
+    if (tonemapping) {
+        draw_tonemap(cmd);
+        presentSource = _tonemapImage.image;
+    }
+
     // Anti-aliasing sees the whole composed frame, so it smooths world
     // silhouettes, portal contents, and the overlay lines in one pass.  ImGui
     // is drawn after the copy, straight into the swapchain, and stays sharp.
-    // A debug view is exempt: those images carry per-pixel data whose value is
-    // that it has not been filtered.
-    VkImage presentSource = _drawImage.image;
-    if (_fxaaEnabled && !showRenderDebugView &&
+    // It reads the tonemap's output, so it is only available when that ran.
+    if (tonemapping && _fxaaEnabled &&
         _fxaaPipeline.pipeline != VK_NULL_HANDLE) {
         draw_fxaa(cmd);
         presentSource = _postProcessImage.image;
+    } else if (tonemapping) {
+        vkutil::transition_image(
+            cmd,
+            _tonemapImage.image,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     } else {
         vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     }
 
+    }
 	// transition the swapchain image into its correct transfer layout
 	vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
@@ -587,6 +814,73 @@ void VulkanEngine::draw(float deltaTime)
 void VulkanEngine::run(){
     SDL_Event e; 
     bool bQuit = false;
+    bool testRestored=false;
+    bool testMinimized=false;
+    double benchmarkMilliseconds = 0.0;
+    double benchmarkSsgiMilliseconds = 0.0;
+    uint32_t benchmarkFrames = 0;
+    // Opt-in unattended validation; ordinary interactive sessions are unchanged.
+    const char* frameLimitText = std::getenv("MIRABILIS_TEST_FRAMES");
+    const int frameLimit = frameLimitText ? std::max(1, std::atoi(frameLimitText)) : 0;
+    if (frameLimit) {
+        if (SDL_getenv("MIRABILIS_TEST_EDITOR_RESUME")) {
+            const auto require = [](bool condition, const char* message) {
+                if (!condition) {fmt::print("GI TEST FAIL: {}\n", message); std::abort();}
+            };
+            const auto key = [&](SDL_Keycode code) {
+                SDL_Event event{}; event.type = SDL_KEYDOWN;
+                event.key.keysym.sym = code;
+                process_event(event);
+            };
+            const std::string originalScene = _activeSceneFilename;
+            respawn_player();
+            _playerMovement.position.x += 0.4f;
+            _playerMovement.previousPosition = _playerMovement.position;
+            mainCamera.position = _playerMovement.position + glm::vec3(0, 1.7f, 0);
+            const glm::vec3 pausedPosition = _playerMovement.position;
+            const Camera pausedCamera = mainCamera;
+            for (int cycle = 0; cycle < 3; ++cycle) {
+                key(SDLK_TAB);
+                require(_editorMode, "Tab did not enter editor");
+                require(glm::length(_editorCamera.position - pausedCamera.position) < 1e-6f,
+                    "Editor did not start at gameplay camera");
+                _editorCamera.position += glm::vec3(2, 1, 0);
+                key(SDLK_TAB);
+                require(!_editorMode, "Tab did not return to gameplay");
+                require(glm::length(_playerMovement.position - pausedPosition) < 1e-6f,
+                    "Tab respawned or moved the player");
+                require(glm::length(mainCamera.position - pausedCamera.position) < 1e-6f &&
+                    mainCamera.pitch == pausedCamera.pitch && mainCamera.yaw == pausedCamera.yaw,
+                    "Tab changed the gameplay camera");
+            }
+            for (int tick = 0; tick < 240; ++tick) update_physics(1.0f / 120.0f);
+            require(_playerMovement.grounded &&
+                glm::length(_playerMovement.position - pausedPosition) < 1e-4f,
+                "Resumed player did not remain supported by the floor");
+            key(SDLK_F1);
+            require(glm::length(_playerMovement.position - _playerMovement.settings.spawnPosition) < 1e-6f,
+                "F1 did not respawn the player");
+            key(SDLK_TAB);
+            _playerMovement.position = glm::vec3(50, 50, 50);
+            require(load_editor_scene_named("gi_cornell_box_dark.json"), "Scene load failed during Tab test");
+            key(SDLK_TAB);
+            require(glm::length(_playerMovement.position - glm::vec3(0, 0, 2.5f)) < 1e-6f,
+                "New scene did not use its authored spawn");
+            require(load_editor_scene_named(originalScene), "Could not restore test scene");
+            fmt::print("GI editor resume: three Tab cycles, camera, floor support, F1 and new-scene spawn PASS\n");
+        }
+        set_editor_mode(true);
+        set_mouse_capture(false);
+        ImGui::GetIO().IniFilename = nullptr;
+        if(const char* camera=SDL_getenv("MIRABILIS_TEST_CAMERA")) {
+            std::sscanf(camera,"%f %f %f %f %f",&_editorCamera.position.x,&_editorCamera.position.y,&_editorCamera.position.z,&_editorCamera.pitch,&_editorCamera.yaw);
+        }
+        if (std::getenv("MIRABILIS_TEST_TRACE")) {
+            _rendererMode = _traceSupported ? RendererMode::SoftwarePathTrace : RendererMode::Raster;
+            if(_traceSupported) validate_path_trace();
+            else if(!std::getenv("MIRABILIS_TEST_DISABLE_TRACE")) std::abort();
+        }
+    }
     auto previousTime = std::chrono::steady_clock::now();
 
     //main loop
@@ -603,6 +897,10 @@ void VulkanEngine::run(){
         }
         // do not draw if we are minimized
         if(stop_rendering) {
+            if(frameLimit&&std::getenv("MIRABILIS_TEST_CYCLE")&&testMinimized&&!testRestored) {
+                SDL_RestoreWindow(_window); testRestored=true;
+                fmt::print("GI lifecycle: minimized and restore requested\n");
+            }
             //throttle the speed to avoid endless spinning
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
@@ -617,15 +915,34 @@ void VulkanEngine::run(){
         if (_editorMode) {
             _editorCamera.update(deltaTime);
             _physicsAccumulator = 0.0f;
+            // Leaving the editor should not make the first tick back in play
+            // sweep through however far the editor camera was turned.
+            _previousPlayerYaw = mainCamera.yaw;
         } else {
             _physicsAccumulator = std::min(
                 _physicsAccumulator + deltaTime,
                 PhysicsDt * static_cast<float>(MaxPhysicsSteps));
-            _playerInput.yaw = mainCamera.yaw;
+            // Where this frame's turn ends.  update_physics() may overwrite
+            // both ends of it partway through if the player crosses a portal,
+            // which is why the loop reads the members rather than a local.
+            _targetPlayerYaw = mainCamera.yaw;
+            // Clamped to at least one: the accumulator can sit a hair above
+            // PhysicsDt while the division truncates to zero, and dividing by
+            // that below would hand the first tick an infinite fraction.
+            const int stepCount = std::max(
+                1, static_cast<int>(_physicsAccumulator / PhysicsDt));
+            int stepIndex = 0;
             while (_physicsAccumulator >= PhysicsDt) {
+                ++stepIndex;
+                _playerInput.yaw = lerp_yaw(
+                    _previousPlayerYaw,
+                    _targetPlayerYaw,
+                    static_cast<float>(stepIndex) /
+                        static_cast<float>(stepCount));
                 update_physics(PhysicsDt);
                 _physicsAccumulator -= PhysicsDt;
             }
+            _previousPlayerYaw = _targetPlayerYaw;
         }
 
         ImGui_ImplVulkan_NewFrame();
@@ -635,7 +952,71 @@ void VulkanEngine::run(){
         draw_frame_ui(deltaTime);
 
         ImGui::Render();
+        if (frameLimit && std::getenv("MIRABILIS_TEST_CYCLE")) {
+            if (_frameNumber == 4) _rendererMode = RendererMode::Raster;
+            if (_frameNumber == 8) _rendererMode = RendererMode::SoftwarePathTrace;
+            if (_frameNumber == 10) SDL_SetWindowSize(_window, 803, 457);
+            if (_frameNumber == 12) renderScale = 0.7f;
+            if (_frameNumber >= 14&&!testMinimized) {SDL_MinimizeWindow(_window);testMinimized=true;}
+        }
+        const bool testInvalidation=frameLimit&&SDL_getenv("MIRABILIS_TEST_INVALIDATION");
+        const int testFrame=_frameNumber;
+        if(testInvalidation) {
+            if(testFrame==2) _traceExposure+=1;
+            if(testFrame==3) ++_traceBaseSeed;
+            if(testFrame==4) _editorCamera.position.x+=0.1f;
+            if(testFrame==5) _traceMaxDepth=1;
+            if(testFrame>=6&&testFrame<=8) {
+                for(auto& object:_scene.objects) if(object.alive&&object.visible&&object.material.enabled) {
+                    if(testFrame==6) object.material.colorTint.r*=0.5f;
+                    if(testFrame==7) object.visible=false;
+                    if(testFrame==8) object.localTransform.position.x+=0.125f;
+                    break;
+                }
+            }
+            if(testFrame==9) renderScale=0.75f;
+            if(testFrame==10) _traceWasActive=false;
+            if(testFrame==11) _traceLighting.sunRadiance.x+=1;
+            if(testFrame==12) _traceLighting.environment.x+=0.25f;
+            if(testFrame==13) _traceMaterialModel=1-_traceMaterialModel;
+            if(testFrame==14) _tracePortalLimit=1;
+            if(testFrame==15) _sunlightDirection.x+=0.25f;
+            if(testFrame==16) {
+                for(auto& object:_scene.objects) if(object.alive&&object.visible&&object.material.enabled) {
+                    object.material.emissionColor=glm::vec3(1);
+                    object.material.emissionStrength+=1; break;
+                }
+            }
+            if(testFrame==17&&!_authoredPortalPairs.empty()) _authoredPortalPairs[0].first.position.x+=0.125f;
+        }
         draw(deltaTime);
+        if (frameLimit && SDL_getenv("MIRABILIS_SSGI_BENCHMARK") &&
+            _frameNumber > 5) {
+            benchmarkMilliseconds += static_cast<double>(deltaTime) * 1000.0;
+            benchmarkSsgiMilliseconds += stats.ssgi_total_time;
+            ++benchmarkFrames;
+        }
+        if(testInvalidation&&testFrame>=2&&testFrame<=17) {
+            const uint32_t expected=testFrame==2?3:1;
+            fmt::print("GI invalidation frame {}: samples={} expected={}\n",testFrame,_traceSamples,expected);
+            if(_traceSamples!=expected) std::abort();
+        }
+        if (frameLimit && _frameNumber >= frameLimit) {
+            if (benchmarkFrames > 0) {
+                const VkExtent2D extent = active_ssgi_extent();
+                fmt::print(
+                    "SSGI benchmark: preset={} extent={}x{} average-frame-ms={:.3f} average-ssgi-gpu-ms={:.3f} samples={}\n",
+                    _ssgiQualityPreset, extent.width, extent.height,
+                    benchmarkMilliseconds / benchmarkFrames,
+                    benchmarkSsgiMilliseconds / benchmarkFrames,
+                    benchmarkFrames);
+            }
+            if (const char* capture=SDL_getenv("MIRABILIS_CAPTURE")) capture_path_trace(capture);
+            if (const char* capture=SDL_getenv("MIRABILIS_SSGI_CAPTURE")) capture_ssgi(capture);
+            fmt::print("GI bounded run complete: frames={} renderer={}\n",_frameNumber,
+                _rendererMode==RendererMode::SoftwarePathTrace&&_traceSupported?"software":"raster");
+            bQuit = true;
+        }
     }
 }
 
@@ -870,6 +1251,9 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
         object.material = surface.material ? &surface.material->data : nullptr;
         object.bounds = surface.bounds;
         object.transform = nodeMatrix;
+        object.previousTransform = hasPreviousDrawTransform
+            ? previousDrawTransform
+            : nodeMatrix;
         object.vertexBufferAddress = mesh->meshBuffers.vertexBufferAddress;
         if (object.material != nullptr) {
             if (object.material->passType == MaterialPass::Transparent) {
@@ -879,6 +1263,8 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
             }
         }
     }
+    previousDrawTransform = nodeMatrix;
+    hasPreviousDrawTransform = true;
     Node::Draw(topMatrix, ctx);
 }
 

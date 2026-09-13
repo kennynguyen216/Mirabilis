@@ -1,6 +1,8 @@
 #include "vk_engine.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -45,7 +47,16 @@ void VulkanEngine::init_default_images_and_samplers()
     samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     samplerInfo.minLod = 0.0f;
     samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
+    // This is the fallback material sampler for every glTF texture whose
+    // sampler index is absent, so it needs the same anisotropy the explicit
+    // ones get; without it a Sponza material with no sampler declaration
+    // would blur at exactly the grazing angles the others stay sharp at.
+    const float anisotropy = material_anisotropy();
+    samplerInfo.anisotropyEnable = anisotropy > 1.0f ? VK_TRUE : VK_FALSE;
+    samplerInfo.maxAnisotropy = anisotropy;
     VK_CHECK(vkCreateSampler(_device, &samplerInfo, nullptr, &_defaultSamplerLinear));
+    samplerInfo.anisotropyEnable = VK_FALSE;
+    samplerInfo.maxAnisotropy = 1.0f;
     
     // The supplied asset is a 2:1 equirectangular panorama.  Horizontal
     // wrapping joins its left/right edges; clamping vertically avoids pulling
@@ -60,40 +71,28 @@ void VulkanEngine::init_default_images_and_samplers()
     skyboxSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     skyboxSamplerInfo.maxLod = 0.0f;
     VK_CHECK(vkCreateSampler(_device, &skyboxSamplerInfo, nullptr, &_skyboxSampler));
+    // The same panorama, but readable past level 0.  Only the SSGI trace uses
+    // it: the visible background must stay at full sharpness, while a traced
+    // miss ray needs a mip coarse enough that a sun disk does not arrive as a
+    // firefly in a four-ray-per-pixel estimate.
+    skyboxSamplerInfo.maxLod = VK_LOD_CLAMP_NONE;
+    VK_CHECK(vkCreateSampler(
+        _device, &skyboxSamplerInfo, nullptr, &_skyboxEnvironmentSampler));
     
-    constexpr const char* SkyboxPath = "../../assets/textures/skybox.png";
-    int skyboxWidth = 0;
-    int skyboxHeight = 0;
-    int skyboxChannels = 0;
-    stbi_uc* skyboxPixels = stbi_load(
-        SkyboxPath,
-        &skyboxWidth,
-        &skyboxHeight,
-        &skyboxChannels,
-        STBI_rgb_alpha);
-    if (skyboxPixels != nullptr) {
-        _skyboxImage = create_image(
-            skyboxPixels,
-            {static_cast<uint32_t>(skyboxWidth),
-             static_cast<uint32_t>(skyboxHeight),
-             1},
-            VK_FORMAT_R8G8B8A8_SRGB,
-            VK_IMAGE_USAGE_SAMPLED_BIT);
-        stbi_image_free(skyboxPixels);
-        fmt::print("Loaded equirectangular skybox: {} ({}x{})\n",
-                   SkyboxPath, skyboxWidth, skyboxHeight);
-    } else {
-        // Keep the descriptor valid even if an asset is missing on another
-        // machine.  The log tells the developer why the sky is plain blue.
-        fmt::print("Failed to load skybox {}: {}\n",
-                   SkyboxPath,
-                   stbi_failure_reason() != nullptr ? stbi_failure_reason() : "unknown");
-        const uint32_t fallbackSky = glm::packUnorm4x8(glm::vec4(0.25f, 0.45f, 0.75f, 1.0f));
+    if (!set_skybox(_skyboxSelection) && !set_skybox(0)) {
+        // Keep every descriptor valid even if all packaged sky assets are
+        // missing.  The individual load failures above identify the paths.
+        const uint32_t fallbackSky =
+            glm::packUnorm4x8(glm::vec4(0.25f, 0.45f, 0.75f, 1.0f));
         _skyboxImage = create_image(
             const_cast<uint32_t*>(&fallbackSky),
             {1, 1, 1},
             VK_FORMAT_R8G8B8A8_SRGB,
             VK_IMAGE_USAGE_SAMPLED_BIT);
+        _skyboxSelection = 0;
+        // set_skybox() does this itself on the paths that succeed; the sets
+        // that name the panorama have to be written on this one too.
+        update_skybox_descriptors();
     }
     
     // The compute background needs the panorama at binding 1.  The portal
@@ -117,6 +116,272 @@ void VulkanEngine::init_default_images_and_samplers()
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     skyboxWriter.update_set(_device, _skyboxDescriptor);
+
+    for (uint32_t writeIndex = 0; writeIndex < _ssgiDescriptors.size();
+         ++writeIndex) {
+        const uint32_t readIndex = 1u - writeIndex;
+        DescriptorWriter ssgiWriter;
+        ssgiWriter.write_image(0, _ssgiRawImage.imageView, VK_NULL_HANDLE,
+            VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        ssgiWriter.write_image(1, _ssgiDebugImage.imageView, VK_NULL_HANDLE,
+            VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        ssgiWriter.write_image(2, _prepassDepthImage.imageView, _prepassSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        ssgiWriter.write_image(3, _prepassNormalImage.imageView, _prepassSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        ssgiWriter.write_image(4, _gbufferAlbedoImage.imageView, _prepassSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        ssgiWriter.write_image(5, _directLightingHistory[readIndex].imageView,
+            _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        ssgiWriter.write_image(6, _portalMaskImage.imageView, _prepassSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        ssgiWriter.write_image(7, _skyboxImage.imageView,
+            _skyboxEnvironmentSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        ssgiWriter.write_image(8, _gbufferVelocityImage.imageView,
+            _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        ssgiWriter.write_image(9, _ssgiTemporalHistory[writeIndex].imageView,
+            VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        ssgiWriter.write_image(10, _ssgiTemporalDiagnosticImage.imageView,
+            VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        ssgiWriter.write_image(11, _ssgiTemporalHistory[readIndex].imageView,
+            _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        ssgiWriter.write_image(12, _ssgiMetadataHistory[readIndex].imageView,
+            _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        ssgiWriter.write_image(13, _ssgiMetadataHistory[writeIndex].imageView,
+            VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        ssgiWriter.write_image(14, _ssgiFallbackImage.imageView,
+            VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        ssgiWriter.update_set(_device, _ssgiDescriptors[writeIndex]);
+    }
+}
+
+bool VulkanEngine::set_skybox(int selection)
+{
+    if (selection < 0 ||
+        selection >= static_cast<int>(SkyboxPaths.size())) {
+        return false;
+    }
+
+    const char* path = SkyboxPaths[selection];
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    AllocatedImage newImage{};
+
+    if (stbi_is_hdr(path)) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(
+            _chosenGPU, VK_FORMAT_R16G16B16A16_SFLOAT, &properties);
+        constexpr VkFormatFeatureFlags RequiredFeatures =
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        if ((properties.optimalTilingFeatures & RequiredFeatures) !=
+            RequiredFeatures) {
+            fmt::print(
+                "Cannot load HDR skybox {}: RGBA16F sampling/filtering is unsupported\n",
+                path);
+            return false;
+        }
+
+        float* pixels = stbi_loadf(
+            path, &width, &height, &channels, STBI_rgb_alpha);
+        if (pixels == nullptr) {
+            fmt::print(
+                "Failed to load HDR skybox {}: {}\n",
+                path,
+                stbi_failure_reason() != nullptr
+                    ? stbi_failure_reason()
+                    : "unknown");
+            return false;
+        }
+
+        const size_t pixelCount =
+            static_cast<size_t>(width) * static_cast<size_t>(height);
+        std::vector<uint32_t> halfPixels(pixelCount * 2);
+        const auto finiteHalf = [](float value) {
+            return std::isfinite(value)
+                ? std::clamp(value, 0.0f, 65504.0f)
+                : 0.0f;
+        };
+        for (size_t pixel = 0; pixel < pixelCount; ++pixel) {
+            const float* source = pixels + pixel * 4;
+            halfPixels[pixel * 2] = glm::packHalf2x16(glm::vec2(
+                finiteHalf(source[0]), finiteHalf(source[1])));
+            halfPixels[pixel * 2 + 1] = glm::packHalf2x16(glm::vec2(
+                finiteHalf(source[2]), 1.0f));
+        }
+        // How bright the sky gets before the sun disk takes over.  Below
+        // this the panorama is sky; above it, almost every pixel belongs to
+        // the sun, whose light the direct term already delivers with a
+        // shadow map.  A percentile rather than a fixed number because the
+        // ratio between the two is a property of the capture.
+        {
+            std::vector<float> luminance(pixelCount);
+            for (size_t pixel = 0; pixel < pixelCount; ++pixel) {
+                const float* source = pixels + pixel * 4;
+                luminance[pixel] = 0.2126f * source[0] +
+                    0.7152f * source[1] + 0.0722f * source[2];
+            }
+            const size_t rank = static_cast<size_t>(
+                static_cast<double>(pixelCount) * 0.999);
+            std::nth_element(
+                luminance.begin(),
+                luminance.begin() + static_cast<std::ptrdiff_t>(rank),
+                luminance.end());
+            // A panorama with no sun in it must not have its sky clipped, so
+            // the ceiling never drops below plain white.
+            _skyboxIndirectClamp = std::max(1.0f, luminance[rank]);
+        }
+        stbi_image_free(pixels);
+
+        newImage = create_image(
+            halfPixels.data(),
+            halfPixels.size() * sizeof(uint32_t),
+            {static_cast<uint32_t>(width),
+             static_cast<uint32_t>(height),
+             1},
+            VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_IMAGE_USAGE_SAMPLED_BIT,
+            true);
+        fmt::print(
+            "Indirect sky/sun split at {:.3f}\n", _skyboxIndirectClamp);
+        fmt::print(
+            "Loaded HDR equirectangular skybox: {} ({}x{}, RGBA16F)\n",
+            path,
+            width,
+            height);
+    } else {
+        stbi_uc* pixels = stbi_load(
+            path, &width, &height, &channels, STBI_rgb_alpha);
+        if (pixels == nullptr) {
+            fmt::print(
+                "Failed to load skybox {}: {}\n",
+                path,
+                stbi_failure_reason() != nullptr
+                    ? stbi_failure_reason()
+                    : "unknown");
+            return false;
+        }
+        // An 8-bit panorama decodes into [0, 1] and has no sun disk to
+        // separate from its sky, so nothing here needs clipping.
+        _skyboxIndirectClamp = 1.0e4f;
+        newImage = create_image(
+            pixels,
+            {static_cast<uint32_t>(width),
+             static_cast<uint32_t>(height),
+             1},
+            VK_FORMAT_R8G8B8A8_SRGB,
+            VK_IMAGE_USAGE_SAMPLED_BIT,
+            true);
+        stbi_image_free(pixels);
+        fmt::print(
+            "Loaded equirectangular skybox: {} ({}x{})\n",
+            path,
+            width,
+            height);
+    }
+
+    // A cosine-weighted indirect ray stands for a wide cone.  Reading it
+    // from a mip about this wide costs one sample and removes almost all of
+    // the variance the full-resolution panorama would contribute; anything
+    // sharper arrives as fireflies that survive both SSGI filters.  Derived
+    // from the panorama actually loaded, so a 1x1 fallback asks for level 0.
+    constexpr float EnvironmentSampleWidth = 64.0f;
+    _skyboxEnvironmentLod = std::max(
+        0.0f,
+        std::log2(
+            static_cast<float>(std::max(width, 1)) / EnvironmentSampleWidth));
+
+    VK_CHECK(vkDeviceWaitIdle(_device));
+    AllocatedImage oldImage = _skyboxImage;
+    _skyboxImage = std::move(newImage);
+    _skyboxSelection = selection;
+    update_skybox_descriptors();
+    _ssgiHistoryValid = false;
+    destroy_image(oldImage);
+    return true;
+}
+
+void VulkanEngine::update_skybox_descriptors()
+{
+    if (_skyboxImage.imageView == VK_NULL_HANDLE) {
+        return;
+    }
+
+    DescriptorWriter writer;
+    if (_drawImageDescriptors != VK_NULL_HANDLE) {
+        writer.write_image(
+            1,
+            _skyboxImage.imageView,
+            _skyboxSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.update_set(_device, _drawImageDescriptors);
+        writer.clear();
+    }
+    if (_skyboxDescriptor != VK_NULL_HANDLE) {
+        writer.write_image(
+            0,
+            _skyboxImage.imageView,
+            _skyboxSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.update_set(_device, _skyboxDescriptor);
+        writer.clear();
+    }
+    for (VkDescriptorSet descriptor : _ssgiDescriptors) {
+        if (descriptor == VK_NULL_HANDLE) {
+            continue;
+        }
+        writer.write_image(
+            7,
+            _skyboxImage.imageView,
+            _skyboxEnvironmentSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.update_set(_device, descriptor);
+        writer.clear();
+    }
+    // Every camera's scene set, main and portal alike.  A portal camera reads
+    // the panorama from its forward shader rather than from a screen-space
+    // trace it cannot run, and both have to be looking at the same sky or the
+    // destination room changes colour when the player crosses.  These sets are
+    // allocated by init_descriptors(), which runs before the panorama exists,
+    // so this is the only place binding 3 is ever written.  The mip-complete
+    // sampler is the one to use: a hemisphere average reads a coarse level.
+    for (FrameData& frame : _frames) {
+        const auto writeEnvironment = [&](VkDescriptorSet descriptor) {
+            if (descriptor == VK_NULL_HANDLE) {
+                return;
+            }
+            writer.write_image(
+                3,
+                _skyboxImage.imageView,
+                _skyboxEnvironmentSampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            writer.update_set(_device, descriptor);
+            writer.clear();
+        };
+        writeEnvironment(frame.sceneDescriptor);
+        for (VkDescriptorSet descriptor : frame.portalSceneDescriptors) {
+            writeEnvironment(descriptor);
+        }
+    }
 }
 
 void VulkanEngine::init_default_meshes()
@@ -308,6 +573,8 @@ void VulkanEngine::init_default_materials()
         MaterialPass::MainColor,
         floorResources,
         globalDescriptorAllocator);
+    _floorMaterial.traceBaseColor = floorConstants->colorFactors;
+    _floorMaterial.traceParameters = floorConstants->metal_rough_factors;
     
     _wallMaterialBuffer = create_buffer(
         sizeof(GLTFMetallic_Roughness::MaterialConstants),
@@ -326,6 +593,8 @@ void VulkanEngine::init_default_materials()
         MaterialPass::MainColor,
         wallResources,
         globalDescriptorAllocator);
+    _wallMaterial.traceBaseColor = wallConstants->colorFactors;
+    _wallMaterial.traceParameters = wallConstants->metal_rough_factors;
     
     // There is no character asset in assets/ yet, so start with a visible
     // collision-sized proxy.  It is rendered only by portal cameras; the
@@ -348,6 +617,8 @@ void VulkanEngine::init_default_materials()
         MaterialPass::MainColor,
         playerResources,
         globalDescriptorAllocator);
+    _playerMaterial.traceBaseColor = playerConstants->colorFactors;
+    _playerMaterial.traceParameters = playerConstants->metal_rough_factors;
     
     _bluePortalMaterialBuffer = create_buffer(
         sizeof(GLTFMetallic_Roughness::MaterialConstants),
@@ -368,6 +639,8 @@ void VulkanEngine::init_default_materials()
         MaterialPass::MainColor,
         bluePortalResources,
         globalDescriptorAllocator);
+    _bluePortalMaterial.traceBaseColor = bluePortalConstants->colorFactors;
+    _bluePortalMaterial.traceParameters = bluePortalConstants->metal_rough_factors;
     
     _orangePortalMaterialBuffer = create_buffer(
         sizeof(GLTFMetallic_Roughness::MaterialConstants),
@@ -386,6 +659,8 @@ void VulkanEngine::init_default_materials()
         MaterialPass::MainColor,
         orangePortalResources,
         globalDescriptorAllocator);
+    _orangePortalMaterial.traceBaseColor = orangePortalConstants->colorFactors;
+    _orangePortalMaterial.traceParameters = orangePortalConstants->metal_rough_factors;
     
     init_portal_camera_targets();
 }
@@ -417,6 +692,7 @@ void VulkanEngine::init_default_scene()
     // A missing file simply leaves the starter sandbox intact on the first
     // launch.  After the first File > Save Scene, this restores the level.
     restore_last_editor_scene_name();
+    if (const char* testScene = SDL_getenv("MIRABILIS_TEST_SCENE")) _activeSceneFilename = testScene;
     load_editor_scene();
 }
 
@@ -443,6 +719,7 @@ void VulkanEngine::init_default_data()
         destroy_buffer(_floorMesh.vertexBuffer);
         destroy_buffer(_floorMesh.indexBuffer);
         vkDestroySampler(_device, _skyboxSampler, nullptr);
+        vkDestroySampler(_device, _skyboxEnvironmentSampler, nullptr);
         vkDestroySampler(_device, _defaultSamplerNearest, nullptr);
         vkDestroySampler(_device, _defaultSamplerLinear, nullptr);
         destroy_image(_skyboxImage);
@@ -505,6 +782,10 @@ GPUMeshBuffers VulkanEngine::uploadMesh(
         .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
         .buffer = newSurface.vertexBuffer.buffer};
     newSurface.vertexBufferAddress = vkGetBufferDeviceAddress(_device, &addressInfo);
+    newSurface.traceSource = std::make_shared<TraceMeshSource>();
+    newSurface.traceSource->vertices.assign(vertices.begin(), vertices.end());
+    newSurface.traceSource->indices.assign(indices.begin(), indices.end());
+    _traceMeshSources[newSurface.vertexBufferAddress] = newSurface.traceSource;
 
     newSurface.indexBuffer = create_buffer(
         indexBufferSize,
@@ -591,6 +872,17 @@ AllocatedImage VulkanEngine::create_image(
     bool mipmapped)
 {
     const size_t dataSize = static_cast<size_t>(size.width) * size.height * size.depth * 4;
+    return create_image(data, dataSize, size, format, usage, mipmapped);
+}
+
+AllocatedImage VulkanEngine::create_image(
+    void* data,
+    size_t dataSize,
+    VkExtent3D size,
+    VkFormat format,
+    VkImageUsageFlags usage,
+    bool mipmapped)
+{
     AllocatedBuffer uploadBuffer = create_buffer(
         dataSize,
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -637,6 +929,12 @@ AllocatedImage VulkanEngine::create_image(
     });
 
     destroy_buffer(uploadBuffer);
+    if(format==VK_FORMAT_R8G8B8A8_UNORM||format==VK_FORMAT_R8G8B8A8_SRGB) {
+        image.traceSource=std::make_shared<TraceTextureSource>();
+        image.traceSource->width=size.width; image.traceSource->height=size.height;
+        image.traceSource->rgba.resize(size_t(size.width)*size.height);
+        std::memcpy(image.traceSource->rgba.data(),data,image.traceSource->rgba.size()*sizeof(uint32_t));
+    }
     return image;
 }
 

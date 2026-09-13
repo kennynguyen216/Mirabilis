@@ -318,7 +318,15 @@ bool VulkanEngine::try_traverse_portal(
                 glm::vec4(0.0f, 0.0f, -1.0f, 0.0f))));
     mainCamera.yaw = std::atan2(transformedForward.x, -transformedForward.z);
     mainCamera.pitch = std::asin(std::clamp(transformedForward.y, -1.0f, 1.0f));
+    // Snap rather than interpolate.  The portal rotated the player instantly;
+    // if the remaining fixed ticks of this frame eased toward the new yaw they
+    // would accelerate the player through an arc they never turned through,
+    // which on a rotated exit is a visible sideways shove.  Collapsing both
+    // ends of the interpolation onto the new value makes those ticks use it
+    // directly, and leaves the next frame's turn starting from here.
     _playerInput.yaw = mainCamera.yaw;
+    _previousPlayerYaw = mainCamera.yaw;
+    _targetPlayerYaw = mainCamera.yaw;
 
     // Prevent the next fixed tick from immediately re-entering the exit.
     _portalTraversalCooldown = 0.15f;

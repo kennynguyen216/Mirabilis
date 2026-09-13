@@ -1,0 +1,131 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=0,rgba16f) uniform writeonly image2D displayImage;
+layout(set=0,binding=1,rgba32f) uniform image2D historyImage;
+struct Triangle { vec4 p0; vec4 p1; vec4 p2; vec4 n0; vec4 n1; vec4 n2; vec4 uv12; uvec4 meta; vec4 c0; vec4 c1; vec4 c2; };
+struct Material { vec4 baseColor; vec4 emission; vec4 parameters; vec4 uvScale; uvec4 textureInfo; };
+layout(std430,set=0,binding=2) readonly buffer Triangles { Triangle triangles[]; };
+layout(std430,set=0,binding=3) readonly buffer Materials { Material materials[]; };
+layout(set=0,binding=5) uniform sampler2D rasterDepth;
+layout(std140,set=0,binding=6) uniform Lighting { vec4 sunDirection; vec4 sunRadiance; vec4 environment; uvec4 counts; } lighting;
+layout(std430,set=0,binding=7) readonly buffer Emitters { uint emitters[]; };
+layout(set=0,binding=8,rgba32f) uniform image2D directHistory;
+layout(set=0,binding=9,rgba32f) uniform image2D indirectHistory;
+layout(std430,set=0,binding=10) readonly buffer Texels { uint texels[]; };
+layout(push_constant) uniform Params {
+    vec4 origin; vec4 right; vec4 up; vec4 forward;
+    uvec4 control; // width, height, sample, diagnostic
+    vec4 settings;
+    uvec4 sampling;
+} pc;
+#include "path_trace_intersect.glsl"
+#include "path_trace_portal.glsl"
+#include "path_trace_transport.glsl"
+vec3 cameraRay(vec2 p) {
+    vec2 uv = p / vec2(pc.control.xy) * 2.0 - 1.0;
+    return normalize(pc.forward.xyz + pc.right.xyz * uv.x * (float(pc.control.x)/float(pc.control.y)) * pc.settings.x - pc.up.xyz * uv.y * pc.settings.x);
+}
+void main() {
+    ivec2 p=ivec2(gl_GlobalInvocationID.xy);
+    if(any(greaterThanEqual(uvec2(p),pc.control.xy))) return;
+    if(pc.control.w==2u) {
+        uint index=uint(p.y)*pc.control.x+uint(p.x);
+        Triangle t=triangles[index%triangles.length()];
+        imageStore(historyImage,p,vec4(t.p0.xyz,materials[t.meta.x].baseColor.x));
+        return;
+    }
+    uint state=uint(p.x)+uint(p.y)*pc.control.x;
+    state^=pc.sampling.y*747796405u+pc.control.z*2891336453u;
+    vec2 jitter=pc.control.w==0u?vec2(randomFloat(state),randomFloat(state)):vec2(0.5);
+    vec3 d=cameraRay(vec2(p)+jitter);
+    if(pc.control.w==1u) {imageStore(historyImage,p,vec4(d,1));return;}
+    if(pc.control.w==5u) {
+        float constants[3]=float[](1,3,8);
+        vec3 sampleValue=vec3(1,2,4)*constants[pc.control.z];
+        vec3 average=pc.control.z==0u?sampleValue:imageLoad(historyImage,p).rgb+(sampleValue-imageLoad(historyImage,p).rgb)/float(pc.control.z+1u);
+        imageStore(historyImage,p,vec4(average,1));return;
+    }
+    if(pc.control.w==6u) {
+        imageStore(historyImage,p,vec4(dielectricFresnel(1,1,1.5),dielectricFresnel(0.5,1.5,1),decodeSRGB(vec3(0.5)).x,1)); return;
+    }
+    if(pc.control.w==7u) {
+        Material m=materials[0]; m.parameters=vec4(1,0.5,0,1.5);
+        vec3 n=vec3(0,1,0),next=sampleBRDF(m,n,n,state);
+        float pdf=brdfPdf(m,n,n,next);
+        vec3 weight=pdf>1e-12?evaluateBRDF(m,vec3(1),n,n,next)*max(dot(n,next),0)/pdf:vec3(0);
+        imageStore(historyImage,p,vec4(weight,pdf)); return;
+    }
+    if(pc.control.w==8u) {
+        vec3 transmitted=refract(vec3(0.5,-sqrt(0.75),0),vec3(0,1,0),1.0/1.5);
+        imageStore(historyImage,p,vec4(transmitted.x,length(transmitted),pow(1.0/1.5,2)*pow(1.5,2),1)); return;
+    }
+    if(pc.control.w==9u) {
+        uint index=(uint(p.y)*pc.control.x+uint(p.x))%uint(texels.length());
+        imageStore(historyImage,p,vec4(textureTexel(uvec4(index,1,1,0),ivec2(0)),1)); return;
+    }
+    if(pc.control.w>=10u&&pc.control.w<=12u) {
+        if(lighting.counts.y==0u) {imageStore(historyImage,p,vec4(0));return;}
+        uint index=(uint(p.y)*pc.control.x+uint(p.x))%lighting.counts.y;
+        TracePortal portal=portals[index];
+        vec2 local=(vec2(p)+0.5)/vec2(pc.control.xy)*1.6-0.8;
+        vec3 origin=portal.center.xyz+portal.rightWidth.xyz*local.x*portal.rightWidth.w+portal.upHeight.xyz*local.y*portal.upHeight.w+portal.normal.xyz;
+        vec3 direction=-portal.normal.xyz;
+        if(pc.control.w<=11u) {
+            transferRay(index,origin,direction,1);
+            imageStore(historyImage,p,vec4(pc.control.w==10u?origin:direction,1));return;
+        }
+        origin=portals[0].center.xyz+portals[0].normal.xyz;direction=-portals[0].normal.xyz;
+        uint count=0;bool limited;float travelled;
+        Hit portalHit=intersectPortalScene(origin,direction,count,limited,travelled);
+        imageStore(historyImage,p,vec4(float(count),limited?1:0,portalHit.invalid?1:0,0));return;
+    }
+    vec3 primaryOrigin=pc.origin.xyz,primaryDirection=d;
+    uint portalCount=0; bool portalLimited=false;float portalDistance=0;
+    Hit hit;
+    if(pc.control.w==0u) hit=intersectPortalScene(primaryOrigin,primaryDirection,portalCount,portalLimited,portalDistance);
+    else hit=intersectScene(pc.origin.xyz,d);
+    if(pc.control.w==4u) {imageStore(historyImage,p,vec4(texelFetch(rasterDepth,p,0).r,hit.triangle<0?-1:hit.t,0,hit.invalid?1:0)); return;}
+    if(pc.control.w==3u) {imageStore(historyImage,p,vec4(hit.triangle<0?-1:hit.t,hit.bary,hit.invalid?1:0)); return;}
+    vec3 radiance=mix(vec3(0.7,0.8,1),vec3(0.12,0.3,0.65),clamp(d.y*0.5+0.5,0,1));
+    if(hit.triangle>=0) {
+        Triangle t=triangles[hit.triangle]; vec3 n=geometricNormal(t); bool front=dot(primaryDirection,n)<0;
+        vec3 sn=shadingNormal(t,hit.bary,n); n=front?n:-n; sn=front?sn:-sn;
+        int view=int(pc.settings.z);
+        radiance=n*0.5+0.5;
+        if(view==1) radiance=sn*0.5+0.5;
+        if(view==2) radiance=vec3((hit.t+portalDistance)/50);
+        if(view==3) radiance=baseColorAt(materials[t.meta.x],t,hit.bary);
+        if(view==4) radiance=fract(vec3(0.618,0.381,0.173)*float(t.meta.x+1));
+    }
+    if(int(pc.settings.z)==5) radiance=vec3(float(hit.visits)/100);
+    if(int(pc.settings.z)==6) radiance=vec3(float(hit.tests)/100);
+    TransportResult result=transport(pc.origin.xyz,d,state);
+    vec3 sampleValue=result.direct+result.indirect;
+    bool invalid=hit.invalid||result.invalid||any(isnan(sampleValue))||any(isinf(sampleValue));
+    if(invalid) {sampleValue=vec3(0);result.direct=vec3(0);result.indirect=vec3(0);}
+    vec3 directAverage=pc.control.z==0u?result.direct:imageLoad(directHistory,p).rgb+(result.direct-imageLoad(directHistory,p).rgb)/float(pc.control.z+1u);
+    vec3 indirectAverage=pc.control.z==0u?result.indirect:imageLoad(indirectHistory,p).rgb+(result.indirect-imageLoad(indirectHistory,p).rgb)/float(pc.control.z+1u);
+    vec3 average=directAverage+indirectAverage;
+    imageStore(directHistory,p,vec4(directAverage,0));
+    imageStore(indirectHistory,p,vec4(indirectAverage,0));
+    // Keep faults observable across accumulation instead of losing a rare
+    // invalid sample on the next clean frame. The first sample resets history.
+    float faults=(pc.control.z==0u?0:imageLoad(historyImage,p).a)+(invalid?1:0);
+    imageStore(historyImage,p,vec4(average,faults));
+    if(int(pc.settings.z)==7) radiance=sampleValue;
+    if(int(pc.settings.z)==8) radiance=average;
+    if(int(pc.settings.z)==9) radiance=faults>0?vec3(1,0,1):vec3(0);
+    if(int(pc.settings.z)==10) radiance=directAverage;
+    if(int(pc.settings.z)==11) radiance=indirectAverage;
+    if(int(pc.settings.z)==12) radiance=vec3(float(portalCount)/4.0);
+    if(int(pc.settings.z)==13) radiance=portalLimited?vec3(1,0.5,0):vec3(0);
+    if(hit.invalid) radiance=vec3(1,0,1);
+    vec3 displayValue=radiance;
+    if(int(pc.settings.z)==7||int(pc.settings.z)==8||int(pc.settings.z)==10||int(pc.settings.z)==11) {
+        displayValue=max(radiance,0)*pc.origin.w;
+        displayValue=displayValue/(1+displayValue);
+        displayValue=mix(12.92*displayValue,1.055*pow(displayValue,vec3(1.0/2.4))-0.055,greaterThan(displayValue,vec3(0.0031308)));
+    }
+    imageStore(displayImage,p,vec4(displayValue,1));
+}

@@ -10,8 +10,11 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     VkShaderModule vertexShader = VK_NULL_HANDLE;
     VkShaderModule portalMaskVertexShader = VK_NULL_HANDLE;
     VkShaderModule portalViewVertexShader = VK_NULL_HANDLE;
+    VkShaderModule maskFragmentShader = VK_NULL_HANDLE;
     VkShaderModule portalViewFragmentShader = VK_NULL_HANDLE;
+    VkShaderModule portalViewMaskFragmentShader = VK_NULL_HANDLE;
     VkShaderModule portalCompositeFragmentShader = VK_NULL_HANDLE;
+    VkShaderModule portalMaskFragmentShader = VK_NULL_HANDLE;
     VkShaderModule portalSkyVertexShader = VK_NULL_HANDLE;
     VkShaderModule portalSkyFragmentShader = VK_NULL_HANDLE;
     VkShaderModule colliderDebugVertexShader = VK_NULL_HANDLE;
@@ -20,8 +23,11 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
         !vkutil::load_shader_module("../../shaders/mesh.vert.spv", engine->_device, &vertexShader) ||
         !vkutil::load_shader_module("../../shaders/portal_mask.vert.spv", engine->_device, &portalMaskVertexShader) ||
         !vkutil::load_shader_module("../../shaders/portal_view.vert.spv", engine->_device, &portalViewVertexShader) ||
+        !vkutil::load_shader_module("../../shaders/mesh_mask.frag.spv", engine->_device, &maskFragmentShader) ||
         !vkutil::load_shader_module("../../shaders/portal_view.frag.spv", engine->_device, &portalViewFragmentShader) ||
+        !vkutil::load_shader_module("../../shaders/portal_view_mask.frag.spv", engine->_device, &portalViewMaskFragmentShader) ||
         !vkutil::load_shader_module("../../shaders/portal_composite.frag.spv", engine->_device, &portalCompositeFragmentShader) ||
+        !vkutil::load_shader_module("../../shaders/portal_mask_output.frag.spv", engine->_device, &portalMaskFragmentShader) ||
         !vkutil::load_shader_module("../../shaders/portal_sky.vert.spv", engine->_device, &portalSkyVertexShader) ||
         !vkutil::load_shader_module("../../shaders/portal_sky.frag.spv", engine->_device, &portalSkyFragmentShader) ||
         !vkutil::load_shader_module("../../shaders/collider_debug.vert.spv", engine->_device, &colliderDebugVertexShader) ||
@@ -39,11 +45,20 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
         if (portalViewVertexShader != VK_NULL_HANDLE) {
             vkDestroyShaderModule(engine->_device, portalViewVertexShader, nullptr);
         }
+        if (maskFragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(engine->_device, maskFragmentShader, nullptr);
+        }
         if (portalViewFragmentShader != VK_NULL_HANDLE) {
             vkDestroyShaderModule(engine->_device, portalViewFragmentShader, nullptr);
         }
+        if (portalViewMaskFragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(engine->_device, portalViewMaskFragmentShader, nullptr);
+        }
         if (portalCompositeFragmentShader != VK_NULL_HANDLE) {
             vkDestroyShaderModule(engine->_device, portalCompositeFragmentShader, nullptr);
+        }
+        if (portalMaskFragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(engine->_device, portalMaskFragmentShader, nullptr);
         }
         if (portalSkyVertexShader != VK_NULL_HANDLE) {
             vkDestroyShaderModule(engine->_device, portalSkyVertexShader, nullptr);
@@ -90,6 +105,9 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     portalViewPipeline.layout = pipelineLayout;
     portalOffscreenPipeline.layout = pipelineLayout;
     portalCompositePipeline.layout = pipelineLayout;
+    maskPipeline.layout = pipelineLayout;
+    portalViewMaskPipeline.layout = pipelineLayout;
+    portalOffscreenMaskPipeline.layout = pipelineLayout;
 
     PipelineBuilder builder;
     builder._pipelineLayout = pipelineLayout;
@@ -98,23 +116,41 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
     builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
     builder.set_multisampling_none();
+    const std::array<VkFormat, 4> mainFormats{
+        engine->_drawImage.imageFormat,
+        engine->_gbufferAlbedoImage.imageFormat,
+        engine->_gbufferVelocityImage.imageFormat,
+        engine->_directLightingImage.imageFormat};
+    builder.set_color_attachment_formats(mainFormats);
     builder.disable_blending();
     builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
-    builder.set_color_attachment_format(engine->_drawImage.imageFormat);
     builder.set_depth_format(engine->_depthImage.imageFormat);
     builder.set_stencil_format(engine->_depthImage.imageFormat);
     opaquePipeline.pipeline = builder.build_pipeline(engine->_device);
 
-    // This pass samples a previously-rendered virtual camera image. Its
-    // fragment shader is intentionally unlit, because the source scene was
-    // already lit while rendering into that image.
-    builder.enable_stenciltest(VK_COMPARE_OP_EQUAL, VK_STENCIL_OP_KEEP);
-    builder.set_shaders(vertexShader, portalCompositeFragmentShader);
-    portalCompositePipeline.pipeline = builder.build_pipeline(engine->_device);
+    // Every piece of state above is right for alpha-masked geometry too: it
+    // writes depth and the G-buffer exactly like an opaque surface.  Only the
+    // fragment shader differs, and only by the cutoff test.
+    builder.set_shaders(vertexShader, maskFragmentShader);
+    maskPipeline.pipeline = builder.build_pipeline(engine->_device);
+    builder.set_shaders(vertexShader, fragmentShader);
 
+    // Transparent surfaces share the MRT blend state because Vulkan devices
+    // without independentBlend require every attachment state to match. The
+    // SSGI contract still ignores them through the opaque-only depth prepass.
+    builder.set_shaders(vertexShader, fragmentShader);
     builder.enable_blending_additive();
     builder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
     transparentPipeline.pipeline = builder.build_pipeline(engine->_device);
+
+    // This pass samples a previously-rendered virtual camera image. Its
+    // fragment shader is intentionally unlit, because the source scene was
+    // already lit while rendering into that image.
+    builder.set_color_attachment_format(engine->_drawImage.imageFormat);
+    builder.disable_blending();
+    builder.enable_stenciltest(VK_COMPARE_OP_EQUAL, VK_STENCIL_OP_KEEP);
+    builder.set_shaders(vertexShader, portalCompositeFragmentShader);
+    portalCompositePipeline.pipeline = builder.build_pipeline(engine->_device);
 
     // Mark a portal in stencil only where its real, slightly front-offset
     // surface is visible against the already-rendered main scene. This pass
@@ -123,7 +159,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     builder.set_color_write_mask(0);
     builder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
     builder.enable_stenciltest(VK_COMPARE_OP_ALWAYS, VK_STENCIL_OP_REPLACE);
-    builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_shaders(vertexShader, portalMaskFragmentShader);
     portalStencilPipeline.pipeline = builder.build_pipeline(engine->_device);
 
     // A recursive portal mask must already be inside its parent portal's
@@ -136,7 +172,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     // stencil pass succeeded. portal_mask.vert forces reversed depth to zero.
     builder.enable_depthtest(true, VK_COMPARE_OP_ALWAYS);
     builder.enable_stenciltest(VK_COMPARE_OP_EQUAL, VK_STENCIL_OP_KEEP);
-    builder.set_shaders(portalMaskVertexShader, fragmentShader);
+    builder.set_shaders(portalMaskVertexShader, portalMaskFragmentShader);
     portalMaskPipeline.pipeline = builder.build_pipeline(engine->_device);
 
     // The linked world's pixels pass only where its portal's stencil value
@@ -149,9 +185,14 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     builder.set_shaders(portalViewVertexShader, portalViewFragmentShader);
     portalViewPipeline.pipeline = builder.build_pipeline(engine->_device);
 
-    // Same oblique-clipped portal-view shader, but without stencil testing:
-    // it renders into a standalone camera target before composition.
+    builder.set_shaders(portalViewVertexShader, portalViewMaskFragmentShader);
+    portalViewMaskPipeline.pipeline = builder.build_pipeline(engine->_device);
+
+    // Same oblique-clipped portal-view shaders, but without stencil testing:
+    // these render into a standalone camera target before composition.
     builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    portalOffscreenMaskPipeline.pipeline = builder.build_pipeline(engine->_device);
+    builder.set_shaders(portalViewVertexShader, portalViewFragmentShader);
     portalOffscreenPipeline.pipeline = builder.build_pipeline(engine->_device);
 
     VkPipelineLayoutCreateInfo portalSkyLayoutInfo = vkinit::pipeline_layout_create_info();
@@ -217,11 +258,14 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
         colliderDebugBuilder.build_pipeline(engine->_device);
 
     vkDestroyShaderModule(engine->_device, fragmentShader, nullptr);
+    vkDestroyShaderModule(engine->_device, maskFragmentShader, nullptr);
     vkDestroyShaderModule(engine->_device, vertexShader, nullptr);
     vkDestroyShaderModule(engine->_device, portalMaskVertexShader, nullptr);
     vkDestroyShaderModule(engine->_device, portalViewVertexShader, nullptr);
     vkDestroyShaderModule(engine->_device, portalViewFragmentShader, nullptr);
+    vkDestroyShaderModule(engine->_device, portalViewMaskFragmentShader, nullptr);
     vkDestroyShaderModule(engine->_device, portalCompositeFragmentShader, nullptr);
+    vkDestroyShaderModule(engine->_device, portalMaskFragmentShader, nullptr);
     vkDestroyShaderModule(engine->_device, portalSkyVertexShader, nullptr);
     vkDestroyShaderModule(engine->_device, portalSkyFragmentShader, nullptr);
     vkDestroyShaderModule(engine->_device, colliderDebugVertexShader, nullptr);
@@ -230,6 +274,9 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     engine->_mainDeletionQueue.push_function([this, engine]() {
         vkDestroyPipeline(engine->_device, opaquePipeline.pipeline, nullptr);
         vkDestroyPipeline(engine->_device, transparentPipeline.pipeline, nullptr);
+        vkDestroyPipeline(engine->_device, maskPipeline.pipeline, nullptr);
+        vkDestroyPipeline(engine->_device, portalViewMaskPipeline.pipeline, nullptr);
+        vkDestroyPipeline(engine->_device, portalOffscreenMaskPipeline.pipeline, nullptr);
         vkDestroyPipeline(engine->_device, portalStencilPipeline.pipeline, nullptr);
         vkDestroyPipeline(engine->_device, portalRecursiveStencilPipeline.pipeline, nullptr);
         vkDestroyPipeline(engine->_device, portalMaskPipeline.pipeline, nullptr);
@@ -249,6 +296,9 @@ void GLTFMetallic_Roughness::clear_resources(VkDevice device)
 {
     vkDestroyPipeline(device, opaquePipeline.pipeline, nullptr);
     vkDestroyPipeline(device, transparentPipeline.pipeline, nullptr);
+    vkDestroyPipeline(device, maskPipeline.pipeline, nullptr);
+    vkDestroyPipeline(device, portalViewMaskPipeline.pipeline, nullptr);
+    vkDestroyPipeline(device, portalOffscreenMaskPipeline.pipeline, nullptr);
     vkDestroyPipeline(device, portalStencilPipeline.pipeline, nullptr);
     vkDestroyPipeline(device, portalRecursiveStencilPipeline.pipeline, nullptr);
     vkDestroyPipeline(device, portalMaskPipeline.pipeline, nullptr);
@@ -266,10 +316,19 @@ MaterialInstance GLTFMetallic_Roughness::write_material(
     DescriptorAllocatorGrowable& descriptorAllocator)
 {
     MaterialInstance material{};
+    material.traceTexture=resources.colorImage.traceSource;
     material.passType = pass;
-    material.pipeline = pass == MaterialPass::Transparent
-        ? &transparentPipeline
-        : &opaquePipeline;
+    switch (pass) {
+    case MaterialPass::Transparent:
+        material.pipeline = &transparentPipeline;
+        break;
+    case MaterialPass::Mask:
+        material.pipeline = &maskPipeline;
+        break;
+    default:
+        material.pipeline = &opaquePipeline;
+        break;
+    }
     material.materialSet = descriptorAllocator.allocate(device, materialLayout);
     writer.clear();
     writer.write_buffer(

@@ -158,7 +158,12 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         return {};
     }
 
-    auto loadImage = [&](fastgltf::Image& source)
+    // The format is the caller's, not the file's: the same PNG byte for byte
+    // is sRGB-encoded when it arrives as base color and linear when it arrives
+    // as a normal or metallic/roughness map.  stb hands back the stored bytes
+    // either way, and only the Vulkan format decides whether the hardware
+    // decodes them on sample.
+    auto loadImage = [&](fastgltf::Image& source, VkFormat format)
         -> std::optional<AllocatedImage> {
         int width = 0;
         int height = 0;
@@ -175,7 +180,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
                     static_cast<uint32_t>(width),
                     static_cast<uint32_t>(height),
                     1},
-                VK_FORMAT_R8G8B8A8_UNORM,
+                format,
                 VK_IMAGE_USAGE_SAMPLED_BIT,
                 true);
         };
@@ -310,26 +315,80 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         samplerInfo.mipmapMode = extract_mipmap_mode(
             sampler.minFilter.value_or(fastgltf::Filter::Nearest));
 
+        // Anisotropy only means anything for a minifying linear filter, which
+        // is exactly the oblique floor and arch case it exists for.  Leaving it
+        // off for NEAREST keeps an intentionally crisp texture crisp.
+        const float anisotropy = engine->material_anisotropy();
+        if (anisotropy > 1.0f && samplerInfo.minFilter == VK_FILTER_LINEAR) {
+            samplerInfo.anisotropyEnable = VK_TRUE;
+            samplerInfo.maxAnisotropy = anisotropy;
+        }
+
         VkSampler newSampler = VK_NULL_HANDLE;
         VK_CHECK(vkCreateSampler(
             engine->_device, &samplerInfo, nullptr, &newSampler));
         scene->samplers.push_back(newSampler);
     }
 
-    std::vector<AllocatedImage> images;
-    images.reserve(gltf.images.size());
-    for (size_t i = 0; i < gltf.images.size(); ++i) {
-        const std::string name = object_name(gltf.images[i].name, "image_", i);
-        auto loadedImage = loadImage(gltf.images[i]);
+    // Images are uploaded on demand rather than up front, because the correct
+    // format is a property of the role the material assigns the image, not of
+    // the image itself.  A glTF may also carry images no material references;
+    // those now cost nothing.  The key is (image index, colour space): one
+    // source image referenced as both base colour and a normal map legitimately
+    // needs two GPU images, and silently sharing one would decode the normals.
+    std::unordered_map<uint64_t, AllocatedImage> imageCache;
+    auto acquireImage = [&](size_t imageIndex, bool srgb) -> AllocatedImage {
+        if (imageIndex >= gltf.images.size()) {
+            return engine->_errorCheckerboardImage;
+        }
+        const uint64_t key = uint64_t(imageIndex) * 2 + (srgb ? 1 : 0);
+        if (auto found = imageCache.find(key); found != imageCache.end()) {
+            return found->second;
+        }
+
+        const VkFormat format = srgb
+            ? VK_FORMAT_R8G8B8A8_SRGB
+            : VK_FORMAT_R8G8B8A8_UNORM;
+        const std::string name =
+            object_name(gltf.images[imageIndex].name, "image_", imageIndex) +
+            (srgb ? ":srgb" : ":linear");
+
+        AllocatedImage resolved{};
+        auto loadedImage = loadImage(gltf.images[imageIndex], format);
         if (loadedImage.has_value()) {
-            images.push_back(*loadedImage);
-            scene->images[name] = *loadedImage;
+            resolved = *loadedImage;
         } else {
-            images.push_back(engine->_errorCheckerboardImage);
-            scene->images[name] = images.back();
+            // A missing texture must not take the scene down with it: the
+            // checkerboard is obvious on screen and is owned by the engine, so
+            // clearAll already knows not to destroy it.
+            resolved = engine->_errorCheckerboardImage;
             fmt::print("Failed to load GLTF image {}\n", name);
         }
-    }
+
+        imageCache[key] = resolved;
+        scene->images[name] = resolved;
+        return resolved;
+    };
+
+    // Resolves one glTF texture reference into the image and sampler a
+    // descriptor needs, leaving both untouched when the reference is absent or
+    // dangling so the caller's default survives.
+    auto resolveTexture = [&](const fastgltf::TextureInfo& textureInfo,
+                              bool srgb,
+                              AllocatedImage& outImage,
+                              VkSampler& outSampler) {
+        if (textureInfo.textureIndex >= gltf.textures.size()) {
+            return;
+        }
+        const auto& texture = gltf.textures[textureInfo.textureIndex];
+        if (texture.imageIndex.has_value()) {
+            outImage = acquireImage(texture.imageIndex.value(), srgb);
+        }
+        if (texture.samplerIndex.has_value() &&
+            texture.samplerIndex.value() < scene->samplers.size()) {
+            outSampler = scene->samplers[texture.samplerIndex.value()];
+        }
+    };
 
     scene->materialDataBuffer = engine->create_buffer(
         sizeof(GLTFMetallic_Roughness::MaterialConstants) * materialCount,
@@ -340,6 +399,13 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
 
     std::vector<std::shared_ptr<GLTFMaterial>> materials;
     materials.reserve(materialCount);
+
+    // Counted per material rather than per image so the log distinguishes "the
+    // asset has no metallic/roughness texture" from "it has one and we failed
+    // to bind it", which are indistinguishable from the rendered image until
+    // the BRDF actually consumes the map.
+    size_t boundBaseColorCount = 0;
+    size_t boundMetalRoughCount = 0;
 
     auto createMaterial = [&](size_t index,
                               glm::vec4 color,
@@ -353,6 +419,13 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         GLTFMetallic_Roughness::MaterialConstants constants{};
         constants.colorFactors = color;
         constants.metal_rough_factors = glm::vec4(metallic, roughness, 0.0f, 0.0f);
+        // extra[0] is the UV transform the scene materials write; extra[1].x
+        // is the alpha cutoff.  It stays zero for every pass but Mask, which
+        // makes the test in the mask shaders a no-op if one is ever bound to
+        // an opaque pipeline by mistake.
+        if (pass == MaterialPass::Mask && source != nullptr) {
+            constants.extra[1].x = source->alphaCutoff;
+        }
         materialConstants[index] = constants;
 
         GLTFMetallic_Roughness::MaterialResources resources{};
@@ -364,16 +437,24 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         resources.dataBufferOffset = static_cast<uint32_t>(
             index * sizeof(GLTFMetallic_Roughness::MaterialConstants));
 
-        if (source != nullptr && source->pbrData.baseColorTexture.has_value()) {
-            const auto& textureInfo = source->pbrData.baseColorTexture.value();
-            const auto& texture = gltf.textures[textureInfo.textureIndex];
-            if (texture.imageIndex.has_value() &&
-                texture.imageIndex.value() < images.size()) {
-                resources.colorImage = images[texture.imageIndex.value()];
+        if (source != nullptr) {
+            // Base colour is the one sRGB-encoded material texture here.  Every
+            // other role stores measurements, not colours, and must stay linear.
+            if (source->pbrData.baseColorTexture.has_value()) {
+                resolveTexture(
+                    source->pbrData.baseColorTexture.value(),
+                    true,
+                    resources.colorImage,
+                    resources.colorSampler);
+                ++boundBaseColorCount;
             }
-            if (texture.samplerIndex.has_value() &&
-                texture.samplerIndex.value() < scene->samplers.size()) {
-                resources.colorSampler = scene->samplers[texture.samplerIndex.value()];
+            if (source->pbrData.metallicRoughnessTexture.has_value()) {
+                resolveTexture(
+                    source->pbrData.metallicRoughnessTexture.value(),
+                    false,
+                    resources.metalRoughImage,
+                    resources.metalRoughSampler);
+                ++boundMetalRoughCount;
             }
         }
 
@@ -382,6 +463,12 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
             pass,
             resources,
             scene->descriptorPool);
+        material->data.traceBaseColor = constants.colorFactors;
+        if(source) material->data.traceEmission=glm::vec4(
+            source->emissiveFactor[0],source->emissiveFactor[1],source->emissiveFactor[2],0)*source->emissiveStrength.value_or(1.f);
+        material->data.traceParameters = constants.metal_rough_factors;
+        material->data.traceParameters.z=source&&source->transmission?source->transmission->transmissionFactor:0.f;
+        material->data.traceParameters.w=source?source->ior.value_or(1.5f):1.5f;
         return material;
     };
 
@@ -397,9 +484,16 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
                 source.pbrData.baseColorFactor[1],
                 source.pbrData.baseColorFactor[2],
                 source.pbrData.baseColorFactor[3]);
-            const MaterialPass pass = source.alphaMode == fastgltf::AlphaMode::Blend
-                ? MaterialPass::Transparent
-                : MaterialPass::MainColor;
+            // MASK is its own pass rather than an opaque material: it still
+            // writes depth and still belongs in the prepass, but every stage
+            // that draws it has to run the cutoff test or it appears as the
+            // solid rectangle its texture is mapped onto.
+            MaterialPass pass = MaterialPass::MainColor;
+            if (source.alphaMode == fastgltf::AlphaMode::Blend) {
+                pass = MaterialPass::Transparent;
+            } else if (source.alphaMode == fastgltf::AlphaMode::Mask) {
+                pass = MaterialPass::Mask;
+            }
             auto material = createMaterial(
                 i,
                 color,
@@ -409,6 +503,37 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
                 &source);
             scene->materials[object_name(source.name, "material_", i)] = material;
         }
+    }
+
+    // Every material has now declared the roles it uses, so the cache holds
+    // exactly the images this scene will occupy.  Reporting it here is what
+    // makes a texture budget arguable later: file size on disk says nothing,
+    // and the mip chain adds a third again on top of the base level.
+    {
+        size_t srgbCount = 0;
+        size_t linearCount = 0;
+        size_t estimatedBytes = 0;
+        for (const auto& [key, image] : imageCache) {
+            if (image.image == engine->_errorCheckerboardImage.image) {
+                continue;
+            }
+            (key & 1) ? ++srgbCount : ++linearCount;
+            const size_t baseLevel = size_t(image.imageExtent.width) *
+                image.imageExtent.height * 4;
+            // A full chain converges on 4/3 of the base level.
+            estimatedBytes += baseLevel + baseLevel / 3;
+        }
+        fmt::print(
+            "GLTF textures: {} sRGB + {} linear, ~{:.1f} MB with mips; "
+            "{}/{} materials bound base colour, {}/{} metallic-roughness ({})\n",
+            srgbCount,
+            linearCount,
+            double(estimatedBytes) / (1024.0 * 1024.0),
+            boundBaseColorCount,
+            materialCount,
+            boundMetalRoughCount,
+            materialCount,
+            filePath.filename().string());
     }
 
     std::vector<std::shared_ptr<MeshAsset>> meshes;

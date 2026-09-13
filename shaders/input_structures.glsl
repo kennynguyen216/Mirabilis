@@ -10,6 +10,13 @@ layout(set = 0, binding = 1) uniform sampler2DShadow shadowMap;
 // one it was computed for is allowed to read it.
 layout(set = 0, binding = 2) uniform sampler2D ambientOcclusionTex;
 
+// The equirectangular environment panorama, at every mip.  It sits beside the
+// scene data rather than in a pass-specific set because more than the SSGI
+// trace needs it now: a portal camera has no screen-space pass to fall back
+// from, so its forward shader reads the same sky directly.  Declared with the
+// name environment.glsl expects.
+layout(set = 0, binding = 3) uniform sampler2D environmentTexture;
+
 // How much of the surrounding hemisphere reaches this surface: 1 fully open,
 // 0 fully enclosed.  Only the ambient term should be scaled by it.  Direct
 // sunlight already has its own visibility test in the shadow map, and
@@ -40,6 +47,10 @@ layout(set = 1, binding = 0) uniform GLTFMaterialData {
     // xy = UV tiling, zw = UV offset. Legacy materials leave this zero and
     // the vertex shaders interpret that as a 1x1 scale.
     vec4 uvTransform;
+    // x = glTF alphaCutoff.  Left at zero on every material that is not
+    // alpha-masked, which makes the test a no-op there instead of something
+    // the shared shader body has to branch around.
+    vec4 alphaMask;
 } materialData;
 
 layout(set = 1, binding = 1) uniform sampler2D colorTex;
@@ -57,8 +68,11 @@ float sunlight_visibility(vec3 worldPosition, vec3 normal)
     // Pushing the sample point along the normal before projecting removes
     // most self-shadowing acne on surfaces that face the sun edge-on, and it
     // does far less to detach contact shadows than depth bias alone.
+    // Respect the value shown in the UI. A tiny nonzero floor avoids exact
+    // coplanar comparisons without silently replacing the authored bias.
+    float normalBias = max(sceneData.shadowSettings.y, 0.001);
     vec4 lightClip = sceneData.sunViewProjection *
-        vec4(worldPosition + normal * sceneData.shadowSettings.y, 1.0);
+        vec4(worldPosition + normal * normalBias, 1.0);
     vec3 projected = lightClip.xyz / lightClip.w;
     // Beyond the shadow camera's depth range there is nothing recorded to
     // compare against, so treat the surface as lit rather than shadowed.
@@ -67,19 +81,36 @@ float sunlight_visibility(vec3 worldPosition, vec3 normal)
     }
 
     vec2 shadowUV = projected.xy * 0.5 + 0.5;
-    float reference = projected.z - sceneData.shadowSettings.x;
+    // Surfaces facing across the light direction need more receiver bias than
+    // ones facing it head-on. This slope-aware term removes the regular
+    // columns caused by tiny depth changes across large grazing-angle faces.
+    vec3 lightDirection = normalize(sceneData.sunlightDirection.xyz);
+    float grazing = 1.0 - abs(dot(normalize(normal), lightDirection));
+    float depthBias = max(sceneData.shadowSettings.x, 0.00002);
+    float reference = projected.z - depthBias * mix(1.0, 2.5, grazing);
     float texel = sceneData.shadowSettings.z;
 
-    // Percentage-closer filtering: nine comparisons instead of one turn the
-    // hard per-texel edge into a short gradient. On formats that support it,
-    // each tap is also bilinear because the sampler compares before filtering.
+    // A deterministic 7x7 tent kernel produces a continuous transition with
+    // no per-pixel random rotation. The previous rotated Poisson pattern was
+    // visible as fine stripes on large, flat surfaces. Each comparison is
+    // also bilinear on depth formats that support linear compare filtering.
+    float filterRadius = max(sceneData.shadowFilterSettings.x, 0.0);
+    if (filterRadius < 0.01) {
+        return texture(shadowMap, vec3(shadowUV, reference));
+    }
     float visibility = 0.0;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            visibility += texture(
-                shadowMap,
-                vec3(shadowUV + vec2(x, y) * texel, reference));
+    float totalWeight = 0.0;
+    float tapSpacing = filterRadius * texel / 3.0;
+    for (int y = -3; y <= 3; ++y) {
+        float weightY = 4.0 - abs(float(y));
+        for (int x = -3; x <= 3; ++x) {
+            float weightX = 4.0 - abs(float(x));
+            float weight = weightX * weightY;
+            vec2 offset = vec2(x, y) * tapSpacing;
+            visibility += weight * texture(
+                shadowMap, vec3(shadowUV + offset, reference));
+            totalWeight += weight;
         }
     }
-    return visibility * (1.0 / 9.0);
+    return visibility / totalWeight;
 }

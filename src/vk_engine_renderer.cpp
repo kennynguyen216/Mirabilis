@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <random>
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -23,6 +24,21 @@ glm::vec3 normalized_sun_direction(const glm::vec3& direction)
         return glm::normalize(glm::vec3(0.0f, 1.0f, 0.5f));
     }
     return glm::normalize(direction);
+}
+
+void set_previous_world_rows(
+    GPUDrawPushConstants& pushConstants,
+    const glm::mat4& previousWorld)
+{
+    pushConstants.previousWorldRow0 = glm::vec4(
+        previousWorld[0][0], previousWorld[1][0],
+        previousWorld[2][0], previousWorld[3][0]);
+    pushConstants.previousWorldRow1 = glm::vec4(
+        previousWorld[0][1], previousWorld[1][1],
+        previousWorld[2][1], previousWorld[3][1]);
+    pushConstants.previousWorldRow2 = glm::vec4(
+        previousWorld[0][2], previousWorld[1][2],
+        previousWorld[2][2], previousWorld[3][2]);
 }
 
 } // namespace
@@ -100,16 +116,31 @@ void VulkanEngine::init_descriptors()
         builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         _singleImageDescriptorLayout = builder.build(_device, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        // The anti-aliasing pass wants exactly that shape: one sampled colour
-        // image.  Both it and the draw image outlive every frame, so this set
-        // is written once here rather than rebuilt per frame.
+        // Both post-process passes want exactly that shape: one sampled
+        // colour image.  Every image involved outlives every frame, so these
+        // sets are written once here rather than rebuilt per frame.
+        _tonemapInputDescriptor = globalDescriptorAllocator.allocate(
+            _device, _singleImageDescriptorLayout);
+
+        DescriptorWriter tonemapWriter;
+        tonemapWriter.write_image(
+            0,
+            _drawImage.imageView,
+            _postProcessSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        tonemapWriter.update_set(_device, _tonemapInputDescriptor);
+
+        // Anti-aliasing reads the tonemap's output, not the draw image.  Its
+        // edge search compares lumas against fixed thresholds, which only
+        // mean anything once the values are in display range.
         _fxaaInputDescriptor = globalDescriptorAllocator.allocate(
             _device, _singleImageDescriptorLayout);
 
         DescriptorWriter fxaaWriter;
         fxaaWriter.write_image(
             0,
-            _drawImage.imageView,
+            _tonemapImage.imageView,
             _postProcessSampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
@@ -126,6 +157,12 @@ void VulkanEngine::init_descriptors()
         // it as well, and a flag in the block itself is what stops them
         // reading occlusion computed for a different view.
         builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        // And the environment panorama.  It used to belong to the SSGI trace
+        // alone, but a portal camera has no trace to fall back from and needs
+        // the same sky directly, so it lives with the scene data every camera
+        // already binds.  update_skybox_descriptors() is what fills it: the
+        // panorama is loaded by init_default_data(), after this runs.
+        builder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         // Compute is here because both occlusion passes bind this same set
         // for the projection and its inverse rather than duplicating them.
         _gpuSceneDataDescriptorLayout = builder.build(
@@ -264,6 +301,158 @@ void VulkanEngine::init_descriptors()
         writer.update_set(_device, _prepassImageDescriptor);
     }
 
+    {
+        DescriptorLayoutBuilder builder;
+        builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        for (uint32_t binding = 2; binding <= 8; ++binding) {
+            builder.add_binding(binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        }
+        builder.add_binding(9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        builder.add_binding(10, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        builder.add_binding(11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(13, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        builder.add_binding(14, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        _ssgiDescriptorLayout = builder.build(
+            _device, VK_SHADER_STAGE_COMPUTE_BIT);
+        for (VkDescriptorSet& set : _ssgiDescriptors) {
+            set = globalDescriptorAllocator.allocate(_device, _ssgiDescriptorLayout);
+        }
+
+        builder.clear();
+        for (uint32_t binding = 0; binding < 11; ++binding) {
+            builder.add_binding(binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        }
+        _ssgiDebugDescriptorLayout = builder.build(
+            _device, VK_SHADER_STAGE_FRAGMENT_BIT);
+        for (uint32_t historyIndex = 0;
+             historyIndex < _ssgiDebugDescriptors.size(); ++historyIndex) {
+            _ssgiDebugDescriptors[historyIndex] =
+                globalDescriptorAllocator.allocate(
+                    _device, _ssgiDebugDescriptorLayout);
+            DescriptorWriter debugWriter;
+            debugWriter.write_image(0, _gbufferAlbedoImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            debugWriter.write_image(1, _gbufferVelocityImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            debugWriter.write_image(2, _portalMaskImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            debugWriter.write_image(3, _directLightingImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            debugWriter.write_image(4, _ssgiRawImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            debugWriter.write_image(5, _ssgiDebugImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            debugWriter.write_image(6,
+                _ssgiTemporalHistory[historyIndex].imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            debugWriter.write_image(7,
+                _ssgiTemporalDiagnosticImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            debugWriter.write_image(8, _ssgiFilteredImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            debugWriter.write_image(9, _ssgiReferenceImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            debugWriter.write_image(10, _ssgiFallbackImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            debugWriter.update_set(
+                _device, _ssgiDebugDescriptors[historyIndex]);
+        }
+
+        builder.clear();
+        builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        _ssgiFilterDescriptorLayout = builder.build(
+            _device, VK_SHADER_STAGE_COMPUTE_BIT);
+        for (VkDescriptorSet& set : _ssgiFilterDescriptors) {
+            set = globalDescriptorAllocator.allocate(
+                _device, _ssgiFilterDescriptorLayout);
+        }
+        for (uint32_t historyIndex = 0; historyIndex < 2; ++historyIndex) {
+            DescriptorWriter filterWriter;
+            filterWriter.write_image(0,
+                _ssgiTemporalHistory[historyIndex].imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            filterWriter.write_image(1, _ssgiFilterScratchImage.imageView,
+                VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
+                VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+            filterWriter.write_image(2, _prepassDepthImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            filterWriter.write_image(3, _prepassNormalImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            filterWriter.update_set(
+                _device, _ssgiFilterDescriptors[historyIndex]);
+        }
+        DescriptorWriter verticalWriter;
+        verticalWriter.write_image(0, _ssgiFilterScratchImage.imageView,
+            _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        verticalWriter.write_image(1, _ssgiFilteredImage.imageView,
+            VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        verticalWriter.write_image(2, _prepassDepthImage.imageView,
+            _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        verticalWriter.write_image(3, _prepassNormalImage.imageView,
+            _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        verticalWriter.update_set(_device, _ssgiFilterDescriptors[2]);
+
+        builder.clear();
+        // Five now, not four: the trace stores incident radiance, so the
+        // composite is where the receiver's base colour is applied.
+        for (uint32_t binding = 0; binding < 5; ++binding) {
+            builder.add_binding(
+                binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        }
+        _ssgiCompositeDescriptorLayout = builder.build(
+            _device, VK_SHADER_STAGE_FRAGMENT_BIT);
+        for (uint32_t historyIndex = 0; historyIndex < 2; ++historyIndex) {
+            _ssgiCompositeDescriptors[historyIndex] =
+                globalDescriptorAllocator.allocate(
+                    _device, _ssgiCompositeDescriptorLayout);
+            DescriptorWriter compositeWriter;
+            compositeWriter.write_image(0, _ssgiFilteredImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            compositeWriter.write_image(1,
+                _ssgiMetadataHistory[historyIndex].imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            compositeWriter.write_image(2, _prepassDepthImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            compositeWriter.write_image(3, _prepassNormalImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            // draw_ssgi() leaves the forward pass's base-colour target in
+            // SHADER_READ_ONLY_OPTIMAL, and it still holds this frame's
+            // albedo when the composite runs immediately afterwards.
+            compositeWriter.write_image(4, _gbufferAlbedoImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            compositeWriter.update_set(
+                _device, _ssgiCompositeDescriptors[historyIndex]);
+        }
+    }
+
     // A device that could not provide an occlusion format still has to bind
     // something at binding 2.  The shadow map is the one image guaranteed to
     // exist by this point; the flag in the scene block keeps it unread.
@@ -400,6 +589,11 @@ void VulkanEngine::init_descriptors()
         vkDestroyDescriptorSetLayout(_device, _ssaoDescriptorLayout, nullptr);
         vkDestroyDescriptorSetLayout(_device, _ssaoBlurDescriptorLayout, nullptr);
         vkDestroyDescriptorSetLayout(_device, _ssaoDebugDescriptorLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _ssgiDescriptorLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _ssgiDebugDescriptorLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _ssgiFilterDescriptorLayout, nullptr);
+        vkDestroyDescriptorSetLayout(
+            _device, _ssgiCompositeDescriptorLayout, nullptr);
     });
 }
 
@@ -408,10 +602,16 @@ void VulkanEngine::init_pipelines()
     init_background_pipelines();
     init_shadow_pipeline();
     init_depth_normal_pipeline();
+    // Deferred to the end of this function: both alpha-tested pipelines take
+    // metalRoughMaterial.materialLayout, which build_pipelines() creates.
     init_render_debug_pipeline();
+    init_tonemap_pipeline();
     init_fxaa_pipeline();
     init_ssao_pipelines();
     metalRoughMaterial.build_pipelines(this);
+    init_shadow_mask_pipeline();
+    init_depth_normal_mask_pipeline();
+    init_ssgi_pipelines();
 }
 
 void VulkanEngine::draw_geometry(
@@ -421,14 +621,29 @@ void VulkanEngine::draw_geometry(
     VkDescriptorSet sceneDescriptor,
     bool clearDepthAndStencil,
     MaterialPipeline* overridePipeline,
+    MaterialPipeline* overrideMaskPipeline,
     uint32_t stencilReference,
     bool useFrustumCulling,
-    uint32_t stencilCompareMask)
+    uint32_t stencilCompareMask,
+    bool writeGBuffer)
 {
     const auto startTime = std::chrono::steady_clock::now();
 
-    VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
+    std::array<VkRenderingAttachmentInfo, 4> colorAttachments{};
+    colorAttachments[0] = vkinit::attachment_info(
         _drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkClearValue clear{};
+    if (writeGBuffer) {
+        colorAttachments[1] = vkinit::attachment_info(
+            _gbufferAlbedoImage.imageView, &clear,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        colorAttachments[2] = vkinit::attachment_info(
+            _gbufferVelocityImage.imageView, &clear,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        colorAttachments[3] = vkinit::attachment_info(
+            _directLightingImage.imageView, &clear,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
         _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     depthAttachment.loadOp = clearDepthAndStencil
@@ -437,7 +652,8 @@ void VulkanEngine::draw_geometry(
     VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
 
     VkRenderingInfo renderInfo = vkinit::rendering_info(
-        _drawExtent, &colorAttachment, &depthAttachment);
+        _drawExtent, colorAttachments.data(), &depthAttachment);
+    renderInfo.colorAttachmentCount = writeGBuffer ? 4u : 1u;
     renderInfo.pStencilAttachment = &stencilAttachment;
 
     vkCmdBeginRendering(cmd, &renderInfo);
@@ -492,9 +708,19 @@ void VulkanEngine::draw_geometry(
             return;
         }
 
-        MaterialPipeline* pipeline = overridePipeline != nullptr
-            ? overridePipeline
-            : renderObject.material->pipeline;
+        // An overriding pass still has to honour the alpha cutoff, or masked
+        // geometry reappears as a solid rectangle the moment it is seen
+        // through a portal.  Passes that write a stencil or a mask rather
+        // than shading pass no mask pipeline and fall back to the one
+        // override, which is what they want: the cutout's silhouette is not
+        // what those passes are describing.
+        MaterialPipeline* pipeline = renderObject.material->pipeline;
+        if (overridePipeline != nullptr) {
+            pipeline = overrideMaskPipeline != nullptr &&
+                    renderObject.material->passType == MaterialPass::Mask
+                ? overrideMaskPipeline
+                : overridePipeline;
+        }
         if (pipeline != lastPipeline) {
             lastPipeline = pipeline;
             vkCmdBindPipeline(
@@ -531,6 +757,7 @@ void VulkanEngine::draw_geometry(
         GPUDrawPushConstants pushConstants{};
         pushConstants.worldMatrix = renderObject.transform;
         pushConstants.vertexBuffer = renderObject.vertexBufferAddress;
+        set_previous_world_rows(pushConstants, renderObject.previousTransform);
         vkCmdPushConstants(
             cmd,
             pipeline->layout,
@@ -571,6 +798,10 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
         0.1f);
     data.proj[1][1] *= -1.0f;
     data.viewproj = data.proj * data.view;
+    // Portal cameras and the first main-camera frame default to zero motion.
+    // update_scene() replaces this with the previous main view-projection for
+    // the ordinary camera.
+    data.previousViewProjection = data.viewproj;
     // Keep authored interiors readable even when a face is turned away from
     // the single directional sun light.
     data.ambientColor = glm::vec4(0.28f);
@@ -585,6 +816,8 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
         _shadowNormalBias,
         1.0f / static_cast<float>(ShadowMapResolution),
         _shadowsEnabled ? 1.0f : 0.0f);
+    data.shadowFilterSettings = glm::vec4(
+        _shadowFilterRadius, 0.0f, 0.0f, 0.0f);
     // Screen-space passes get a depth buffer rather than a position per
     // fragment; these are what turn one back into the other.
     data.inverseProjection = glm::inverse(data.proj);
@@ -596,8 +829,8 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
     data.screenSpaceSettings = glm::vec4(
         ssao_active() ? 1.0f : 0.0f,
         _ssaoAmbientOnly ? 1.0f : 0.0f,
-        0.0f,
-        0.0f);
+        _ssgiEnabled ? 1.0f : 0.0f,
+        _ssgiHalfResolution ? 1.0f : 0.0f);
     // One multiply takes a fragment coordinate to its occlusion texel.  It
     // folds together the half resolution, the render scale, and the fact that
     // the image stays allocated at window size, none of which a fragment
@@ -614,6 +847,14 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
         occlusionFraction.y / static_cast<float>(_drawExtent.height),
         occlusionFraction.x - 0.5f / occlusionAllocation.x,
         occlusionFraction.y - 0.5f / occlusionAllocation.y);
+    data.ssgiFallbackSettings = _traceLighting.environment;
+    // Ambient and SSGI are two answers to one question, so how they divide it
+    // travels with every camera rather than being decided in the shader.
+    data.indirectSettings = glm::vec4(
+        _ssgiAmbientRetention,
+        _ssgiTraceEnvironmentMap ? 1.0f : 0.0f,
+        _skyboxEnvironmentLod,
+        _skyboxIndirectClamp);
     return data;
 }
 
@@ -777,6 +1018,66 @@ void VulkanEngine::init_shadow_pipeline()
     });
 }
 
+void VulkanEngine::init_shadow_mask_pipeline()
+{
+    VkShaderModule vertexShader = VK_NULL_HANDLE;
+    VkShaderModule fragmentShader = VK_NULL_HANDLE;
+    if (!vkutil::load_shader_module(
+            "../../shaders/shadow_depth_mask.vert.spv", _device, &vertexShader) ||
+        !vkutil::load_shader_module(
+            "../../shaders/shadow_depth_mask.frag.spv", _device, &fragmentShader)) {
+        fmt::print("Error loading alpha-tested shadow shaders\n");
+        if (vertexShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, vertexShader, nullptr);
+        }
+        if (fragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, fragmentShader, nullptr);
+        }
+        return;
+    }
+
+    // One descriptor set, and it is the per-material set the forward pass
+    // binds at index 1.  Nothing about the sun's camera is needed here - it
+    // is still folded into the push constant - so the scene set the other
+    // passes carry would be dead weight, and set 0 is the material instead.
+    VkPushConstantRange pushRange{
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = sizeof(ShadowPushConstants)};
+    VkPipelineLayoutCreateInfo layoutInfo = vkinit::pipeline_layout_create_info();
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &metalRoughMaterial.materialLayout;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushRange;
+    VK_CHECK(vkCreatePipelineLayout(
+        _device, &layoutInfo, nullptr, &_shadowMaskPipeline.layout));
+
+    PipelineBuilder builder;
+    builder._pipelineLayout = _shadowMaskPipeline.layout;
+    builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    // Every state below matches the opaque shadow pipeline exactly.  Where a
+    // masked surface and an opaque one meet, any disagreement here would show
+    // up as a seam between the two shadows they cast.
+    builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    builder.set_multisampling_none();
+    builder.disable_blending();
+    builder.disable_color_attachment();
+    builder.enable_depthtest(true, VK_COMPARE_OP_LESS_OR_EQUAL);
+    builder.enable_depth_bias(1.25f, 2.75f);
+    builder.set_depth_format(_shadowMapImage.imageFormat);
+    _shadowMaskPipeline.pipeline = builder.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, fragmentShader, nullptr);
+    vkDestroyShaderModule(_device, vertexShader, nullptr);
+
+    _mainDeletionQueue.push_function([this]() {
+        vkDestroyPipeline(_device, _shadowMaskPipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _shadowMaskPipeline.layout, nullptr);
+    });
+}
+
 void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
 {
     const auto startTime = std::chrono::steady_clock::now();
@@ -821,19 +1122,54 @@ void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
         vkCmdBindPipeline(
             cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadowPipeline.pipeline);
 
+        VkPipeline lastPipeline = _shadowPipeline.pipeline;
+        MaterialInstance* lastMaterial = nullptr;
         VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
         // portalViewDrawContext is the world plus the player's body, which is
         // what actually exists in the level.  The main camera's context is
         // not usable here: it also carries the portal quads, and it omits the
         // body the first-person camera sits inside.
-        // Transparent surfaces intentionally do not cast yet. Supporting
-        // foliage or grates requires a material-aware alpha-tested pass.
+        // Transparent surfaces intentionally do not cast yet: a blended
+        // surface has no single silhouette to cast.  Masked ones do, and they
+        // go through _shadowMaskPipeline so foliage and grates cast their
+        // cutout rather than the rectangle it is painted on.
         for (const RenderObject& renderObject :
                 portalViewDrawContext.OpaqueSurfaces) {
             // Cull against the light, never against the player's camera: an
             // object behind the camera can still drop a shadow into view.
             if (!is_visible(renderObject, _sunViewProjection)) {
                 continue;
+            }
+
+            const bool masked = renderObject.material != nullptr &&
+                renderObject.material->passType == MaterialPass::Mask &&
+                _shadowMaskPipeline.pipeline != VK_NULL_HANDLE;
+            const MaterialPipeline& active = masked
+                ? _shadowMaskPipeline
+                : _shadowPipeline;
+            if (active.pipeline != lastPipeline) {
+                lastPipeline = active.pipeline;
+                vkCmdBindPipeline(
+                    cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, active.pipeline);
+                // The opaque pipeline's layout declares no sets at all, so
+                // the two are compatible for nothing: whatever was bound for
+                // the mask pipeline does not survive a round trip through it.
+                lastMaterial = nullptr;
+            }
+            if (masked && renderObject.material != lastMaterial) {
+                lastMaterial = renderObject.material;
+                // Set 0 here, not 1.  This pipeline carries the material set
+                // alone, because the sun's camera is already folded into the
+                // push constant and nothing else about the scene is read.
+                vkCmdBindDescriptorSets(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    active.layout,
+                    0,
+                    1,
+                    &renderObject.material->materialSet,
+                    0,
+                    nullptr);
             }
 
             if (renderObject.indexBuffer != lastIndexBuffer) {
@@ -847,7 +1183,7 @@ void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
             pushConstants.vertexBuffer = renderObject.vertexBufferAddress;
             vkCmdPushConstants(
                 cmd,
-                _shadowPipeline.layout,
+                active.layout,
                 VK_SHADER_STAGE_VERTEX_BIT,
                 0,
                 sizeof(ShadowPushConstants),
@@ -1102,6 +1438,214 @@ void VulkanEngine::init_depth_normal_resources()
     });
 }
 
+void VulkanEngine::init_ssgi_resources()
+{
+    const auto requireFormat = [&](VkFormat format, VkFormatFeatureFlags required,
+                                   const char* label) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(_chosenGPU, format, &properties);
+        if ((properties.optimalTilingFeatures & required) != required) {
+            fmt::print("Required SSGI {} format is unsupported\n", label);
+            std::abort();
+        }
+    };
+    requireFormat(
+        VK_FORMAT_R8G8B8A8_UNORM,
+        VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT,
+        "albedo");
+    requireFormat(
+        VK_FORMAT_R8_UNORM,
+        VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT,
+        "portal mask");
+    requireFormat(
+        VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+            VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT,
+        "HDR/velocity");
+
+    const VkExtent3D extent = _drawImage.imageExtent;
+    _gbufferAlbedoImage = create_image(
+        extent, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    _gbufferVelocityImage = create_image(
+        extent, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    _directLightingImage = create_image(
+        extent, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    _portalMaskImage = create_image(
+        extent, VK_FORMAT_R8_UNORM,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    _ssgiRawImage = create_image(
+        extent, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    _ssgiDebugImage = create_image(
+        extent, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    _ssgiFallbackImage = create_image(
+        extent, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    for (AllocatedImage& history : _ssgiTemporalHistory) {
+        history = create_image(
+            extent, VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    }
+    for (AllocatedImage& history : _ssgiMetadataHistory) {
+        history = create_image(
+            extent, VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    }
+    _ssgiTemporalDiagnosticImage = create_image(
+        extent, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    _ssgiFilterScratchImage = create_image(
+        extent, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    _ssgiFilteredImage = create_image(
+        extent, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    _ssgiReferenceImage = create_image(
+        extent, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+
+    AllocatedBuffer referenceUpload{};
+    if (const char* referencePath = std::getenv("MIRABILIS_SSGI_REFERENCE")) {
+        std::ifstream file(referencePath, std::ios::binary);
+        std::string magic;
+        uint32_t width = 0, height = 0;
+        float scale = 0.0f;
+        file >> magic >> width >> height >> scale;
+        file.get();
+        if (!file || magic != "PF" || width != extent.width ||
+            height != extent.height || scale >= 0.0f) {
+            fmt::print("SSGI reference must be a matching little-endian RGB PFM: {}\n",
+                referencePath);
+            std::abort();
+        }
+        std::vector<uint64_t> packed(size_t(width) * height);
+        for (int y = int(height) - 1; y >= 0; --y) {
+            for (uint32_t x = 0; x < width; ++x) {
+                glm::vec3 rgb{};
+                file.read(reinterpret_cast<char*>(&rgb), 3 * sizeof(float));
+                const uint64_t rg = glm::packHalf2x16(glm::vec2(rgb));
+                const uint64_t ba = glm::packHalf2x16(glm::vec2(rgb.z, 1.0f));
+                packed[size_t(y) * width + x] = rg | (ba << 32u);
+            }
+        }
+        if (!file) std::abort();
+        referenceUpload = create_buffer(
+            packed.size() * sizeof(uint64_t), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        std::memcpy(referenceUpload.info.pMappedData, packed.data(),
+            packed.size() * sizeof(uint64_t));
+        _ssgiReferenceLoaded = true;
+        fmt::print("Loaded SSGI reference: {} ({}x{})\n",
+            referencePath, width, height);
+    }
+    for (AllocatedImage& history : _directLightingHistory) {
+        history = create_image(
+            extent, VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    }
+
+    // Give persistent descriptors valid layouts before their first frame.
+    // The history contents remain invalid until the first forward pass copies
+    // into one side of the pair.
+    immediate_submit([&](VkCommandBuffer cmd) {
+        const std::array<AllocatedImage*, 6> sampledImages{
+            &_gbufferAlbedoImage,
+            &_gbufferVelocityImage,
+            &_directLightingImage,
+            &_portalMaskImage,
+            &_directLightingHistory[0],
+            &_directLightingHistory[1]};
+        for (const AllocatedImage* image : sampledImages) {
+            vkutil::transition_image(
+                cmd, image->image, VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+        vkutil::transition_image(
+            cmd, _ssgiRawImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(
+            cmd, _ssgiDebugImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(
+            cmd, _ssgiFallbackImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL);
+        for (AllocatedImage& history : _ssgiTemporalHistory) {
+            vkutil::transition_image(
+                cmd, history.image, VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_GENERAL);
+        }
+        for (AllocatedImage& history : _ssgiMetadataHistory) {
+            vkutil::transition_image(
+                cmd, history.image, VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_GENERAL);
+        }
+        vkutil::transition_image(
+            cmd, _ssgiTemporalDiagnosticImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(
+            cmd, _ssgiFilterScratchImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(
+            cmd, _ssgiFilteredImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(cmd, _ssgiReferenceImage.image,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageSubresourceRange referenceRange{
+            VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        if (_ssgiReferenceLoaded) {
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            copy.imageExtent = extent;
+            vkCmdCopyBufferToImage(cmd, referenceUpload.buffer,
+                _ssgiReferenceImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1, &copy);
+        } else {
+            VkClearColorValue clear{};
+            vkCmdClearColorImage(cmd, _ssgiReferenceImage.image,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1,
+                &referenceRange);
+        }
+        vkutil::transition_image(cmd, _ssgiReferenceImage.image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+    if (_ssgiReferenceLoaded) {
+        destroy_buffer(referenceUpload);
+    }
+
+    _mainDeletionQueue.push_function([this]() {
+        destroy_image(_gbufferAlbedoImage);
+        destroy_image(_gbufferVelocityImage);
+        destroy_image(_directLightingImage);
+        destroy_image(_portalMaskImage);
+        destroy_image(_ssgiRawImage);
+        destroy_image(_ssgiDebugImage);
+        destroy_image(_ssgiFallbackImage);
+        for (const AllocatedImage& history : _ssgiTemporalHistory) {
+            destroy_image(history);
+        }
+        for (const AllocatedImage& history : _ssgiMetadataHistory) {
+            destroy_image(history);
+        }
+        destroy_image(_ssgiTemporalDiagnosticImage);
+        destroy_image(_ssgiFilterScratchImage);
+        destroy_image(_ssgiFilteredImage);
+        destroy_image(_ssgiReferenceImage);
+        for (const AllocatedImage& history : _directLightingHistory) {
+            destroy_image(history);
+        }
+    });
+}
+
 void VulkanEngine::init_depth_normal_pipeline()
 {
     VkShaderModule vertexShader = VK_NULL_HANDLE;
@@ -1159,6 +1703,65 @@ void VulkanEngine::init_depth_normal_pipeline()
     });
 }
 
+void VulkanEngine::init_depth_normal_mask_pipeline()
+{
+    VkShaderModule vertexShader = VK_NULL_HANDLE;
+    VkShaderModule fragmentShader = VK_NULL_HANDLE;
+    if (!vkutil::load_shader_module(
+            "../../shaders/depth_normal_mask.vert.spv", _device, &vertexShader) ||
+        !vkutil::load_shader_module(
+            "../../shaders/depth_normal_mask.frag.spv", _device, &fragmentShader)) {
+        fmt::print("Error loading alpha-tested prepass shaders\n");
+        if (vertexShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, vertexShader, nullptr);
+        }
+        if (fragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, fragmentShader, nullptr);
+        }
+        return;
+    }
+
+    // Scene data and the material, in the same order the forward pass uses
+    // them, so a material set written for that pass binds here unchanged.
+    VkDescriptorSetLayout layouts[] = {
+        _gpuSceneDataDescriptorLayout,
+        metalRoughMaterial.materialLayout};
+    VkPushConstantRange matrixRange{
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = sizeof(GPUDrawPushConstants)};
+    VkPipelineLayoutCreateInfo layoutInfo = vkinit::pipeline_layout_create_info();
+    layoutInfo.setLayoutCount = 2;
+    layoutInfo.pSetLayouts = layouts;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &matrixRange;
+    VK_CHECK(vkCreatePipelineLayout(
+        _device, &layoutInfo, nullptr, &_depthNormalMaskPipeline.layout));
+
+    PipelineBuilder builder;
+    builder._pipelineLayout = _depthNormalMaskPipeline.layout;
+    builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    // Matching the opaque prepass for the same reason it matches the main
+    // pass: occlusion computed here has to land on the shaded image's pixels.
+    builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    builder.set_multisampling_none();
+    builder.disable_blending();
+    builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    builder.set_color_attachment_format(_prepassNormalImage.imageFormat);
+    builder.set_depth_format(_prepassDepthImage.imageFormat);
+    _depthNormalMaskPipeline.pipeline = builder.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, fragmentShader, nullptr);
+    vkDestroyShaderModule(_device, vertexShader, nullptr);
+
+    _mainDeletionQueue.push_function([this]() {
+        vkDestroyPipeline(_device, _depthNormalMaskPipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _depthNormalMaskPipeline.layout, nullptr);
+    });
+}
+
 void VulkanEngine::init_render_debug_pipeline()
 {
     VkShaderModule vertexShader = VK_NULL_HANDLE;
@@ -1180,13 +1783,14 @@ void VulkanEngine::init_render_debug_pipeline()
     VkDescriptorSetLayout layouts[] = {
         _gpuSceneDataDescriptorLayout,
         _prepassImageDescriptorLayout,
-        _ssaoDebugDescriptorLayout};
+        _ssaoDebugDescriptorLayout,
+        _ssgiDebugDescriptorLayout};
     VkPushConstantRange settingsRange{
         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
         .size = sizeof(RenderDebugPushConstants)};
     VkPipelineLayoutCreateInfo layoutInfo = vkinit::pipeline_layout_create_info();
-    layoutInfo.setLayoutCount = 3;
+    layoutInfo.setLayoutCount = 4;
     layoutInfo.pSetLayouts = layouts;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &settingsRange;
@@ -1217,15 +1821,206 @@ void VulkanEngine::init_render_debug_pipeline()
     });
 }
 
+void VulkanEngine::init_ssgi_pipelines()
+{
+    VkShaderModule computeShader = VK_NULL_HANDLE;
+    VkShaderModule temporalShader = VK_NULL_HANDLE;
+    VkShaderModule filterShader = VK_NULL_HANDLE;
+    VkShaderModule compositeVertexShader = VK_NULL_HANDLE;
+    VkShaderModule compositeFragmentShader = VK_NULL_HANDLE;
+    VkShaderModule meshVertexShader = VK_NULL_HANDLE;
+    VkShaderModule maskFragmentShader = VK_NULL_HANDLE;
+    if (!vkutil::load_shader_module(
+            "../../shaders/ssgi.comp.spv", _device, &computeShader) ||
+        !vkutil::load_shader_module(
+            "../../shaders/ssgi_temporal.comp.spv", _device,
+            &temporalShader) ||
+        !vkutil::load_shader_module(
+            "../../shaders/ssgi_bilateral.comp.spv", _device, &filterShader) ||
+        !vkutil::load_shader_module(
+            "../../shaders/render_debug.vert.spv", _device,
+            &compositeVertexShader) ||
+        !vkutil::load_shader_module(
+            "../../shaders/ssgi_composite.frag.spv", _device,
+            &compositeFragmentShader) ||
+        !vkutil::load_shader_module(
+            "../../shaders/mesh.vert.spv", _device, &meshVertexShader) ||
+        !vkutil::load_shader_module(
+            "../../shaders/portal_mask_output.frag.spv", _device,
+            &maskFragmentShader)) {
+        fmt::print("Error loading SSGI shaders\n");
+        if (computeShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, computeShader, nullptr);
+        }
+        if (temporalShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, temporalShader, nullptr);
+        }
+        if (filterShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, filterShader, nullptr);
+        }
+        if (compositeVertexShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, compositeVertexShader, nullptr);
+        }
+        if (compositeFragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, compositeFragmentShader, nullptr);
+        }
+        if (meshVertexShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, meshVertexShader, nullptr);
+        }
+        if (maskFragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, maskFragmentShader, nullptr);
+        }
+        return;
+    }
+
+    const std::array<VkDescriptorSetLayout, 2> computeLayouts{
+        _gpuSceneDataDescriptorLayout, _ssgiDescriptorLayout};
+    VkPushConstantRange computeRange{
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .offset = 0,
+        .size = sizeof(SSGIPushConstants)};
+    VkPipelineLayoutCreateInfo computeLayoutInfo =
+        vkinit::pipeline_layout_create_info();
+    computeLayoutInfo.setLayoutCount =
+        static_cast<uint32_t>(computeLayouts.size());
+    computeLayoutInfo.pSetLayouts = computeLayouts.data();
+    computeLayoutInfo.pushConstantRangeCount = 1;
+    computeLayoutInfo.pPushConstantRanges = &computeRange;
+    VK_CHECK(vkCreatePipelineLayout(
+        _device, &computeLayoutInfo, nullptr, &_ssgiPipelineLayout));
+
+    VkComputePipelineCreateInfo computeInfo{
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    computeInfo.layout = _ssgiPipelineLayout;
+    computeInfo.stage = vkinit::pipeline_shader_stage_create_info(
+        VK_SHADER_STAGE_COMPUTE_BIT, computeShader);
+    VK_CHECK(vkCreateComputePipelines(
+        _device, VK_NULL_HANDLE, 1, &computeInfo, nullptr, &_ssgiPipeline));
+    computeInfo.stage = vkinit::pipeline_shader_stage_create_info(
+        VK_SHADER_STAGE_COMPUTE_BIT, temporalShader);
+    VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1,
+        &computeInfo, nullptr, &_ssgiTemporalPipeline));
+
+    VkPushConstantRange filterRange{
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .offset = 0,
+        .size = sizeof(SSGIFilterPushConstants)};
+    VkPipelineLayoutCreateInfo filterLayoutInfo =
+        vkinit::pipeline_layout_create_info();
+    filterLayoutInfo.setLayoutCount = 1;
+    filterLayoutInfo.pSetLayouts = &_ssgiFilterDescriptorLayout;
+    filterLayoutInfo.pushConstantRangeCount = 1;
+    filterLayoutInfo.pPushConstantRanges = &filterRange;
+    VK_CHECK(vkCreatePipelineLayout(_device, &filterLayoutInfo, nullptr,
+        &_ssgiFilterPipelineLayout));
+    computeInfo.layout = _ssgiFilterPipelineLayout;
+    computeInfo.stage = vkinit::pipeline_shader_stage_create_info(
+        VK_SHADER_STAGE_COMPUTE_BIT, filterShader);
+    VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1,
+        &computeInfo, nullptr, &_ssgiFilterPipeline));
+
+    VkPushConstantRange compositeRange{
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset = 0,
+        .size = sizeof(SSGICompositePushConstants)};
+    VkPipelineLayoutCreateInfo compositeLayoutInfo =
+        vkinit::pipeline_layout_create_info();
+    compositeLayoutInfo.setLayoutCount = 1;
+    compositeLayoutInfo.pSetLayouts = &_ssgiCompositeDescriptorLayout;
+    compositeLayoutInfo.pushConstantRangeCount = 1;
+    compositeLayoutInfo.pPushConstantRanges = &compositeRange;
+    VK_CHECK(vkCreatePipelineLayout(_device, &compositeLayoutInfo, nullptr,
+        &_ssgiCompositePipeline.layout));
+    PipelineBuilder compositeBuilder;
+    compositeBuilder._pipelineLayout = _ssgiCompositePipeline.layout;
+    compositeBuilder.set_shaders(
+        compositeVertexShader, compositeFragmentShader);
+    compositeBuilder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    compositeBuilder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    compositeBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    compositeBuilder.set_multisampling_none();
+    compositeBuilder.enable_blending_additive();
+    compositeBuilder.disable_depthtest();
+    compositeBuilder.set_color_attachment_format(_drawImage.imageFormat);
+    compositeBuilder.set_depth_format(VK_FORMAT_UNDEFINED);
+    _ssgiCompositePipeline.pipeline =
+        compositeBuilder.build_pipeline(_device);
+
+    const std::array<VkDescriptorSetLayout, 2> maskLayouts{
+        _gpuSceneDataDescriptorLayout, metalRoughMaterial.materialLayout};
+    VkPushConstantRange maskRange{
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = sizeof(GPUDrawPushConstants)};
+    VkPipelineLayoutCreateInfo maskLayoutInfo =
+        vkinit::pipeline_layout_create_info();
+    maskLayoutInfo.setLayoutCount = static_cast<uint32_t>(maskLayouts.size());
+    maskLayoutInfo.pSetLayouts = maskLayouts.data();
+    maskLayoutInfo.pushConstantRangeCount = 1;
+    maskLayoutInfo.pPushConstantRanges = &maskRange;
+    VK_CHECK(vkCreatePipelineLayout(
+        _device, &maskLayoutInfo, nullptr, &_ssgiPortalMaskPipeline.layout));
+
+    PipelineBuilder builder;
+    builder._pipelineLayout = _ssgiPortalMaskPipeline.layout;
+    builder.set_shaders(meshVertexShader, maskFragmentShader);
+    builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    builder.set_multisampling_none();
+    builder.disable_blending();
+    builder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    builder.set_color_attachment_format(_portalMaskImage.imageFormat);
+    builder.set_depth_format(_depthImage.imageFormat);
+    builder.set_stencil_format(_depthImage.imageFormat);
+    _ssgiPortalMaskPipeline.pipeline = builder.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, maskFragmentShader, nullptr);
+    vkDestroyShaderModule(_device, meshVertexShader, nullptr);
+    vkDestroyShaderModule(_device, computeShader, nullptr);
+    vkDestroyShaderModule(_device, temporalShader, nullptr);
+    vkDestroyShaderModule(_device, filterShader, nullptr);
+    vkDestroyShaderModule(_device, compositeFragmentShader, nullptr);
+    vkDestroyShaderModule(_device, compositeVertexShader, nullptr);
+
+    _mainDeletionQueue.push_function([this]() {
+        vkDestroyPipeline(_device, _ssgiPipeline, nullptr);
+        vkDestroyPipeline(_device, _ssgiTemporalPipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _ssgiPipelineLayout, nullptr);
+        vkDestroyPipeline(_device, _ssgiFilterPipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _ssgiFilterPipelineLayout, nullptr);
+        vkDestroyPipeline(_device, _ssgiCompositePipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(
+            _device, _ssgiCompositePipeline.layout, nullptr);
+        vkDestroyPipeline(_device, _ssgiPortalMaskPipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(
+            _device, _ssgiPortalMaskPipeline.layout, nullptr);
+    });
+}
+
 void VulkanEngine::init_post_process_resources()
 {
     // A filter cannot read and write one image in the same pass, so the
     // composed frame is read from _drawImage and resolved into this one.  It
     // matches the draw image exactly, including being allocated at window size
     // and only partly used when the resolution scale is below 1.
+    // Both post-process targets carry the swapchain's format rather than the
+    // draw image's.  By the time the frame reaches them the tonemap has
+    // already reduced it to display range, so the extra twelve bits per pixel
+    // of the HDR format would store nothing, and matching the swapchain lets
+    // the final blit copy rather than convert.
     _postProcessImage = create_image(
         _drawImage.imageExtent,
-        _drawImage.imageFormat,
+        _swapchainImageFormat,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+
+    // The tonemap's own target.  It is separate from _postProcessImage for
+    // the same reason that one is separate from _drawImage: anti-aliasing
+    // reads this and writes that, and no pass may do both to one image.
+    _tonemapImage = create_image(
+        _drawImage.imageExtent,
+        _swapchainImageFormat,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
 
@@ -1245,7 +2040,63 @@ void VulkanEngine::init_post_process_resources()
 
     _mainDeletionQueue.push_function([this]() {
         vkDestroySampler(_device, _postProcessSampler, nullptr);
+        destroy_image(_tonemapImage);
         destroy_image(_postProcessImage);
+    });
+}
+
+void VulkanEngine::init_tonemap_pipeline()
+{
+    VkShaderModule vertexShader = VK_NULL_HANDLE;
+    VkShaderModule fragmentShader = VK_NULL_HANDLE;
+    // The same fullscreen triangle the anti-aliasing pass uses.  It binds
+    // nothing and interpolates nothing, so there is no reason for a second
+    // copy of it.
+    if (!vkutil::load_shader_module(
+            "../../shaders/fxaa.vert.spv", _device, &vertexShader) ||
+        !vkutil::load_shader_module(
+            "../../shaders/tonemap.frag.spv", _device, &fragmentShader)) {
+        fmt::print("Error loading tonemap shaders\n");
+        if (vertexShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, vertexShader, nullptr);
+        }
+        if (fragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, fragmentShader, nullptr);
+        }
+        return;
+    }
+
+    VkPushConstantRange settingsRange{
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset = 0,
+        .size = sizeof(TonemapPushConstants)};
+    VkPipelineLayoutCreateInfo layoutInfo = vkinit::pipeline_layout_create_info();
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &_singleImageDescriptorLayout;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &settingsRange;
+    VK_CHECK(vkCreatePipelineLayout(
+        _device, &layoutInfo, nullptr, &_tonemapPipeline.layout));
+
+    PipelineBuilder builder;
+    builder._pipelineLayout = _tonemapPipeline.layout;
+    builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    builder.set_multisampling_none();
+    builder.disable_blending();
+    builder.disable_depthtest();
+    builder.set_color_attachment_format(_tonemapImage.imageFormat);
+    builder.set_depth_format(VK_FORMAT_UNDEFINED);
+    _tonemapPipeline.pipeline = builder.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, fragmentShader, nullptr);
+    vkDestroyShaderModule(_device, vertexShader, nullptr);
+
+    _mainDeletionQueue.push_function([this]() {
+        vkDestroyPipeline(_device, _tonemapPipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _tonemapPipeline.layout, nullptr);
     });
 }
 
@@ -1359,6 +2210,9 @@ void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
     vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
 
     if (_depthNormalPipeline.pipeline != VK_NULL_HANDLE) {
+        // Both prepass layouts declare the scene set at index 0 with the same
+        // push constant range, which makes them compatible for that set: it
+        // survives a switch between the two pipelines and is bound once.
         vkCmdBindPipeline(
             cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _depthNormalPipeline.pipeline);
         vkCmdBindDescriptorSets(
@@ -1371,14 +2225,43 @@ void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
             0,
             nullptr);
 
+        VkPipeline lastPipeline = _depthNormalPipeline.pipeline;
+        MaterialInstance* lastMaterial = nullptr;
         VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
         // mainDrawContext and the main camera's frustum test, because these
         // buffers must describe the image the player is actually looking at.
         // Transparent surfaces are left out for now: one depth and one normal
-        // per pixel cannot describe a surface seen through another.
+        // per pixel cannot describe a surface seen through another.  Masked
+        // surfaces are not in that category - they are opaque wherever they
+        // draw at all - so they belong here, drawn through a pipeline that
+        // runs their cutoff test.
         for (const RenderObject& renderObject : mainDrawContext.OpaqueSurfaces) {
             if (!is_visible(renderObject, sceneData.viewproj)) {
                 continue;
+            }
+
+            const bool masked = renderObject.material != nullptr &&
+                renderObject.material->passType == MaterialPass::Mask &&
+                _depthNormalMaskPipeline.pipeline != VK_NULL_HANDLE;
+            const MaterialPipeline& active = masked
+                ? _depthNormalMaskPipeline
+                : _depthNormalPipeline;
+            if (active.pipeline != lastPipeline) {
+                lastPipeline = active.pipeline;
+                vkCmdBindPipeline(
+                    cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, active.pipeline);
+            }
+            if (masked && renderObject.material != lastMaterial) {
+                lastMaterial = renderObject.material;
+                vkCmdBindDescriptorSets(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    active.layout,
+                    1,
+                    1,
+                    &renderObject.material->materialSet,
+                    0,
+                    nullptr);
             }
 
             if (renderObject.indexBuffer != lastIndexBuffer) {
@@ -1392,7 +2275,7 @@ void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
             pushConstants.vertexBuffer = renderObject.vertexBufferAddress;
             vkCmdPushConstants(
                 cmd,
-                _depthNormalPipeline.layout,
+                active.layout,
                 VK_SHADER_STAGE_VERTEX_BIT,
                 0,
                 sizeof(GPUDrawPushConstants),
@@ -1452,10 +2335,11 @@ void VulkanEngine::draw_render_debug(VkCommandBuffer cmd)
 
     vkCmdBindPipeline(
         cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _renderDebugPipeline.pipeline);
-    const std::array<VkDescriptorSet, 3> sets{
+    const std::array<VkDescriptorSet, 4> sets{
         get_current_frame().sceneDescriptor,
         _prepassImageDescriptor,
-        _ssaoDebugDescriptor};
+        _ssaoDebugDescriptor,
+        _ssgiDebugDescriptors[1u - _ssgiHistoryWriteIndex]};
     vkCmdBindDescriptorSets(
         cmd,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1485,16 +2369,373 @@ void VulkanEngine::draw_render_debug(VkCommandBuffer cmd)
     vkCmdEndRendering(cmd);
 }
 
-void VulkanEngine::draw_fxaa(VkCommandBuffer cmd)
+void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
 {
-    // The scene image becomes a texture, and the pass writes its result into
-    // the second colour image beside it.  Reading and writing one image within
-    // a single draw has no defined result, which is why the pair exists.
+    // The forward MRT outputs become read-only inputs for both SSGI and the
+    // debug views. Direct lighting is copied into a ping-pong history so the
+    // march never samples an image being rendered this frame.
+    vkutil::transition_image(
+        cmd, _gbufferAlbedoImage.image,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vkutil::transition_image(
+        cmd, _gbufferVelocityImage.image,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vkutil::transition_image(
+        cmd, _directLightingImage.image,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+    const VkExtent2D ssgiExtent = active_ssgi_extent();
+    if (_ssgiHistoryExtent.width != ssgiExtent.width ||
+        _ssgiHistoryExtent.height != ssgiExtent.height) {
+        _ssgiHistoryValid = false;
+        _ssgiHistoryExtent = ssgiExtent;
+    }
+
+    const uint32_t writeIndex = _ssgiHistoryWriteIndex;
+    const uint32_t readIndex = 1u - writeIndex;
+    vkutil::transition_image(
+        cmd, _directLightingHistory[writeIndex].image,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    vkutil::copy_image_to_image(
+        cmd,
+        _directLightingImage.image,
+        _directLightingHistory[writeIndex].image,
+        _drawExtent,
+        _drawExtent);
+    vkutil::transition_image(
+        cmd, _directLightingHistory[writeIndex].image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vkutil::transition_image(
+        cmd, _directLightingImage.image,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    const bool debugRequestsSSGI =
+        _renderDebugView == RenderDebugView::SSGIRaw ||
+        _renderDebugView == RenderDebugView::SSGIHitMiss ||
+        _renderDebugView == RenderDebugView::SSGISteps ||
+        _renderDebugView == RenderDebugView::SSGITemporal ||
+        _renderDebugView == RenderDebugView::SSGIHistoryRejection ||
+        _renderDebugView == RenderDebugView::SSGIReprojection ||
+        _renderDebugView == RenderDebugView::SSGIFiltered ||
+        _renderDebugView == RenderDebugView::SSGIFallback ||
+        _renderDebugView == RenderDebugView::SSGIReferenceDifference;
+    const bool runSSGI = (_ssgiEnabled || debugRequestsSSGI) &&
+        _ssgiPipeline != VK_NULL_HANDLE &&
+        _ssgiTemporalPipeline != VK_NULL_HANDLE;
+    if (runSSGI) {
+        const uint32_t timingBase =
+            (_frameNumber % FRAME_OVERLAP) * SSGITimestampsPerFrame;
+        if (_gpuTimingSupported) {
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                _ssgiTimestampPool, timingBase + 0);
+        }
+        // Same-layout barriers make the preceding frame's fragment reads and
+        // this dispatch's writes explicit without changing descriptor state.
+        vkutil::transition_image(
+            cmd, _ssgiRawImage.image, VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(
+            cmd, _ssgiDebugImage.image, VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(
+            cmd, _ssgiFallbackImage.image, VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_GENERAL);
+
+        vkutil::transition_image(
+            cmd, _ssgiTemporalHistory[writeIndex].image,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(
+            cmd, _ssgiMetadataHistory[writeIndex].image,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(
+            cmd, _ssgiTemporalDiagnosticImage.image,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+
+        vkCmdBindPipeline(
+            cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgiPipeline);
+        const std::array<VkDescriptorSet, 2> sets{
+            get_current_frame().sceneDescriptor,
+            _ssgiDescriptors[writeIndex]};
+        vkCmdBindDescriptorSets(
+            cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgiPipelineLayout,
+            0, static_cast<uint32_t>(sets.size()), sets.data(), 0, nullptr);
+        SSGIPushConstants pushConstants{};
+        pushConstants.control = glm::uvec4(
+            ssgiExtent.width,
+            ssgiExtent.height,
+            _ssgiHistoryValid ? 1u : 0u,
+            static_cast<uint32_t>(_frameNumber));
+        pushConstants.settings = glm::vec4(
+            _ssgiRayLength,
+            _ssgiThickness,
+            _ssgiStartOffset,
+            static_cast<float>(_ssgiStepCount));
+        pushConstants.temporal = glm::vec4(
+            _ssgiHistoryWeight,
+            _ssgiDepthRejection,
+            _ssgiNormalRejection,
+            _ssgiVelocityRejection);
+        pushConstants.quality = glm::uvec4(
+            static_cast<uint32_t>(std::clamp(_ssgiRaysPerPixel, 1, 8)),
+            0u, 0u, 0u);
+        vkCmdPushConstants(
+            cmd, _ssgiPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+            0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(
+            cmd,
+            (ssgiExtent.width + 7u) / 8u,
+            (ssgiExtent.height + 7u) / 8u,
+            1);
+        if (_gpuTimingSupported) {
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                _ssgiTimestampPool, timingBase + 1);
+        }
+        vkutil::transition_image(
+            cmd, _ssgiRawImage.image, VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(
+            cmd, _ssgiDebugImage.image, VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(
+            cmd, _ssgiFallbackImage.image, VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_GENERAL);
+
+        // Temporal accumulation is a separate dispatch so every invocation
+        // sees the complete current-frame raw image. This makes the 3x3
+        // neighborhood clamp deterministic across workgroups.
+        vkCmdBindPipeline(
+            cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgiTemporalPipeline);
+        vkCmdBindDescriptorSets(
+            cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgiPipelineLayout,
+            0, static_cast<uint32_t>(sets.size()), sets.data(), 0, nullptr);
+        vkCmdPushConstants(
+            cmd, _ssgiPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+            0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(
+            cmd,
+            (ssgiExtent.width + 7u) / 8u,
+            (ssgiExtent.height + 7u) / 8u,
+            1);
+        if (_gpuTimingSupported) {
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                _ssgiTimestampPool, timingBase + 2);
+        }
+        vkutil::transition_image(
+            cmd, _ssgiTemporalHistory[writeIndex].image,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(
+            cmd, _ssgiMetadataHistory[writeIndex].image,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(
+            cmd, _ssgiTemporalDiagnosticImage.image,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+
+        if (_ssgiFilterPipeline != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(
+                cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgiFilterPipeline);
+            SSGIFilterPushConstants filterPush{};
+            filterPush.settings = glm::vec4(
+                static_cast<float>(_ssgiFilterRadius),
+                _ssgiFilterDepthFalloff,
+                _ssgiFilterNormalPower,
+                _ssgiSpatialFilterEnabled ? 1.0f : 0.0f);
+            const uint32_t groupX = (ssgiExtent.width + 7u) / 8u;
+            const uint32_t groupY = (ssgiExtent.height + 7u) / 8u;
+            filterPush.control = glm::ivec4(
+                static_cast<int>(ssgiExtent.width),
+                static_cast<int>(ssgiExtent.height), 1, 0);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                _ssgiFilterPipelineLayout, 0, 1,
+                &_ssgiFilterDescriptors[writeIndex], 0, nullptr);
+            vkCmdPushConstants(cmd, _ssgiFilterPipelineLayout,
+                VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(filterPush), &filterPush);
+            vkCmdDispatch(cmd, groupX, groupY, 1);
+            vkutil::transition_image(cmd, _ssgiFilterScratchImage.image,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+
+            filterPush.control.z = 0;
+            filterPush.control.w = 1;
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                _ssgiFilterPipelineLayout, 0, 1,
+                &_ssgiFilterDescriptors[2], 0, nullptr);
+            vkCmdPushConstants(cmd, _ssgiFilterPipelineLayout,
+                VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(filterPush), &filterPush);
+            vkCmdDispatch(cmd, groupX, groupY, 1);
+            vkutil::transition_image(cmd, _ssgiFilteredImage.image,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+        }
+        if (_gpuTimingSupported) {
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                _ssgiTimestampPool, timingBase + 3);
+        }
+
+        _ssgiHistoryValid = true;
+        _ssgiHistoryWriteIndex = readIndex;
+    } else {
+        // Enabling the effect later must not blend history from before it was
+        // disabled, when neither geometry nor camera continuity was tracked.
+        _ssgiHistoryValid = false;
+    }
+}
+
+void VulkanEngine::draw_ssgi_composite(VkCommandBuffer cmd)
+{
+    if (!_ssgiEnabled || _ssgiCompositePipeline.pipeline == VK_NULL_HANDLE) {
+        return;
+    }
+
+    VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
+        _drawImage.imageView, nullptr,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingInfo renderInfo = vkinit::rendering_info(
+        _drawExtent, &colorAttachment, nullptr);
+    vkCmdBeginRendering(cmd, &renderInfo);
+
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(_drawExtent.width);
+    viewport.height = static_cast<float>(_drawExtent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    VkRect2D scissor{};
+    scissor.extent = _drawExtent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+    vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
+    vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+        _ssgiCompositePipeline.pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+        _ssgiCompositePipeline.layout, 0, 1,
+        &_ssgiCompositeDescriptors[1u - _ssgiHistoryWriteIndex], 0, nullptr);
+    SSGICompositePushConstants push{};
+    const VkExtent2D ssgiExtent = active_ssgi_extent();
+    push.extents = glm::vec4(
+        static_cast<float>(_drawExtent.width),
+        static_cast<float>(_drawExtent.height),
+        static_cast<float>(ssgiExtent.width),
+        static_cast<float>(ssgiExtent.height));
+    push.settings = glm::vec4(
+        _ssgiIntensity, _ssgiHalfResolution ? 1.0f : 0.0f, 0.0f, 0.0f);
+    vkCmdPushConstants(cmd, _ssgiCompositePipeline.layout,
+        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRendering(cmd);
+    if (_gpuTimingSupported) {
+        const uint32_t timingBase =
+            (_frameNumber % FRAME_OVERLAP) * SSGITimestampsPerFrame;
+        vkCmdWriteTimestamp2(cmd,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            _ssgiTimestampPool, timingBase + 4);
+        _ssgiTimingWritten[_frameNumber % FRAME_OVERLAP] = true;
+    }
+}
+
+VkExtent2D VulkanEngine::active_ssgi_extent() const
+{
+    if (!_ssgiHalfResolution) {
+        return _drawExtent;
+    }
+    return VkExtent2D{
+        std::max(1u, (_drawExtent.width + 1u) / 2u),
+        std::max(1u, (_drawExtent.height + 1u) / 2u)};
+}
+
+void VulkanEngine::draw_tonemap(VkCommandBuffer cmd)
+{
+    // The composed linear frame becomes a texture and the pass resolves it
+    // into the display-range image beside it.  Everything downstream of here
+    // - anti-aliasing, the blit, ImGui - works in that range.
     vkutil::transition_image(
         cmd,
         _drawImage.image,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vkutil::transition_image(
+        cmd,
+        _tonemapImage.image,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
+    VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
+        _tonemapImage.imageView,
+        nullptr,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingInfo renderInfo = vkinit::rendering_info(
+        _drawExtent, &colorAttachment, nullptr);
+    vkCmdBeginRendering(cmd, &renderInfo);
+
+    // _drawExtent rather than the allocation, for the same reason the
+    // anti-aliasing pass uses it: below a resolution scale of 1 the rest of
+    // the image holds nothing this frame produced.
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(_drawExtent.width);
+    viewport.height = static_cast<float>(_drawExtent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.extent = _drawExtent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    // No stencil attachment here either, but the shared builder makes stencil
+    // state dynamic on every pipeline it produces.
+    vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+    vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
+    vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
+
+    vkCmdBindPipeline(
+        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _tonemapPipeline.pipeline);
+    vkCmdBindDescriptorSets(
+        cmd,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        _tonemapPipeline.layout,
+        0,
+        1,
+        &_tonemapInputDescriptor,
+        0,
+        nullptr);
+
+    TonemapPushConstants pushConstants{};
+    pushConstants.settings = glm::vec4(
+        _tonemapExposure,
+        _tonemapOperator == 1 ? 1.0f : 0.0f,
+        _tonemapBypassCurve ? 1.0f : 0.0f,
+        0.0f);
+    vkCmdPushConstants(
+        cmd,
+        _tonemapPipeline.layout,
+        VK_SHADER_STAGE_FRAGMENT_BIT,
+        0,
+        sizeof(TonemapPushConstants),
+        &pushConstants);
+
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+
+    vkCmdEndRendering(cmd);
+
+    // Left readable rather than transfer-ready: anti-aliasing may still want
+    // it as a texture.  draw() transitions it for the blit if it does not.
+    vkutil::transition_image(
+        cmd,
+        _tonemapImage.image,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
+
+void VulkanEngine::draw_fxaa(VkCommandBuffer cmd)
+{
+    // Its source is the tonemap's output, which that pass already left in a
+    // readable layout, so only the target needs transitioning here.  Reading
+    // and writing one image within a single draw has no defined result, which
+    // is why the pair exists.
     vkutil::transition_image(
         cmd,
         _postProcessImage.image,
@@ -2087,10 +3328,14 @@ void VulkanEngine::init_gpu_timestamps()
     poolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
     poolInfo.queryCount = FRAME_OVERLAP * TimestampsPerFrame;
     VK_CHECK(vkCreateQueryPool(_device, &poolInfo, nullptr, &_timestampPool));
+    poolInfo.queryCount = FRAME_OVERLAP * SSGITimestampsPerFrame;
+    VK_CHECK(vkCreateQueryPool(
+        _device, &poolInfo, nullptr, &_ssgiTimestampPool));
     _gpuTimingSupported = true;
 
     _mainDeletionQueue.push_function([this]() {
         vkDestroyQueryPool(_device, _timestampPool, nullptr);
+        vkDestroyQueryPool(_device, _ssgiTimestampPool, nullptr);
     });
 }
 
@@ -2098,10 +3343,11 @@ void VulkanEngine::read_gpu_timestamps(uint32_t frameIndex)
 {
     // Called only after this frame slot's fence has been waited on, so the
     // results being read belong to a submission that has certainly finished.
-    if (!_gpuTimingSupported || !_timestampsPending[frameIndex]) {
+    if (!_gpuTimingSupported) {
         return;
     }
-    _timestampsPending[frameIndex] = false;
+    if (_timestampsPending[frameIndex]) {
+        _timestampsPending[frameIndex] = false;
 
     std::array<uint64_t, TimestampsPerFrame> ticks{};
     const VkResult result = vkGetQueryPoolResults(
@@ -2127,4 +3373,27 @@ void VulkanEngine::read_gpu_timestamps(uint32_t frameIndex)
     stats.ssao_blur_vertical_time = toMilliseconds(ticks[2], ticks[3]);
     stats.ssao_total_time = toMilliseconds(ticks[0], ticks[3]);
     stats.ssao_time_is_gpu = true;
+    }
+
+    if (_ssgiTimingWritten[frameIndex]) {
+        _ssgiTimingWritten[frameIndex] = false;
+        std::array<uint64_t, SSGITimestampsPerFrame> ssgiTicks{};
+        const VkResult ssgiResult = vkGetQueryPoolResults(
+            _device, _ssgiTimestampPool,
+            frameIndex * SSGITimestampsPerFrame,
+            SSGITimestampsPerFrame, sizeof(ssgiTicks), ssgiTicks.data(),
+            sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+        if (ssgiResult == VK_SUCCESS) {
+            const auto milliseconds = [&](uint64_t from, uint64_t to) {
+                return static_cast<float>(to - from) *
+                    _timestampPeriod * 1e-6f;
+            };
+            stats.ssgi_raw_time = milliseconds(ssgiTicks[0], ssgiTicks[1]);
+            stats.ssgi_temporal_time = milliseconds(ssgiTicks[1], ssgiTicks[2]);
+            stats.ssgi_filter_time = milliseconds(ssgiTicks[2], ssgiTicks[3]);
+            stats.ssgi_composite_time = milliseconds(ssgiTicks[3], ssgiTicks[4]);
+            stats.ssgi_total_time = milliseconds(ssgiTicks[0], ssgiTicks[4]);
+            stats.ssgi_time_is_gpu = true;
+        }
+    }
 }

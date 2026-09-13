@@ -35,9 +35,17 @@
 /build/
 /bin/
 /assets/brickadia/
+/assets/sponza/
 /shaders/*.spv
 /.vs/
 __pycache__/
 
+# Generated Python cache files
+__pycache__/
+*.py[cod]
+
 # Local Gradle caches
 .gradle/
+
+# Local software-tracing checkpoints, logs and GPU captures
+/tmp/gi-checkpoints/

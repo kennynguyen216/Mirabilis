@@ -92,6 +92,10 @@ struct SceneMaterial {
     glm::vec2 uvScale{1.0f};
     float metallic{0.0f};
     float roughness{0.8f};
+    glm::vec3 emissionColor{0};
+    float emissionStrength{0};
+    float transmission{0};
+    float ior{1.5f};
 };
 
 struct SceneObject {

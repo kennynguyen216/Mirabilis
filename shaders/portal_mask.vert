@@ -11,6 +11,8 @@ layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec4 outColor;
 layout(location = 2) out vec2 outUV;
 layout(location = 3) out vec3 outWorldPosition;
+layout(location = 4) out vec4 outCurrentClip;
+layout(location = 5) out vec4 outPreviousClip;
 
 struct Vertex {
     vec3 position;
@@ -37,6 +39,8 @@ void main()
 
     // The engine uses reversed depth (near = 1, far = 0).
     gl_Position.z = 0.0;
+    outCurrentClip = gl_Position;
+    outPreviousClip = gl_Position;
     outWorldPosition = vec3(PushConstants.render_matrix *
         vec4(vertex.position, 1.0));
     outNormal = vec3(0.0, 1.0, 0.0);

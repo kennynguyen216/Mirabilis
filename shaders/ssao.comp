@@ -63,10 +63,16 @@ void main()
     vec3 normal = normalize(rawNormal);
     vec3 viewPosition = view_position_from_depth(screenUV, depth);
 
-    // The noise tiles across the occlusion grid rather than the window,
-    // because this pass runs at half resolution.
-    vec2 rotation = normalize(texelFetch(rotationNoise,
-        pixel % textureSize(rotationNoise, 0), 0).xy * 2.0 - 1.0);
+    // Generate a decorrelated rotation for every AO pixel. The old 16x16
+    // texture repeated often enough that its pattern survived the bilateral
+    // blur as visible vertical columns on large, flat walls. Interleaved
+    // gradient noise has no short tile boundary for the eye to pick out.
+    vec2 pixelCenter = vec2(pixel) + 0.5;
+    float randomUnit = fract(
+        52.9829189 * fract(dot(pixelCenter, vec2(0.06711056, 0.00583715))));
+    float randomAngle = randomUnit * 6.28318530718;
+    vec2 rotation = vec2(cos(randomAngle), sin(randomAngle));
+
     // Rotate within a stable tangent plane. Projecting XY noise onto a wall
     // normal collapses many different angles to the same tangent direction.
     vec3 axis = abs(normal.z) < 0.9 ? vec3(0, 0, 1) : vec3(0, 1, 0);

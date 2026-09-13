@@ -1,0 +1,133 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "scene_data.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(rgba16f, set = 1, binding = 0) readonly uniform image2D rawIndirectImage;
+layout(set = 1, binding = 2) uniform sampler2D prepassDepth;
+layout(set = 1, binding = 3) uniform sampler2D prepassNormal;
+layout(set = 1, binding = 6) uniform sampler2D portalMask;
+layout(set = 1, binding = 8) uniform sampler2D gbufferVelocity;
+layout(rgba16f, set = 1, binding = 9) writeonly uniform image2D temporalIndirectImage;
+layout(rgba16f, set = 1, binding = 10) writeonly uniform image2D temporalDiagnosticImage;
+layout(set = 1, binding = 11) uniform sampler2D previousTemporalIndirect;
+layout(set = 1, binding = 12) uniform sampler2D previousMetadata;
+layout(rgba16f, set = 1, binding = 13) writeonly uniform image2D currentMetadata;
+
+layout(push_constant) uniform constants {
+    uvec4 control;
+    vec4 settings;
+    vec4 temporal;
+    uvec4 quality;
+} PushConstants;
+
+vec2 allocation_uv(vec2 screenUV, sampler2D source)
+{
+    vec2 allocation = vec2(textureSize(source, 0));
+    vec2 liveFraction = vec2(PushConstants.control.xy) / allocation;
+    return clamp(screenUV * liveFraction, vec2(0.5) / allocation,
+        liveFraction - vec2(0.5) / allocation);
+}
+
+vec2 encode_octahedron(vec3 n)
+{
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    vec2 encoded = n.xy;
+    if (n.z < 0.0) encoded = (1.0 - abs(encoded.yx)) * sign(encoded.xy);
+    return encoded * 0.5 + 0.5;
+}
+
+vec3 decode_octahedron(vec2 encoded)
+{
+    vec2 f = encoded * 2.0 - 1.0;
+    vec3 n = vec3(f, 1.0 - abs(f.x) - abs(f.y));
+    if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * sign(n.xy);
+    return normalize(n);
+}
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 extent = ivec2(PushConstants.control.xy);
+    if (any(greaterThanEqual(pixel, extent))) return;
+
+    vec2 screenUV = (vec2(pixel) + 0.5) / vec2(extent);
+    float depth = texture(prepassDepth,
+        allocation_uv(screenUV, prepassDepth)).r;
+    if (depth <= 1e-6) {
+        imageStore(temporalIndirectImage, pixel, vec4(0.0));
+        imageStore(temporalDiagnosticImage, pixel,
+            vec4(0.25, 0.0, 0.0, 1.0));
+        imageStore(currentMetadata, pixel, vec4(0.0));
+        return;
+    }
+
+    vec3 current = imageLoad(rawIndirectImage, pixel).rgb;
+    vec3 normal = normalize(texture(prepassNormal,
+        allocation_uv(screenUV, prepassNormal)).xyz);
+    vec2 velocity = texture(gbufferVelocity,
+        allocation_uv(screenUV, gbufferVelocity)).xy;
+    vec2 previousUV = screenUV + velocity;
+    float currentPortal = texture(portalMask,
+        allocation_uv(screenUV, portalMask)).r;
+    float rejection = 0.0;
+    bool accepted = PushConstants.control.z != 0u;
+    if (!accepted || any(lessThan(previousUV, vec2(0.0))) ||
+        any(greaterThanEqual(previousUV, vec2(1.0)))) {
+        accepted = false;
+        rejection = 0.25;
+    }
+
+    vec4 priorMetadata = vec4(0.0);
+    if (accepted) {
+        priorMetadata = texture(previousMetadata,
+            allocation_uv(previousUV, previousMetadata));
+        vec4 worldPosition = sceneData.inverseViewProjection *
+            vec4(screenUV * 2.0 - 1.0, depth, 1.0);
+        worldPosition /= worldPosition.w;
+        vec4 previousClip = sceneData.previousViewProjection * worldPosition;
+        float expectedDepth = previousClip.z / max(previousClip.w, 0.00001);
+        if (abs(priorMetadata.r - expectedDepth) > PushConstants.temporal.y) {
+            accepted = false;
+            rejection = 0.50;
+        }
+    }
+    if (accepted && dot(normal, decode_octahedron(priorMetadata.gb)) <
+        PushConstants.temporal.z) {
+        accepted = false;
+        rejection = 0.75;
+    }
+    if (accepted && (abs(priorMetadata.a - currentPortal) > 0.5 ||
+        length(velocity) > PushConstants.temporal.w)) {
+        accepted = false;
+        rejection = 1.0;
+    }
+
+    vec3 result = current;
+    if (accepted) {
+        vec3 neighborhoodMin = vec3(1e20);
+        vec3 neighborhoodMax = vec3(-1e20);
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                ivec2 q = clamp(pixel + ivec2(x, y), ivec2(0), extent - 1);
+                vec3 sampleValue = imageLoad(rawIndirectImage, q).rgb;
+                neighborhoodMin = min(neighborhoodMin, sampleValue);
+                neighborhoodMax = max(neighborhoodMax, sampleValue);
+            }
+        }
+        vec3 history = texture(previousTemporalIndirect,
+            allocation_uv(previousUV, previousTemporalIndirect)).rgb;
+        history = clamp(history, neighborhoodMin, neighborhoodMax);
+        result = mix(current, history,
+            clamp(PushConstants.temporal.x, 0.0, 0.99));
+    }
+
+    imageStore(temporalIndirectImage, pixel, vec4(result, 1.0));
+    imageStore(temporalDiagnosticImage, pixel, vec4(
+        rejection, min(length(velocity) * 20.0, 1.0),
+        accepted ? 1.0 : 0.0, 1.0));
+    imageStore(currentMetadata, pixel,
+        vec4(depth, encode_octahedron(normal), currentPortal));
+}

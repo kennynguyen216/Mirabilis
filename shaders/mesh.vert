@@ -8,6 +8,8 @@ layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec4 outColor;
 layout(location = 2) out vec2 outUV;
 layout(location = 3) out vec3 outWorldPosition;
+layout(location = 4) out vec4 outCurrentClip;
+layout(location = 5) out vec4 outPreviousClip;
 
 struct Vertex {
     vec3 position;
@@ -24,6 +26,9 @@ layout(buffer_reference, std430) readonly buffer VertexBuffer {
 layout(push_constant) uniform constants {
     mat4 render_matrix;
     VertexBuffer vertexBuffer;
+    vec4 previousWorldRow0;
+    vec4 previousWorldRow1;
+    vec4 previousWorldRow2;
 } PushConstants;
 
 void main()
@@ -32,6 +37,14 @@ void main()
     vec4 worldPosition = PushConstants.render_matrix * vec4(vertex.position, 1.0);
 
     gl_Position = sceneData.viewproj * worldPosition;
+    outCurrentClip = gl_Position;
+    vec4 localPosition = vec4(vertex.position, 1.0);
+    vec4 previousWorldPosition = vec4(
+        dot(PushConstants.previousWorldRow0, localPosition),
+        dot(PushConstants.previousWorldRow1, localPosition),
+        dot(PushConstants.previousWorldRow2, localPosition),
+        1.0);
+    outPreviousClip = sceneData.previousViewProjection * previousWorldPosition;
     // The shadow lookup happens in world space, so it works unchanged for
     // the main camera and for every portal camera.
     outWorldPosition = worldPosition.xyz;

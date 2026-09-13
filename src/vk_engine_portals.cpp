@@ -30,6 +30,83 @@ RenderObject VulkanEngine::make_portal_render_object(
     };
 }
 
+void VulkanEngine::draw_ssgi_portal_mask(VkCommandBuffer cmd)
+{
+    vkutil::transition_image(
+        cmd, _portalMaskImage.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
+    VkClearValue clear{};
+    VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
+        _portalMaskImage.imageView, &clear,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
+        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    VkRenderingInfo renderInfo = vkinit::rendering_info(
+        _drawExtent, &colorAttachment, &depthAttachment);
+    vkCmdBeginRendering(cmd, &renderInfo);
+
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(_drawExtent.width);
+    viewport.height = static_cast<float>(_drawExtent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    VkRect2D scissor{};
+    scissor.extent = _drawExtent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+    vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
+    vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
+
+    if (_ssgiPortalMaskPipeline.pipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(
+            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            _ssgiPortalMaskPipeline.pipeline);
+        const VkDescriptorSet sceneDescriptor =
+            get_current_frame().sceneDescriptor;
+        vkCmdBindDescriptorSets(
+            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            _ssgiPortalMaskPipeline.layout, 0, 1,
+            &sceneDescriptor, 0, nullptr);
+
+        const auto drawPortal = [&](const Portal& portal,
+                                    MaterialInstance& material) {
+            const RenderObject object = make_portal_render_object(portal, material);
+            vkCmdBindDescriptorSets(
+                cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                _ssgiPortalMaskPipeline.layout, 1, 1,
+                &material.materialSet, 0, nullptr);
+            vkCmdBindIndexBuffer(
+                cmd, object.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            GPUDrawPushConstants pushConstants{};
+            pushConstants.worldMatrix = object.transform;
+            pushConstants.vertexBuffer = object.vertexBufferAddress;
+            vkCmdPushConstants(
+                cmd, _ssgiPortalMaskPipeline.layout,
+                VK_SHADER_STAGE_VERTEX_BIT, 0,
+                sizeof(pushConstants), &pushConstants);
+            vkCmdDrawIndexed(
+                cmd, object.indexCount, 1, object.firstIndex, 0, 0);
+        };
+
+        if (_bluePortal.placed && _orangePortal.placed) {
+            drawPortal(_bluePortal, _bluePortalMaterial);
+            drawPortal(_orangePortal, _orangePortalMaterial);
+        }
+        for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+            drawPortal(pair.first, _bluePortalMaterial);
+            drawPortal(pair.second, _orangePortalMaterial);
+        }
+    }
+
+    vkCmdEndRendering(cmd);
+    vkutil::transition_image(
+        cmd, _portalMaskImage.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
+
 void VulkanEngine::draw_portal_masks(VkCommandBuffer cmd)
 {
     const bool hasPlayerPair = _bluePortal.placed && _orangePortal.placed;
@@ -215,7 +292,9 @@ void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
         draw_geometry(cmd, portalViewDrawContext,
                       _portalSceneData[baseViewIndex].viewproj,
                       frame.portalSceneDescriptors[baseViewIndex], false,
-                      &metalRoughMaterial.portalViewPipeline, primaryStencil, false);
+                      &metalRoughMaterial.portalViewPipeline,
+                      &metalRoughMaterial.portalViewMaskPipeline,
+                      primaryStencil, false);
 
         // Each extra level is the same portal seen again through its linked
         // view. Two high stencil bits keep the recursive aperture constrained
@@ -233,8 +312,9 @@ void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
             draw_geometry(cmd, portalViewDrawContext,
                           _portalSceneData[baseViewIndex + level].viewproj,
                           frame.portalSceneDescriptors[baseViewIndex + level], false,
-                          &metalRoughMaterial.portalViewPipeline, recursiveStencil,
-                          false, recursiveStencil);
+                          &metalRoughMaterial.portalViewPipeline,
+                          &metalRoughMaterial.portalViewMaskPipeline,
+                          recursiveStencil, false, recursiveStencil);
             parentStencil = recursiveStencil;
         }
         ++surfaceIndex;
@@ -280,6 +360,22 @@ void VulkanEngine::draw_geometry_to_portal_camera(
     scissor.extent = _portalCameraExtent;
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
+    // Every object in this pass shares one camera, and all but the
+    // alpha-masked ones share one pipeline.  Both variants were built from
+    // the same layout, so the scene set is bound once here and stays bound
+    // across a pipeline switch.  Only the material set, the index buffer and
+    // the choice between the two pipelines vary, and each is guarded.
+    vkCmdBindDescriptorSets(
+        cmd,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        metalRoughMaterial.portalOffscreenPipeline.layout,
+        0,
+        1,
+        &sceneDescriptor,
+        0,
+        nullptr);
+
+    VkPipeline lastPipeline = VK_NULL_HANDLE;
     MaterialInstance* lastMaterial = nullptr;
     VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
     for (const RenderObject& renderObject : drawContext.OpaqueSurfaces) {
@@ -287,19 +383,14 @@ void VulkanEngine::draw_geometry_to_portal_camera(
             continue;
         }
 
-        vkCmdBindPipeline(
-            cmd,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            metalRoughMaterial.portalOffscreenPipeline.pipeline);
-        vkCmdBindDescriptorSets(
-            cmd,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            metalRoughMaterial.portalOffscreenPipeline.layout,
-            0,
-            1,
-            &sceneDescriptor,
-            0,
-            nullptr);
+        const VkPipeline pipeline =
+            renderObject.material->passType == MaterialPass::Mask
+                ? metalRoughMaterial.portalOffscreenMaskPipeline.pipeline
+                : metalRoughMaterial.portalOffscreenPipeline.pipeline;
+        if (pipeline != lastPipeline) {
+            lastPipeline = pipeline;
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        }
         if (renderObject.material != lastMaterial) {
             lastMaterial = renderObject.material;
             vkCmdBindDescriptorSets(
@@ -386,6 +477,9 @@ void VulkanEngine::draw_offscreen_portal_views(VkCommandBuffer cmd)
         frame.sceneDescriptor,
         false,
         &metalRoughMaterial.portalCompositePipeline,
+        // The composite draws one full-bleed quad textured with an
+        // already-rendered camera image; there is no cutout to test.
+        nullptr,
         BluePortalView + 1,
         false);
 
@@ -399,6 +493,7 @@ void VulkanEngine::draw_offscreen_portal_views(VkCommandBuffer cmd)
         frame.sceneDescriptor,
         false,
         &metalRoughMaterial.portalCompositePipeline,
+        nullptr,
         OrangePortalView + 1,
         false);
 }
@@ -498,7 +593,18 @@ GPUSceneData VulkanEngine::build_portal_scene_data(
     // visible through this opening.  Reusing it would stamp the near room's
     // contact shadows onto the far one, so this camera shades unoccluded.
     // Portal-specific occlusion would need its own prepass per virtual camera.
+    //
+    // SSGI is cleared for the same reason, but clearing it alone was the
+    // whole portal colour shift: the main camera keeps only a fraction of the
+    // flat ambient term and lets SSGI supply the rest, while this camera went
+    // on spending all of it and received nothing in return.  Read the main
+    // camera's SSGI flag before clearing it, so the portal shader knows to
+    // apply the same split and to stand the missing indirect estimate up from
+    // the shared environment instead.
+    data.portalIndirectSettings.x = data.screenSpaceSettings.z;
     data.screenSpaceSettings.x = 0.0f;
+    data.screenSpaceSettings.z = 0.0f;
+    data.screenSpaceSettings.w = 0.0f;
     return data;
 }
 

@@ -32,12 +32,17 @@ struct DrawContext;
         }                                                                  \
     } while (0)
 
+struct TraceTextureSource {
+    uint32_t width{},height{};
+    std::vector<uint32_t> rgba;
+};
 struct AllocatedImage{
     VkImage image;
     VkImageView imageView;
     VmaAllocation allocation;
     VkExtent3D imageExtent;
     VkFormat imageFormat;
+    std::shared_ptr<TraceTextureSource> traceSource;
 };
 
 struct AllocatedBuffer {
@@ -54,7 +59,13 @@ struct Vertex {
     glm::vec4 color;
 };
 
+struct TraceMeshSource {
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+};
+
 struct GPUMeshBuffers {
+    std::shared_ptr<TraceMeshSource> traceSource;
     AllocatedBuffer indexBuffer;
     AllocatedBuffer vertexBuffer;
     VkDeviceAddress vertexBufferAddress{};
@@ -63,11 +74,24 @@ struct GPUMeshBuffers {
 struct GPUDrawPushConstants {
     glm::mat4 worldMatrix;
     VkDeviceAddress vertexBuffer;
+    // Three rows of the previous affine object transform. Together with the
+    // implicit final row (0,0,0,1), this fits the guaranteed 128-byte Vulkan
+    // push-constant budget while still supporting object motion vectors.
+    uint64_t alignmentPadding{};
+    glm::vec4 previousWorldRow0{1.0f, 0.0f, 0.0f, 0.0f};
+    glm::vec4 previousWorldRow1{0.0f, 1.0f, 0.0f, 0.0f};
+    glm::vec4 previousWorldRow2{0.0f, 0.0f, 1.0f, 0.0f};
 };
+static_assert(sizeof(GPUDrawPushConstants) == 128);
 
 enum class MaterialPass : uint8_t {
     MainColor,
     Transparent,
+    // glTF alphaMode MASK: fully opaque wherever it draws at all, but the
+    // base colour's alpha decides per fragment whether it draws.  It is a
+    // separate pass from Transparent because it still writes depth and still
+    // belongs in the prepass, which blended surfaces do not.
+    Mask,
     Other
 };
 
@@ -77,6 +101,11 @@ struct MaterialPipeline {
 };
 
 struct MaterialInstance {
+    std::shared_ptr<TraceTextureSource> traceTexture;
+    glm::vec2 traceUVScale{1};
+    glm::vec4 traceBaseColor{1.0f};
+    glm::vec4 traceParameters{0.0f,0.8f,0.0f,1.5f};
+    glm::vec4 traceEmission{0.0f};
     MaterialPipeline* pipeline{};
     VkDescriptorSet materialSet{};
     MaterialPass passType{MaterialPass::MainColor};
@@ -86,6 +115,7 @@ struct GPUSceneData {
     glm::mat4 view;
     glm::mat4 proj;
     glm::mat4 viewproj;
+    glm::mat4 previousViewProjection;
     glm::vec4 ambientColor;
     glm::vec4 sunlightDirection;
     glm::vec4 sunlightColor;
@@ -117,6 +147,33 @@ struct GPUSceneData {
     //      size while the render scale moves the live region inside it, so a
     //      fragment cannot simply divide by the render extent.
     glm::vec4 ambientOcclusionUV{0.0f};
+    // x = reference-compatible environment intensity, y = 1 for black.
+    glm::vec4 ssgiFallbackSettings{1.0f, 0.0f, 0.0f, 0.0f};
+    // x = PCF footprint radius in shadow-map texels.
+    glm::vec4 shadowFilterSettings{3.0f, 0.0f, 0.0f, 0.0f};
+    // How the flat ambient term and the screen-space indirect estimate divide
+    // the same job, shared by the forward shader and the SSGI trace.
+    // x = the fraction of ambient that survives while SSGI is enabled.  At 0
+    //     SSGI replaces ambient outright, which is only honest once ray
+    //     misses are filled from the real environment; at 1 SSGI adds on top
+    //     of it, which double-counts sky fill but can never darken a region.
+    // y = 1 fills SSGI ray misses from the environment map, 0 uses the
+    //     analytic gradient the software path tracer also uses.  The gradient
+    //     is kept so a reference comparison can light both sides the same.
+    // z = the mip level to sample the environment at.  A cosine-weighted ray
+    //     represents a wide cone, not a texel of a 4K panorama.
+    // w = the radiance ceiling a miss ray may return.  A coarse mip alone is
+    //     not enough: a clear-sky panorama keeps most of its energy in a sun
+    //     disk thousands of times brighter than the sky, which survives every
+    //     mip, and which the shadow-mapped direct term already delivers.
+    glm::vec4 indirectSettings{0.0f, 1.0f, 0.0f, 1.0e4f};
+    // x = 1 while this camera substitutes a direct environment lookup for a
+    //     screen-space indirect pass it cannot run.  Only portal cameras set
+    //     it, and only while the main camera is running SSGI.  Both views have
+    //     to divide the same job between the flat ambient term and indirect
+    //     light the same way; when they do not, the destination room visibly
+    //     changes colour at the moment the player crosses the portal.
+    glm::vec4 portalIndirectSettings{0.0f};
 };
 
 // Sixteen visible surfaces (the player pair plus seven authored links), with
@@ -146,6 +203,7 @@ struct RenderObject {
     MaterialInstance* material{};
     Bounds bounds{};
     glm::mat4 transform{1.0f};
+    glm::mat4 previousTransform{1.0f};
     VkDeviceAddress vertexBufferAddress{};
 };
 
@@ -159,6 +217,8 @@ struct Node : public IRenderable {
     std::vector<std::shared_ptr<Node>> children;
     glm::mat4 localTransform{1.0f};
     glm::mat4 worldTransform{1.0f};
+    glm::mat4 previousDrawTransform{1.0f};
+    bool hasPreviousDrawTransform{false};
 
     void refreshTransform(const glm::mat4& parentMatrix)
     {

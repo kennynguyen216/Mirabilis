@@ -1,0 +1,72 @@
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D inputIndirect;
+layout(rgba16f, set = 0, binding = 1) uniform image2D outputIndirect;
+layout(set = 0, binding = 2) uniform sampler2D prepassDepth;
+layout(set = 0, binding = 3) uniform sampler2D prepassNormal;
+
+layout(push_constant) uniform constants {
+    // xy = live extent, zw = integer tap direction.
+    ivec4 control;
+    // x = radius, y = depth falloff, z = normal exponent, w = enabled.
+    vec4 settings;
+} PushConstants;
+
+vec2 allocation_uv(vec2 screenUV, sampler2D source)
+{
+    vec2 allocation = vec2(textureSize(source, 0));
+    vec2 liveFraction = vec2(PushConstants.control.xy) / allocation;
+    return clamp(screenUV * liveFraction, vec2(0.5) / allocation,
+        liveFraction - vec2(0.5) / allocation);
+}
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 extent = PushConstants.control.xy;
+    if (any(greaterThanEqual(pixel, extent))) {
+        return;
+    }
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(extent);
+    float centerDepth = texture(
+        prepassDepth, allocation_uv(uv, prepassDepth)).r;
+    if (centerDepth <= 1e-6 || PushConstants.settings.w < 0.5) {
+        imageStore(outputIndirect, pixel,
+            texture(inputIndirect, allocation_uv(uv, inputIndirect)));
+        return;
+    }
+    vec3 centerNormal = normalize(texture(
+        prepassNormal, allocation_uv(uv, prepassNormal)).xyz);
+
+    int radius = clamp(int(PushConstants.settings.x + 0.5), 1, 8);
+    ivec2 direction = PushConstants.control.zw;
+    vec3 sum = vec3(0.0);
+    float totalWeight = 0.0;
+    for (int tap = -8; tap <= 8; ++tap) {
+        if (abs(tap) > radius) {
+            continue;
+        }
+        ivec2 samplePixel = clamp(pixel + direction * tap,
+            ivec2(0), extent - ivec2(1));
+        vec2 sampleUV = (vec2(samplePixel) + 0.5) / vec2(extent);
+        float sampleDepth = texture(
+            prepassDepth, allocation_uv(sampleUV, prepassDepth)).r;
+        vec3 sampleNormal = normalize(texture(
+            prepassNormal, allocation_uv(sampleUV, prepassNormal)).xyz);
+        float spatial = exp(-0.5 * float(tap * tap) /
+            max(float(radius * radius) * 0.35, 0.001));
+        float depthWeight = exp(-abs(sampleDepth - centerDepth) *
+            PushConstants.settings.y);
+        float normalWeight = pow(max(dot(centerNormal, sampleNormal), 0.0),
+            PushConstants.settings.z);
+        float weight = spatial * depthWeight * normalWeight;
+        sum += texture(inputIndirect,
+            allocation_uv(sampleUV, inputIndirect)).rgb * weight;
+        totalWeight += weight;
+    }
+    imageStore(outputIndirect, pixel,
+        vec4(sum / max(totalWeight, 0.00001), 1.0));
+}
