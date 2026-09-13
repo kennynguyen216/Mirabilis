@@ -661,6 +661,15 @@ void VulkanEngine::capture_ssgi(const char* filename)
         << "\nFilter enabled: " << _ssgiSpatialFilterEnabled
         << "\nFilter radius: " << _ssgiFilterRadius
         << "\nIntensity: " << _ssgiIntensity
+        << "\nAmbient retention: " << _ssgiAmbientRetention
+        << "\nMiss fill: "
+        << (_ssgiTraceEnvironmentMap ? "environment map" : "analytic gradient")
+        << "\nEnvironment mip: " << _skyboxEnvironmentLod
+        // Captures taken before the albedo multiply moved to the
+        // composite hold reflected colour, so a comparison across that
+        // change needs to know which quantity it is looking at.
+        << "\nQuantity: incident radiance"
+        << " (receiver albedo applied at composite)"
         << "\nLinear indirect mean: " << sum / pixels
         << "\nNonfinite pixels: " << invalid << "\nCamera: "
         << render_camera().position.x << "," << render_camera().position.y

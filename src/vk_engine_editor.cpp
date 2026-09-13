@@ -1596,6 +1596,21 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                             IM_ARRAYSIZE(debugViewNames))) {
                         _renderDebugView = static_cast<RenderDebugView>(debugView);
                     }
+                    // Easy to misread otherwise: these buffers hold the light
+                    // arriving at a surface, not the colour it reflects.  A
+                    // white wall and a red one under the same bounce now look
+                    // identical here, and differ only after the composite.
+                    const bool showsIndirectRadiance =
+                        _renderDebugView == RenderDebugView::SSGIRaw ||
+                        _renderDebugView == RenderDebugView::SSGITemporal ||
+                        _renderDebugView == RenderDebugView::SSGIFiltered ||
+                        _renderDebugView == RenderDebugView::SSGIFallback;
+                    if (showsIndirectRadiance) {
+                        ImGui::TextDisabled(
+                            "SSGI buffers hold incident radiance; albedo is");
+                        ImGui::TextDisabled(
+                            "applied in the composite, not in the trace.");
+                    }
                     if (_renderDebugView == RenderDebugView::Depth) {
                         ImGui::SliderFloat(
                             "Depth View Range",
@@ -1652,8 +1667,39 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                     ImGui::SliderFloat(
                         "Indirect Intensity", &_ssgiIntensity,
                         0.0f, 2.0f, "%.2f");
+                    // Enabling SSGI used to delete the flat ambient term
+                    // outright, which is why turning it on read as a large
+                    // drop in brightness rather than as indirect light.  The
+                    // two are alternative answers to the same question, so
+                    // the split between them is now visible and adjustable.
+                    ImGui::SliderFloat(
+                        "Ambient Retention", &_ssgiAmbientRetention,
+                        0.0f, 1.0f, "%.2f");
                     ImGui::TextDisabled(
-                        "At 1.0, SSGI replaces flat ambient; SSAO ambient is bypassed.");
+                        "0: SSGI replaces flat ambient.");
+                    ImGui::TextDisabled(
+                        "1: SSGI adds on top of it, which counts sky fill");
+                    ImGui::TextDisabled(
+                        "twice but can never darken a region SSGI has");
+                    ImGui::TextDisabled(
+                        "nothing to say about.");
+                    // A traced ray that leaves the depth buffer has to be
+                    // filled from somewhere.  The analytic gradient is what
+                    // the software path tracer still uses, so it stays
+                    // reachable for reference comparisons.
+                    ImGui::Checkbox(
+                        "Miss Rays Sample Skybox", &_ssgiTraceEnvironmentMap);
+                    if (_ssgiTraceEnvironmentMap) {
+                        ImGui::TextDisabled(
+                            "Misses read %s at mip %.1f.",
+                            SkyboxDisplayNames[_skyboxSelection],
+                            _skyboxEnvironmentLod);
+                    } else {
+                        ImGui::TextDisabled(
+                            "Misses use the analytic gradient, matching");
+                        ImGui::TextDisabled(
+                            "the software path tracer's environment.");
+                    }
                     if (stats.ssgi_time_is_gpu) {
                         const VkExtent2D ssgiExtent = active_ssgi_extent();
                         ImGui::Text(

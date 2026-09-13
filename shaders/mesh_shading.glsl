@@ -44,12 +44,18 @@ void main()
     // much of the surrounding hemisphere nearby geometry blocks.
     float visibility = sunlight_visibility(inWorldPosition, normal);
     float occlusion = ambient_occlusion(gl_FragCoord.xy);
-    // Once SSGI is composited, the flat ambient stand-in must not count the
-    // same indirect light a second time. Portal cameras clear this flag and
-    // retain ambient until they receive their own screen-space pass.
-    vec3 ambient = sceneData.screenSpaceSettings.z > 0.5
-        ? vec3(0.0)
-        : sceneData.ambientColor.rgb * occlusion;
+    // Once SSGI is composited, the flat ambient stand-in risks counting the
+    // same indirect light a second time, because a ray that leaves the depth
+    // buffer is filled from the same sky this term stands in for.  How much
+    // of it survives is a policy rather than a constant: replacing ambient
+    // outright is only honest while misses carry real environment radiance,
+    // and an enclosed scene whose rays mostly hit unlit stone has nothing to
+    // put in its place.  Portal cameras clear the SSGI flag and keep the
+    // whole term until they receive their own screen-space pass.
+    float ambientScale = sceneData.screenSpaceSettings.z > 0.5
+        ? clamp(sceneData.indirectSettings.x, 0.0, 1.0)
+        : 1.0;
+    vec3 ambient = sceneData.ambientColor.rgb * occlusion * ambientScale;
     // The sun term is left alone: it already has its own visibility test, and
     // scaling it here would darken contact points standing in full sunlight.
     vec3 direct = visibility * diffuse * sceneData.sunlightColor.rgb;

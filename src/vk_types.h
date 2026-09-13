@@ -151,6 +151,19 @@ struct GPUSceneData {
     glm::vec4 ssgiFallbackSettings{1.0f, 0.0f, 0.0f, 0.0f};
     // x = PCF footprint radius in shadow-map texels.
     glm::vec4 shadowFilterSettings{3.0f, 0.0f, 0.0f, 0.0f};
+    // How the flat ambient term and the screen-space indirect estimate divide
+    // the same job, shared by the forward shader and the SSGI trace.
+    // x = the fraction of ambient that survives while SSGI is enabled.  At 0
+    //     SSGI replaces ambient outright, which is only honest once ray
+    //     misses are filled from the real environment; at 1 SSGI adds on top
+    //     of it, which double-counts sky fill but can never darken a region.
+    // y = 1 fills SSGI ray misses from the environment map, 0 uses the
+    //     analytic gradient the software path tracer also uses.  The gradient
+    //     is kept so a reference comparison can light both sides the same.
+    // z = the mip level to sample the environment at.  A cosine-weighted ray
+    //     represents a wide cone, not a texel of a 4K panorama, and sampling
+    //     level 0 turns the sun disk into fireflies.
+    glm::vec4 indirectSettings{0.0f, 1.0f, 0.0f, 0.0f};
 };
 
 // Sixteen visible surfaces (the player pair plus seven authored links), with

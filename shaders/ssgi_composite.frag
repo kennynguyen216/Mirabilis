@@ -8,6 +8,11 @@ layout(set = 0, binding = 0) uniform sampler2D filteredIndirect;
 layout(set = 0, binding = 1) uniform sampler2D ssgiMetadata;
 layout(set = 0, binding = 2) uniform sampler2D prepassDepth;
 layout(set = 0, binding = 3) uniform sampler2D prepassNormal;
+// The forward pass's base-colour target.  The trace stores incident radiance,
+// so the receiver's albedo is applied here: once, at full resolution, and
+// after every filter that would otherwise have been smearing one surface's
+// colour across its neighbour.
+layout(set = 0, binding = 4) uniform sampler2D gbufferAlbedo;
 
 layout(push_constant) uniform constants {
     // xy = full render extent, zw = active SSGI extent.
@@ -67,5 +72,9 @@ void main()
                 clamp(base, ivec2(0), giExtent - ivec2(1)), 0).rgb;
         }
     }
-    outFragColor = vec4(indirect, PushConstants.settings.x);
+    // texelFetch, not texture(): this pass is one output pixel per full-
+    // resolution G-buffer pixel, so there is nothing to interpolate and no
+    // live-region bound to clamp against.
+    vec3 albedo = texelFetch(gbufferAlbedo, pixel, 0).rgb;
+    outFragColor = vec4(indirect * albedo, PushConstants.settings.x);
 }

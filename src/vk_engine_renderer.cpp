@@ -410,7 +410,9 @@ void VulkanEngine::init_descriptors()
         verticalWriter.update_set(_device, _ssgiFilterDescriptors[2]);
 
         builder.clear();
-        for (uint32_t binding = 0; binding < 4; ++binding) {
+        // Five now, not four: the trace stores incident radiance, so the
+        // composite is where the receiver's base colour is applied.
+        for (uint32_t binding = 0; binding < 5; ++binding) {
             builder.add_binding(
                 binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         }
@@ -432,6 +434,12 @@ void VulkanEngine::init_descriptors()
                 _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             compositeWriter.write_image(3, _prepassNormalImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            // draw_ssgi() leaves the forward pass's base-colour target in
+            // SHADER_READ_ONLY_OPTIMAL, and it still holds this frame's
+            // albedo when the composite runs immediately afterwards.
+            compositeWriter.write_image(4, _gbufferAlbedoImage.imageView,
                 _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             compositeWriter.update_set(
@@ -834,6 +842,13 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
         occlusionFraction.x - 0.5f / occlusionAllocation.x,
         occlusionFraction.y - 0.5f / occlusionAllocation.y);
     data.ssgiFallbackSettings = _traceLighting.environment;
+    // Ambient and SSGI are two answers to one question, so how they divide it
+    // travels with every camera rather than being decided in the shader.
+    data.indirectSettings = glm::vec4(
+        _ssgiAmbientRetention,
+        _ssgiTraceEnvironmentMap ? 1.0f : 0.0f,
+        _skyboxEnvironmentLod,
+        0.0f);
     return data;
 }
 

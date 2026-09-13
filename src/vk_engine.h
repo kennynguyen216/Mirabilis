@@ -419,6 +419,13 @@ class VulkanEngine{
     VkSampler _defaultSamplerLinear{};
     VkSampler _defaultSamplerNearest{};
     VkSampler _skyboxSampler{};
+    // A second view of the same panorama for the SSGI trace.  The background
+    // pass wants it sharp at level 0; an indirect ray wants a coarse mip, so
+    // this one is the only sampler allowed past the first level.
+    VkSampler _skyboxEnvironmentSampler{};
+    // The mip a traced miss ray samples, derived from the loaded panorama's
+    // width so a 1x1 fallback and a 4K HDR both land on a sane footprint.
+    float _skyboxEnvironmentLod{0.0f};
     // Anisotropic filtering is an optional device feature, so nothing may
     // request it before init_vulkan has both confirmed support and read the
     // device's ceiling.  _textureAnisotropy is the preset's requested level;
@@ -854,6 +861,20 @@ class VulkanEngine{
         float _ssgiFilterDepthFalloff{800.0f};
         float _ssgiFilterNormalPower{32.0f};
         float _ssgiIntensity{1.0f};
+        // How much of the flat ambient term survives while SSGI is on.
+        // Zero is the coherent setting in the sense that nothing is counted
+        // twice, but it is not the honest one yet: the bounce this renderer
+        // gathers comes from a direct-lighting buffer that excludes ambient,
+        // so stone out of the sun contributes nothing at all to it, and an
+        // arcade lit only by what the sun reaches reads far darker than the
+        // same geometry in life.  Half is a starting point to tune by eye,
+        // not a derived value, and it is a slider because the right answer
+        // depends on how enclosed the scene is.
+        float _ssgiAmbientRetention{0.5f};
+        // Fill ray misses from the selected skybox rather than the analytic
+        // gradient.  Turning this off restores parity with the software path
+        // tracer, which still lights its misses from the gradient.
+        bool _ssgiTraceEnvironmentMap{true};
         bool _ssgiHalfResolution{false};
         int _ssgiQualityPreset{0};
         bool _depthNormalPrepassEnabled{true};

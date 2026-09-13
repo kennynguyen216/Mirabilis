@@ -38,4 +38,9 @@ layout(set = 0, binding = 0) uniform SceneData {
     vec4 ssgiFallbackSettings;
     // x = PCF footprint radius in shadow-map texels.
     vec4 shadowFilterSettings;
+    // How the flat ambient term and the screen-space indirect estimate divide
+    // the same job.  x = the fraction of ambient that survives while SSGI is
+    // enabled, y = 1 to fill SSGI ray misses from the environment map rather
+    // than the analytic gradient, z = the mip level to sample it at.
+    vec4 indirectSettings;
 } sceneData;

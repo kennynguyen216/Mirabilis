@@ -104,7 +104,12 @@ void main()
             outFragColor = vec4(
                 texelFetch(ssgiFallback, ssgiPixel, 0).rgb, 1.0);
         } else if (mode == ModeSSGIReferenceDifference) {
-            vec3 filtered = texelFetch(ssgiFiltered, ssgiPixel, 0).rgb;
+            // The reference is path-traced reflected radiance, while the SSGI
+            // buffers now hold incident radiance with the receiver's albedo
+            // left for the composite to apply.  Applying it here is what
+            // keeps the two sides of this subtraction the same quantity.
+            vec3 filtered = texelFetch(ssgiFiltered, ssgiPixel, 0).rgb *
+                texelFetch(gbufferAlbedo, pixel, 0).rgb;
             vec3 reference = texelFetch(ssgiReference, pixel, 0).rgb;
             vec3 difference = abs(filtered - reference);
             // Log-like false colour keeps both subtle and large errors visible.

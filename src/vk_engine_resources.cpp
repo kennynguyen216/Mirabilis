@@ -71,6 +71,13 @@ void VulkanEngine::init_default_images_and_samplers()
     skyboxSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     skyboxSamplerInfo.maxLod = 0.0f;
     VK_CHECK(vkCreateSampler(_device, &skyboxSamplerInfo, nullptr, &_skyboxSampler));
+    // The same panorama, but readable past level 0.  Only the SSGI trace uses
+    // it: the visible background must stay at full sharpness, while a traced
+    // miss ray needs a mip coarse enough that a sun disk does not arrive as a
+    // firefly in a four-ray-per-pixel estimate.
+    skyboxSamplerInfo.maxLod = VK_LOD_CLAMP_NONE;
+    VK_CHECK(vkCreateSampler(
+        _device, &skyboxSamplerInfo, nullptr, &_skyboxEnvironmentSampler));
     
     if (!set_skybox(_skyboxSelection) && !set_skybox(0)) {
         // Keep every descriptor valid even if all packaged sky assets are
@@ -130,7 +137,8 @@ void VulkanEngine::init_default_images_and_samplers()
         ssgiWriter.write_image(6, _portalMaskImage.imageView, _prepassSampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(7, _skyboxImage.imageView, _skyboxSampler,
+        ssgiWriter.write_image(7, _skyboxImage.imageView,
+            _skyboxEnvironmentSampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         ssgiWriter.write_image(8, _gbufferVelocityImage.imageView,
@@ -222,7 +230,8 @@ bool VulkanEngine::set_skybox(int selection)
              static_cast<uint32_t>(height),
              1},
             VK_FORMAT_R16G16B16A16_SFLOAT,
-            VK_IMAGE_USAGE_SAMPLED_BIT);
+            VK_IMAGE_USAGE_SAMPLED_BIT,
+            true);
         fmt::print(
             "Loaded HDR equirectangular skybox: {} ({}x{}, RGBA16F)\n",
             path,
@@ -246,7 +255,8 @@ bool VulkanEngine::set_skybox(int selection)
              static_cast<uint32_t>(height),
              1},
             VK_FORMAT_R8G8B8A8_SRGB,
-            VK_IMAGE_USAGE_SAMPLED_BIT);
+            VK_IMAGE_USAGE_SAMPLED_BIT,
+            true);
         stbi_image_free(pixels);
         fmt::print(
             "Loaded equirectangular skybox: {} ({}x{})\n",
@@ -254,6 +264,17 @@ bool VulkanEngine::set_skybox(int selection)
             width,
             height);
     }
+
+    // A cosine-weighted indirect ray stands for a wide cone.  Reading it
+    // from a mip about this wide costs one sample and removes almost all of
+    // the variance the full-resolution panorama would contribute; anything
+    // sharper arrives as fireflies that survive both SSGI filters.  Derived
+    // from the panorama actually loaded, so a 1x1 fallback asks for level 0.
+    constexpr float EnvironmentSampleWidth = 64.0f;
+    _skyboxEnvironmentLod = std::max(
+        0.0f,
+        std::log2(
+            static_cast<float>(std::max(width, 1)) / EnvironmentSampleWidth));
 
     VK_CHECK(vkDeviceWaitIdle(_device));
     AllocatedImage oldImage = _skyboxImage;
@@ -299,7 +320,7 @@ void VulkanEngine::update_skybox_descriptors()
         writer.write_image(
             7,
             _skyboxImage.imageView,
-            _skyboxSampler,
+            _skyboxEnvironmentSampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         writer.update_set(_device, descriptor);
@@ -642,6 +663,7 @@ void VulkanEngine::init_default_data()
         destroy_buffer(_floorMesh.vertexBuffer);
         destroy_buffer(_floorMesh.indexBuffer);
         vkDestroySampler(_device, _skyboxSampler, nullptr);
+        vkDestroySampler(_device, _skyboxEnvironmentSampler, nullptr);
         vkDestroySampler(_device, _defaultSamplerNearest, nullptr);
         vkDestroySampler(_device, _defaultSamplerLinear, nullptr);
         destroy_image(_skyboxImage);

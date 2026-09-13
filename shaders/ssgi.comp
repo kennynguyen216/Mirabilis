@@ -9,6 +9,11 @@ layout(rgba16f, set = 1, binding = 0) uniform image2D rawIndirectImage;
 layout(rgba16f, set = 1, binding = 1) uniform image2D diagnosticImage;
 layout(set = 1, binding = 2) uniform sampler2D prepassDepth;
 layout(set = 1, binding = 3) uniform sampler2D prepassNormal;
+// Bound but no longer read here.  Receiver albedo is applied once, in the
+// composite, at full resolution: the bilateral filter between here and there
+// is far better behaved on radiance than on radiance already tinted by a
+// neighbouring surface's base colour.  The binding stays so the descriptor
+// set layout is shared with the debug views.
 layout(set = 1, binding = 4) uniform sampler2D gbufferAlbedo;
 layout(set = 1, binding = 5) uniform sampler2D previousDirectLighting;
 layout(set = 1, binding = 6) uniform sampler2D portalMask;
@@ -84,6 +89,38 @@ vec2 equirectangular_uv(vec3 direction)
     return vec2(longitude, latitude);
 }
 
+// Radiance arriving from outside the depth buffer.  A ray that leaves the
+// screen has to be filled with something, and the equirectangular mapping
+// above is the one sky.comp uses, so what it is filled with is the same sky
+// the camera would have seen looking that way.
+//
+// The lookup is deliberately taken from a coarse mip.  One cosine-weighted
+// sample stands for a wide cone, not for a texel of a 4K panorama, and a
+// noon sky with a sun disk in it produces fireflies at level 0 that no
+// amount of bilateral filtering removes.
+//
+// The analytic gradient is kept rather than deleted: the software path
+// tracer still uses it, and a reference comparison is only meaningful when
+// both sides are lit by the same environment.
+vec3 environment_radiance(vec3 worldDirection)
+{
+    if (sceneData.ssgiFallbackSettings.y > 0.5) {
+        return vec3(0.0);
+    }
+    vec3 radiance;
+    if (sceneData.indirectSettings.y > 0.5) {
+        radiance = textureLod(
+            environmentMap,
+            equirectangular_uv(worldDirection),
+            sceneData.indirectSettings.z).rgb;
+    } else {
+        radiance = mix(
+            vec3(0.7, 0.8, 1.0), vec3(0.12, 0.3, 0.65),
+            clamp(worldDirection.y * 0.5 + 0.5, 0.0, 1.0));
+    }
+    return sceneData.ssgiFallbackSettings.x * radiance;
+}
+
 vec2 encode_octahedron(vec3 n)
 {
     n /= abs(n.x) + abs(n.y) + abs(n.z);
@@ -125,8 +162,6 @@ void main()
     vec3 position = view_position(screenUV, depth);
     vec3 normal = normalize(texture(prepassNormal,
         allocation_uv(screenUV, prepassNormal)).xyz);
-    vec3 albedo = texture(gbufferAlbedo,
-        allocation_uv(screenUV, gbufferAlbedo)).rgb;
     uint state = uint(pixel.x) * 1973u ^ uint(pixel.y) * 9277u ^
         PushConstants.control.w * 26699u ^ 0x68bc21ebu;
     vec3 origin = position + normal * PushConstants.settings.z;
@@ -188,18 +223,16 @@ void main()
         if (!hit || PushConstants.control.z == 0u) {
             vec3 worldDirection = normalize(
                 transpose(mat3(sceneData.view)) * direction);
-            incident = sceneData.ssgiFallbackSettings.y > 0.5
-                ? vec3(0.0)
-                : sceneData.ssgiFallbackSettings.x * mix(
-                    vec3(0.7, 0.8, 1.0), vec3(0.12, 0.3, 0.65),
-                    clamp(worldDirection.y * 0.5 + 0.5, 0.0, 1.0));
-            fallbackIndirect += incident * albedo;
+            incident = environment_radiance(worldDirection);
+            fallbackIndirect += incident;
         }
-        indirect += incident * albedo;
+        indirect += incident;
         hitSamples += hit ? 1 : 0;
         portalSamples += portalTermination ? 1 : 0;
         totalSteps += stepsTaken;
     }
+    // Incident radiance, not reflected colour: the composite multiplies by
+    // the receiver's albedo after the temporal and spatial filters have run.
     indirect /= float(rayCount);
     fallbackIndirect /= float(rayCount);
     imageStore(rawIndirectImage, pixel, vec4(indirect, 1.0));
