@@ -7,7 +7,6 @@
 #include <unordered_map>
 
 #include <simdjson.h>
-#include <SDL.h>
 
 namespace {
 
@@ -301,6 +300,9 @@ bool VulkanEngine::save_editor_scene()
              << json_escape(object.material.baseColorTexturePath) << "\""
              << ", \"materialTint\": ";
         writeVec4(object.material.colorTint);
+        file << ", \"emissionColor\": "; writeVec3(object.material.emissionColor);
+        file << ", \"emissionStrength\": " << object.material.emissionStrength;
+        file << ", \"transmission\": " << object.material.transmission << ", \"ior\": " << object.material.ior;
         file << ", \"materialMetallic\": " << object.material.metallic
              << ", \"materialRoughness\": " << object.material.roughness
              << ", \"materialDebugChecker\": "
@@ -346,7 +348,14 @@ bool VulkanEngine::save_editor_scene()
     // bias depends on the scale of the geometry in this particular scene.
     // Map resolution is deliberately not here; that is a quality setting for
     // the machine, not a property of the level.
-    file << ",\n  \"lighting\": {\"sunDirection\": ";
+    file << ",\n  \"referenceLighting\": {\"sunRadiance\": ";
+    writeVec3(glm::vec3(_traceLighting.sunRadiance));
+    file << ", \"environmentIntensity\": " << _traceLighting.environment.x
+         << ", \"blackEnvironment\": " << (_traceLighting.environment.y>0.5f?"true":"false") << '}';
+    const int savedSkybox = std::clamp(
+        _skyboxSelection, 0, static_cast<int>(SkyboxIds.size()) - 1);
+    file << ",\n  \"lighting\": {\"skybox\": \""
+         << SkyboxIds[savedSkybox] << "\", \"sunDirection\": ";
     writeVec3(_sunlightDirection);
     file << ", \"shadowsEnabled\": " << (_shadowsEnabled ? "true" : "false")
          << ", \"shadowRadius\": " << _shadowRadius
@@ -356,14 +365,12 @@ bool VulkanEngine::save_editor_scene()
     // depends on the scale this level was authored at.  The sample count and
     // the resolution are absent for the same reason the shadow map size is -
     // they describe a machine, not a level.
-    if (_ssaoSceneOverride) {
     file << ",\n  \"ssao\": {\"enabled\": "
          << (_ssaoSettings.enabled ? "true" : "false")
          << ", \"radius\": " << _ssaoSettings.radius
          << ", \"bias\": " << _ssaoSettings.bias
          << ", \"intensity\": " << _ssaoSettings.intensity
          << ", \"power\": " << _ssaoSettings.power << '}';
-    }
     file << "\n}\n";
     if (!file) {
         fmt::print("Could not finish writing scene: {}\n", scenePath.string());
@@ -371,9 +378,9 @@ bool VulkanEngine::save_editor_scene()
     }
 
     _sceneDirty = false;
-    std::ofstream lastSceneFile(LastEditorScenePath, std::ios::trunc);
-    if (lastSceneFile) {
-        lastSceneFile << _activeSceneFilename << '\n';
+    if (!SDL_getenv("MIRABILIS_TEST_FRAMES")) {
+        std::ofstream lastSceneFile(LastEditorScenePath, std::ios::trunc);
+        if (lastSceneFile) lastSceneFile << _activeSceneFilename << '\n';
     }
     fmt::print("Saved editor scene: {}\n", scenePath.string());
     return true;
@@ -406,37 +413,6 @@ void VulkanEngine::restore_last_editor_scene_name()
     if (normalized.has_value() && std::filesystem::exists(editor_scene_path(*normalized))) {
         _activeSceneFilename = *normalized;
     }
-}
-
-// SDL's user directory is shared by Debug/Release and independent of maps.
-void VulkanEngine::load_ao_preferences()
-{
-    char* directory = SDL_GetPrefPath("Mirabilis", "Mirabilis");
-    if (!directory) return;
-    std::ifstream file(std::filesystem::path(directory) / "ambient_occlusion.cfg");
-    SDL_free(directory);
-    int version = 0, enabled = 1, quality = 1;
-    float depth = 12.0f, normal = 16.0f;
-    if (!(file >> version >> enabled >> quality >> depth >> normal) ||
-        version != 1 || (enabled != 0 && enabled != 1) ||
-        quality < 0 || quality >= static_cast<int>(SSAOKernelSizes.size()) ||
-        !std::isfinite(depth) || depth < 5.0f || depth > 120.0f ||
-        !std::isfinite(normal) || normal < 1.0f || normal > 48.0f) return;
-    _ssaoGlobalEnabled = enabled != 0;
-    _ssaoQuality = quality;
-    _ssaoDepthFalloff = depth;
-    _ssaoNormalFalloff = normal;
-}
-
-void VulkanEngine::save_ao_preferences() const
-{
-    char* directory = SDL_GetPrefPath("Mirabilis", "Mirabilis");
-    if (!directory) return;
-    std::ofstream file(std::filesystem::path(directory) / "ambient_occlusion.cfg");
-    SDL_free(directory);
-    file << "1 " << (_ssaoGlobalEnabled ? 1 : 0) << ' ' << _ssaoQuality
-         << ' ' << _ssaoDepthFalloff << ' ' << _ssaoNormalFalloff << '\n';
-    if (!file) fmt::print("Could not save ambient occlusion preferences\n");
 }
 
 bool VulkanEngine::load_editor_scene()
@@ -473,8 +449,19 @@ bool VulkanEngine::load_editor_scene()
     // Absent in scenes saved before lighting was stored, and in that case
     // every value below keeps whatever the engine already had.  That is why
     // adding the block does not need a scene version bump.
+    int pendingSkyboxSelection = _skyboxSelection;
     simdjson::dom::object jsonLighting;
     if (document["lighting"].get_object().get(jsonLighting) == simdjson::SUCCESS) {
+        std::string_view skyboxId;
+        if (jsonLighting["skybox"].get_string().get(skyboxId) ==
+            simdjson::SUCCESS) {
+            for (size_t index = 0; index < SkyboxIds.size(); ++index) {
+                if (skyboxId == SkyboxIds[index]) {
+                    pendingSkyboxSelection = static_cast<int>(index);
+                    break;
+                }
+            }
+        }
         simdjson::dom::element sunDirection;
         glm::vec3 loadedSunDirection{0.0f};
         if (jsonLighting["sunDirection"].get(sunDirection) == simdjson::SUCCESS &&
@@ -509,11 +496,21 @@ bool VulkanEngine::load_editor_scene()
     // exactly as they were.  Starting from a default-constructed value is
     // also what gives a legacy scene with no block the documented defaults
     // rather than whatever the previous level happened to set.
+    TraceLighting pendingReference{};
+    simdjson::dom::object reference;
+    if(document["referenceLighting"].get_object().get(reference)==simdjson::SUCCESS) {
+        simdjson::dom::element color; glm::vec3 radiance;
+        if(reference["sunRadiance"].get(color)==simdjson::SUCCESS&&read_json_vec3(color,radiance))
+            pendingReference.sunRadiance=glm::vec4(glm::clamp(radiance,glm::vec3(0),glm::vec3(10000)),0);
+        double value=1;
+        if(reference["environmentIntensity"].get_double().get(value)==simdjson::SUCCESS&&std::isfinite(value))
+            pendingReference.environment.x=float(std::clamp(value,0.0,10000.0));
+        bool black=false;
+        if(reference["blackEnvironment"].get_bool().get(black)==simdjson::SUCCESS) pendingReference.environment.y=black?1.f:0.f;
+    }
     SSAOSettings pendingSSAO{};
-    bool pendingSSAOOverride = false;
     simdjson::dom::object jsonSSAO;
     if (document["ssao"].get_object().get(jsonSSAO) == simdjson::SUCCESS) {
-        pendingSSAOOverride = true;
         bool ssaoEnabled = pendingSSAO.enabled;
         if (jsonSSAO["enabled"].get_bool().get(ssaoEnabled) == simdjson::SUCCESS) {
             pendingSSAO.enabled = ssaoEnabled;
@@ -712,6 +709,19 @@ bool VulkanEngine::load_editor_scene()
             saved.material.baseColorTexturePath = baseColorTexture;
             saved.material.metallic = static_cast<float>(metallic);
             saved.material.roughness = static_cast<float>(roughness);
+            double transmission=0,ior=1.5;
+            if(jsonObject["transmission"].get_double().get(transmission)==simdjson::SUCCESS&&std::isfinite(transmission))
+                saved.material.transmission=float(std::clamp(transmission,0.0,1.0));
+            if(jsonObject["ior"].get_double().get(ior)==simdjson::SUCCESS&&std::isfinite(ior))
+                saved.material.ior=float(std::clamp(ior,1.0,3.0));
+            simdjson::dom::element emission;
+            if(jsonObject["emissionColor"].get(emission)==simdjson::SUCCESS) {
+                if(!read_json_vec3(emission,saved.material.emissionColor)) return false;
+                saved.material.emissionColor=glm::clamp(saved.material.emissionColor,glm::vec3(0),glm::vec3(10000));
+            }
+            double strength=0;
+            if(jsonObject["emissionStrength"].get_double().get(strength)==simdjson::SUCCESS&&std::isfinite(strength))
+                saved.material.emissionStrength=float(std::clamp(strength,0.0,10000.0));
             bool debugChecker = false;
             const simdjson::error_code checkerResult =
                 jsonObject["materialDebugChecker"].get_bool().get(debugChecker);
@@ -743,13 +753,24 @@ bool VulkanEngine::load_editor_scene()
 
     Scene restoredScene{};
     std::unordered_map<uint32_t, SceneObjectID> restoredIDs;
+    const bool isGIPlaytest = scenePath.filename().string().rfind("gi_", 0) == 0;
     for (const SavedSceneObject& saved : savedObjects) {
         const SceneObjectID newID = restoredScene.create_object(saved.name);
         restoredIDs.emplace(saved.oldID, newID);
         SceneObject* object = restoredScene.get(newID);
         object->localTransform = saved.transform;
         object->visible = saved.visible;
-        object->hasCollision = saved.hasCollision;
+        // GI fixtures are also useful as small gameplay rooms. Their trace
+        // validation scenes historically left collision disabled because the
+        // automated tracer uses the editor camera. Keep authored collision
+        // values authoritative everywhere else, while giving these fixtures
+        // a floor and solid cube boundaries for F1/F2 gameplay inspection.
+        const bool giFloor = isGIPlaytest &&
+            saved.assetKind == SceneAssetKind::FloorQuad &&
+            saved.collisionShape == CollisionShape::GroundPlane &&
+            std::abs(saved.transform.position.y) <= 0.01f;
+        const bool giCube = isGIPlaytest && saved.assetKind == SceneAssetKind::UnitCube;
+        object->hasCollision = saved.hasCollision || giFloor || giCube;
         object->portalPlaceable = saved.portalPlaceable;
         object->layer = saved.layer;
         object->collisionShape = saved.collisionShape;
@@ -833,11 +854,20 @@ bool VulkanEngine::load_editor_scene()
     _nextCreatedActorNumber = static_cast<uint32_t>(std::max<uint64_t>(nextActor, 1));
     // Past every path that could still have failed.
     _ssaoSettings = pendingSSAO;
-    _ssaoSceneOverride = pendingSSAOOverride;
+    _traceLighting = pendingReference;
+    if (pendingSkyboxSelection != _skyboxSelection &&
+        !set_skybox(pendingSkyboxSelection)) {
+        fmt::print(
+            "Scene skybox could not be loaded; keeping {}\n",
+            SkyboxDisplayNames[_skyboxSelection]);
+    }
+    // A newly loaded scene supplies the gameplay spawn. Ordinary editor/play
+    // toggles can then preserve the paused player's position.
+    respawn_player();
     _sceneDirty = false;
-    std::ofstream lastSceneFile(LastEditorScenePath, std::ios::trunc);
-    if (lastSceneFile) {
-        lastSceneFile << _activeSceneFilename << '\n';
+    if (!SDL_getenv("MIRABILIS_TEST_FRAMES")) {
+        std::ofstream lastSceneFile(LastEditorScenePath, std::ios::trunc);
+        if (lastSceneFile) lastSceneFile << _activeSceneFilename << '\n';
     }
     rebuild_collision_from_scene();
     fmt::print("Loaded editor scene: {}\n", scenePath.string());
