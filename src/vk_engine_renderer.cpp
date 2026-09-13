@@ -573,10 +573,14 @@ void VulkanEngine::init_pipelines()
     init_background_pipelines();
     init_shadow_pipeline();
     init_depth_normal_pipeline();
+    // Deferred to the end of this function: both alpha-tested pipelines take
+    // metalRoughMaterial.materialLayout, which build_pipelines() creates.
     init_render_debug_pipeline();
     init_fxaa_pipeline();
     init_ssao_pipelines();
     metalRoughMaterial.build_pipelines(this);
+    init_shadow_mask_pipeline();
+    init_depth_normal_mask_pipeline();
     init_ssgi_pipelines();
 }
 
@@ -587,6 +591,7 @@ void VulkanEngine::draw_geometry(
     VkDescriptorSet sceneDescriptor,
     bool clearDepthAndStencil,
     MaterialPipeline* overridePipeline,
+    MaterialPipeline* overrideMaskPipeline,
     uint32_t stencilReference,
     bool useFrustumCulling,
     uint32_t stencilCompareMask,
@@ -673,9 +678,19 @@ void VulkanEngine::draw_geometry(
             return;
         }
 
-        MaterialPipeline* pipeline = overridePipeline != nullptr
-            ? overridePipeline
-            : renderObject.material->pipeline;
+        // An overriding pass still has to honour the alpha cutoff, or masked
+        // geometry reappears as a solid rectangle the moment it is seen
+        // through a portal.  Passes that write a stencil or a mask rather
+        // than shading pass no mask pipeline and fall back to the one
+        // override, which is what they want: the cutout's silhouette is not
+        // what those passes are describing.
+        MaterialPipeline* pipeline = renderObject.material->pipeline;
+        if (overridePipeline != nullptr) {
+            pipeline = overrideMaskPipeline != nullptr &&
+                    renderObject.material->passType == MaterialPass::Mask
+                ? overrideMaskPipeline
+                : overridePipeline;
+        }
         if (pipeline != lastPipeline) {
             lastPipeline = pipeline;
             vkCmdBindPipeline(
@@ -966,6 +981,66 @@ void VulkanEngine::init_shadow_pipeline()
     });
 }
 
+void VulkanEngine::init_shadow_mask_pipeline()
+{
+    VkShaderModule vertexShader = VK_NULL_HANDLE;
+    VkShaderModule fragmentShader = VK_NULL_HANDLE;
+    if (!vkutil::load_shader_module(
+            "../../shaders/shadow_depth_mask.vert.spv", _device, &vertexShader) ||
+        !vkutil::load_shader_module(
+            "../../shaders/shadow_depth_mask.frag.spv", _device, &fragmentShader)) {
+        fmt::print("Error loading alpha-tested shadow shaders\n");
+        if (vertexShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, vertexShader, nullptr);
+        }
+        if (fragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, fragmentShader, nullptr);
+        }
+        return;
+    }
+
+    // One descriptor set, and it is the per-material set the forward pass
+    // binds at index 1.  Nothing about the sun's camera is needed here - it
+    // is still folded into the push constant - so the scene set the other
+    // passes carry would be dead weight, and set 0 is the material instead.
+    VkPushConstantRange pushRange{
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = sizeof(ShadowPushConstants)};
+    VkPipelineLayoutCreateInfo layoutInfo = vkinit::pipeline_layout_create_info();
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &metalRoughMaterial.materialLayout;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushRange;
+    VK_CHECK(vkCreatePipelineLayout(
+        _device, &layoutInfo, nullptr, &_shadowMaskPipeline.layout));
+
+    PipelineBuilder builder;
+    builder._pipelineLayout = _shadowMaskPipeline.layout;
+    builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    // Every state below matches the opaque shadow pipeline exactly.  Where a
+    // masked surface and an opaque one meet, any disagreement here would show
+    // up as a seam between the two shadows they cast.
+    builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    builder.set_multisampling_none();
+    builder.disable_blending();
+    builder.disable_color_attachment();
+    builder.enable_depthtest(true, VK_COMPARE_OP_LESS_OR_EQUAL);
+    builder.enable_depth_bias(1.25f, 2.75f);
+    builder.set_depth_format(_shadowMapImage.imageFormat);
+    _shadowMaskPipeline.pipeline = builder.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, fragmentShader, nullptr);
+    vkDestroyShaderModule(_device, vertexShader, nullptr);
+
+    _mainDeletionQueue.push_function([this]() {
+        vkDestroyPipeline(_device, _shadowMaskPipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _shadowMaskPipeline.layout, nullptr);
+    });
+}
+
 void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
 {
     const auto startTime = std::chrono::steady_clock::now();
@@ -1010,19 +1085,54 @@ void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
         vkCmdBindPipeline(
             cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadowPipeline.pipeline);
 
+        VkPipeline lastPipeline = _shadowPipeline.pipeline;
+        MaterialInstance* lastMaterial = nullptr;
         VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
         // portalViewDrawContext is the world plus the player's body, which is
         // what actually exists in the level.  The main camera's context is
         // not usable here: it also carries the portal quads, and it omits the
         // body the first-person camera sits inside.
-        // Transparent surfaces intentionally do not cast yet. Supporting
-        // foliage or grates requires a material-aware alpha-tested pass.
+        // Transparent surfaces intentionally do not cast yet: a blended
+        // surface has no single silhouette to cast.  Masked ones do, and they
+        // go through _shadowMaskPipeline so foliage and grates cast their
+        // cutout rather than the rectangle it is painted on.
         for (const RenderObject& renderObject :
                 portalViewDrawContext.OpaqueSurfaces) {
             // Cull against the light, never against the player's camera: an
             // object behind the camera can still drop a shadow into view.
             if (!is_visible(renderObject, _sunViewProjection)) {
                 continue;
+            }
+
+            const bool masked = renderObject.material != nullptr &&
+                renderObject.material->passType == MaterialPass::Mask &&
+                _shadowMaskPipeline.pipeline != VK_NULL_HANDLE;
+            const MaterialPipeline& active = masked
+                ? _shadowMaskPipeline
+                : _shadowPipeline;
+            if (active.pipeline != lastPipeline) {
+                lastPipeline = active.pipeline;
+                vkCmdBindPipeline(
+                    cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, active.pipeline);
+                // The opaque pipeline's layout declares no sets at all, so
+                // the two are compatible for nothing: whatever was bound for
+                // the mask pipeline does not survive a round trip through it.
+                lastMaterial = nullptr;
+            }
+            if (masked && renderObject.material != lastMaterial) {
+                lastMaterial = renderObject.material;
+                // Set 0 here, not 1.  This pipeline carries the material set
+                // alone, because the sun's camera is already folded into the
+                // push constant and nothing else about the scene is read.
+                vkCmdBindDescriptorSets(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    active.layout,
+                    0,
+                    1,
+                    &renderObject.material->materialSet,
+                    0,
+                    nullptr);
             }
 
             if (renderObject.indexBuffer != lastIndexBuffer) {
@@ -1036,7 +1146,7 @@ void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
             pushConstants.vertexBuffer = renderObject.vertexBufferAddress;
             vkCmdPushConstants(
                 cmd,
-                _shadowPipeline.layout,
+                active.layout,
                 VK_SHADER_STAGE_VERTEX_BIT,
                 0,
                 sizeof(ShadowPushConstants),
@@ -1556,6 +1666,65 @@ void VulkanEngine::init_depth_normal_pipeline()
     });
 }
 
+void VulkanEngine::init_depth_normal_mask_pipeline()
+{
+    VkShaderModule vertexShader = VK_NULL_HANDLE;
+    VkShaderModule fragmentShader = VK_NULL_HANDLE;
+    if (!vkutil::load_shader_module(
+            "../../shaders/depth_normal_mask.vert.spv", _device, &vertexShader) ||
+        !vkutil::load_shader_module(
+            "../../shaders/depth_normal_mask.frag.spv", _device, &fragmentShader)) {
+        fmt::print("Error loading alpha-tested prepass shaders\n");
+        if (vertexShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, vertexShader, nullptr);
+        }
+        if (fragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, fragmentShader, nullptr);
+        }
+        return;
+    }
+
+    // Scene data and the material, in the same order the forward pass uses
+    // them, so a material set written for that pass binds here unchanged.
+    VkDescriptorSetLayout layouts[] = {
+        _gpuSceneDataDescriptorLayout,
+        metalRoughMaterial.materialLayout};
+    VkPushConstantRange matrixRange{
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = sizeof(GPUDrawPushConstants)};
+    VkPipelineLayoutCreateInfo layoutInfo = vkinit::pipeline_layout_create_info();
+    layoutInfo.setLayoutCount = 2;
+    layoutInfo.pSetLayouts = layouts;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &matrixRange;
+    VK_CHECK(vkCreatePipelineLayout(
+        _device, &layoutInfo, nullptr, &_depthNormalMaskPipeline.layout));
+
+    PipelineBuilder builder;
+    builder._pipelineLayout = _depthNormalMaskPipeline.layout;
+    builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    // Matching the opaque prepass for the same reason it matches the main
+    // pass: occlusion computed here has to land on the shaded image's pixels.
+    builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    builder.set_multisampling_none();
+    builder.disable_blending();
+    builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    builder.set_color_attachment_format(_prepassNormalImage.imageFormat);
+    builder.set_depth_format(_prepassDepthImage.imageFormat);
+    _depthNormalMaskPipeline.pipeline = builder.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, fragmentShader, nullptr);
+    vkDestroyShaderModule(_device, vertexShader, nullptr);
+
+    _mainDeletionQueue.push_function([this]() {
+        vkDestroyPipeline(_device, _depthNormalMaskPipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _depthNormalMaskPipeline.layout, nullptr);
+    });
+}
+
 void VulkanEngine::init_render_debug_pipeline()
 {
     VkShaderModule vertexShader = VK_NULL_HANDLE;
@@ -1934,6 +2103,9 @@ void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
     vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
 
     if (_depthNormalPipeline.pipeline != VK_NULL_HANDLE) {
+        // Both prepass layouts declare the scene set at index 0 with the same
+        // push constant range, which makes them compatible for that set: it
+        // survives a switch between the two pipelines and is bound once.
         vkCmdBindPipeline(
             cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _depthNormalPipeline.pipeline);
         vkCmdBindDescriptorSets(
@@ -1946,14 +2118,43 @@ void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
             0,
             nullptr);
 
+        VkPipeline lastPipeline = _depthNormalPipeline.pipeline;
+        MaterialInstance* lastMaterial = nullptr;
         VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
         // mainDrawContext and the main camera's frustum test, because these
         // buffers must describe the image the player is actually looking at.
         // Transparent surfaces are left out for now: one depth and one normal
-        // per pixel cannot describe a surface seen through another.
+        // per pixel cannot describe a surface seen through another.  Masked
+        // surfaces are not in that category - they are opaque wherever they
+        // draw at all - so they belong here, drawn through a pipeline that
+        // runs their cutoff test.
         for (const RenderObject& renderObject : mainDrawContext.OpaqueSurfaces) {
             if (!is_visible(renderObject, sceneData.viewproj)) {
                 continue;
+            }
+
+            const bool masked = renderObject.material != nullptr &&
+                renderObject.material->passType == MaterialPass::Mask &&
+                _depthNormalMaskPipeline.pipeline != VK_NULL_HANDLE;
+            const MaterialPipeline& active = masked
+                ? _depthNormalMaskPipeline
+                : _depthNormalPipeline;
+            if (active.pipeline != lastPipeline) {
+                lastPipeline = active.pipeline;
+                vkCmdBindPipeline(
+                    cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, active.pipeline);
+            }
+            if (masked && renderObject.material != lastMaterial) {
+                lastMaterial = renderObject.material;
+                vkCmdBindDescriptorSets(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    active.layout,
+                    1,
+                    1,
+                    &renderObject.material->materialSet,
+                    0,
+                    nullptr);
             }
 
             if (renderObject.indexBuffer != lastIndexBuffer) {
@@ -1967,7 +2168,7 @@ void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
             pushConstants.vertexBuffer = renderObject.vertexBufferAddress;
             vkCmdPushConstants(
                 cmd,
-                _depthNormalPipeline.layout,
+                active.layout,
                 VK_SHADER_STAGE_VERTEX_BIT,
                 0,
                 sizeof(GPUDrawPushConstants),

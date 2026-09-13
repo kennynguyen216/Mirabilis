@@ -292,7 +292,9 @@ void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
         draw_geometry(cmd, portalViewDrawContext,
                       _portalSceneData[baseViewIndex].viewproj,
                       frame.portalSceneDescriptors[baseViewIndex], false,
-                      &metalRoughMaterial.portalViewPipeline, primaryStencil, false);
+                      &metalRoughMaterial.portalViewPipeline,
+                      &metalRoughMaterial.portalViewMaskPipeline,
+                      primaryStencil, false);
 
         // Each extra level is the same portal seen again through its linked
         // view. Two high stencil bits keep the recursive aperture constrained
@@ -310,8 +312,9 @@ void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
             draw_geometry(cmd, portalViewDrawContext,
                           _portalSceneData[baseViewIndex + level].viewproj,
                           frame.portalSceneDescriptors[baseViewIndex + level], false,
-                          &metalRoughMaterial.portalViewPipeline, recursiveStencil,
-                          false, recursiveStencil);
+                          &metalRoughMaterial.portalViewPipeline,
+                          &metalRoughMaterial.portalViewMaskPipeline,
+                          recursiveStencil, false, recursiveStencil);
             parentStencil = recursiveStencil;
         }
         ++surfaceIndex;
@@ -357,6 +360,22 @@ void VulkanEngine::draw_geometry_to_portal_camera(
     scissor.extent = _portalCameraExtent;
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
+    // Every object in this pass shares one camera, and all but the
+    // alpha-masked ones share one pipeline.  Both variants were built from
+    // the same layout, so the scene set is bound once here and stays bound
+    // across a pipeline switch.  Only the material set, the index buffer and
+    // the choice between the two pipelines vary, and each is guarded.
+    vkCmdBindDescriptorSets(
+        cmd,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        metalRoughMaterial.portalOffscreenPipeline.layout,
+        0,
+        1,
+        &sceneDescriptor,
+        0,
+        nullptr);
+
+    VkPipeline lastPipeline = VK_NULL_HANDLE;
     MaterialInstance* lastMaterial = nullptr;
     VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
     for (const RenderObject& renderObject : drawContext.OpaqueSurfaces) {
@@ -364,19 +383,14 @@ void VulkanEngine::draw_geometry_to_portal_camera(
             continue;
         }
 
-        vkCmdBindPipeline(
-            cmd,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            metalRoughMaterial.portalOffscreenPipeline.pipeline);
-        vkCmdBindDescriptorSets(
-            cmd,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            metalRoughMaterial.portalOffscreenPipeline.layout,
-            0,
-            1,
-            &sceneDescriptor,
-            0,
-            nullptr);
+        const VkPipeline pipeline =
+            renderObject.material->passType == MaterialPass::Mask
+                ? metalRoughMaterial.portalOffscreenMaskPipeline.pipeline
+                : metalRoughMaterial.portalOffscreenPipeline.pipeline;
+        if (pipeline != lastPipeline) {
+            lastPipeline = pipeline;
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        }
         if (renderObject.material != lastMaterial) {
             lastMaterial = renderObject.material;
             vkCmdBindDescriptorSets(
@@ -463,6 +477,9 @@ void VulkanEngine::draw_offscreen_portal_views(VkCommandBuffer cmd)
         frame.sceneDescriptor,
         false,
         &metalRoughMaterial.portalCompositePipeline,
+        // The composite draws one full-bleed quad textured with an
+        // already-rendered camera image; there is no cutout to test.
+        nullptr,
         BluePortalView + 1,
         false);
 
@@ -476,6 +493,7 @@ void VulkanEngine::draw_offscreen_portal_views(VkCommandBuffer cmd)
         frame.sceneDescriptor,
         false,
         &metalRoughMaterial.portalCompositePipeline,
+        nullptr,
         OrangePortalView + 1,
         false);
 }

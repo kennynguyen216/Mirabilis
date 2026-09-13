@@ -40,6 +40,10 @@ layout(set = 1, binding = 0) uniform GLTFMaterialData {
     // xy = UV tiling, zw = UV offset. Legacy materials leave this zero and
     // the vertex shaders interpret that as a 1x1 scale.
     vec4 uvTransform;
+    // x = glTF alphaCutoff.  Left at zero on every material that is not
+    // alpha-masked, which makes the test a no-op there instead of something
+    // the shared shader body has to branch around.
+    vec4 alphaMask;
 } materialData;
 
 layout(set = 1, binding = 1) uniform sampler2D colorTex;

@@ -678,6 +678,7 @@ void VulkanEngine::draw(float deltaTime)
         get_current_frame().sceneDescriptor,
         true,
         nullptr,
+        nullptr,
         0,
         true,
         0xff,

@@ -87,6 +87,11 @@ static_assert(sizeof(GPUDrawPushConstants) == 128);
 enum class MaterialPass : uint8_t {
     MainColor,
     Transparent,
+    // glTF alphaMode MASK: fully opaque wherever it draws at all, but the
+    // base colour's alpha decides per fragment whether it draws.  It is a
+    // separate pass from Transparent because it still writes depth and still
+    // belongs in the prepass, which blended surfaces do not.
+    Mask,
     Other
 };
 

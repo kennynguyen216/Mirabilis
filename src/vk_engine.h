@@ -263,6 +263,13 @@ enum class EditorGizmoOperation : uint8_t {
 struct GLTFMetallic_Roughness {
     MaterialPipeline opaquePipeline;
     MaterialPipeline transparentPipeline;
+    // The alpha-tested counterparts of the three passes that shade geometry.
+    // They exist as separate pipelines rather than as a branch inside the
+    // opaque ones so that discard - which costs every opaque surface its
+    // early depth rejection - is confined to the materials that need it.
+    MaterialPipeline maskPipeline;
+    MaterialPipeline portalViewMaskPipeline;
+    MaterialPipeline portalOffscreenMaskPipeline;
     // These use the same layout as opaquePipeline, but split a portal mask
     // into visible-stencil and stencil-restricted depth-clear passes.
     MaterialPipeline portalStencilPipeline;
@@ -497,10 +504,12 @@ class VulkanEngine{
         void init_portal_camera_targets();
         void init_shadow_resources();
         void init_shadow_pipeline();
+        void init_shadow_mask_pipeline();
         void draw_shadow_map(VkCommandBuffer cmd);
         void init_depth_normal_resources();
         void init_ssgi_resources();
         void init_depth_normal_pipeline();
+        void init_depth_normal_mask_pipeline();
         void init_render_debug_pipeline();
         void init_post_process_resources();
         void init_fxaa_pipeline();
@@ -532,6 +541,11 @@ class VulkanEngine{
             VkDescriptorSet sceneDescriptor,
             bool clearDepthAndStencil,
             MaterialPipeline* overridePipeline = nullptr,
+            // Used in place of overridePipeline for alpha-masked materials.
+            // Null means masked surfaces fall back to overridePipeline, which
+            // is right for the passes that write a stencil or a mask rather
+            // than shading anything.
+            MaterialPipeline* overrideMaskPipeline = nullptr,
             uint32_t stencilReference = 0,
             bool useFrustumCulling = true,
             uint32_t stencilCompareMask = 0xff,
@@ -718,6 +732,10 @@ class VulkanEngine{
         // because the lookup is done from world-space positions.
         static constexpr uint32_t ShadowMapResolution = 4096;
         AllocatedImage _shadowMapImage;
+        // Alpha-tested shadow casting.  The opaque shadow pipeline binds no
+        // descriptors at all, so this one cannot share its layout: it needs
+        // the per-material set to sample the base colour's alpha.
+        MaterialPipeline _shadowMaskPipeline;
         VkSampler _shadowSampler{};
         MaterialPipeline _shadowPipeline;
         glm::mat4 _sunViewProjection{1.0f};
@@ -773,6 +791,10 @@ class VulkanEngine{
         VkDescriptorSetLayout _ssgiFilterDescriptorLayout{};
         std::array<VkDescriptorSet, 3> _ssgiFilterDescriptors{};
         MaterialPipeline _depthNormalPipeline;
+        // Alpha-tested prepass.  Without it, occlusion and screen-space GI
+        // would be computed against the quad a leaf texture is drawn on
+        // rather than against the leaves.
+        MaterialPipeline _depthNormalMaskPipeline;
         MaterialPipeline _renderDebugPipeline;
         MaterialPipeline _ssgiPortalMaskPipeline;
         VkPipelineLayout _ssgiPipelineLayout{};

@@ -419,6 +419,13 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         GLTFMetallic_Roughness::MaterialConstants constants{};
         constants.colorFactors = color;
         constants.metal_rough_factors = glm::vec4(metallic, roughness, 0.0f, 0.0f);
+        // extra[0] is the UV transform the scene materials write; extra[1].x
+        // is the alpha cutoff.  It stays zero for every pass but Mask, which
+        // makes the test in the mask shaders a no-op if one is ever bound to
+        // an opaque pipeline by mistake.
+        if (pass == MaterialPass::Mask && source != nullptr) {
+            constants.extra[1].x = source->alphaCutoff;
+        }
         materialConstants[index] = constants;
 
         GLTFMetallic_Roughness::MaterialResources resources{};
@@ -477,9 +484,16 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
                 source.pbrData.baseColorFactor[1],
                 source.pbrData.baseColorFactor[2],
                 source.pbrData.baseColorFactor[3]);
-            const MaterialPass pass = source.alphaMode == fastgltf::AlphaMode::Blend
-                ? MaterialPass::Transparent
-                : MaterialPass::MainColor;
+            // MASK is its own pass rather than an opaque material: it still
+            // writes depth and still belongs in the prepass, but every stage
+            // that draws it has to run the cutoff test or it appears as the
+            // solid rectangle its texture is mapped onto.
+            MaterialPass pass = MaterialPass::MainColor;
+            if (source.alphaMode == fastgltf::AlphaMode::Blend) {
+                pass = MaterialPass::Transparent;
+            } else if (source.alphaMode == fastgltf::AlphaMode::Mask) {
+                pass = MaterialPass::Mask;
+            }
             auto material = createMaterial(
                 i,
                 color,
