@@ -157,6 +157,12 @@ void VulkanEngine::init_descriptors()
         // it as well, and a flag in the block itself is what stops them
         // reading occlusion computed for a different view.
         builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        // And the environment panorama.  It used to belong to the SSGI trace
+        // alone, but a portal camera has no trace to fall back from and needs
+        // the same sky directly, so it lives with the scene data every camera
+        // already binds.  update_skybox_descriptors() is what fills it: the
+        // panorama is loaded by init_default_data(), after this runs.
+        builder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         // Compute is here because both occlusion passes bind this same set
         // for the projection and its inverse rather than duplicating them.
         _gpuSceneDataDescriptorLayout = builder.build(

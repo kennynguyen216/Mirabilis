@@ -167,6 +167,13 @@ struct GPUSceneData {
     //     disk thousands of times brighter than the sky, which survives every
     //     mip, and which the shadow-mapped direct term already delivers.
     glm::vec4 indirectSettings{0.0f, 1.0f, 0.0f, 1.0e4f};
+    // x = 1 while this camera substitutes a direct environment lookup for a
+    //     screen-space indirect pass it cannot run.  Only portal cameras set
+    //     it, and only while the main camera is running SSGI.  Both views have
+    //     to divide the same job between the flat ambient term and indirect
+    //     light the same way; when they do not, the destination room visibly
+    //     changes colour at the moment the player crosses the portal.
+    glm::vec4 portalIndirectSettings{0.0f};
 };
 
 // Sixteen visible surfaces (the player pair plus seven authored links), with

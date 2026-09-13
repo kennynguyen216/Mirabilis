@@ -90,6 +90,9 @@ void VulkanEngine::init_default_images_and_samplers()
             VK_FORMAT_R8G8B8A8_SRGB,
             VK_IMAGE_USAGE_SAMPLED_BIT);
         _skyboxSelection = 0;
+        // set_skybox() does this itself on the paths that succeed; the sets
+        // that name the panorama have to be written on this one too.
+        update_skybox_descriptors();
     }
     
     // The compute background needs the panorama at binding 1.  The portal
@@ -352,6 +355,32 @@ void VulkanEngine::update_skybox_descriptors()
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         writer.update_set(_device, descriptor);
         writer.clear();
+    }
+    // Every camera's scene set, main and portal alike.  A portal camera reads
+    // the panorama from its forward shader rather than from a screen-space
+    // trace it cannot run, and both have to be looking at the same sky or the
+    // destination room changes colour when the player crosses.  These sets are
+    // allocated by init_descriptors(), which runs before the panorama exists,
+    // so this is the only place binding 3 is ever written.  The mip-complete
+    // sampler is the one to use: a hemisphere average reads a coarse level.
+    for (FrameData& frame : _frames) {
+        const auto writeEnvironment = [&](VkDescriptorSet descriptor) {
+            if (descriptor == VK_NULL_HANDLE) {
+                return;
+            }
+            writer.write_image(
+                3,
+                _skyboxImage.imageView,
+                _skyboxEnvironmentSampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            writer.update_set(_device, descriptor);
+            writer.clear();
+        };
+        writeEnvironment(frame.sceneDescriptor);
+        for (VkDescriptorSet descriptor : frame.portalSceneDescriptors) {
+            writeEnvironment(descriptor);
+        }
     }
 }
 

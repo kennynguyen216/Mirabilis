@@ -45,4 +45,10 @@ layout(set = 0, binding = 0) uniform SceneData {
     // w = the radiance ceiling a miss ray may return, which separates the
     // sky from a sun disk the direct term already delivers.
     vec4 indirectSettings;
+    // x = 1 while this camera substitutes an environment lookup for a
+    //     screen-space indirect pass it cannot run.  Only portal cameras set
+    //     it, and only while the main camera is running SSGI: both views have
+    //     to divide the work between flat ambient and indirect light the same
+    //     way, or the destination room changes colour as the player crosses.
+    vec4 portalIndirectSettings;
 } sceneData;

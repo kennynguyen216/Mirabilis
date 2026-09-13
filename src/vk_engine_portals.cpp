@@ -593,6 +593,15 @@ GPUSceneData VulkanEngine::build_portal_scene_data(
     // visible through this opening.  Reusing it would stamp the near room's
     // contact shadows onto the far one, so this camera shades unoccluded.
     // Portal-specific occlusion would need its own prepass per virtual camera.
+    //
+    // SSGI is cleared for the same reason, but clearing it alone was the
+    // whole portal colour shift: the main camera keeps only a fraction of the
+    // flat ambient term and lets SSGI supply the rest, while this camera went
+    // on spending all of it and received nothing in return.  Read the main
+    // camera's SSGI flag before clearing it, so the portal shader knows to
+    // apply the same split and to stand the missing indirect estimate up from
+    // the shared environment instead.
+    data.portalIndirectSettings.x = data.screenSpaceSettings.z;
     data.screenSpaceSettings.x = 0.0f;
     data.screenSpaceSettings.z = 0.0f;
     data.screenSpaceSettings.w = 0.0f;

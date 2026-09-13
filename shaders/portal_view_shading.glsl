@@ -3,6 +3,7 @@
 // differ only by MIRABILIS_ALPHA_MASK.
 #include "input_structures.glsl"
 #include "alpha_mask.glsl"
+#include "environment.glsl"
 
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec4 inColor;
@@ -38,7 +39,26 @@ void main()
     // much of the surrounding hemisphere nearby geometry blocks.
     float visibility = sunlight_visibility(inWorldPosition, normal);
     float occlusion = ambient_occlusion(gl_FragCoord.xy);
-    vec3 ambient = sceneData.ambientColor.rgb * occlusion;
+    // A portal camera cannot run SSGI: every screen-space buffer in the frame
+    // describes the room in front of the player, not the one through the
+    // opening.  What it must not do is carry on spending the whole flat
+    // ambient term while the main camera has handed most of that job to SSGI,
+    // because then the same wall is lit two ways and changes colour the
+    // instant the player steps through.  So this camera divides the work the
+    // same way the main one does, and stands the missing screen-space
+    // estimate up with the environment SSGI itself falls back to whenever a
+    // ray leaves the depth buffer -- evaluated over the whole hemisphere at
+    // once, since there are no rays here to average.
+    //
+    // It is an approximation and not portal SSGI: it carries no colour
+    // bleeding, no local indirect shadowing, and no light from surfaces the
+    // portal camera cannot see.  It only stops the two cameras disagreeing
+    // about how much indirect light there is.
+    float substitute = sceneData.portalIndirectSettings.x;
+    float ambientScale = mix(
+        1.0, clamp(sceneData.indirectSettings.x, 0.0, 1.0), substitute);
+    vec3 ambient = sceneData.ambientColor.rgb * occlusion * ambientScale +
+        substitute * environment_irradiance(normal) * occlusion;
     // The sun term is left alone: it already has its own visibility test, and
     // scaling it here would darken contact points standing in full sunlight.
     vec3 direct = visibility * diffuse * sceneData.sunlightColor.rgb;
