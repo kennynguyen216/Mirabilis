@@ -64,6 +64,8 @@ const AllocatedImage& VulkanEngine::load_scene_texture(
         VK_FORMAT_R8G8B8A8_SRGB,
         VK_IMAGE_USAGE_SAMPLED_BIT,
         true);
+    // Scene textures are only ever bound as base colour.
+    image.traceSource = make_trace_texture(pixels, image.imageExtent);
     stbi_image_free(pixels);
 
     auto [inserted, unused] = _sceneTextureCache.emplace(key, image);

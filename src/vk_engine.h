@@ -646,6 +646,11 @@ class VulkanEngine{
             VkImageUsageFlags usage,
             bool mipmapped = false);
         void destroy_image(const AllocatedImage& image);
+        // A CPU copy of RGBA8 pixels for the software path tracer.  Opt-in,
+        // because the tracer reads base colour alone and copying every
+        // uploaded normal and roughness map costs gigabytes on Sponza.
+        static std::shared_ptr<TraceTextureSource> make_trace_texture(
+            const void* rgba, VkExtent3D size);
         void init_imgui();
         void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
         void update_physics(float deltaTime);
