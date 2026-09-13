@@ -426,6 +426,13 @@ class VulkanEngine{
     // The mip a traced miss ray samples, derived from the loaded panorama's
     // width so a 1x1 fallback and a 4K HDR both land on a sane footprint.
     float _skyboxEnvironmentLod{0.0f};
+    // The radiance ceiling a traced miss ray is allowed to return.  A clear-
+    // sky HDR keeps most of its energy in the sun disk -- four orders of
+    // magnitude above the sky, and a fraction of a percent of its pixels --
+    // and that disk is already delivered by the shadow-mapped direct term.
+    // Derived per panorama rather than fixed, because how bright the sky is
+    // relative to its sun is a property of the capture.
+    float _skyboxIndirectClamp{1.0e4f};
     // Anisotropic filtering is an optional device feature, so nothing may
     // request it before init_vulkan has both confirmed support and read the
     // device's ceiling.  _textureAnisotropy is the preset's requested level;

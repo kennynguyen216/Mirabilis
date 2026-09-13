@@ -848,7 +848,7 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
         _ssgiAmbientRetention,
         _ssgiTraceEnvironmentMap ? 1.0f : 0.0f,
         _skyboxEnvironmentLod,
-        0.0f);
+        _skyboxIndirectClamp);
     return data;
 }
 

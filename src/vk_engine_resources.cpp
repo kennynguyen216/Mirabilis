@@ -221,6 +221,28 @@ bool VulkanEngine::set_skybox(int selection)
             halfPixels[pixel * 2 + 1] = glm::packHalf2x16(glm::vec2(
                 finiteHalf(source[2]), 1.0f));
         }
+        // How bright the sky gets before the sun disk takes over.  Below
+        // this the panorama is sky; above it, almost every pixel belongs to
+        // the sun, whose light the direct term already delivers with a
+        // shadow map.  A percentile rather than a fixed number because the
+        // ratio between the two is a property of the capture.
+        {
+            std::vector<float> luminance(pixelCount);
+            for (size_t pixel = 0; pixel < pixelCount; ++pixel) {
+                const float* source = pixels + pixel * 4;
+                luminance[pixel] = 0.2126f * source[0] +
+                    0.7152f * source[1] + 0.0722f * source[2];
+            }
+            const size_t rank = static_cast<size_t>(
+                static_cast<double>(pixelCount) * 0.999);
+            std::nth_element(
+                luminance.begin(),
+                luminance.begin() + static_cast<std::ptrdiff_t>(rank),
+                luminance.end());
+            // A panorama with no sun in it must not have its sky clipped, so
+            // the ceiling never drops below plain white.
+            _skyboxIndirectClamp = std::max(1.0f, luminance[rank]);
+        }
         stbi_image_free(pixels);
 
         newImage = create_image(
@@ -232,6 +254,8 @@ bool VulkanEngine::set_skybox(int selection)
             VK_FORMAT_R16G16B16A16_SFLOAT,
             VK_IMAGE_USAGE_SAMPLED_BIT,
             true);
+        fmt::print(
+            "Indirect sky/sun split at {:.3f}\n", _skyboxIndirectClamp);
         fmt::print(
             "Loaded HDR equirectangular skybox: {} ({}x{}, RGBA16F)\n",
             path,
@@ -249,6 +273,9 @@ bool VulkanEngine::set_skybox(int selection)
                     : "unknown");
             return false;
         }
+        // An 8-bit panorama decodes into [0, 1] and has no sun disk to
+        // separate from its sky, so nothing here needs clipping.
+        _skyboxIndirectClamp = 1.0e4f;
         newImage = create_image(
             pixels,
             {static_cast<uint32_t>(width),

@@ -665,6 +665,7 @@ void VulkanEngine::capture_ssgi(const char* filename)
         << "\nMiss fill: "
         << (_ssgiTraceEnvironmentMap ? "environment map" : "analytic gradient")
         << "\nEnvironment mip: " << _skyboxEnvironmentLod
+        << "\nIndirect sky/sun split: " << _skyboxIndirectClamp
         // Captures taken before the albedo multiply moved to the
         // composite hold reflected colour, so a comparison across that
         // change needs to know which quantity it is looking at.

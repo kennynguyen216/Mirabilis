@@ -1694,6 +1694,11 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                             "Misses read %s at mip %.1f.",
                             SkyboxDisplayNames[_skyboxSelection],
                             _skyboxEnvironmentLod);
+                        ImGui::TextDisabled(
+                            "Sky/sun split at %.2f; above it is the sun,",
+                            _skyboxIndirectClamp);
+                        ImGui::TextDisabled(
+                            "which the direct term already delivers.");
                     } else {
                         ImGui::TextDisabled(
                             "Misses use the analytic gradient, matching");

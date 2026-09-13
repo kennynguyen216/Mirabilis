@@ -161,9 +161,12 @@ struct GPUSceneData {
     //     analytic gradient the software path tracer also uses.  The gradient
     //     is kept so a reference comparison can light both sides the same.
     // z = the mip level to sample the environment at.  A cosine-weighted ray
-    //     represents a wide cone, not a texel of a 4K panorama, and sampling
-    //     level 0 turns the sun disk into fireflies.
-    glm::vec4 indirectSettings{0.0f, 1.0f, 0.0f, 0.0f};
+    //     represents a wide cone, not a texel of a 4K panorama.
+    // w = the radiance ceiling a miss ray may return.  A coarse mip alone is
+    //     not enough: a clear-sky panorama keeps most of its energy in a sun
+    //     disk thousands of times brighter than the sky, which survives every
+    //     mip, and which the shadow-mapped direct term already delivers.
+    glm::vec4 indirectSettings{0.0f, 1.0f, 0.0f, 1.0e4f};
 };
 
 // Sixteen visible surfaces (the player pair plus seven authored links), with
