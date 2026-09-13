@@ -352,7 +352,10 @@ bool VulkanEngine::save_editor_scene()
     writeVec3(glm::vec3(_traceLighting.sunRadiance));
     file << ", \"environmentIntensity\": " << _traceLighting.environment.x
          << ", \"blackEnvironment\": " << (_traceLighting.environment.y>0.5f?"true":"false") << '}';
-    file << ",\n  \"lighting\": {\"sunDirection\": ";
+    const int savedSkybox = std::clamp(
+        _skyboxSelection, 0, static_cast<int>(SkyboxIds.size()) - 1);
+    file << ",\n  \"lighting\": {\"skybox\": \""
+         << SkyboxIds[savedSkybox] << "\", \"sunDirection\": ";
     writeVec3(_sunlightDirection);
     file << ", \"shadowsEnabled\": " << (_shadowsEnabled ? "true" : "false")
          << ", \"shadowRadius\": " << _shadowRadius
@@ -446,8 +449,19 @@ bool VulkanEngine::load_editor_scene()
     // Absent in scenes saved before lighting was stored, and in that case
     // every value below keeps whatever the engine already had.  That is why
     // adding the block does not need a scene version bump.
+    int pendingSkyboxSelection = _skyboxSelection;
     simdjson::dom::object jsonLighting;
     if (document["lighting"].get_object().get(jsonLighting) == simdjson::SUCCESS) {
+        std::string_view skyboxId;
+        if (jsonLighting["skybox"].get_string().get(skyboxId) ==
+            simdjson::SUCCESS) {
+            for (size_t index = 0; index < SkyboxIds.size(); ++index) {
+                if (skyboxId == SkyboxIds[index]) {
+                    pendingSkyboxSelection = static_cast<int>(index);
+                    break;
+                }
+            }
+        }
         simdjson::dom::element sunDirection;
         glm::vec3 loadedSunDirection{0.0f};
         if (jsonLighting["sunDirection"].get(sunDirection) == simdjson::SUCCESS &&
@@ -841,6 +855,12 @@ bool VulkanEngine::load_editor_scene()
     // Past every path that could still have failed.
     _ssaoSettings = pendingSSAO;
     _traceLighting = pendingReference;
+    if (pendingSkyboxSelection != _skyboxSelection &&
+        !set_skybox(pendingSkyboxSelection)) {
+        fmt::print(
+            "Scene skybox could not be loaded; keeping {}\n",
+            SkyboxDisplayNames[_skyboxSelection]);
+    }
     // A newly loaded scene supplies the gameplay spawn. Ordinary editor/play
     // toggles can then preserve the paused player's position.
     respawn_player();

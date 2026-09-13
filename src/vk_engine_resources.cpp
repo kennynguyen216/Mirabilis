@@ -1,6 +1,8 @@
 #include "vk_engine.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -70,39 +72,17 @@ void VulkanEngine::init_default_images_and_samplers()
     skyboxSamplerInfo.maxLod = 0.0f;
     VK_CHECK(vkCreateSampler(_device, &skyboxSamplerInfo, nullptr, &_skyboxSampler));
     
-    constexpr const char* SkyboxPath = "../../assets/textures/skybox.png";
-    int skyboxWidth = 0;
-    int skyboxHeight = 0;
-    int skyboxChannels = 0;
-    stbi_uc* skyboxPixels = stbi_load(
-        SkyboxPath,
-        &skyboxWidth,
-        &skyboxHeight,
-        &skyboxChannels,
-        STBI_rgb_alpha);
-    if (skyboxPixels != nullptr) {
-        _skyboxImage = create_image(
-            skyboxPixels,
-            {static_cast<uint32_t>(skyboxWidth),
-             static_cast<uint32_t>(skyboxHeight),
-             1},
-            VK_FORMAT_R8G8B8A8_SRGB,
-            VK_IMAGE_USAGE_SAMPLED_BIT);
-        stbi_image_free(skyboxPixels);
-        fmt::print("Loaded equirectangular skybox: {} ({}x{})\n",
-                   SkyboxPath, skyboxWidth, skyboxHeight);
-    } else {
-        // Keep the descriptor valid even if an asset is missing on another
-        // machine.  The log tells the developer why the sky is plain blue.
-        fmt::print("Failed to load skybox {}: {}\n",
-                   SkyboxPath,
-                   stbi_failure_reason() != nullptr ? stbi_failure_reason() : "unknown");
-        const uint32_t fallbackSky = glm::packUnorm4x8(glm::vec4(0.25f, 0.45f, 0.75f, 1.0f));
+    if (!set_skybox(_skyboxSelection) && !set_skybox(0)) {
+        // Keep every descriptor valid even if all packaged sky assets are
+        // missing.  The individual load failures above identify the paths.
+        const uint32_t fallbackSky =
+            glm::packUnorm4x8(glm::vec4(0.25f, 0.45f, 0.75f, 1.0f));
         _skyboxImage = create_image(
             const_cast<uint32_t*>(&fallbackSky),
             {1, 1, 1},
             VK_FORMAT_R8G8B8A8_SRGB,
             VK_IMAGE_USAGE_SAMPLED_BIT);
+        _skyboxSelection = 0;
     }
     
     // The compute background needs the panorama at binding 1.  The portal
@@ -175,6 +155,155 @@ void VulkanEngine::init_default_images_and_samplers()
             VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         ssgiWriter.update_set(_device, _ssgiDescriptors[writeIndex]);
+    }
+}
+
+bool VulkanEngine::set_skybox(int selection)
+{
+    if (selection < 0 ||
+        selection >= static_cast<int>(SkyboxPaths.size())) {
+        return false;
+    }
+
+    const char* path = SkyboxPaths[selection];
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    AllocatedImage newImage{};
+
+    if (stbi_is_hdr(path)) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(
+            _chosenGPU, VK_FORMAT_R16G16B16A16_SFLOAT, &properties);
+        constexpr VkFormatFeatureFlags RequiredFeatures =
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        if ((properties.optimalTilingFeatures & RequiredFeatures) !=
+            RequiredFeatures) {
+            fmt::print(
+                "Cannot load HDR skybox {}: RGBA16F sampling/filtering is unsupported\n",
+                path);
+            return false;
+        }
+
+        float* pixels = stbi_loadf(
+            path, &width, &height, &channels, STBI_rgb_alpha);
+        if (pixels == nullptr) {
+            fmt::print(
+                "Failed to load HDR skybox {}: {}\n",
+                path,
+                stbi_failure_reason() != nullptr
+                    ? stbi_failure_reason()
+                    : "unknown");
+            return false;
+        }
+
+        const size_t pixelCount =
+            static_cast<size_t>(width) * static_cast<size_t>(height);
+        std::vector<uint32_t> halfPixels(pixelCount * 2);
+        const auto finiteHalf = [](float value) {
+            return std::isfinite(value)
+                ? std::clamp(value, 0.0f, 65504.0f)
+                : 0.0f;
+        };
+        for (size_t pixel = 0; pixel < pixelCount; ++pixel) {
+            const float* source = pixels + pixel * 4;
+            halfPixels[pixel * 2] = glm::packHalf2x16(glm::vec2(
+                finiteHalf(source[0]), finiteHalf(source[1])));
+            halfPixels[pixel * 2 + 1] = glm::packHalf2x16(glm::vec2(
+                finiteHalf(source[2]), 1.0f));
+        }
+        stbi_image_free(pixels);
+
+        newImage = create_image(
+            halfPixels.data(),
+            halfPixels.size() * sizeof(uint32_t),
+            {static_cast<uint32_t>(width),
+             static_cast<uint32_t>(height),
+             1},
+            VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_IMAGE_USAGE_SAMPLED_BIT);
+        fmt::print(
+            "Loaded HDR equirectangular skybox: {} ({}x{}, RGBA16F)\n",
+            path,
+            width,
+            height);
+    } else {
+        stbi_uc* pixels = stbi_load(
+            path, &width, &height, &channels, STBI_rgb_alpha);
+        if (pixels == nullptr) {
+            fmt::print(
+                "Failed to load skybox {}: {}\n",
+                path,
+                stbi_failure_reason() != nullptr
+                    ? stbi_failure_reason()
+                    : "unknown");
+            return false;
+        }
+        newImage = create_image(
+            pixels,
+            {static_cast<uint32_t>(width),
+             static_cast<uint32_t>(height),
+             1},
+            VK_FORMAT_R8G8B8A8_SRGB,
+            VK_IMAGE_USAGE_SAMPLED_BIT);
+        stbi_image_free(pixels);
+        fmt::print(
+            "Loaded equirectangular skybox: {} ({}x{})\n",
+            path,
+            width,
+            height);
+    }
+
+    VK_CHECK(vkDeviceWaitIdle(_device));
+    AllocatedImage oldImage = _skyboxImage;
+    _skyboxImage = std::move(newImage);
+    _skyboxSelection = selection;
+    update_skybox_descriptors();
+    _ssgiHistoryValid = false;
+    destroy_image(oldImage);
+    return true;
+}
+
+void VulkanEngine::update_skybox_descriptors()
+{
+    if (_skyboxImage.imageView == VK_NULL_HANDLE) {
+        return;
+    }
+
+    DescriptorWriter writer;
+    if (_drawImageDescriptors != VK_NULL_HANDLE) {
+        writer.write_image(
+            1,
+            _skyboxImage.imageView,
+            _skyboxSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.update_set(_device, _drawImageDescriptors);
+        writer.clear();
+    }
+    if (_skyboxDescriptor != VK_NULL_HANDLE) {
+        writer.write_image(
+            0,
+            _skyboxImage.imageView,
+            _skyboxSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.update_set(_device, _skyboxDescriptor);
+        writer.clear();
+    }
+    for (VkDescriptorSet descriptor : _ssgiDescriptors) {
+        if (descriptor == VK_NULL_HANDLE) {
+            continue;
+        }
+        writer.write_image(
+            7,
+            _skyboxImage.imageView,
+            _skyboxSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.update_set(_device, descriptor);
+        writer.clear();
     }
 }
 
@@ -665,6 +794,17 @@ AllocatedImage VulkanEngine::create_image(
     bool mipmapped)
 {
     const size_t dataSize = static_cast<size_t>(size.width) * size.height * size.depth * 4;
+    return create_image(data, dataSize, size, format, usage, mipmapped);
+}
+
+AllocatedImage VulkanEngine::create_image(
+    void* data,
+    size_t dataSize,
+    VkExtent3D size,
+    VkFormat format,
+    VkImageUsageFlags usage,
+    bool mipmapped)
+{
     AllocatedBuffer uploadBuffer = create_buffer(
         dataSize,
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,

@@ -1380,6 +1380,21 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
             if (ImGui::Begin("Render Settings")) {
                 draw_path_trace_ui();
                 ImGui::SliderFloat("Resolution Scale", &renderScale, 0.3f, 1.0f);
+                int skyboxSelection = _skyboxSelection;
+                if (ImGui::Combo(
+                        "Skybox",
+                        &skyboxSelection,
+                        SkyboxDisplayNames.data(),
+                        static_cast<int>(SkyboxDisplayNames.size()))) {
+                    if (set_skybox(skyboxSelection)) {
+                        _sceneDirty = true;
+                    }
+                }
+                if (_skyboxImage.imageFormat ==
+                    VK_FORMAT_R16G16B16A16_SFLOAT) {
+                    ImGui::TextDisabled(
+                        "True HDR source (RGBA16F on GPU)");
+                }
                 if (ImGui::Button("Apply Maximum Fidelity")) {
                     apply_max_fidelity_settings();
                 }

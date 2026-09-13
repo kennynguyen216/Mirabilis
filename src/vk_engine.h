@@ -403,9 +403,19 @@ class VulkanEngine{
     AllocatedImage _blackImage;
     AllocatedImage _greyImage;
     AllocatedImage _errorCheckerboardImage;
-    // A single equirectangular (2:1) panorama used as the world skybox.
-    // It is sampled by the main compute background and portal sky pass.
-    AllocatedImage _skyboxImage;
+    // Only the selected equirectangular panorama is resident.  Keeping the two
+    // 4K HDR choices out of memory until selected saves roughly 64 MiB each.
+    inline static constexpr std::array<const char*, 3> SkyboxDisplayNames{
+        "Legacy PNG", "Qwantani Noon (HDR)", "Kloofendal Clear (HDR)"};
+    inline static constexpr std::array<const char*, 3> SkyboxIds{
+        "legacy", "qwantani_noon", "kloofendal_clear"};
+    inline static constexpr std::array<const char*, 3> SkyboxPaths{
+        "../../assets/textures/skybox.png",
+        "../../assets/textures/skyboxes/qwantani_noon_puresky_4k.hdr",
+        "../../assets/textures/skyboxes/kloofendal_43d_clear_puresky_4k.hdr"};
+    // Legacy scenes with no saved choice retain their previous appearance.
+    int _skyboxSelection{0};
+    AllocatedImage _skyboxImage{};
     VkSampler _defaultSamplerLinear{};
     VkSampler _defaultSamplerNearest{};
     VkSampler _skyboxSampler{};
@@ -507,6 +517,8 @@ class VulkanEngine{
         void init_pipelines();
         void init_background_pipelines();
         void init_default_data();
+        bool set_skybox(int selection);
+        void update_skybox_descriptors();
         void init_default_images_and_samplers();
         void init_default_meshes();
         void init_default_materials();
@@ -603,6 +615,13 @@ class VulkanEngine{
             bool mipmapped = false);
         AllocatedImage create_image(
             void* data,
+            VkExtent3D size,
+            VkFormat format,
+            VkImageUsageFlags usage,
+            bool mipmapped = false);
+        AllocatedImage create_image(
+            void* data,
+            size_t dataSize,
             VkExtent3D size,
             VkFormat format,
             VkImageUsageFlags usage,
