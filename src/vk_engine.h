@@ -93,6 +93,13 @@ struct RenderDebugPushConstants {
 };
 
 // The anti-aliasing pass is a fullscreen filter over the composed image.
+struct TonemapPushConstants {
+    // x = exposure multiplier applied before the curve, y = operator
+    // (0 ACES, 1 Reinhard), z = 1 while the curve is bypassed and only the
+    // sRGB encode runs.
+    glm::vec4 settings{1.0f, 0.0f, 0.0f, 0.0f};
+};
+
 struct FXAAPushConstants {
     // xy = one texel in UV space, taken from the draw image allocation
     // rather than the rendered region.  z = edge contrast threshold,
@@ -512,6 +519,7 @@ class VulkanEngine{
         void init_depth_normal_mask_pipeline();
         void init_render_debug_pipeline();
         void init_post_process_resources();
+        void init_tonemap_pipeline();
         void init_fxaa_pipeline();
         void init_ssao_resources();
         void init_ssao_pipelines();
@@ -532,6 +540,7 @@ class VulkanEngine{
         VkExtent2D active_ssao_extent() const;
         bool ssao_active() const;
         void draw_render_debug(VkCommandBuffer cmd);
+        void draw_tonemap(VkCommandBuffer cmd);
         void draw_fxaa(VkCommandBuffer cmd);
         glm::mat4 compute_sun_view_projection(const glm::vec3& focusPoint) const;
         void draw_geometry(
@@ -890,6 +899,27 @@ class VulkanEngine{
         VkDescriptorSet _fxaaInputDescriptor{};
         MaterialPipeline _fxaaPipeline;
         bool _fxaaEnabled{true};
+        // Where the frame stops being linear HDR.  The tonemap reads
+        // _drawImage and resolves into this image in the swapchain's own
+        // 8-bit format; anti-aliasing then runs on that, because FXAA's edge
+        // detection assumes display-range values and behaves poorly on the
+        // unbounded ones it used to be handed.
+        AllocatedImage _tonemapImage;
+        // _drawImage bound as a texture, written once for the same reason as
+        // _fxaaInputDescriptor.
+        VkDescriptorSet _tonemapInputDescriptor{};
+        MaterialPipeline _tonemapPipeline;
+        // Off leaves the frame linear and clipped, which is how it looked
+        // before this pass existed.  Kept as a comparison, not as a default.
+        bool _tonemapEnabled{true};
+        // Stops in photographic terms would be friendlier, but every other
+        // exposure-like control in this engine is a plain multiplier.
+        float _tonemapExposure{1.0f};
+        // 0 = ACES filmic, 1 = Reinhard.
+        int _tonemapOperator{0};
+        // Runs the sRGB encode without the curve, so the curve's contribution
+        // can be told apart from the transfer function's.
+        bool _tonemapBypassCurve{false};
         // The fraction of the local maximum luma a pixel must differ by
         // before it counts as an edge.  Lower catches more, at the cost of
         // filtering detail that was never aliased.

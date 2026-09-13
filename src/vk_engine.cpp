@@ -712,15 +712,37 @@ void VulkanEngine::draw(float deltaTime)
         draw_collider_debug_bounds(cmd);
     }
 
+    // Everything above this point works in unbounded linear radiance.  The
+    // tonemap is what turns that into something a display can show, and it has
+    // to run before anti-aliasing: FXAA thresholds luma differences against
+    // fixed constants, which only describe visible contrast once the values
+    // are in display range.
+    //
+    // A debug view skips both.  Those images carry per-pixel data - normals,
+    // depth, velocity - whose whole value is that nothing has reshaped it, and
+    // a tone curve would do exactly that.  They present from the draw image on
+    // the untouched path below, as they always have.
+    const bool tonemapping = _tonemapEnabled && !showRenderDebugView &&
+        _tonemapPipeline.pipeline != VK_NULL_HANDLE;
+    if (tonemapping) {
+        draw_tonemap(cmd);
+        presentSource = _tonemapImage.image;
+    }
+
     // Anti-aliasing sees the whole composed frame, so it smooths world
     // silhouettes, portal contents, and the overlay lines in one pass.  ImGui
     // is drawn after the copy, straight into the swapchain, and stays sharp.
-    // A debug view is exempt: those images carry per-pixel data whose value is
-    // that it has not been filtered.
-    if (_fxaaEnabled && !showRenderDebugView &&
+    // It reads the tonemap's output, so it is only available when that ran.
+    if (tonemapping && _fxaaEnabled &&
         _fxaaPipeline.pipeline != VK_NULL_HANDLE) {
         draw_fxaa(cmd);
         presentSource = _postProcessImage.image;
+    } else if (tonemapping) {
+        vkutil::transition_image(
+            cmd,
+            _tonemapImage.image,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     } else {
         vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     }

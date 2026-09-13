@@ -1478,6 +1478,35 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                             "Ambient Only (occlusion check)", &_ssaoAmbientOnly);
                     }
                 }
+                if (ImGui::CollapsingHeader("Tonemapping")) {
+                    // Also a session preference, so none of it marks the
+                    // level dirty.
+                    ImGui::Checkbox("Enabled##Tonemapping", &_tonemapEnabled);
+                    if (!_tonemapEnabled) {
+                        ImGui::TextDisabled(
+                            "Linear HDR is written straight to an 8-bit\n"
+                            "buffer: midtones read dark and highlights clip.");
+                    }
+                    if (_tonemapEnabled) {
+                        const char* operatorNames[] = {"ACES Filmic", "Reinhard"};
+                        ImGui::Combo(
+                            "Operator",
+                            &_tonemapOperator,
+                            operatorNames,
+                            IM_ARRAYSIZE(operatorNames));
+                        ImGui::SliderFloat(
+                            "Exposure", &_tonemapExposure, 0.05f, 8.0f, "%.2f");
+                        // Separates the two things this pass does, so a frame
+                        // that looks wrong can be blamed on the curve or on
+                        // the transfer function rather than on both at once.
+                        ImGui::Checkbox(
+                            "Bypass Curve (encode only)", &_tonemapBypassCurve);
+                        if (_renderDebugView != RenderDebugView::None) {
+                            ImGui::TextDisabled(
+                                "Inactive while a debug view is shown.");
+                        }
+                    }
+                }
                 if (ImGui::CollapsingHeader("Anti-Aliasing")) {
                     // A session preference rather than a scene property, so
                     // none of this marks the level dirty.
@@ -1506,6 +1535,10 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                         // Tuning against this is far easier than judging the
                         // threshold from the finished image.
                         ImGui::Checkbox("Debug Edges", &_fxaaShowEdges);
+                        if (!_tonemapEnabled) {
+                            ImGui::TextDisabled(
+                                "Inactive: FXAA reads the tonemapped image.");
+                        }
                         if (_renderDebugView != RenderDebugView::None) {
                             ImGui::TextDisabled(
                                 "Suspended while a debug view is shown.");
