@@ -1,2 +1,9 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# The optimized Sponza payload is hundreds of MiB and includes a geometry file
+# above GitHub's ordinary 100 MiB per-file limit.  Keep its readable manifest
+# and license in Git while storing the binary payload through Git LFS.
+assets/sponza_optimized/*.bin filter=lfs diff=lfs merge=lfs -text
+assets/sponza_optimized/textures/*.png filter=lfs diff=lfs merge=lfs -text
+assets/textures/skyboxes/*.hdr filter=lfs diff=lfs merge=lfs -text
