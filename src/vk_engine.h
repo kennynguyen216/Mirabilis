@@ -1,6 +1,7 @@
 #pragma once
 #include "path_trace_scene.h"
 
+#include <algorithm>
 #include <array>
 #include <unordered_map>
 #include <unordered_set>
@@ -92,6 +93,13 @@ struct RenderDebugPushConstants {
 };
 
 // The anti-aliasing pass is a fullscreen filter over the composed image.
+struct TonemapPushConstants {
+    // x = exposure multiplier applied before the curve, y = operator
+    // (0 ACES, 1 Reinhard), z = 1 while the curve is bypassed and only the
+    // sRGB encode runs.
+    glm::vec4 settings{1.0f, 0.0f, 0.0f, 0.0f};
+};
+
 struct FXAAPushConstants {
     // xy = one texel in UV space, taken from the draw image allocation
     // rather than the rendered region.  z = edge contrast threshold,
@@ -262,6 +270,13 @@ enum class EditorGizmoOperation : uint8_t {
 struct GLTFMetallic_Roughness {
     MaterialPipeline opaquePipeline;
     MaterialPipeline transparentPipeline;
+    // The alpha-tested counterparts of the three passes that shade geometry.
+    // They exist as separate pipelines rather than as a branch inside the
+    // opaque ones so that discard - which costs every opaque surface its
+    // early depth rejection - is confined to the materials that need it.
+    MaterialPipeline maskPipeline;
+    MaterialPipeline portalViewMaskPipeline;
+    MaterialPipeline portalOffscreenMaskPipeline;
     // These use the same layout as opaquePipeline, but split a portal mask
     // into visible-stencil and stencil-restricted depth-clear passes.
     MaterialPipeline portalStencilPipeline;
@@ -308,7 +323,10 @@ class VulkanEngine{
     int _frameNumber {0};
     bool stop_rendering {false};
     bool resize_requested {false};
-    float renderScale {1.0f};
+    // Render internally below the window size by default.  The swapchain
+    // remains 1280x720, while the expensive prepass/SSGI work starts at 75%
+    // resolution and is upscaled for presentation.
+    float renderScale {0.75f};
     enum class RendererMode { Raster, SoftwarePathTrace };
     RendererMode _rendererMode{RendererMode::Raster};
     bool _traceSupported{false};
@@ -385,12 +403,53 @@ class VulkanEngine{
     AllocatedImage _blackImage;
     AllocatedImage _greyImage;
     AllocatedImage _errorCheckerboardImage;
-    // A single equirectangular (2:1) panorama used as the world skybox.
-    // It is sampled by the main compute background and portal sky pass.
-    AllocatedImage _skyboxImage;
+    // Only the selected equirectangular panorama is resident.  Keeping the two
+    // 4K HDR choices out of memory until selected saves roughly 64 MiB each.
+    inline static constexpr std::array<const char*, 3> SkyboxDisplayNames{
+        "Legacy PNG", "Qwantani Noon (HDR)", "Kloofendal Clear (HDR)"};
+    inline static constexpr std::array<const char*, 3> SkyboxIds{
+        "legacy", "qwantani_noon", "kloofendal_clear"};
+    inline static constexpr std::array<const char*, 3> SkyboxPaths{
+        "../../assets/textures/skybox.png",
+        "../../assets/textures/skyboxes/qwantani_noon_puresky_4k.hdr",
+        "../../assets/textures/skyboxes/kloofendal_43d_clear_puresky_4k.hdr"};
+    // Legacy scenes with no saved choice retain their previous appearance.
+    int _skyboxSelection{0};
+    AllocatedImage _skyboxImage{};
     VkSampler _defaultSamplerLinear{};
     VkSampler _defaultSamplerNearest{};
     VkSampler _skyboxSampler{};
+    // A second view of the same panorama for the SSGI trace.  The background
+    // pass wants it sharp at level 0; an indirect ray wants a coarse mip, so
+    // this one is the only sampler allowed past the first level.
+    VkSampler _skyboxEnvironmentSampler{};
+    // The mip a traced miss ray samples, derived from the loaded panorama's
+    // width so a 1x1 fallback and a 4K HDR both land on a sane footprint.
+    float _skyboxEnvironmentLod{0.0f};
+    // The radiance ceiling a traced miss ray is allowed to return.  A clear-
+    // sky HDR keeps most of its energy in the sun disk -- four orders of
+    // magnitude above the sky, and a fraction of a percent of its pixels --
+    // and that disk is already delivered by the shadow-mapped direct term.
+    // Derived per panorama rather than fixed, because how bright the sky is
+    // relative to its sun is a property of the capture.
+    float _skyboxIndirectClamp{1.0e4f};
+    // Anisotropic filtering is an optional device feature, so nothing may
+    // request it before init_vulkan has both confirmed support and read the
+    // device's ceiling.  _textureAnisotropy is the preset's requested level;
+    // material_anisotropy() is what a sampler is actually allowed to ask for.
+    bool _samplerAnisotropySupported{false};
+    float _maxSamplerAnisotropy{1.0f};
+    float _textureAnisotropy{16.0f};
+    // Clamped to the device limit and to 1 when the feature is missing, so a
+    // caller can assign the result unconditionally: 1.0 means "off", which is
+    // exactly what anisotropyEnable = VK_FALSE would have produced.
+    float material_anisotropy() const
+    {
+        if (!_samplerAnisotropySupported) {
+            return 1.0f;
+        }
+        return std::clamp(_textureAnisotropy, 1.0f, _maxSamplerAnisotropy);
+    }
     VkDescriptorSet _skyboxDescriptor{};
     DrawContext mainDrawContext;
     DrawContext worldDrawContext;
@@ -472,6 +531,8 @@ class VulkanEngine{
         void init_pipelines();
         void init_background_pipelines();
         void init_default_data();
+        bool set_skybox(int selection);
+        void update_skybox_descriptors();
         void init_default_images_and_samplers();
         void init_default_meshes();
         void init_default_materials();
@@ -479,12 +540,15 @@ class VulkanEngine{
         void init_portal_camera_targets();
         void init_shadow_resources();
         void init_shadow_pipeline();
+        void init_shadow_mask_pipeline();
         void draw_shadow_map(VkCommandBuffer cmd);
         void init_depth_normal_resources();
         void init_ssgi_resources();
         void init_depth_normal_pipeline();
+        void init_depth_normal_mask_pipeline();
         void init_render_debug_pipeline();
         void init_post_process_resources();
+        void init_tonemap_pipeline();
         void init_fxaa_pipeline();
         void init_ssao_resources();
         void init_ssao_pipelines();
@@ -505,6 +569,7 @@ class VulkanEngine{
         VkExtent2D active_ssao_extent() const;
         bool ssao_active() const;
         void draw_render_debug(VkCommandBuffer cmd);
+        void draw_tonemap(VkCommandBuffer cmd);
         void draw_fxaa(VkCommandBuffer cmd);
         glm::mat4 compute_sun_view_projection(const glm::vec3& focusPoint) const;
         void draw_geometry(
@@ -514,6 +579,11 @@ class VulkanEngine{
             VkDescriptorSet sceneDescriptor,
             bool clearDepthAndStencil,
             MaterialPipeline* overridePipeline = nullptr,
+            // Used in place of overridePipeline for alpha-masked materials.
+            // Null means masked surfaces fall back to overridePipeline, which
+            // is right for the passes that write a stencil or a mask rather
+            // than shading anything.
+            MaterialPipeline* overrideMaskPipeline = nullptr,
             uint32_t stencilReference = 0,
             bool useFrustumCulling = true,
             uint32_t stencilCompareMask = 0xff,
@@ -559,6 +629,13 @@ class VulkanEngine{
             bool mipmapped = false);
         AllocatedImage create_image(
             void* data,
+            VkExtent3D size,
+            VkFormat format,
+            VkImageUsageFlags usage,
+            bool mipmapped = false);
+        AllocatedImage create_image(
+            void* data,
+            size_t dataSize,
             VkExtent3D size,
             VkFormat format,
             VkImageUsageFlags usage,
@@ -641,6 +718,14 @@ class VulkanEngine{
         float _scaleSnap{0.1f};
         float _portalTraversalCooldown{0.0f};
         float _physicsAccumulator{0.0f};
+        // Camera yaw is sampled once per rendered frame, but physics runs at a
+        // fixed step that can tick up to MaxPhysicsSteps times for that one
+        // frame.  Holding both ends of the frame's turn lets each tick receive
+        // its own share of it, so air control and strafing stay the same at 30
+        // and 300 fps.  Portal traversal snaps both: that rotation is a
+        // discontinuity, not something the player turned through.
+        float _previousPlayerYaw{0.0f};
+        float _targetPlayerYaw{0.0f};
         float _timeTrialSeconds{0.0f};
         float _timeTrialBestSeconds{-1.0f};
         bool _timeTrialRunning{false};
@@ -692,6 +777,10 @@ class VulkanEngine{
         // because the lookup is done from world-space positions.
         static constexpr uint32_t ShadowMapResolution = 4096;
         AllocatedImage _shadowMapImage;
+        // Alpha-tested shadow casting.  The opaque shadow pipeline binds no
+        // descriptors at all, so this one cannot share its layout: it needs
+        // the per-material set to sample the base colour's alpha.
+        MaterialPipeline _shadowMaskPipeline;
         VkSampler _shadowSampler{};
         MaterialPipeline _shadowPipeline;
         glm::mat4 _sunViewProjection{1.0f};
@@ -747,6 +836,10 @@ class VulkanEngine{
         VkDescriptorSetLayout _ssgiFilterDescriptorLayout{};
         std::array<VkDescriptorSet, 3> _ssgiFilterDescriptors{};
         MaterialPipeline _depthNormalPipeline;
+        // Alpha-tested prepass.  Without it, occlusion and screen-space GI
+        // would be computed against the quad a leaf texture is drawn on
+        // rather than against the leaves.
+        MaterialPipeline _depthNormalMaskPipeline;
         MaterialPipeline _renderDebugPipeline;
         MaterialPipeline _ssgiPortalMaskPipeline;
         VkPipelineLayout _ssgiPipelineLayout{};
@@ -775,6 +868,20 @@ class VulkanEngine{
         float _ssgiFilterDepthFalloff{800.0f};
         float _ssgiFilterNormalPower{32.0f};
         float _ssgiIntensity{1.0f};
+        // How much of the flat ambient term survives while SSGI is on.
+        // Zero is the coherent setting in the sense that nothing is counted
+        // twice, but it is not the honest one yet: the bounce this renderer
+        // gathers comes from a direct-lighting buffer that excludes ambient,
+        // so stone out of the sun contributes nothing at all to it, and an
+        // arcade lit only by what the sun reaches reads far darker than the
+        // same geometry in life.  Half is a starting point to tune by eye,
+        // not a derived value, and it is a slider because the right answer
+        // depends on how enclosed the scene is.
+        float _ssgiAmbientRetention{0.5f};
+        // Fill ray misses from the selected skybox rather than the analytic
+        // gradient.  Turning this off restores parity with the software path
+        // tracer, which still lights its misses from the gradient.
+        bool _ssgiTraceEnvironmentMap{true};
         bool _ssgiHalfResolution{false};
         int _ssgiQualityPreset{0};
         bool _depthNormalPrepassEnabled{true};
@@ -842,6 +949,27 @@ class VulkanEngine{
         VkDescriptorSet _fxaaInputDescriptor{};
         MaterialPipeline _fxaaPipeline;
         bool _fxaaEnabled{true};
+        // Where the frame stops being linear HDR.  The tonemap reads
+        // _drawImage and resolves into this image in the swapchain's own
+        // 8-bit format; anti-aliasing then runs on that, because FXAA's edge
+        // detection assumes display-range values and behaves poorly on the
+        // unbounded ones it used to be handed.
+        AllocatedImage _tonemapImage;
+        // _drawImage bound as a texture, written once for the same reason as
+        // _fxaaInputDescriptor.
+        VkDescriptorSet _tonemapInputDescriptor{};
+        MaterialPipeline _tonemapPipeline;
+        // Off leaves the frame linear and clipped, which is how it looked
+        // before this pass existed.  Kept as a comparison, not as a default.
+        bool _tonemapEnabled{true};
+        // Stops in photographic terms would be friendlier, but every other
+        // exposure-like control in this engine is a plain multiplier.
+        float _tonemapExposure{1.0f};
+        // 0 = ACES filmic, 1 = Reinhard.
+        int _tonemapOperator{0};
+        // Runs the sRGB encode without the curve, so the curve's contribution
+        // can be told apart from the transfer function's.
+        bool _tonemapBypassCurve{false};
         // The fraction of the local maximum luma a pixel must differ by
         // before it counts as an edge.  Lower catches more, at the cost of
         // filtering detail that was never aliased.

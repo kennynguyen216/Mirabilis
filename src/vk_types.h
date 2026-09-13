@@ -87,6 +87,11 @@ static_assert(sizeof(GPUDrawPushConstants) == 128);
 enum class MaterialPass : uint8_t {
     MainColor,
     Transparent,
+    // glTF alphaMode MASK: fully opaque wherever it draws at all, but the
+    // base colour's alpha decides per fragment whether it draws.  It is a
+    // separate pass from Transparent because it still writes depth and still
+    // belongs in the prepass, which blended surfaces do not.
+    Mask,
     Other
 };
 
@@ -146,6 +151,29 @@ struct GPUSceneData {
     glm::vec4 ssgiFallbackSettings{1.0f, 0.0f, 0.0f, 0.0f};
     // x = PCF footprint radius in shadow-map texels.
     glm::vec4 shadowFilterSettings{3.0f, 0.0f, 0.0f, 0.0f};
+    // How the flat ambient term and the screen-space indirect estimate divide
+    // the same job, shared by the forward shader and the SSGI trace.
+    // x = the fraction of ambient that survives while SSGI is enabled.  At 0
+    //     SSGI replaces ambient outright, which is only honest once ray
+    //     misses are filled from the real environment; at 1 SSGI adds on top
+    //     of it, which double-counts sky fill but can never darken a region.
+    // y = 1 fills SSGI ray misses from the environment map, 0 uses the
+    //     analytic gradient the software path tracer also uses.  The gradient
+    //     is kept so a reference comparison can light both sides the same.
+    // z = the mip level to sample the environment at.  A cosine-weighted ray
+    //     represents a wide cone, not a texel of a 4K panorama.
+    // w = the radiance ceiling a miss ray may return.  A coarse mip alone is
+    //     not enough: a clear-sky panorama keeps most of its energy in a sun
+    //     disk thousands of times brighter than the sky, which survives every
+    //     mip, and which the shadow-mapped direct term already delivers.
+    glm::vec4 indirectSettings{0.0f, 1.0f, 0.0f, 1.0e4f};
+    // x = 1 while this camera substitutes a direct environment lookup for a
+    //     screen-space indirect pass it cannot run.  Only portal cameras set
+    //     it, and only while the main camera is running SSGI.  Both views have
+    //     to divide the same job between the flat ambient term and indirect
+    //     light the same way; when they do not, the destination room visibly
+    //     changes colour at the moment the player crosses the portal.
+    glm::vec4 portalIndirectSettings{0.0f};
 };
 
 // Sixteen visible surfaces (the player pair plus seven authored links), with

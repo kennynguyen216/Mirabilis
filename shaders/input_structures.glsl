@@ -10,6 +10,13 @@ layout(set = 0, binding = 1) uniform sampler2DShadow shadowMap;
 // one it was computed for is allowed to read it.
 layout(set = 0, binding = 2) uniform sampler2D ambientOcclusionTex;
 
+// The equirectangular environment panorama, at every mip.  It sits beside the
+// scene data rather than in a pass-specific set because more than the SSGI
+// trace needs it now: a portal camera has no screen-space pass to fall back
+// from, so its forward shader reads the same sky directly.  Declared with the
+// name environment.glsl expects.
+layout(set = 0, binding = 3) uniform sampler2D environmentTexture;
+
 // How much of the surrounding hemisphere reaches this surface: 1 fully open,
 // 0 fully enclosed.  Only the ambient term should be scaled by it.  Direct
 // sunlight already has its own visibility test in the shadow map, and
@@ -40,6 +47,10 @@ layout(set = 1, binding = 0) uniform GLTFMaterialData {
     // xy = UV tiling, zw = UV offset. Legacy materials leave this zero and
     // the vertex shaders interpret that as a 1x1 scale.
     vec4 uvTransform;
+    // x = glTF alphaCutoff.  Left at zero on every material that is not
+    // alpha-masked, which makes the test a no-op there instead of something
+    // the shared shader body has to branch around.
+    vec4 alphaMask;
 } materialData;
 
 layout(set = 1, binding = 1) uniform sampler2D colorTex;

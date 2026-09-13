@@ -1380,6 +1380,21 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
             if (ImGui::Begin("Render Settings")) {
                 draw_path_trace_ui();
                 ImGui::SliderFloat("Resolution Scale", &renderScale, 0.3f, 1.0f);
+                int skyboxSelection = _skyboxSelection;
+                if (ImGui::Combo(
+                        "Skybox",
+                        &skyboxSelection,
+                        SkyboxDisplayNames.data(),
+                        static_cast<int>(SkyboxDisplayNames.size()))) {
+                    if (set_skybox(skyboxSelection)) {
+                        _sceneDirty = true;
+                    }
+                }
+                if (_skyboxImage.imageFormat ==
+                    VK_FORMAT_R16G16B16A16_SFLOAT) {
+                    ImGui::TextDisabled(
+                        "True HDR source (RGBA16F on GPU)");
+                }
                 if (ImGui::Button("Apply Maximum Fidelity")) {
                     apply_max_fidelity_settings();
                 }
@@ -1428,7 +1443,7 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                         // describes what the machine can afford and does not.
                         bool occlusionEdited = false;
                         occlusionEdited |=
-                            ImGui::Checkbox("Enabled", &_ssaoSettings.enabled);
+                            ImGui::Checkbox("Enabled##SSAO", &_ssaoSettings.enabled);
                         occlusionEdited |= ImGui::SliderFloat(
                             "Radius",
                             &_ssaoSettings.radius,
@@ -1478,6 +1493,35 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                             "Ambient Only (occlusion check)", &_ssaoAmbientOnly);
                     }
                 }
+                if (ImGui::CollapsingHeader("Tonemapping")) {
+                    // Also a session preference, so none of it marks the
+                    // level dirty.
+                    ImGui::Checkbox("Enabled##Tonemapping", &_tonemapEnabled);
+                    if (!_tonemapEnabled) {
+                        ImGui::TextDisabled(
+                            "Linear HDR is written straight to an 8-bit\n"
+                            "buffer: midtones read dark and highlights clip.");
+                    }
+                    if (_tonemapEnabled) {
+                        const char* operatorNames[] = {"ACES Filmic", "Reinhard"};
+                        ImGui::Combo(
+                            "Operator",
+                            &_tonemapOperator,
+                            operatorNames,
+                            IM_ARRAYSIZE(operatorNames));
+                        ImGui::SliderFloat(
+                            "Exposure", &_tonemapExposure, 0.05f, 8.0f, "%.2f");
+                        // Separates the two things this pass does, so a frame
+                        // that looks wrong can be blamed on the curve or on
+                        // the transfer function rather than on both at once.
+                        ImGui::Checkbox(
+                            "Bypass Curve (encode only)", &_tonemapBypassCurve);
+                        if (_renderDebugView != RenderDebugView::None) {
+                            ImGui::TextDisabled(
+                                "Inactive while a debug view is shown.");
+                        }
+                    }
+                }
                 if (ImGui::CollapsingHeader("Anti-Aliasing")) {
                     // A session preference rather than a scene property, so
                     // none of this marks the level dirty.
@@ -1506,6 +1550,10 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                         // Tuning against this is far easier than judging the
                         // threshold from the finished image.
                         ImGui::Checkbox("Debug Edges", &_fxaaShowEdges);
+                        if (!_tonemapEnabled) {
+                            ImGui::TextDisabled(
+                                "Inactive: FXAA reads the tonemapped image.");
+                        }
                         if (_renderDebugView != RenderDebugView::None) {
                             ImGui::TextDisabled(
                                 "Suspended while a debug view is shown.");
@@ -1547,6 +1595,21 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                             debugViewNames,
                             IM_ARRAYSIZE(debugViewNames))) {
                         _renderDebugView = static_cast<RenderDebugView>(debugView);
+                    }
+                    // Easy to misread otherwise: these buffers hold the light
+                    // arriving at a surface, not the colour it reflects.  A
+                    // white wall and a red one under the same bounce now look
+                    // identical here, and differ only after the composite.
+                    const bool showsIndirectRadiance =
+                        _renderDebugView == RenderDebugView::SSGIRaw ||
+                        _renderDebugView == RenderDebugView::SSGITemporal ||
+                        _renderDebugView == RenderDebugView::SSGIFiltered ||
+                        _renderDebugView == RenderDebugView::SSGIFallback;
+                    if (showsIndirectRadiance) {
+                        ImGui::TextDisabled(
+                            "SSGI buffers hold incident radiance; albedo is");
+                        ImGui::TextDisabled(
+                            "applied in the composite, not in the trace.");
                     }
                     if (_renderDebugView == RenderDebugView::Depth) {
                         ImGui::SliderFloat(
@@ -1604,8 +1667,44 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                     ImGui::SliderFloat(
                         "Indirect Intensity", &_ssgiIntensity,
                         0.0f, 2.0f, "%.2f");
+                    // Enabling SSGI used to delete the flat ambient term
+                    // outright, which is why turning it on read as a large
+                    // drop in brightness rather than as indirect light.  The
+                    // two are alternative answers to the same question, so
+                    // the split between them is now visible and adjustable.
+                    ImGui::SliderFloat(
+                        "Ambient Retention", &_ssgiAmbientRetention,
+                        0.0f, 1.0f, "%.2f");
                     ImGui::TextDisabled(
-                        "At 1.0, SSGI replaces flat ambient; SSAO ambient is bypassed.");
+                        "0: SSGI replaces flat ambient.");
+                    ImGui::TextDisabled(
+                        "1: SSGI adds on top of it, which counts sky fill");
+                    ImGui::TextDisabled(
+                        "twice but can never darken a region SSGI has");
+                    ImGui::TextDisabled(
+                        "nothing to say about.");
+                    // A traced ray that leaves the depth buffer has to be
+                    // filled from somewhere.  The analytic gradient is what
+                    // the software path tracer still uses, so it stays
+                    // reachable for reference comparisons.
+                    ImGui::Checkbox(
+                        "Miss Rays Sample Skybox", &_ssgiTraceEnvironmentMap);
+                    if (_ssgiTraceEnvironmentMap) {
+                        ImGui::TextDisabled(
+                            "Misses read %s at mip %.1f.",
+                            SkyboxDisplayNames[_skyboxSelection],
+                            _skyboxEnvironmentLod);
+                        ImGui::TextDisabled(
+                            "Sky/sun split at %.2f; above it is the sun,",
+                            _skyboxIndirectClamp);
+                        ImGui::TextDisabled(
+                            "which the direct term already delivers.");
+                    } else {
+                        ImGui::TextDisabled(
+                            "Misses use the analytic gradient, matching");
+                        ImGui::TextDisabled(
+                            "the software path tracer's environment.");
+                    }
                     if (stats.ssgi_time_is_gpu) {
                         const VkExtent2D ssgiExtent = active_ssgi_extent();
                         ImGui::Text(

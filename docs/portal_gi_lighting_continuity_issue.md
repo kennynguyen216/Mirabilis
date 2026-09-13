@@ -2,8 +2,9 @@
 
 ## Document status
 
-**Status:** Confirmed known issue; fix proposed but not implemented  
-**Date:** 2026-09-12  
+**Status:** Milestone 1 (shared environment approximation) implemented; the
+issue itself remains open until portal cameras run their own hybrid GI  
+**Date:** 2026-09-12, mitigation landed 2026-09-13  
 **Affected renderer:** Raster mode with SSGI enabled  
 **Related design:** [Hybrid Screen-Space and Ray-Traced Global Illumination](hybrid_ray_traced_gi_design.md)
 
@@ -111,23 +112,26 @@ This is intentional for SSAO because the main camera's depth and normal images
 cannot describe the foreign portal camera. Reusing them would project nearby
 occlusion from the wrong room into the portal.
 
-However, `shaders/portal_view.frag` then always applies the constant ambient
-term:
+`shaders/portal_view.frag` then applied the whole constant ambient term:
 
 ```glsl
 vec3 ambient = sceneData.ambientColor.rgb * occlusion;
 ```
 
-`VulkanEngine::build_scene_data()` currently sets that ambient value to
-`vec4(0.28)`.
+`VulkanEngine::build_scene_data()` sets that ambient value to `vec4(0.28)`,
+and `_ssgiAmbientRetention` defaults to 0.5, so the main camera was spending
+0.14 of it and the portal camera 0.28 -- with no indirect light arriving at
+the portal camera to account for the difference.
 
-The resulting portal-camera lighting is conceptually:
+The resulting portal-camera lighting was conceptually:
 
 ```text
 baseColor * (rasterDirectSun + constantAmbient0.28)
 ```
 
-No portal-camera SSGI pass later replaces this approximation.
+No portal-camera SSGI pass replaces this approximation.  Milestone 1 below
+now substitutes the shared environment for it; the mismatch described here is
+what that substitution corrects.
 
 ### Frame ordering
 
@@ -435,6 +439,26 @@ call the maximum setting real-time without measured results.
 **Acceptance:** broad color discontinuity decreases in the test fixture without
 double counting main-camera ambient. This milestone is mitigation, not final
 completion.
+
+**Implemented 2026-09-13.** The environment convention moved out of
+`shaders/ssgi.comp` into `shaders/environment.glsl`, which now owns the
+analytic gradient, the equirectangular mapping, the environment intensity, the
+black-environment override and the sun-disk ceiling. The panorama moved from
+the SSGI-only descriptor set to binding 3 of the per-camera scene set, so a
+portal camera reads the same image from its forward shader;
+`update_skybox_descriptors()` fills that binding for every frame's main and
+portal sets, because `init_descriptors()` runs before the panorama is loaded.
+
+`GPUSceneData::portalIndirectSettings.x` carries the main camera's SSGI flag
+into each portal camera. When it is set, `portal_view_shading.glsl` applies the
+same `indirectSettings.x` ambient retention the main camera applies, and adds
+`environment_irradiance(normal)` -- the cosine-weighted hemisphere average of
+the same environment SSGI misses fall back to -- in place of the screen-space
+estimate it cannot compute. With SSGI off nothing changes: the flag is zero and
+the whole flat ambient term is kept.
+
+Still outstanding from this milestone: the environment/fallback-only portal
+debug view, and captured test artifacts quantifying the remaining difference.
 
 ### Portal Fix Milestone 2: one portal-camera G-buffer
 

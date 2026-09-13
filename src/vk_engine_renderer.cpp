@@ -116,16 +116,31 @@ void VulkanEngine::init_descriptors()
         builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         _singleImageDescriptorLayout = builder.build(_device, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-        // The anti-aliasing pass wants exactly that shape: one sampled colour
-        // image.  Both it and the draw image outlive every frame, so this set
-        // is written once here rather than rebuilt per frame.
+        // Both post-process passes want exactly that shape: one sampled
+        // colour image.  Every image involved outlives every frame, so these
+        // sets are written once here rather than rebuilt per frame.
+        _tonemapInputDescriptor = globalDescriptorAllocator.allocate(
+            _device, _singleImageDescriptorLayout);
+
+        DescriptorWriter tonemapWriter;
+        tonemapWriter.write_image(
+            0,
+            _drawImage.imageView,
+            _postProcessSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        tonemapWriter.update_set(_device, _tonemapInputDescriptor);
+
+        // Anti-aliasing reads the tonemap's output, not the draw image.  Its
+        // edge search compares lumas against fixed thresholds, which only
+        // mean anything once the values are in display range.
         _fxaaInputDescriptor = globalDescriptorAllocator.allocate(
             _device, _singleImageDescriptorLayout);
 
         DescriptorWriter fxaaWriter;
         fxaaWriter.write_image(
             0,
-            _drawImage.imageView,
+            _tonemapImage.imageView,
             _postProcessSampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
@@ -142,6 +157,12 @@ void VulkanEngine::init_descriptors()
         // it as well, and a flag in the block itself is what stops them
         // reading occlusion computed for a different view.
         builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        // And the environment panorama.  It used to belong to the SSGI trace
+        // alone, but a portal camera has no trace to fall back from and needs
+        // the same sky directly, so it lives with the scene data every camera
+        // already binds.  update_skybox_descriptors() is what fills it: the
+        // panorama is loaded by init_default_data(), after this runs.
+        builder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         // Compute is here because both occlusion passes bind this same set
         // for the projection and its inverse rather than duplicating them.
         _gpuSceneDataDescriptorLayout = builder.build(
@@ -395,7 +416,9 @@ void VulkanEngine::init_descriptors()
         verticalWriter.update_set(_device, _ssgiFilterDescriptors[2]);
 
         builder.clear();
-        for (uint32_t binding = 0; binding < 4; ++binding) {
+        // Five now, not four: the trace stores incident radiance, so the
+        // composite is where the receiver's base colour is applied.
+        for (uint32_t binding = 0; binding < 5; ++binding) {
             builder.add_binding(
                 binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         }
@@ -417,6 +440,12 @@ void VulkanEngine::init_descriptors()
                 _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             compositeWriter.write_image(3, _prepassNormalImage.imageView,
+                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            // draw_ssgi() leaves the forward pass's base-colour target in
+            // SHADER_READ_ONLY_OPTIMAL, and it still holds this frame's
+            // albedo when the composite runs immediately afterwards.
+            compositeWriter.write_image(4, _gbufferAlbedoImage.imageView,
                 _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             compositeWriter.update_set(
@@ -573,10 +602,15 @@ void VulkanEngine::init_pipelines()
     init_background_pipelines();
     init_shadow_pipeline();
     init_depth_normal_pipeline();
+    // Deferred to the end of this function: both alpha-tested pipelines take
+    // metalRoughMaterial.materialLayout, which build_pipelines() creates.
     init_render_debug_pipeline();
+    init_tonemap_pipeline();
     init_fxaa_pipeline();
     init_ssao_pipelines();
     metalRoughMaterial.build_pipelines(this);
+    init_shadow_mask_pipeline();
+    init_depth_normal_mask_pipeline();
     init_ssgi_pipelines();
 }
 
@@ -587,6 +621,7 @@ void VulkanEngine::draw_geometry(
     VkDescriptorSet sceneDescriptor,
     bool clearDepthAndStencil,
     MaterialPipeline* overridePipeline,
+    MaterialPipeline* overrideMaskPipeline,
     uint32_t stencilReference,
     bool useFrustumCulling,
     uint32_t stencilCompareMask,
@@ -673,9 +708,19 @@ void VulkanEngine::draw_geometry(
             return;
         }
 
-        MaterialPipeline* pipeline = overridePipeline != nullptr
-            ? overridePipeline
-            : renderObject.material->pipeline;
+        // An overriding pass still has to honour the alpha cutoff, or masked
+        // geometry reappears as a solid rectangle the moment it is seen
+        // through a portal.  Passes that write a stencil or a mask rather
+        // than shading pass no mask pipeline and fall back to the one
+        // override, which is what they want: the cutout's silhouette is not
+        // what those passes are describing.
+        MaterialPipeline* pipeline = renderObject.material->pipeline;
+        if (overridePipeline != nullptr) {
+            pipeline = overrideMaskPipeline != nullptr &&
+                    renderObject.material->passType == MaterialPass::Mask
+                ? overrideMaskPipeline
+                : overridePipeline;
+        }
         if (pipeline != lastPipeline) {
             lastPipeline = pipeline;
             vkCmdBindPipeline(
@@ -803,6 +848,13 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
         occlusionFraction.x - 0.5f / occlusionAllocation.x,
         occlusionFraction.y - 0.5f / occlusionAllocation.y);
     data.ssgiFallbackSettings = _traceLighting.environment;
+    // Ambient and SSGI are two answers to one question, so how they divide it
+    // travels with every camera rather than being decided in the shader.
+    data.indirectSettings = glm::vec4(
+        _ssgiAmbientRetention,
+        _ssgiTraceEnvironmentMap ? 1.0f : 0.0f,
+        _skyboxEnvironmentLod,
+        _skyboxIndirectClamp);
     return data;
 }
 
@@ -966,6 +1018,66 @@ void VulkanEngine::init_shadow_pipeline()
     });
 }
 
+void VulkanEngine::init_shadow_mask_pipeline()
+{
+    VkShaderModule vertexShader = VK_NULL_HANDLE;
+    VkShaderModule fragmentShader = VK_NULL_HANDLE;
+    if (!vkutil::load_shader_module(
+            "../../shaders/shadow_depth_mask.vert.spv", _device, &vertexShader) ||
+        !vkutil::load_shader_module(
+            "../../shaders/shadow_depth_mask.frag.spv", _device, &fragmentShader)) {
+        fmt::print("Error loading alpha-tested shadow shaders\n");
+        if (vertexShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, vertexShader, nullptr);
+        }
+        if (fragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, fragmentShader, nullptr);
+        }
+        return;
+    }
+
+    // One descriptor set, and it is the per-material set the forward pass
+    // binds at index 1.  Nothing about the sun's camera is needed here - it
+    // is still folded into the push constant - so the scene set the other
+    // passes carry would be dead weight, and set 0 is the material instead.
+    VkPushConstantRange pushRange{
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = sizeof(ShadowPushConstants)};
+    VkPipelineLayoutCreateInfo layoutInfo = vkinit::pipeline_layout_create_info();
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &metalRoughMaterial.materialLayout;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushRange;
+    VK_CHECK(vkCreatePipelineLayout(
+        _device, &layoutInfo, nullptr, &_shadowMaskPipeline.layout));
+
+    PipelineBuilder builder;
+    builder._pipelineLayout = _shadowMaskPipeline.layout;
+    builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    // Every state below matches the opaque shadow pipeline exactly.  Where a
+    // masked surface and an opaque one meet, any disagreement here would show
+    // up as a seam between the two shadows they cast.
+    builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    builder.set_multisampling_none();
+    builder.disable_blending();
+    builder.disable_color_attachment();
+    builder.enable_depthtest(true, VK_COMPARE_OP_LESS_OR_EQUAL);
+    builder.enable_depth_bias(1.25f, 2.75f);
+    builder.set_depth_format(_shadowMapImage.imageFormat);
+    _shadowMaskPipeline.pipeline = builder.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, fragmentShader, nullptr);
+    vkDestroyShaderModule(_device, vertexShader, nullptr);
+
+    _mainDeletionQueue.push_function([this]() {
+        vkDestroyPipeline(_device, _shadowMaskPipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _shadowMaskPipeline.layout, nullptr);
+    });
+}
+
 void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
 {
     const auto startTime = std::chrono::steady_clock::now();
@@ -1010,19 +1122,54 @@ void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
         vkCmdBindPipeline(
             cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadowPipeline.pipeline);
 
+        VkPipeline lastPipeline = _shadowPipeline.pipeline;
+        MaterialInstance* lastMaterial = nullptr;
         VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
         // portalViewDrawContext is the world plus the player's body, which is
         // what actually exists in the level.  The main camera's context is
         // not usable here: it also carries the portal quads, and it omits the
         // body the first-person camera sits inside.
-        // Transparent surfaces intentionally do not cast yet. Supporting
-        // foliage or grates requires a material-aware alpha-tested pass.
+        // Transparent surfaces intentionally do not cast yet: a blended
+        // surface has no single silhouette to cast.  Masked ones do, and they
+        // go through _shadowMaskPipeline so foliage and grates cast their
+        // cutout rather than the rectangle it is painted on.
         for (const RenderObject& renderObject :
                 portalViewDrawContext.OpaqueSurfaces) {
             // Cull against the light, never against the player's camera: an
             // object behind the camera can still drop a shadow into view.
             if (!is_visible(renderObject, _sunViewProjection)) {
                 continue;
+            }
+
+            const bool masked = renderObject.material != nullptr &&
+                renderObject.material->passType == MaterialPass::Mask &&
+                _shadowMaskPipeline.pipeline != VK_NULL_HANDLE;
+            const MaterialPipeline& active = masked
+                ? _shadowMaskPipeline
+                : _shadowPipeline;
+            if (active.pipeline != lastPipeline) {
+                lastPipeline = active.pipeline;
+                vkCmdBindPipeline(
+                    cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, active.pipeline);
+                // The opaque pipeline's layout declares no sets at all, so
+                // the two are compatible for nothing: whatever was bound for
+                // the mask pipeline does not survive a round trip through it.
+                lastMaterial = nullptr;
+            }
+            if (masked && renderObject.material != lastMaterial) {
+                lastMaterial = renderObject.material;
+                // Set 0 here, not 1.  This pipeline carries the material set
+                // alone, because the sun's camera is already folded into the
+                // push constant and nothing else about the scene is read.
+                vkCmdBindDescriptorSets(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    active.layout,
+                    0,
+                    1,
+                    &renderObject.material->materialSet,
+                    0,
+                    nullptr);
             }
 
             if (renderObject.indexBuffer != lastIndexBuffer) {
@@ -1036,7 +1183,7 @@ void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
             pushConstants.vertexBuffer = renderObject.vertexBufferAddress;
             vkCmdPushConstants(
                 cmd,
-                _shadowPipeline.layout,
+                active.layout,
                 VK_SHADER_STAGE_VERTEX_BIT,
                 0,
                 sizeof(ShadowPushConstants),
@@ -1556,6 +1703,65 @@ void VulkanEngine::init_depth_normal_pipeline()
     });
 }
 
+void VulkanEngine::init_depth_normal_mask_pipeline()
+{
+    VkShaderModule vertexShader = VK_NULL_HANDLE;
+    VkShaderModule fragmentShader = VK_NULL_HANDLE;
+    if (!vkutil::load_shader_module(
+            "../../shaders/depth_normal_mask.vert.spv", _device, &vertexShader) ||
+        !vkutil::load_shader_module(
+            "../../shaders/depth_normal_mask.frag.spv", _device, &fragmentShader)) {
+        fmt::print("Error loading alpha-tested prepass shaders\n");
+        if (vertexShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, vertexShader, nullptr);
+        }
+        if (fragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, fragmentShader, nullptr);
+        }
+        return;
+    }
+
+    // Scene data and the material, in the same order the forward pass uses
+    // them, so a material set written for that pass binds here unchanged.
+    VkDescriptorSetLayout layouts[] = {
+        _gpuSceneDataDescriptorLayout,
+        metalRoughMaterial.materialLayout};
+    VkPushConstantRange matrixRange{
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset = 0,
+        .size = sizeof(GPUDrawPushConstants)};
+    VkPipelineLayoutCreateInfo layoutInfo = vkinit::pipeline_layout_create_info();
+    layoutInfo.setLayoutCount = 2;
+    layoutInfo.pSetLayouts = layouts;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &matrixRange;
+    VK_CHECK(vkCreatePipelineLayout(
+        _device, &layoutInfo, nullptr, &_depthNormalMaskPipeline.layout));
+
+    PipelineBuilder builder;
+    builder._pipelineLayout = _depthNormalMaskPipeline.layout;
+    builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    // Matching the opaque prepass for the same reason it matches the main
+    // pass: occlusion computed here has to land on the shaded image's pixels.
+    builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    builder.set_multisampling_none();
+    builder.disable_blending();
+    builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    builder.set_color_attachment_format(_prepassNormalImage.imageFormat);
+    builder.set_depth_format(_prepassDepthImage.imageFormat);
+    _depthNormalMaskPipeline.pipeline = builder.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, fragmentShader, nullptr);
+    vkDestroyShaderModule(_device, vertexShader, nullptr);
+
+    _mainDeletionQueue.push_function([this]() {
+        vkDestroyPipeline(_device, _depthNormalMaskPipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _depthNormalMaskPipeline.layout, nullptr);
+    });
+}
+
 void VulkanEngine::init_render_debug_pipeline()
 {
     VkShaderModule vertexShader = VK_NULL_HANDLE;
@@ -1798,9 +2004,23 @@ void VulkanEngine::init_post_process_resources()
     // composed frame is read from _drawImage and resolved into this one.  It
     // matches the draw image exactly, including being allocated at window size
     // and only partly used when the resolution scale is below 1.
+    // Both post-process targets carry the swapchain's format rather than the
+    // draw image's.  By the time the frame reaches them the tonemap has
+    // already reduced it to display range, so the extra twelve bits per pixel
+    // of the HDR format would store nothing, and matching the swapchain lets
+    // the final blit copy rather than convert.
     _postProcessImage = create_image(
         _drawImage.imageExtent,
-        _drawImage.imageFormat,
+        _swapchainImageFormat,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+
+    // The tonemap's own target.  It is separate from _postProcessImage for
+    // the same reason that one is separate from _drawImage: anti-aliasing
+    // reads this and writes that, and no pass may do both to one image.
+    _tonemapImage = create_image(
+        _drawImage.imageExtent,
+        _swapchainImageFormat,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
 
@@ -1820,7 +2040,63 @@ void VulkanEngine::init_post_process_resources()
 
     _mainDeletionQueue.push_function([this]() {
         vkDestroySampler(_device, _postProcessSampler, nullptr);
+        destroy_image(_tonemapImage);
         destroy_image(_postProcessImage);
+    });
+}
+
+void VulkanEngine::init_tonemap_pipeline()
+{
+    VkShaderModule vertexShader = VK_NULL_HANDLE;
+    VkShaderModule fragmentShader = VK_NULL_HANDLE;
+    // The same fullscreen triangle the anti-aliasing pass uses.  It binds
+    // nothing and interpolates nothing, so there is no reason for a second
+    // copy of it.
+    if (!vkutil::load_shader_module(
+            "../../shaders/fxaa.vert.spv", _device, &vertexShader) ||
+        !vkutil::load_shader_module(
+            "../../shaders/tonemap.frag.spv", _device, &fragmentShader)) {
+        fmt::print("Error loading tonemap shaders\n");
+        if (vertexShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, vertexShader, nullptr);
+        }
+        if (fragmentShader != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, fragmentShader, nullptr);
+        }
+        return;
+    }
+
+    VkPushConstantRange settingsRange{
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset = 0,
+        .size = sizeof(TonemapPushConstants)};
+    VkPipelineLayoutCreateInfo layoutInfo = vkinit::pipeline_layout_create_info();
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &_singleImageDescriptorLayout;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &settingsRange;
+    VK_CHECK(vkCreatePipelineLayout(
+        _device, &layoutInfo, nullptr, &_tonemapPipeline.layout));
+
+    PipelineBuilder builder;
+    builder._pipelineLayout = _tonemapPipeline.layout;
+    builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    builder.set_multisampling_none();
+    builder.disable_blending();
+    builder.disable_depthtest();
+    builder.set_color_attachment_format(_tonemapImage.imageFormat);
+    builder.set_depth_format(VK_FORMAT_UNDEFINED);
+    _tonemapPipeline.pipeline = builder.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, fragmentShader, nullptr);
+    vkDestroyShaderModule(_device, vertexShader, nullptr);
+
+    _mainDeletionQueue.push_function([this]() {
+        vkDestroyPipeline(_device, _tonemapPipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _tonemapPipeline.layout, nullptr);
     });
 }
 
@@ -1934,6 +2210,9 @@ void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
     vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
 
     if (_depthNormalPipeline.pipeline != VK_NULL_HANDLE) {
+        // Both prepass layouts declare the scene set at index 0 with the same
+        // push constant range, which makes them compatible for that set: it
+        // survives a switch between the two pipelines and is bound once.
         vkCmdBindPipeline(
             cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _depthNormalPipeline.pipeline);
         vkCmdBindDescriptorSets(
@@ -1946,14 +2225,43 @@ void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
             0,
             nullptr);
 
+        VkPipeline lastPipeline = _depthNormalPipeline.pipeline;
+        MaterialInstance* lastMaterial = nullptr;
         VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
         // mainDrawContext and the main camera's frustum test, because these
         // buffers must describe the image the player is actually looking at.
         // Transparent surfaces are left out for now: one depth and one normal
-        // per pixel cannot describe a surface seen through another.
+        // per pixel cannot describe a surface seen through another.  Masked
+        // surfaces are not in that category - they are opaque wherever they
+        // draw at all - so they belong here, drawn through a pipeline that
+        // runs their cutoff test.
         for (const RenderObject& renderObject : mainDrawContext.OpaqueSurfaces) {
             if (!is_visible(renderObject, sceneData.viewproj)) {
                 continue;
+            }
+
+            const bool masked = renderObject.material != nullptr &&
+                renderObject.material->passType == MaterialPass::Mask &&
+                _depthNormalMaskPipeline.pipeline != VK_NULL_HANDLE;
+            const MaterialPipeline& active = masked
+                ? _depthNormalMaskPipeline
+                : _depthNormalPipeline;
+            if (active.pipeline != lastPipeline) {
+                lastPipeline = active.pipeline;
+                vkCmdBindPipeline(
+                    cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, active.pipeline);
+            }
+            if (masked && renderObject.material != lastMaterial) {
+                lastMaterial = renderObject.material;
+                vkCmdBindDescriptorSets(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    active.layout,
+                    1,
+                    1,
+                    &renderObject.material->materialSet,
+                    0,
+                    nullptr);
             }
 
             if (renderObject.indexBuffer != lastIndexBuffer) {
@@ -1967,7 +2275,7 @@ void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
             pushConstants.vertexBuffer = renderObject.vertexBufferAddress;
             vkCmdPushConstants(
                 cmd,
-                _depthNormalPipeline.layout,
+                active.layout,
                 VK_SHADER_STAGE_VERTEX_BIT,
                 0,
                 sizeof(GPUDrawPushConstants),
@@ -2340,16 +2648,94 @@ VkExtent2D VulkanEngine::active_ssgi_extent() const
         std::max(1u, (_drawExtent.height + 1u) / 2u)};
 }
 
-void VulkanEngine::draw_fxaa(VkCommandBuffer cmd)
+void VulkanEngine::draw_tonemap(VkCommandBuffer cmd)
 {
-    // The scene image becomes a texture, and the pass writes its result into
-    // the second colour image beside it.  Reading and writing one image within
-    // a single draw has no defined result, which is why the pair exists.
+    // The composed linear frame becomes a texture and the pass resolves it
+    // into the display-range image beside it.  Everything downstream of here
+    // - anti-aliasing, the blit, ImGui - works in that range.
     vkutil::transition_image(
         cmd,
         _drawImage.image,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vkutil::transition_image(
+        cmd,
+        _tonemapImage.image,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
+    VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
+        _tonemapImage.imageView,
+        nullptr,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingInfo renderInfo = vkinit::rendering_info(
+        _drawExtent, &colorAttachment, nullptr);
+    vkCmdBeginRendering(cmd, &renderInfo);
+
+    // _drawExtent rather than the allocation, for the same reason the
+    // anti-aliasing pass uses it: below a resolution scale of 1 the rest of
+    // the image holds nothing this frame produced.
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(_drawExtent.width);
+    viewport.height = static_cast<float>(_drawExtent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.extent = _drawExtent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    // No stencil attachment here either, but the shared builder makes stencil
+    // state dynamic on every pipeline it produces.
+    vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+    vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
+    vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
+
+    vkCmdBindPipeline(
+        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _tonemapPipeline.pipeline);
+    vkCmdBindDescriptorSets(
+        cmd,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        _tonemapPipeline.layout,
+        0,
+        1,
+        &_tonemapInputDescriptor,
+        0,
+        nullptr);
+
+    TonemapPushConstants pushConstants{};
+    pushConstants.settings = glm::vec4(
+        _tonemapExposure,
+        _tonemapOperator == 1 ? 1.0f : 0.0f,
+        _tonemapBypassCurve ? 1.0f : 0.0f,
+        0.0f);
+    vkCmdPushConstants(
+        cmd,
+        _tonemapPipeline.layout,
+        VK_SHADER_STAGE_FRAGMENT_BIT,
+        0,
+        sizeof(TonemapPushConstants),
+        &pushConstants);
+
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+
+    vkCmdEndRendering(cmd);
+
+    // Left readable rather than transfer-ready: anti-aliasing may still want
+    // it as a texture.  draw() transitions it for the blit if it does not.
+    vkutil::transition_image(
+        cmd,
+        _tonemapImage.image,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
+
+void VulkanEngine::draw_fxaa(VkCommandBuffer cmd)
+{
+    // Its source is the tonemap's output, which that pass already left in a
+    // readable layout, so only the target needs transitioning here.  Reading
+    // and writing one image within a single draw has no defined result, which
+    // is why the pair exists.
     vkutil::transition_image(
         cmd,
         _postProcessImage.image,

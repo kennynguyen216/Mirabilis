@@ -33,6 +33,26 @@ constexpr bool bUseValidationLayers = false;
 constexpr bool bUseValidationLayers = true;
 #endif
 
+namespace {
+
+// Interpolates between two yaw angles along the shorter arc.  Yaw is
+// accumulated from mouse motion and is never wrapped, so the raw difference
+// between two samples can be several turns' worth even when the player barely
+// moved; folding it into (-pi, pi] first keeps the step small and in the
+// direction they actually turned.
+float lerp_yaw(float from, float to, float t)
+{
+    constexpr float Pi = 3.14159265358979323846f;
+    constexpr float TwoPi = 2.0f * Pi;
+    float delta = std::fmod(to - from + Pi, TwoPi);
+    if (delta < 0.0f) {
+        delta += TwoPi;
+    }
+    return from + (delta - Pi) * t;
+}
+
+} // namespace
+
 VulkanEngine* loadedEngine = nullptr;
 
 VulkanEngine& VulkanEngine::Get() {return *loadedEngine;}
@@ -209,6 +229,8 @@ void VulkanEngine::init()
     mainCamera.position = glm::vec3(0.0f, 5.0f, 12.0f);
     mainCamera.pitch = glm::radians(-20.0f);
     mainCamera.yaw = 0.0f;
+    _previousPlayerYaw = mainCamera.yaw;
+    _targetPlayerYaw = mainCamera.yaw;
 
     _playerMovement.position = _playerMovement.settings.spawnPosition;
     _playerMovement.velocity = glm::vec3(0.0f);
@@ -334,6 +356,16 @@ void VulkanEngine::init_vulkan()
         .select()
         .value();
 
+    // Anisotropic filtering is requested rather than required: it is a large
+    // quality win on Sponza's oblique floors and arches, but it is an optional
+    // Vulkan feature and a device that lacks it should still run with plain
+    // trilinear filtering instead of failing selection.  The samplers read
+    // material_anisotropy(), which collapses to 1.0 when this does not take.
+    VkPhysicalDeviceFeatures anisotropyFeature{};
+    anisotropyFeature.samplerAnisotropy = VK_TRUE;
+    _samplerAnisotropySupported =
+        physicalDevice.enable_features_if_present(anisotropyFeature);
+
     // create the vulkan device now
 
     vkb::DeviceBuilder deviceBuilder {physicalDevice};
@@ -344,6 +376,25 @@ void VulkanEngine::init_vulkan()
     _chosenGPU = physicalDevice.physical_device;
     _graphicsQueue = vkbDevice.get_queue(vkb::QueueType::graphics).value();
     _graphicsQueueFamily = vkbDevice.get_queue_index(vkb::QueueType::graphics).value();
+
+    // maxSamplerAnisotropy is only meaningful once the feature is on; a device
+    // that reports 16 while the feature is off still rejects any sampler that
+    // asks for more than 1.
+    VkPhysicalDeviceProperties deviceProperties{};
+    vkGetPhysicalDeviceProperties(_chosenGPU, &deviceProperties);
+    _maxSamplerAnisotropy = _samplerAnisotropySupported
+        ? deviceProperties.limits.maxSamplerAnisotropy
+        : 1.0f;
+    if (_samplerAnisotropySupported) {
+        fmt::print(
+            "GPU: {} (anisotropy up to {}x)\n",
+            deviceProperties.deviceName,
+            _maxSamplerAnisotropy);
+    } else {
+        fmt::print(
+            "GPU: {} (anisotropy unsupported, using trilinear)\n",
+            deviceProperties.deviceName);
+    }
 
     VmaAllocatorCreateInfo allocatorInfo = {};
     allocatorInfo.physicalDevice = _chosenGPU;
@@ -627,6 +678,7 @@ void VulkanEngine::draw(float deltaTime)
         get_current_frame().sceneDescriptor,
         true,
         nullptr,
+        nullptr,
         0,
         true,
         0xff,
@@ -660,15 +712,37 @@ void VulkanEngine::draw(float deltaTime)
         draw_collider_debug_bounds(cmd);
     }
 
+    // Everything above this point works in unbounded linear radiance.  The
+    // tonemap is what turns that into something a display can show, and it has
+    // to run before anti-aliasing: FXAA thresholds luma differences against
+    // fixed constants, which only describe visible contrast once the values
+    // are in display range.
+    //
+    // A debug view skips both.  Those images carry per-pixel data - normals,
+    // depth, velocity - whose whole value is that nothing has reshaped it, and
+    // a tone curve would do exactly that.  They present from the draw image on
+    // the untouched path below, as they always have.
+    const bool tonemapping = _tonemapEnabled && !showRenderDebugView &&
+        _tonemapPipeline.pipeline != VK_NULL_HANDLE;
+    if (tonemapping) {
+        draw_tonemap(cmd);
+        presentSource = _tonemapImage.image;
+    }
+
     // Anti-aliasing sees the whole composed frame, so it smooths world
     // silhouettes, portal contents, and the overlay lines in one pass.  ImGui
     // is drawn after the copy, straight into the swapchain, and stays sharp.
-    // A debug view is exempt: those images carry per-pixel data whose value is
-    // that it has not been filtered.
-    if (_fxaaEnabled && !showRenderDebugView &&
+    // It reads the tonemap's output, so it is only available when that ran.
+    if (tonemapping && _fxaaEnabled &&
         _fxaaPipeline.pipeline != VK_NULL_HANDLE) {
         draw_fxaa(cmd);
         presentSource = _postProcessImage.image;
+    } else if (tonemapping) {
+        vkutil::transition_image(
+            cmd,
+            _tonemapImage.image,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     } else {
         vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     }
@@ -840,15 +914,34 @@ void VulkanEngine::run(){
         if (_editorMode) {
             _editorCamera.update(deltaTime);
             _physicsAccumulator = 0.0f;
+            // Leaving the editor should not make the first tick back in play
+            // sweep through however far the editor camera was turned.
+            _previousPlayerYaw = mainCamera.yaw;
         } else {
             _physicsAccumulator = std::min(
                 _physicsAccumulator + deltaTime,
                 PhysicsDt * static_cast<float>(MaxPhysicsSteps));
-            _playerInput.yaw = mainCamera.yaw;
+            // Where this frame's turn ends.  update_physics() may overwrite
+            // both ends of it partway through if the player crosses a portal,
+            // which is why the loop reads the members rather than a local.
+            _targetPlayerYaw = mainCamera.yaw;
+            // Clamped to at least one: the accumulator can sit a hair above
+            // PhysicsDt while the division truncates to zero, and dividing by
+            // that below would hand the first tick an infinite fraction.
+            const int stepCount = std::max(
+                1, static_cast<int>(_physicsAccumulator / PhysicsDt));
+            int stepIndex = 0;
             while (_physicsAccumulator >= PhysicsDt) {
+                ++stepIndex;
+                _playerInput.yaw = lerp_yaw(
+                    _previousPlayerYaw,
+                    _targetPlayerYaw,
+                    static_cast<float>(stepIndex) /
+                        static_cast<float>(stepCount));
                 update_physics(PhysicsDt);
                 _physicsAccumulator -= PhysicsDt;
             }
+            _previousPlayerYaw = _targetPlayerYaw;
         }
 
         ImGui_ImplVulkan_NewFrame();

@@ -9,10 +9,15 @@ layout(rgba16f, set = 1, binding = 0) uniform image2D rawIndirectImage;
 layout(rgba16f, set = 1, binding = 1) uniform image2D diagnosticImage;
 layout(set = 1, binding = 2) uniform sampler2D prepassDepth;
 layout(set = 1, binding = 3) uniform sampler2D prepassNormal;
+// Bound but no longer read here.  Receiver albedo is applied once, in the
+// composite, at full resolution: the bilateral filter between here and there
+// is far better behaved on radiance than on radiance already tinted by a
+// neighbouring surface's base colour.  The binding stays so the descriptor
+// set layout is shared with the debug views.
 layout(set = 1, binding = 4) uniform sampler2D gbufferAlbedo;
 layout(set = 1, binding = 5) uniform sampler2D previousDirectLighting;
 layout(set = 1, binding = 6) uniform sampler2D portalMask;
-layout(set = 1, binding = 7) uniform sampler2D environmentMap;
+layout(set = 1, binding = 7) uniform sampler2D environmentTexture;
 layout(set = 1, binding = 8) uniform sampler2D gbufferVelocity;
 layout(rgba16f, set = 1, binding = 9) uniform image2D temporalIndirectImage;
 layout(rgba16f, set = 1, binding = 10) uniform image2D temporalDiagnosticImage;
@@ -34,6 +39,11 @@ layout(push_constant) uniform constants {
     // x = rays per pixel.
     uvec4 quality;
 } PushConstants;
+
+// The sky every miss ray is filled from, and the policy that decides how
+// much of it a miss is worth.  Shared with the portal cameras, which have
+// no screen-space pass of their own to fall back from.
+#include "environment.glsl"
 
 const float Pi = 3.14159265359;
 const float BackgroundDepth = 1e-6;
@@ -77,13 +87,6 @@ vec3 cosine_direction(vec3 normal, inout uint state)
     return normalize(tangent * local.x + bitangent * local.y + normal * local.z);
 }
 
-vec2 equirectangular_uv(vec3 direction)
-{
-    float longitude = atan(direction.z, direction.x) / (2.0 * Pi) + 0.5;
-    float latitude = acos(clamp(direction.y, -1.0, 1.0)) / Pi;
-    return vec2(longitude, latitude);
-}
-
 vec2 encode_octahedron(vec3 n)
 {
     n /= abs(n.x) + abs(n.y) + abs(n.z);
@@ -125,8 +128,6 @@ void main()
     vec3 position = view_position(screenUV, depth);
     vec3 normal = normalize(texture(prepassNormal,
         allocation_uv(screenUV, prepassNormal)).xyz);
-    vec3 albedo = texture(gbufferAlbedo,
-        allocation_uv(screenUV, gbufferAlbedo)).rgb;
     uint state = uint(pixel.x) * 1973u ^ uint(pixel.y) * 9277u ^
         PushConstants.control.w * 26699u ^ 0x68bc21ebu;
     vec3 origin = position + normal * PushConstants.settings.z;
@@ -188,18 +189,16 @@ void main()
         if (!hit || PushConstants.control.z == 0u) {
             vec3 worldDirection = normalize(
                 transpose(mat3(sceneData.view)) * direction);
-            incident = sceneData.ssgiFallbackSettings.y > 0.5
-                ? vec3(0.0)
-                : sceneData.ssgiFallbackSettings.x * mix(
-                    vec3(0.7, 0.8, 1.0), vec3(0.12, 0.3, 0.65),
-                    clamp(worldDirection.y * 0.5 + 0.5, 0.0, 1.0));
-            fallbackIndirect += incident * albedo;
+            incident = environment_radiance(worldDirection);
+            fallbackIndirect += incident;
         }
-        indirect += incident * albedo;
+        indirect += incident;
         hitSamples += hit ? 1 : 0;
         portalSamples += portalTermination ? 1 : 0;
         totalSteps += stepsTaken;
     }
+    // Incident radiance, not reflected colour: the composite multiplies by
+    // the receiver's albedo after the temporal and spatial filters have run.
     indirect /= float(rayCount);
     fallbackIndirect /= float(rayCount);
     imageStore(rawIndirectImage, pixel, vec4(indirect, 1.0));
