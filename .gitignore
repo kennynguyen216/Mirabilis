@@ -38,6 +38,7 @@
 /assets/sponza/
 /shaders/*.spv
 /.vs/
+__pycache__/
 
 # Generated Python cache files
 __pycache__/

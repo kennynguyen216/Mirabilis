@@ -163,10 +163,10 @@ struct SSAOSettings {
     // The size of the neighbourhood that can occlude a point, in world units.
     // It depends entirely on the scale the level was authored at.
     float radius{0.75f};
-    // How far a sample must be behind a surface before it counts as blocked.
+    // Offset the sample hemisphere along the surface normal, in world units.
     // Too little and surfaces shadow themselves into speckle; too much and
     // occlusion detaches from the corners that produced it.
-    float bias{0.025f};
+    float bias{0.075f};
     float intensity{1.0f};
     float power{1.5f};
 };
@@ -568,6 +568,8 @@ class VulkanEngine{
         // cover.  The images themselves stay allocated at half the window.
         VkExtent2D active_ssao_extent() const;
         bool ssao_active() const;
+        void load_ao_preferences();
+        void save_ao_preferences() const;
         void draw_render_debug(VkCommandBuffer cmd);
         void draw_tonemap(VkCommandBuffer cmd);
         void draw_fxaa(VkCommandBuffer cmd);
@@ -916,6 +918,8 @@ class VulkanEngine{
         VkFormat _ssaoFormat{VK_FORMAT_UNDEFINED};
         const char* _ssaoFormatName{"none"};
         SSAOSettings _ssaoSettings{};
+        bool _ssaoSceneOverride{false};
+        bool _ssaoGlobalEnabled{true};
         // A machine setting, not a scene one: it buys quality with GPU time
         // and says nothing about how the level is lit.
         int _ssaoQuality{1};

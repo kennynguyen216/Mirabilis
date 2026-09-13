@@ -7,6 +7,7 @@
 #include <unordered_map>
 
 #include <simdjson.h>
+#include <SDL.h>
 
 namespace {
 
@@ -365,12 +366,14 @@ bool VulkanEngine::save_editor_scene()
     // depends on the scale this level was authored at.  The sample count and
     // the resolution are absent for the same reason the shadow map size is -
     // they describe a machine, not a level.
-    file << ",\n  \"ssao\": {\"enabled\": "
-         << (_ssaoSettings.enabled ? "true" : "false")
-         << ", \"radius\": " << _ssaoSettings.radius
-         << ", \"bias\": " << _ssaoSettings.bias
-         << ", \"intensity\": " << _ssaoSettings.intensity
-         << ", \"power\": " << _ssaoSettings.power << '}';
+    if (_ssaoSceneOverride) {
+        file << ",\n  \"ssao\": {\"enabled\": "
+             << (_ssaoSettings.enabled ? "true" : "false")
+             << ", \"radius\": " << _ssaoSettings.radius
+             << ", \"bias\": " << _ssaoSettings.bias
+             << ", \"intensity\": " << _ssaoSettings.intensity
+             << ", \"power\": " << _ssaoSettings.power << '}';
+    }
     file << "\n}\n";
     if (!file) {
         fmt::print("Could not finish writing scene: {}\n", scenePath.string());
@@ -413,6 +416,37 @@ void VulkanEngine::restore_last_editor_scene_name()
     if (normalized.has_value() && std::filesystem::exists(editor_scene_path(*normalized))) {
         _activeSceneFilename = *normalized;
     }
+}
+
+// SDL's user directory is shared by Debug/Release and independent of maps.
+void VulkanEngine::load_ao_preferences()
+{
+    char* directory = SDL_GetPrefPath("Mirabilis", "Mirabilis");
+    if (!directory) return;
+    std::ifstream file(std::filesystem::path(directory) / "ambient_occlusion.cfg");
+    SDL_free(directory);
+    int version = 0, enabled = 1, quality = 1;
+    float depth = 12.0f, normal = 16.0f;
+    if (!(file >> version >> enabled >> quality >> depth >> normal) ||
+        version != 1 || (enabled != 0 && enabled != 1) ||
+        quality < 0 || quality >= static_cast<int>(SSAOKernelSizes.size()) ||
+        !std::isfinite(depth) || depth < 5.0f || depth > 120.0f ||
+        !std::isfinite(normal) || normal < 1.0f || normal > 48.0f) return;
+    _ssaoGlobalEnabled = enabled != 0;
+    _ssaoQuality = quality;
+    _ssaoDepthFalloff = depth;
+    _ssaoNormalFalloff = normal;
+}
+
+void VulkanEngine::save_ao_preferences() const
+{
+    char* directory = SDL_GetPrefPath("Mirabilis", "Mirabilis");
+    if (!directory) return;
+    std::ofstream file(std::filesystem::path(directory) / "ambient_occlusion.cfg");
+    SDL_free(directory);
+    file << "1 " << (_ssaoGlobalEnabled ? 1 : 0) << ' ' << _ssaoQuality
+         << ' ' << _ssaoDepthFalloff << ' ' << _ssaoNormalFalloff << '\n';
+    if (!file) fmt::print("Could not save ambient occlusion preferences\n");
 }
 
 bool VulkanEngine::load_editor_scene()
@@ -509,8 +543,10 @@ bool VulkanEngine::load_editor_scene()
         if(reference["blackEnvironment"].get_bool().get(black)==simdjson::SUCCESS) pendingReference.environment.y=black?1.f:0.f;
     }
     SSAOSettings pendingSSAO{};
+    bool pendingSSAOOverride = false;
     simdjson::dom::object jsonSSAO;
     if (document["ssao"].get_object().get(jsonSSAO) == simdjson::SUCCESS) {
+        pendingSSAOOverride = true;
         bool ssaoEnabled = pendingSSAO.enabled;
         if (jsonSSAO["enabled"].get_bool().get(ssaoEnabled) == simdjson::SUCCESS) {
             pendingSSAO.enabled = ssaoEnabled;
@@ -854,6 +890,7 @@ bool VulkanEngine::load_editor_scene()
     _nextCreatedActorNumber = static_cast<uint32_t>(std::max<uint64_t>(nextActor, 1));
     // Past every path that could still have failed.
     _ssaoSettings = pendingSSAO;
+    _ssaoSceneOverride = pendingSSAOOverride;
     _traceLighting = pendingReference;
     if (pendingSkyboxSelection != _skyboxSelection &&
         !set_skybox(pendingSkyboxSelection)) {

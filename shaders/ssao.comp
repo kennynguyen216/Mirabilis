@@ -41,8 +41,9 @@ void main()
         return;
     }
 
-    vec2 screenUV = screen_uv_for(pixel);
-    float depth = texture(prepassDepth, prepass_uv(screenUV)).r;
+    ivec2 centerPixel = prepass_pixel(screen_uv_for(pixel));
+    vec2 screenUV = prepass_screen_uv(centerPixel);
+    float depth = texelFetch(prepassDepth, centerPixel, 0).r;
 
     // Nothing was drawn here, so there is no surface to occlude.  Leaving the
     // background fully visible is what keeps the sky out of the effect.
@@ -54,7 +55,7 @@ void main()
     // The prepass writes signed view-space normals into a float attachment,
     // so there is nothing to decode here.  It clears to zero, which is how a
     // pixel no surface covered is recognised.
-    vec3 rawNormal = texture(prepassNormal, prepass_uv(screenUV)).xyz;
+    vec3 rawNormal = texelFetch(prepassNormal, centerPixel, 0).xyz;
     if (dot(rawNormal, rawNormal) < 1e-8) {
         imageStore(outputAO, pixel, vec4(1.0));
         return;
@@ -70,24 +71,20 @@ void main()
     float randomUnit = fract(
         52.9829189 * fract(dot(pixelCenter, vec2(0.06711056, 0.00583715))));
     float randomAngle = randomUnit * 6.28318530718;
-    vec3 randomVector = vec3(cos(randomAngle), sin(randomAngle), 0.0);
+    vec2 rotation = vec2(cos(randomAngle), sin(randomAngle));
 
-    // Gram-Schmidt against the normal.  If the stored vector happens to lie
-    // along the normal the result collapses, so fall back to whichever axis
-    // is furthest from it instead of building a degenerate basis.
-    vec3 tangent = randomVector - normal * dot(randomVector, normal);
-    if (dot(tangent, tangent) < 1e-6) {
-        vec3 fallback = abs(normal.x) < 0.9
-            ? vec3(1.0, 0.0, 0.0)
-            : vec3(0.0, 1.0, 0.0);
-        tangent = fallback - normal * dot(fallback, normal);
-    }
-    tangent = normalize(tangent);
+    // Rotate within a stable tangent plane. Projecting XY noise onto a wall
+    // normal collapses many different angles to the same tangent direction.
+    vec3 axis = abs(normal.z) < 0.9 ? vec3(0, 0, 1) : vec3(0, 1, 0);
+    vec3 baseTangent = normalize(cross(axis, normal));
+    vec3 baseBitangent = cross(normal, baseTangent);
+    vec3 tangent = baseTangent * rotation.x + baseBitangent * rotation.y;
     vec3 bitangent = cross(normal, tangent);
     mat3 tangentToView = mat3(tangent, bitangent, normal);
 
     float radius = PushConstants.settings.x;
     float bias = PushConstants.settings.y;
+    vec3 sampleOrigin = viewPosition + normal * bias;
     // Distance in front of the camera, which grows as a surface recedes.
     // The engine's view space looks down -Z.
     float centerDistance = -viewPosition.z;
@@ -95,7 +92,7 @@ void main()
     float occlusion = 0.0;
     for (int i = 0; i < KernelSize; ++i) {
         vec3 samplePosition =
-            viewPosition + tangentToView * kernelData.samples[i].xyz * radius;
+            sampleOrigin + tangentToView * kernelData.samples[i].xyz * radius;
 
         vec4 clipPosition = sceneData.proj * vec4(samplePosition, 1.0);
         // Behind or on the plane of the camera: there is no screen position
@@ -112,27 +109,26 @@ void main()
             continue;
         }
 
-        float sampledDepth = texture(prepassDepth, prepass_uv(sampleScreenUV)).r;
+        ivec2 sampledPixel = prepass_pixel(sampleScreenUV);
+        float sampledDepth = texelFetch(prepassDepth, sampledPixel, 0).r;
         if (sampledDepth <= BackgroundDepth) {
             continue;
         }
         // Reconstructing the position is less error-prone than comparing raw
         // reversed-depth values, which are both non-linear and inverted.
         vec3 sampledPosition =
-            view_position_from_depth(sampleScreenUV, sampledDepth);
+            view_position_from_depth(prepass_screen_uv(sampledPixel), sampledDepth);
 
         float sampleDistance = -samplePosition.z;
         float surfaceDistance = -sampledPosition.z;
         // The surface actually visible along this ray sits nearer the camera
         // than the hemisphere point, so it blocks it.
-        // A depth comparison alone can mistake another point on this same
-        // plane for an occluder when a large wall is viewed at a grazing
-        // angle. That produced the evenly spaced vertical bands visible on
-        // flat walls. A real occluder must also sit measurably above the
-        // tangent plane through the centre point, in the normal hemisphere.
-        float normalSeparation = dot(normal, sampledPosition - viewPosition);
-        bool blocked = surfaceDistance < sampleDistance - bias &&
-            normalSeparation > bias;
+        // A coplanar neighbour cannot occlude the outward hemisphere.
+        // Keep this tolerance small so narrow contacts survive filtering.
+        float planeHeight = dot(normal, sampledPosition - viewPosition);
+        float tolerance = max(0.001, radius * 0.001);
+        bool blocked = surfaceDistance < sampleDistance - tolerance &&
+            planeHeight > tolerance;
 
         // Without this a distant wall would occlude a surface purely because
         // it is nearer the camera than a sample floating out in the open.

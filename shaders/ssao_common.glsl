@@ -36,11 +36,23 @@ layout(push_constant) uniform constants {
 // pixel still holding it was never covered by geometry.
 const float BackgroundDepth = 1e-6;
 
-// The centre of the full-resolution 2x2 block this occlusion pixel stands
-// for, in screen space where 0..1 spans the rendered region.
+// Map AO pixel centers across the active screen. This agrees with composition
+// even when ceil(fullExtent / 2) is not exactly half the full extent.
 vec2 screen_uv_for(ivec2 aoPixel)
 {
-    return (vec2(aoPixel) * 2.0 + 1.0) * PushConstants.screenTexel.xy;
+    return (vec2(aoPixel) + 0.5) / vec2(PushConstants.extents.xy);
+}
+
+// Reconstruct on the exact ray whose depth was fetched, including odd sizes.
+ivec2 prepass_pixel(vec2 screenUV)
+{
+    ivec2 extent = ivec2(round(1.0 / PushConstants.screenTexel.xy));
+    return clamp(ivec2(floor(screenUV * vec2(extent))), ivec2(0), extent - 1);
+}
+
+vec2 prepass_screen_uv(ivec2 pixel)
+{
+    return (vec2(pixel) + 0.5) * PushConstants.screenTexel.xy;
 }
 
 // Screen space -> a texture coordinate in the prepass allocation.
