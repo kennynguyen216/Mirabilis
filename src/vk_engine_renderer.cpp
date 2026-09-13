@@ -1589,7 +1589,7 @@ bool VulkanEngine::ssao_active() const
     // Every pipeline has to have been built, and the whole effect reads the
     // prepass, so a device that failed to produce either leaves it off rather
     // than shading against an image nothing wrote.
-    return _ssaoSettings.enabled &&
+    return _ssaoGlobalEnabled && _ssaoSettings.enabled &&
         _ssaoBlurPipeline != VK_NULL_HANDLE &&
         _ssaoPipelines[_ssaoQuality] != VK_NULL_HANDLE &&
         _depthNormalPipeline.pipeline != VK_NULL_HANDLE;

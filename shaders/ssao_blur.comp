@@ -30,7 +30,8 @@ void main()
     }
 
     vec2 screenUV = screen_uv_for(pixel);
-    float centerDepth = texture(prepassDepth, prepass_uv(screenUV)).r;
+    ivec2 centerPixel = prepass_pixel(screenUV);
+    float centerDepth = texelFetch(prepassDepth, centerPixel, 0).r;
 
     // The background carries no occlusion to filter, and letting it into a
     // weighted sum would pull foreground edges towards full visibility.
@@ -39,14 +40,14 @@ void main()
         return;
     }
 
-    vec3 centerPosition = view_position_from_depth(screenUV, centerDepth);
-    vec3 centerNormal =
-        normalize(texture(prepassNormal, prepass_uv(screenUV)).xyz);
+    vec3 centerPosition = view_position_from_depth(prepass_screen_uv(centerPixel), centerDepth);
+    vec3 centerNormal = texelFetch(prepassNormal, centerPixel, 0).xyz;
+    if (dot(centerNormal, centerNormal) < 1e-8) {
+        imageStore(outputAO, pixel, vec4(1.0));
+        return;
+    }
+    centerNormal = normalize(centerNormal);
 
-    // One occlusion texel is two full-resolution pixels, so a tap of one
-    // occlusion pixel is a screen-space step of two.
-    vec2 tapStep = vec2(PushConstants.extents.zw) *
-        PushConstants.screenTexel.xy * 2.0;
     float depthFalloff = PushConstants.settings.x;
     float normalFalloff = PushConstants.settings.y;
 
@@ -55,22 +56,25 @@ void main()
     for (int tap = -TapRadius; tap <= TapRadius; ++tap) {
         // Clamped to the rendered region, so the kernel never reaches into
         // the part of the allocation this frame's render scale left untouched.
-        vec2 tapScreenUV = clamp(
-            screenUV + tapStep * float(tap), vec2(0.0), vec2(1.0));
+        ivec2 tapPixel = clamp(pixel + PushConstants.extents.zw * tap,
+            ivec2(0), PushConstants.extents.xy - 1);
+        vec2 tapScreenUV = screen_uv_for(tapPixel);
+        ivec2 depthPixel = prepass_pixel(tapScreenUV);
 
-        float tapDepth = texture(prepassDepth, prepass_uv(tapScreenUV)).r;
+        float tapDepth = texelFetch(prepassDepth, depthPixel, 0).r;
         if (tapDepth <= BackgroundDepth) {
             continue;
         }
-        vec3 tapNormal =
-            normalize(texture(prepassNormal, prepass_uv(tapScreenUV)).xyz);
+        vec3 tapNormal = texelFetch(prepassNormal, depthPixel, 0).xyz;
+        if (dot(tapNormal, tapNormal) < 1e-8) continue;
+        tapNormal = normalize(tapNormal);
 
         // How far the tap sits off the plane through the centre pixel, rather
         // than how far its depth differs.  On a floor seen at a grazing angle
         // two neighbouring rows are metres apart in depth while lying on the
         // same surface; a raw depth comparison rejects every one of them and
         // leaves the noise behind as horizontal streaks.
-        vec3 tapPosition = view_position_from_depth(tapScreenUV, tapDepth);
+        vec3 tapPosition = view_position_from_depth(prepass_screen_uv(depthPixel), tapDepth);
         float planeDistance =
             abs(dot(centerNormal, tapPosition - centerPosition));
         float depthWeight = exp(-planeDistance * depthFalloff);
@@ -81,7 +85,7 @@ void main()
 
         float weight =
             SpatialWeight[tap + TapRadius] * depthWeight * normalWeight;
-        total += texture(inputAO, ao_uv(tapScreenUV)).r * weight;
+        total += texelFetch(inputAO, tapPixel, 0).r * weight;
         totalWeight += weight;
     }
 
@@ -89,6 +93,6 @@ void main()
     // itself, so this only guards against denormals.
     float filtered = totalWeight > 1e-5
         ? total / totalWeight
-        : texture(inputAO, ao_uv(screenUV)).r;
+        : texelFetch(inputAO, pixel, 0).r;
     imageStore(outputAO, pixel, vec4(clamp(filtered, 0.0, 1.0)));
 }

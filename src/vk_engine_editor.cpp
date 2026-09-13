@@ -1410,9 +1410,16 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                         // Radius, bias, intensity and power describe how this
                         // level is lit and travel with the scene.  Quality
                         // describes what the machine can afford and does not.
+                        bool preferencesEdited = ImGui::Checkbox(
+                            "Globally Enabled", &_ssaoGlobalEnabled);
+                        if (ImGui::Checkbox("Override For This Scene", &_ssaoSceneOverride)) {
+                            if (!_ssaoSceneOverride) _ssaoSettings = SSAOSettings{};
+                            _sceneDirty = true;
+                        }
+                        ImGui::BeginDisabled(!_ssaoSceneOverride);
                         bool occlusionEdited = false;
                         occlusionEdited |=
-                            ImGui::Checkbox("Enabled", &_ssaoSettings.enabled);
+                            ImGui::Checkbox("Scene Enabled", &_ssaoSettings.enabled);
                         occlusionEdited |= ImGui::SliderFloat(
                             "Radius",
                             &_ssaoSettings.radius,
@@ -1428,6 +1435,12 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                         if (occlusionEdited) {
                             _sceneDirty = true;
                         }
+                        ImGui::EndDisabled();
+                        if (ImGui::Button("Reset to Project Defaults")) {
+                            _ssaoSettings = SSAOSettings{};
+                            _ssaoSceneOverride = false;
+                            _sceneDirty = true;
+                        }
 
                         const char* qualityNames[] = {"Low", "Medium", "High"};
                         if (ImGui::Combo(
@@ -1435,7 +1448,7 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                                 &_ssaoQuality,
                                 qualityNames,
                                 IM_ARRAYSIZE(qualityNames))) {
-                            // Not a scene edit: it buys quality with GPU time.
+                            preferencesEdited = true;
                         }
                         ImGui::TextDisabled(
                             "%d samples", SSAOKernelSizes[_ssaoQuality]);
@@ -1443,16 +1456,17 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                         // How readily the blur accepts a neighbour as being on
                         // the same surface.  Both depend on world scale, but
                         // they are filter tuning rather than lighting.
-                        ImGui::SliderFloat(
+                        preferencesEdited |= ImGui::SliderFloat(
                             "Blur Depth Falloff",
                             &_ssaoDepthFalloff,
                             5.0f,
                             120.0f);
-                        ImGui::SliderFloat(
+                        preferencesEdited |= ImGui::SliderFloat(
                             "Blur Normal Falloff",
                             &_ssaoNormalFalloff,
                             1.0f,
                             48.0f);
+                        if (preferencesEdited) save_ao_preferences();
 
                         // With the sun off, occlusion is the only thing
                         // shaping the image.  Setting ambient to zero as well

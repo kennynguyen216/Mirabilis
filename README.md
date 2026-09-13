@@ -93,5 +93,24 @@ and time-trial triggers. Source reference: https://github.com/momentum-mod/level
 
 ## Status
 
+Ambient occlusion has a persistent **Globally Enabled** switch and quality/
+blur preferences in Render Settings. These are saved in SDL's per-user
+Mirabilis directory (`ambient_occlusion.cfg`) and shared by Debug and Release.
+Loading a scene does not change them. Scenes without an `ssao` block use the
+project defaults (radius 0.75, normal offset bias 0.075, intensity 1, power 1.5).
+Enable **Override For This Scene** to edit and save level-specific values;
+**Reset to Project Defaults** removes that override on the next scene save.
+Existing scene `ssao` blocks remain explicit overrides.
+
+SSAO coordinate reference checks can be run with:
+
+```cmd
+python -m unittest discover -s tests
+```
+
+These exercise odd render dimensions, reconstruction on grazing surfaces,
+kernel rotation, and coplanar rejection. They complement GPU validation and
+visual testing of Raw/Final AO on walls, corners, and narrow gaps.
+
 Mirabilis is an active engine and rendering prototype. Features, controls, and scene formats may change as portal rendering, movement, and editor tooling evolve.
 

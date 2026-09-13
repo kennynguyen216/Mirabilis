@@ -37,6 +37,7 @@
 /assets/brickadia/
 /shaders/*.spv
 /.vs/
+__pycache__/
 
 # Local Gradle caches
 .gradle/

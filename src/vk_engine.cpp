@@ -45,6 +45,7 @@ void VulkanEngine::init()
     // initializedSDL and create a window with it
 
     SDL_Init(SDL_INIT_VIDEO);
+    load_ao_preferences();
 
     SDL_WindowFlags window_flags =
         static_cast<SDL_WindowFlags>(SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);

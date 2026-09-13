@@ -41,10 +41,14 @@ void main()
     // white.  The reconstruction below returns early on background depth, and
     // black there would look exactly like full occlusion.
     if (mode >= ModeOcclusionRaw) {
-        // Half resolution, so each occlusion texel covers a 2x2 block.  The
-        // allocation is half the draw image in the same way, which is why the
-        // active region needs no scaling here.
-        ivec2 occlusionPixel = pixel / 2;
+        // Match composition's normalized mapping, including odd dimensions.
+        vec2 aoExtent = ceil(PushConstants.settings.yz * 0.5);
+        ivec2 occlusionPixel = min(ivec2(gl_FragCoord.xy /
+            PushConstants.settings.yz * aoExtent), ivec2(aoExtent) - 1);
+        if (sceneData.screenSpaceSettings.x < 0.5) {
+            outFragColor = vec4(1.0);
+            return;
+        }
         float occlusion = 1.0;
         if (mode == ModeOcclusionRaw) {
             occlusion = texelFetch(occlusionRaw, occlusionPixel, 0).r;
