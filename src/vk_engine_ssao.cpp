@@ -505,11 +505,11 @@ void VulkanEngine::draw_ssao(VkCommandBuffer cmd)
 
     SSAOPushConstants push = build_ssao_push_constants();
 
-    if (_gpuTimingSupported) {
+    if (_gpuTiming.supported) {
         vkCmdWriteTimestamp2(
             cmd,
             VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-            _timestampPool,
+            _gpuTiming.timestampPool,
             timestampBase + 0);
     }
 
@@ -543,11 +543,11 @@ void VulkanEngine::draw_ssao(VkCommandBuffer cmd)
     vkCmdDispatch(cmd, groupsX, groupsY, 1);
     toSampledRead(_ssao.rawImage);
 
-    if (_gpuTimingSupported) {
+    if (_gpuTiming.supported) {
         vkCmdWriteTimestamp2(
             cmd,
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            _timestampPool,
+            _gpuTiming.timestampPool,
             timestampBase + 1);
     }
 
@@ -585,22 +585,21 @@ void VulkanEngine::draw_ssao(VkCommandBuffer cmd)
     };
 
     runBlur(_ssao.blurHorizontalDescriptor, _ssao.blurImage, 1, 0);
-    if (_gpuTimingSupported) {
+    if (_gpuTiming.supported) {
         vkCmdWriteTimestamp2(
             cmd,
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            _timestampPool,
+            _gpuTiming.timestampPool,
             timestampBase + 2);
     }
 
     runBlur(_ssao.blurVerticalDescriptor, _ssao.finalImage, 0, 1);
-    if (_gpuTimingSupported) {
+    if (_gpuTiming.supported) {
         vkCmdWriteTimestamp2(
             cmd,
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            _timestampPool,
+            _gpuTiming.timestampPool,
             timestampBase + 3);
-        _timestampsPending[_frameNumber % FRAME_OVERLAP] = true;
+        _gpuTiming.timestampsPending[_frameNumber % FRAME_OVERLAP] = true;
     }
 }
-

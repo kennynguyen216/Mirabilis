@@ -977,11 +977,14 @@ class VulkanEngine{
         // Four marks per frame - before the sampling pass and after each of
         // the three dispatches - read back once the frame's fence has passed.
         static constexpr uint32_t TimestampsPerFrame = 4;
-        VkQueryPool _timestampPool{VK_NULL_HANDLE};
-        // Nanoseconds per timestamp tick, from the device.
-        float _timestampPeriod{0.0f};
-        bool _gpuTimingSupported{false};
-        std::array<bool, FRAME_OVERLAP> _timestampsPending{};
+        struct GpuTimingState {
+            VkQueryPool timestampPool{VK_NULL_HANDLE};
+            // Nanoseconds per timestamp tick, from the device.
+            float timestampPeriod{0.0f};
+            bool supported{false};
+            std::array<bool, FRAME_OVERLAP> timestampsPending{};
+        };
+        GpuTimingState _gpuTiming;
         static constexpr uint32_t SSGITimestampsPerFrame = 5;
         // Anti-aliasing runs last, on the composed colour, so one filter
         // covers world geometry, portal contents, and the debug overlays

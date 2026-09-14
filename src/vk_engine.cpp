@@ -515,10 +515,10 @@ void VulkanEngine::draw(float deltaTime)
 
 	// Timestamps have to be reset before they are written again, and this
 	// slot's results were read above.
-	if (_gpuTimingSupported) {
+	if (_gpuTiming.supported) {
 		vkCmdResetQueryPool(
 			cmd,
-			_timestampPool,
+			_gpuTiming.timestampPool,
 			(_frameNumber % FRAME_OVERLAP) * TimestampsPerFrame,
 			TimestampsPerFrame);
 		vkCmdResetQueryPool(

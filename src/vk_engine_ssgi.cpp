@@ -635,7 +635,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
     if (runSSGI) {
         const uint32_t timingBase =
             (_frameNumber % FRAME_OVERLAP) * SSGITimestampsPerFrame;
-        if (_gpuTimingSupported) {
+        if (_gpuTiming.supported) {
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 _ssgi.timestampPool, timingBase + 0);
         }
@@ -696,7 +696,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             (ssgiExtent.width + 7u) / 8u,
             (ssgiExtent.height + 7u) / 8u,
             1);
-        if (_gpuTimingSupported) {
+        if (_gpuTiming.supported) {
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 _ssgi.timestampPool, timingBase + 1);
         }
@@ -726,7 +726,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             (ssgiExtent.width + 7u) / 8u,
             (ssgiExtent.height + 7u) / 8u,
             1);
-        if (_gpuTimingSupported) {
+        if (_gpuTiming.supported) {
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 _ssgi.timestampPool, timingBase + 2);
         }
@@ -774,7 +774,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkutil::transition_image(cmd, _ssgi.filteredImage.image,
                 VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
         }
-        if (_gpuTimingSupported) {
+        if (_gpuTiming.supported) {
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 _ssgi.timestampPool, timingBase + 3);
         }
@@ -821,7 +821,7 @@ void VulkanEngine::draw_ssgi_composite(VkCommandBuffer cmd)
         VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRendering(cmd);
-    if (_gpuTimingSupported) {
+    if (_gpuTiming.supported) {
         const uint32_t timingBase =
             (_frameNumber % FRAME_OVERLAP) * SSGITimestampsPerFrame;
         vkCmdWriteTimestamp2(cmd,
@@ -894,4 +894,3 @@ void VulkanEngine::write_ssgi_trace_descriptors()
         ssgiWriter.update_set(_device, _ssgi.descriptors[writeIndex]);
     }
 }
-

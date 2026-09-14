@@ -616,20 +616,20 @@ void VulkanEngine::init_gpu_timestamps()
                    "CPU recording time instead\n");
         return;
     }
-    _timestampPeriod = properties.limits.timestampPeriod;
+    _gpuTiming.timestampPeriod = properties.limits.timestampPeriod;
 
     VkQueryPoolCreateInfo poolInfo{
         .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
     poolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
     poolInfo.queryCount = FRAME_OVERLAP * TimestampsPerFrame;
-    VK_CHECK(vkCreateQueryPool(_device, &poolInfo, nullptr, &_timestampPool));
+    VK_CHECK(vkCreateQueryPool(_device, &poolInfo, nullptr, &_gpuTiming.timestampPool));
     poolInfo.queryCount = FRAME_OVERLAP * SSGITimestampsPerFrame;
     VK_CHECK(vkCreateQueryPool(
         _device, &poolInfo, nullptr, &_ssgi.timestampPool));
-    _gpuTimingSupported = true;
+    _gpuTiming.supported = true;
 
     _mainDeletionQueue.push_function([this]() {
-        vkDestroyQueryPool(_device, _timestampPool, nullptr);
+        vkDestroyQueryPool(_device, _gpuTiming.timestampPool, nullptr);
         vkDestroyQueryPool(_device, _ssgi.timestampPool, nullptr);
     });
 }
@@ -638,16 +638,16 @@ void VulkanEngine::read_gpu_timestamps(uint32_t frameIndex)
 {
     // Called only after this frame slot's fence has been waited on, so the
     // results being read belong to a submission that has certainly finished.
-    if (!_gpuTimingSupported) {
+    if (!_gpuTiming.supported) {
         return;
     }
-    if (_timestampsPending[frameIndex]) {
-        _timestampsPending[frameIndex] = false;
+    if (_gpuTiming.timestampsPending[frameIndex]) {
+        _gpuTiming.timestampsPending[frameIndex] = false;
 
     std::array<uint64_t, TimestampsPerFrame> ticks{};
     const VkResult result = vkGetQueryPoolResults(
         _device,
-        _timestampPool,
+        _gpuTiming.timestampPool,
         frameIndex * TimestampsPerFrame,
         TimestampsPerFrame,
         sizeof(ticks),
@@ -661,7 +661,7 @@ void VulkanEngine::read_gpu_timestamps(uint32_t frameIndex)
     // timestampPeriod is nanoseconds per tick; the panel reports milliseconds
     // like every other timing beside it.
     const auto toMilliseconds = [this](uint64_t from, uint64_t to) {
-        return static_cast<float>(to - from) * _timestampPeriod * 1e-6f;
+        return static_cast<float>(to - from) * _gpuTiming.timestampPeriod * 1e-6f;
     };
     stats.ssao_raw_time = toMilliseconds(ticks[0], ticks[1]);
     stats.ssao_blur_horizontal_time = toMilliseconds(ticks[1], ticks[2]);
@@ -681,7 +681,7 @@ void VulkanEngine::read_gpu_timestamps(uint32_t frameIndex)
         if (ssgiResult == VK_SUCCESS) {
             const auto milliseconds = [&](uint64_t from, uint64_t to) {
                 return static_cast<float>(to - from) *
-                    _timestampPeriod * 1e-6f;
+                    _gpuTiming.timestampPeriod * 1e-6f;
             };
             stats.ssgi_raw_time = milliseconds(ssgiTicks[0], ssgiTicks[1]);
             stats.ssgi_temporal_time = milliseconds(ssgiTicks[1], ssgiTicks[2]);
