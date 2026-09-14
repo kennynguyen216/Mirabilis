@@ -166,7 +166,14 @@ void VulkanEngine::init()
     // initializedSDL and create a window with it
 
     SDL_Init(SDL_INIT_VIDEO);
-    load_ao_preferences();
+    // Bounded test runs use the project defaults, so a machine where someone
+    // switched occlusion off in Render Settings cannot silently skip the pass
+    // under the validation harness.
+    if (SDL_getenv("MIRABILIS_TEST_FRAMES")) {
+        fmt::print("GI test: per-user ambient occlusion preferences ignored\n");
+    } else {
+        load_ao_preferences();
+    }
 
     SDL_WindowFlags window_flags =
         static_cast<SDL_WindowFlags>(SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
@@ -880,6 +887,13 @@ void VulkanEngine::run(){
             if(_traceSupported) validate_path_trace();
             else if(!std::getenv("MIRABILIS_TEST_DISABLE_TRACE")) std::abort();
         }
+        if (SDL_getenv("MIRABILIS_TEST_REQUIRE_SSAO")) {
+            if (!ssao_active()) {
+                fmt::print("GI TEST FAIL: SSAO was required but inactive\n");
+                std::abort();
+            }
+            fmt::print("GI test: ssao=active\n");
+        }
     }
     auto previousTime = std::chrono::steady_clock::now();
 
@@ -974,7 +988,7 @@ void VulkanEngine::run(){
                     break;
                 }
             }
-            if(testFrame==9) renderScale=0.75f;
+            if(testFrame==9) renderScale=0.5f;
             if(testFrame==10) _traceWasActive=false;
             if(testFrame==11) _traceLighting.sunRadiance.x+=1;
             if(testFrame==12) _traceLighting.environment.x+=0.25f;
