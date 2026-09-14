@@ -1360,6 +1360,309 @@ void VulkanEngine::assign_scene_asset(
     }
 }
 
+void VulkanEngine::draw_sun_shadow_settings()
+{
+    if (ImGui::CollapsingHeader("Sun & Shadows")) {
+        // These are saved with the scene, so editing one is an edit to the
+        // level rather than a session preference.
+        bool lightingEdited = false;
+        lightingEdited |= ImGui::Checkbox("Cast Shadows", &_shadowsEnabled);
+        // The direction points from a surface towards the sun.
+        if (ImGui::SliderFloat3(
+                "Sun Direction", &_sunlightDirection.x, -1.0f, 1.0f)) {
+            lightingEdited = true;
+            if (glm::dot(_sunlightDirection, _sunlightDirection) <
+                0.000001f) {
+                // A zero direction cannot define a light camera.
+                _sunlightDirection = glm::vec3(0.0f, 1.0f, 0.5f);
+            }
+        }
+        lightingEdited |= ImGui::SliderFloat(
+            "Shadow Radius", &_shadowRadius, 10.0f, 200.0f);
+        ImGui::Checkbox("Show Shadow Bounds", &_showShadowBounds);
+        // Too little bias and surfaces shadow themselves; too much and a
+        // shadow detaches from the object casting it.
+        lightingEdited |= ImGui::SliderFloat(
+            "Depth Bias", &_shadowDepthBias, 0.0f, 0.005f, "%.5f");
+        lightingEdited |= ImGui::SliderFloat(
+            "Normal Bias", &_shadowNormalBias, 0.0f, 0.5f, "%.3f");
+        ImGui::SliderFloat(
+            "Shadow Softness", &_shadowFilterRadius,
+            0.0f, 12.0f, "%.2f texels");
+        if (lightingEdited) {
+            _sceneDirty = true;
+        }
+    }
+}
+
+void VulkanEngine::draw_ambient_occlusion_settings()
+{
+    if (ImGui::CollapsingHeader("Ambient Occlusion")) {
+        if (_ssaoFormat == VK_FORMAT_UNDEFINED) {
+            ImGui::TextDisabled(
+                "Unavailable: no storage-capable occlusion format.");
+        } else {
+            // Radius, bias, intensity and power describe how this level is lit
+            // and travel with the scene.  Quality describes what the machine
+            // can afford and does not.
+            bool preferencesEdited =
+                ImGui::Checkbox("Globally Enabled", &_ssaoGlobalEnabled);
+            if (ImGui::Checkbox("Override For This Scene", &_ssaoSceneOverride)) {
+                if (!_ssaoSceneOverride) _ssaoSettings = SSAOSettings{};
+                _sceneDirty = true;
+            }
+            ImGui::BeginDisabled(!_ssaoSceneOverride);
+            bool occlusionEdited = false;
+            occlusionEdited |=
+                ImGui::Checkbox("Scene Enabled", &_ssaoSettings.enabled);
+            occlusionEdited |= ImGui::SliderFloat(
+                "Radius", &_ssaoSettings.radius, 0.05f, 5.0f, "%.3f");
+            occlusionEdited |= ImGui::SliderFloat(
+                "Bias", &_ssaoSettings.bias, 0.0f, 0.1f, "%.4f");
+            occlusionEdited |= ImGui::SliderFloat(
+                "Intensity", &_ssaoSettings.intensity, 0.0f, 2.0f);
+            occlusionEdited |= ImGui::SliderFloat(
+                "Power", &_ssaoSettings.power, 0.25f, 4.0f);
+            if (occlusionEdited) {
+                _sceneDirty = true;
+            }
+            ImGui::EndDisabled();
+            if (ImGui::Button("Reset to Project Defaults")) {
+                _ssaoSettings = SSAOSettings{};
+                _ssaoSceneOverride = false;
+                _sceneDirty = true;
+            }
+
+            const char* qualityNames[] = {"Low", "Medium", "High"};
+            if (ImGui::Combo(
+                    "Quality",
+                    &_ssaoQuality,
+                    qualityNames,
+                    IM_ARRAYSIZE(qualityNames))) {
+                preferencesEdited = true;
+            }
+            ImGui::TextDisabled("%d samples", SSAOKernelSizes[_ssaoQuality]);
+
+            // How readily the blur accepts a neighbour as being on the same
+            // surface.  Both depend on world scale, but they are filter tuning
+            // rather than lighting.
+            preferencesEdited |= ImGui::SliderFloat(
+                "Blur Depth Falloff", &_ssaoDepthFalloff, 5.0f, 120.0f);
+            preferencesEdited |= ImGui::SliderFloat(
+                "Blur Normal Falloff", &_ssaoNormalFalloff, 1.0f, 48.0f);
+            if (preferencesEdited) save_ao_preferences();
+
+            // With the sun off, occlusion is the only thing shaping the image.
+            // Setting ambient to zero as well should then produce no visible
+            // difference at all, which is the check that it touches nothing
+            // else.
+            ImGui::Checkbox(
+                "Ambient Only (occlusion check)", &_ssaoAmbientOnly);
+        }
+    }
+}
+
+void VulkanEngine::draw_tonemap_settings()
+{
+    if (ImGui::CollapsingHeader("Tonemapping")) {
+        // Also a session preference, so none of it marks the level dirty.
+        ImGui::Checkbox("Enabled##Tonemapping", &_tonemapEnabled);
+        if (!_tonemapEnabled) {
+            ImGui::TextDisabled(
+                "Linear HDR is written straight to an 8-bit\n"
+                "buffer: midtones read dark and highlights clip.");
+        }
+        if (_tonemapEnabled) {
+            const char* operatorNames[] = {"ACES Filmic", "Reinhard"};
+            ImGui::Combo(
+                "Operator",
+                &_tonemapOperator,
+                operatorNames,
+                IM_ARRAYSIZE(operatorNames));
+            ImGui::SliderFloat(
+                "Exposure", &_tonemapExposure, 0.05f, 8.0f, "%.2f");
+            // Separates the two things this pass does, so a frame that looks
+            // wrong can be blamed on the curve or on the transfer function
+            // rather than on both at once.
+            ImGui::Checkbox(
+                "Bypass Curve (encode only)", &_tonemapBypassCurve);
+            if (_renderDebugView != RenderDebugView::None) {
+                ImGui::TextDisabled("Inactive while a debug view is shown.");
+            }
+        }
+    }
+}
+
+void VulkanEngine::draw_antialiasing_settings()
+{
+    if (ImGui::CollapsingHeader("Anti-Aliasing")) {
+        // A session preference rather than a scene property, so none of this
+        // marks the level dirty.
+        const char* modeNames[] = {"Off", "FXAA"};
+        int mode = _fxaaEnabled ? 1 : 0;
+        if (ImGui::Combo("Mode", &mode, modeNames, IM_ARRAYSIZE(modeNames))) {
+            _fxaaEnabled = mode == 1;
+        }
+        if (_fxaaEnabled) {
+            // Lower catches more edges; too low and the filter starts
+            // softening texture detail that never aliased.
+            ImGui::SliderFloat(
+                "Edge Threshold", &_fxaaEdgeThreshold, 0.03f, 0.25f, "%.3f");
+            ImGui::SliderFloat(
+                "Subpixel Strength", &_fxaaSubpixelStrength, 0.0f, 1.0f, "%.2f");
+            // White marks every pixel the threshold accepted. Tuning against
+            // this is far easier than judging the threshold from the finished
+            // image.
+            ImGui::Checkbox("Debug Edges", &_fxaaShowEdges);
+            if (!_tonemapEnabled) {
+                ImGui::TextDisabled(
+                    "Inactive: FXAA reads the tonemapped image.");
+            }
+            if (_renderDebugView != RenderDebugView::None) {
+                ImGui::TextDisabled(
+                    "Suspended while a debug view is shown.");
+            }
+        }
+    }
+}
+
+void VulkanEngine::draw_screen_buffer_settings()
+{
+    if (ImGui::CollapsingHeader("Screen-Space Buffers")) {
+        ImGui::Checkbox("Depth/Normal Prepass", &_depthNormalPrepassEnabled);
+        // Reading a half-finished buffer directly is far more informative than
+        // trying to infer a projection or orientation mistake from a finished
+        // effect.
+        int debugView = static_cast<int>(_renderDebugView);
+        if (ImGui::Combo(
+                "Debug View",
+                &debugView,
+                RenderDebugViewNames.data(),
+                static_cast<int>(RenderDebugViewNames.size()))) {
+            _renderDebugView = static_cast<RenderDebugView>(debugView);
+        }
+        // Easy to misread otherwise: these buffers hold the light arriving at
+        // a surface, not the colour it reflects.  A white wall and a red one
+        // under the same bounce now look identical here, and differ only after
+        // the composite.
+        if (is_ssgi_indirect_radiance_view(_renderDebugView)) {
+            ImGui::TextDisabled(
+                "SSGI buffers hold incident radiance; albedo is");
+            ImGui::TextDisabled(
+                "applied in the composite, not in the trace.");
+        }
+        if (_renderDebugView == RenderDebugView::Depth) {
+            ImGui::SliderFloat(
+                "Depth View Range", &_renderDebugDepthRange, 5.0f, 500.0f);
+        }
+        ImGui::SeparatorText("SSGI Milestone 5");
+        ImGui::Checkbox("Run SSGI", &_ssgiEnabled);
+        const char* ssgiPresets[] = {
+            "Validation (full resolution)",
+            "High (half resolution)",
+            "Balanced (half resolution)",
+            "Performance (half resolution)",
+            "Peak (full resolution, 8 rays)"};
+        int ssgiPreset = _ssgiQualityPreset;
+        if (ImGui::Combo("Quality Preset", &ssgiPreset,
+                ssgiPresets, IM_ARRAYSIZE(ssgiPresets))) {
+            apply_ssgi_quality_preset(ssgiPreset);
+        }
+        ImGui::SliderInt("Ray Steps", &_ssgiStepCount, 8, 96);
+        ImGui::SliderInt("Rays Per Pixel", &_ssgiRaysPerPixel, 1, 8);
+        ImGui::SliderFloat("Ray Length", &_ssgiRayLength, 1.0f, 40.0f, "%.2f");
+        ImGui::SliderFloat("Thickness", &_ssgiThickness, 0.01f, 2.0f, "%.3f");
+        ImGui::SliderFloat(
+            "Start Offset", &_ssgiStartOffset, 0.001f, 0.5f, "%.3f");
+        ImGui::SliderFloat(
+            "History Weight", &_ssgiHistoryWeight, 0.0f, 0.98f, "%.3f");
+        ImGui::SliderFloat(
+            "History Depth Reject", &_ssgiDepthRejection,
+            0.0001f, 0.02f, "%.4f");
+        ImGui::SliderFloat(
+            "History Normal Reject", &_ssgiNormalRejection,
+            0.0f, 1.0f, "%.3f");
+        ImGui::SliderFloat(
+            "History Velocity Reject", &_ssgiVelocityRejection,
+            0.005f, 0.5f, "%.3f");
+        ImGui::SeparatorText("SSGI Milestone 6");
+        ImGui::Checkbox("Spatial Filter", &_ssgiSpatialFilterEnabled);
+        ImGui::SliderInt("Filter Radius", &_ssgiFilterRadius, 1, 8);
+        ImGui::SliderFloat(
+            "Filter Depth Falloff", &_ssgiFilterDepthFalloff,
+            10.0f, 4000.0f, "%.1f");
+        ImGui::SliderFloat(
+            "Filter Normal Power", &_ssgiFilterNormalPower,
+            1.0f, 128.0f, "%.1f");
+        ImGui::SeparatorText("SSGI Milestone 7");
+        ImGui::SliderFloat(
+            "Indirect Intensity", &_ssgiIntensity, 0.0f, 2.0f, "%.2f");
+        // Enabling SSGI used to delete the flat ambient term outright, which
+        // is why turning it on read as a large drop in brightness rather than
+        // as indirect light.  The two are alternative answers to the same
+        // question, so the split between them is now visible and adjustable.
+        ImGui::SliderFloat(
+            "Ambient Retention", &_ssgiAmbientRetention, 0.0f, 1.0f, "%.2f");
+        ImGui::TextDisabled("0: SSGI replaces flat ambient.");
+        ImGui::TextDisabled(
+            "1: SSGI adds on top of it, which counts sky fill");
+        ImGui::TextDisabled(
+            "twice but can never darken a region SSGI has");
+        ImGui::TextDisabled("nothing to say about.");
+        // A traced ray that leaves the depth buffer has to be filled from
+        // somewhere.  The analytic gradient is what the software path tracer
+        // still uses, so it stays reachable for reference comparisons.
+        ImGui::Checkbox("Miss Rays Sample Skybox", &_ssgiTraceEnvironmentMap);
+        if (_ssgiTraceEnvironmentMap) {
+            ImGui::TextDisabled(
+                "Misses read %s at mip %.1f.",
+                SkyboxDisplayNames[_skyboxSelection],
+                _skyboxEnvironmentLod);
+            ImGui::TextDisabled(
+                "Sky/sun split at %.2f; above it is the sun,",
+                _skyboxIndirectClamp);
+            ImGui::TextDisabled(
+                "which the direct term already delivers.");
+        } else {
+            ImGui::TextDisabled("Misses use the analytic gradient, matching");
+            ImGui::TextDisabled(
+                "the software path tracer's environment.");
+        }
+        if (stats.ssgi_time_is_gpu) {
+            const VkExtent2D ssgiExtent = active_ssgi_extent();
+            ImGui::Text(
+                "SSGI GPU %.3f ms (%ux%u)",
+                stats.ssgi_total_time,
+                ssgiExtent.width,
+                ssgiExtent.height);
+            ImGui::TextDisabled(
+                "Trace %.3f | temporal %.3f | filter %.3f | composite %.3f ms",
+                stats.ssgi_raw_time,
+                stats.ssgi_temporal_time,
+                stats.ssgi_filter_time,
+                stats.ssgi_composite_time);
+        }
+        ImGui::TextDisabled("Green rejection view pixels accepted history.");
+    }
+}
+
+void VulkanEngine::draw_background_effect_settings()
+{
+    if (!backgroundEffects.empty()) {
+        ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
+        ImGui::Text("Effect: %s", selected.name);
+        ImGui::SliderInt(
+            "Effect Index",
+            &currentBackgroundEffect,
+            0,
+            static_cast<int>(backgroundEffects.size()) - 1);
+        ImGui::InputFloat4("data1", &selected.data.data1.x);
+        ImGui::InputFloat4("data2", &selected.data.data2.x);
+        ImGui::InputFloat4("data3", &selected.data.data3.x);
+        ImGui::InputFloat4("data4", &selected.data.data4.x);
+    }
+}
+
 void VulkanEngine::draw_movement_tuning_panel()
 {
     if (ImGui::Begin("Movement Tuning")) {
@@ -1568,327 +1871,12 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                 ImGui::SameLine();
                 ImGui::TextDisabled(
                     "4K shadows, full-res 8-ray SSGI, high SSAO sampling, quality FXAA");
-                if (ImGui::CollapsingHeader("Sun & Shadows")) {
-                    // These are saved with the scene, so editing one is an
-                    // edit to the level rather than a session preference.
-                    bool lightingEdited = false;
-                    lightingEdited |=
-                        ImGui::Checkbox("Cast Shadows", &_shadowsEnabled);
-                    // The direction points from a surface towards the sun.
-                    if (ImGui::SliderFloat3(
-                            "Sun Direction", &_sunlightDirection.x, -1.0f, 1.0f)) {
-                        lightingEdited = true;
-                        if (glm::dot(_sunlightDirection, _sunlightDirection) <
-                            0.000001f) {
-                            // A zero direction cannot define a light camera.
-                            _sunlightDirection = glm::vec3(0.0f, 1.0f, 0.5f);
-                        }
-                    }
-                    lightingEdited |= ImGui::SliderFloat(
-                        "Shadow Radius", &_shadowRadius, 10.0f, 200.0f);
-                    ImGui::Checkbox("Show Shadow Bounds", &_showShadowBounds);
-                    // Too little bias and surfaces shadow themselves; too
-                    // much and a shadow detaches from the object casting it.
-                    lightingEdited |= ImGui::SliderFloat(
-                        "Depth Bias", &_shadowDepthBias, 0.0f, 0.005f, "%.5f");
-                    lightingEdited |= ImGui::SliderFloat(
-                        "Normal Bias", &_shadowNormalBias, 0.0f, 0.5f, "%.3f");
-                    ImGui::SliderFloat(
-                        "Shadow Softness", &_shadowFilterRadius,
-                        0.0f, 12.0f, "%.2f texels");
-                    if (lightingEdited) {
-                        _sceneDirty = true;
-                    }
-                }
-                if (ImGui::CollapsingHeader("Ambient Occlusion")) {
-                    if (_ssaoFormat == VK_FORMAT_UNDEFINED) {
-                        ImGui::TextDisabled(
-                            "Unavailable: no storage-capable occlusion format.");
-                    } else {
-                        // Radius, bias, intensity and power describe how this
-                        // level is lit and travel with the scene.  Quality
-                        // describes what the machine can afford and does not.
-                        bool preferencesEdited = ImGui::Checkbox(
-                            "Globally Enabled", &_ssaoGlobalEnabled);
-                        if (ImGui::Checkbox("Override For This Scene", &_ssaoSceneOverride)) {
-                            if (!_ssaoSceneOverride) _ssaoSettings = SSAOSettings{};
-                            _sceneDirty = true;
-                        }
-                        ImGui::BeginDisabled(!_ssaoSceneOverride);
-                        bool occlusionEdited = false;
-                        occlusionEdited |=
-                            ImGui::Checkbox("Scene Enabled", &_ssaoSettings.enabled);
-                        occlusionEdited |= ImGui::SliderFloat(
-                            "Radius",
-                            &_ssaoSettings.radius,
-                            0.05f,
-                            5.0f,
-                            "%.3f");
-                        occlusionEdited |= ImGui::SliderFloat(
-                            "Bias", &_ssaoSettings.bias, 0.0f, 0.1f, "%.4f");
-                        occlusionEdited |= ImGui::SliderFloat(
-                            "Intensity", &_ssaoSettings.intensity, 0.0f, 2.0f);
-                        occlusionEdited |= ImGui::SliderFloat(
-                            "Power", &_ssaoSettings.power, 0.25f, 4.0f);
-                        if (occlusionEdited) {
-                            _sceneDirty = true;
-                        }
-                        ImGui::EndDisabled();
-                        if (ImGui::Button("Reset to Project Defaults")) {
-                            _ssaoSettings = SSAOSettings{};
-                            _ssaoSceneOverride = false;
-                            _sceneDirty = true;
-                        }
-
-                        const char* qualityNames[] = {"Low", "Medium", "High"};
-                        if (ImGui::Combo(
-                                "Quality",
-                                &_ssaoQuality,
-                                qualityNames,
-                                IM_ARRAYSIZE(qualityNames))) {
-                            preferencesEdited = true;
-                        }
-                        ImGui::TextDisabled(
-                            "%d samples", SSAOKernelSizes[_ssaoQuality]);
-
-                        // How readily the blur accepts a neighbour as being on
-                        // the same surface.  Both depend on world scale, but
-                        // they are filter tuning rather than lighting.
-                        preferencesEdited |= ImGui::SliderFloat(
-                            "Blur Depth Falloff",
-                            &_ssaoDepthFalloff,
-                            5.0f,
-                            120.0f);
-                        preferencesEdited |= ImGui::SliderFloat(
-                            "Blur Normal Falloff",
-                            &_ssaoNormalFalloff,
-                            1.0f,
-                            48.0f);
-                        if (preferencesEdited) save_ao_preferences();
-
-                        // With the sun off, occlusion is the only thing
-                        // shaping the image.  Setting ambient to zero as well
-                        // should then produce no visible difference at all,
-                        // which is the check that it touches nothing else.
-                        ImGui::Checkbox(
-                            "Ambient Only (occlusion check)", &_ssaoAmbientOnly);
-                    }
-                }
-                if (ImGui::CollapsingHeader("Tonemapping")) {
-                    // Also a session preference, so none of it marks the
-                    // level dirty.
-                    ImGui::Checkbox("Enabled##Tonemapping", &_tonemapEnabled);
-                    if (!_tonemapEnabled) {
-                        ImGui::TextDisabled(
-                            "Linear HDR is written straight to an 8-bit\n"
-                            "buffer: midtones read dark and highlights clip.");
-                    }
-                    if (_tonemapEnabled) {
-                        const char* operatorNames[] = {"ACES Filmic", "Reinhard"};
-                        ImGui::Combo(
-                            "Operator",
-                            &_tonemapOperator,
-                            operatorNames,
-                            IM_ARRAYSIZE(operatorNames));
-                        ImGui::SliderFloat(
-                            "Exposure", &_tonemapExposure, 0.05f, 8.0f, "%.2f");
-                        // Separates the two things this pass does, so a frame
-                        // that looks wrong can be blamed on the curve or on
-                        // the transfer function rather than on both at once.
-                        ImGui::Checkbox(
-                            "Bypass Curve (encode only)", &_tonemapBypassCurve);
-                        if (_renderDebugView != RenderDebugView::None) {
-                            ImGui::TextDisabled(
-                                "Inactive while a debug view is shown.");
-                        }
-                    }
-                }
-                if (ImGui::CollapsingHeader("Anti-Aliasing")) {
-                    // A session preference rather than a scene property, so
-                    // none of this marks the level dirty.
-                    const char* modeNames[] = {"Off", "FXAA"};
-                    int mode = _fxaaEnabled ? 1 : 0;
-                    if (ImGui::Combo(
-                            "Mode", &mode, modeNames, IM_ARRAYSIZE(modeNames))) {
-                        _fxaaEnabled = mode == 1;
-                    }
-                    if (_fxaaEnabled) {
-                        // Lower catches more edges; too low and the filter
-                        // starts softening texture detail that never aliased.
-                        ImGui::SliderFloat(
-                            "Edge Threshold",
-                            &_fxaaEdgeThreshold,
-                            0.03f,
-                            0.25f,
-                            "%.3f");
-                        ImGui::SliderFloat(
-                            "Subpixel Strength",
-                            &_fxaaSubpixelStrength,
-                            0.0f,
-                            1.0f,
-                            "%.2f");
-                        // White marks every pixel the threshold accepted.
-                        // Tuning against this is far easier than judging the
-                        // threshold from the finished image.
-                        ImGui::Checkbox("Debug Edges", &_fxaaShowEdges);
-                        if (!_tonemapEnabled) {
-                            ImGui::TextDisabled(
-                                "Inactive: FXAA reads the tonemapped image.");
-                        }
-                        if (_renderDebugView != RenderDebugView::None) {
-                            ImGui::TextDisabled(
-                                "Suspended while a debug view is shown.");
-                        }
-                    }
-                }
-                if (ImGui::CollapsingHeader("Screen-Space Buffers")) {
-                    ImGui::Checkbox(
-                        "Depth/Normal Prepass", &_depthNormalPrepassEnabled);
-                    // Reading a half-finished buffer directly is far more
-                    // informative than trying to infer a projection or
-                    // orientation mistake from a finished effect.
-                    int debugView = static_cast<int>(_renderDebugView);
-                    if (ImGui::Combo(
-                            "Debug View",
-                            &debugView,
-                            RenderDebugViewNames.data(),
-                            static_cast<int>(RenderDebugViewNames.size()))) {
-                        _renderDebugView = static_cast<RenderDebugView>(debugView);
-                    }
-                    // Easy to misread otherwise: these buffers hold the light
-                    // arriving at a surface, not the colour it reflects.  A
-                    // white wall and a red one under the same bounce now look
-                    // identical here, and differ only after the composite.
-                    if (is_ssgi_indirect_radiance_view(_renderDebugView)) {
-                        ImGui::TextDisabled(
-                            "SSGI buffers hold incident radiance; albedo is");
-                        ImGui::TextDisabled(
-                            "applied in the composite, not in the trace.");
-                    }
-                    if (_renderDebugView == RenderDebugView::Depth) {
-                        ImGui::SliderFloat(
-                            "Depth View Range",
-                            &_renderDebugDepthRange,
-                            5.0f,
-                            500.0f);
-                    }
-                    ImGui::SeparatorText("SSGI Milestone 5");
-                    ImGui::Checkbox("Run SSGI", &_ssgiEnabled);
-                    const char* ssgiPresets[] = {
-                        "Validation (full resolution)",
-                        "High (half resolution)",
-                        "Balanced (half resolution)",
-                        "Performance (half resolution)",
-                        "Peak (full resolution, 8 rays)"};
-                    int ssgiPreset = _ssgiQualityPreset;
-                    if (ImGui::Combo("Quality Preset", &ssgiPreset,
-                            ssgiPresets, IM_ARRAYSIZE(ssgiPresets))) {
-                        apply_ssgi_quality_preset(ssgiPreset);
-                    }
-                    ImGui::SliderInt(
-                        "Ray Steps", &_ssgiStepCount, 8, 96);
-                    ImGui::SliderInt(
-                        "Rays Per Pixel", &_ssgiRaysPerPixel, 1, 8);
-                    ImGui::SliderFloat(
-                        "Ray Length", &_ssgiRayLength, 1.0f, 40.0f, "%.2f");
-                    ImGui::SliderFloat(
-                        "Thickness", &_ssgiThickness, 0.01f, 2.0f, "%.3f");
-                    ImGui::SliderFloat(
-                        "Start Offset", &_ssgiStartOffset, 0.001f, 0.5f, "%.3f");
-                    ImGui::SliderFloat(
-                        "History Weight", &_ssgiHistoryWeight, 0.0f, 0.98f, "%.3f");
-                    ImGui::SliderFloat(
-                        "History Depth Reject", &_ssgiDepthRejection,
-                        0.0001f, 0.02f, "%.4f");
-                    ImGui::SliderFloat(
-                        "History Normal Reject", &_ssgiNormalRejection,
-                        0.0f, 1.0f, "%.3f");
-                    ImGui::SliderFloat(
-                        "History Velocity Reject", &_ssgiVelocityRejection,
-                        0.005f, 0.5f, "%.3f");
-                    ImGui::SeparatorText("SSGI Milestone 6");
-                    ImGui::Checkbox(
-                        "Spatial Filter", &_ssgiSpatialFilterEnabled);
-                    ImGui::SliderInt(
-                        "Filter Radius", &_ssgiFilterRadius, 1, 8);
-                    ImGui::SliderFloat(
-                        "Filter Depth Falloff", &_ssgiFilterDepthFalloff,
-                        10.0f, 4000.0f, "%.1f");
-                    ImGui::SliderFloat(
-                        "Filter Normal Power", &_ssgiFilterNormalPower,
-                        1.0f, 128.0f, "%.1f");
-                    ImGui::SeparatorText("SSGI Milestone 7");
-                    ImGui::SliderFloat(
-                        "Indirect Intensity", &_ssgiIntensity,
-                        0.0f, 2.0f, "%.2f");
-                    // Enabling SSGI used to delete the flat ambient term
-                    // outright, which is why turning it on read as a large
-                    // drop in brightness rather than as indirect light.  The
-                    // two are alternative answers to the same question, so
-                    // the split between them is now visible and adjustable.
-                    ImGui::SliderFloat(
-                        "Ambient Retention", &_ssgiAmbientRetention,
-                        0.0f, 1.0f, "%.2f");
-                    ImGui::TextDisabled(
-                        "0: SSGI replaces flat ambient.");
-                    ImGui::TextDisabled(
-                        "1: SSGI adds on top of it, which counts sky fill");
-                    ImGui::TextDisabled(
-                        "twice but can never darken a region SSGI has");
-                    ImGui::TextDisabled(
-                        "nothing to say about.");
-                    // A traced ray that leaves the depth buffer has to be
-                    // filled from somewhere.  The analytic gradient is what
-                    // the software path tracer still uses, so it stays
-                    // reachable for reference comparisons.
-                    ImGui::Checkbox(
-                        "Miss Rays Sample Skybox", &_ssgiTraceEnvironmentMap);
-                    if (_ssgiTraceEnvironmentMap) {
-                        ImGui::TextDisabled(
-                            "Misses read %s at mip %.1f.",
-                            SkyboxDisplayNames[_skyboxSelection],
-                            _skyboxEnvironmentLod);
-                        ImGui::TextDisabled(
-                            "Sky/sun split at %.2f; above it is the sun,",
-                            _skyboxIndirectClamp);
-                        ImGui::TextDisabled(
-                            "which the direct term already delivers.");
-                    } else {
-                        ImGui::TextDisabled(
-                            "Misses use the analytic gradient, matching");
-                        ImGui::TextDisabled(
-                            "the software path tracer's environment.");
-                    }
-                    if (stats.ssgi_time_is_gpu) {
-                        const VkExtent2D ssgiExtent = active_ssgi_extent();
-                        ImGui::Text(
-                            "SSGI GPU %.3f ms (%ux%u)",
-                            stats.ssgi_total_time,
-                            ssgiExtent.width,
-                            ssgiExtent.height);
-                        ImGui::TextDisabled(
-                            "Trace %.3f | temporal %.3f | filter %.3f | composite %.3f ms",
-                            stats.ssgi_raw_time,
-                            stats.ssgi_temporal_time,
-                            stats.ssgi_filter_time,
-                            stats.ssgi_composite_time);
-                    }
-                    ImGui::TextDisabled(
-                        "Green rejection view pixels accepted history.");
-                }
-                if (!backgroundEffects.empty()) {
-                    ComputeEffect& selected = backgroundEffects[currentBackgroundEffect];
-                    ImGui::Text("Effect: %s", selected.name);
-                    ImGui::SliderInt(
-                        "Effect Index",
-                        &currentBackgroundEffect,
-                        0,
-                        static_cast<int>(backgroundEffects.size()) - 1);
-                    ImGui::InputFloat4("data1", &selected.data.data1.x);
-                    ImGui::InputFloat4("data2", &selected.data.data2.x);
-                    ImGui::InputFloat4("data3", &selected.data.data3.x);
-                    ImGui::InputFloat4("data4", &selected.data.data4.x);
-                }
+                draw_sun_shadow_settings();
+                draw_ambient_occlusion_settings();
+                draw_tonemap_settings();
+                draw_antialiasing_settings();
+                draw_screen_buffer_settings();
+                draw_background_effect_settings();
             }
             ImGui::End();
     

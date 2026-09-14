@@ -520,6 +520,12 @@ class VulkanEngine{
         void init_vulkan();
         bool process_event(const SDL_Event& event);
         void draw_frame_ui(float deltaTime);
+        void draw_sun_shadow_settings();
+        void draw_ambient_occlusion_settings();
+        void draw_tonemap_settings();
+        void draw_antialiasing_settings();
+        void draw_screen_buffer_settings();
+        void draw_background_effect_settings();
         void draw_movement_tuning_panel();
         void draw_statistics_panel(float horizontalSpeed);
         void draw_play_overlay(float horizontalSpeed);
