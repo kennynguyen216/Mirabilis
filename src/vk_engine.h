@@ -524,6 +524,16 @@ class VulkanEngine{
         void init_commands();
         void init_sync_structures();
         void init_descriptors();
+        void init_descriptor_pools();
+        void init_background_descriptors();
+        void init_post_process_descriptors();
+        void init_scene_descriptors();
+        void init_ssao_descriptors();
+        void init_prepass_descriptors();
+        void init_ssgi_descriptors();
+        void init_descriptor_cleanup();
+        VkImageView ssao_occlusion_view() const;
+        VkSampler ssao_occlusion_sampler() const;
         void create_swapchain(uint32_t width, uint32_t height);
         void destroy_swapchain();
         void resize_swapchain();

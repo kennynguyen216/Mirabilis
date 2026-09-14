@@ -85,7 +85,19 @@ void VulkanEngine::draw_background(VkCommandBuffer cmd)
 	vkCmdClearColorImage(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, &clearValue, 1, &clearRange);
 }
 
-void VulkanEngine::init_descriptors()
+VkImageView VulkanEngine::ssao_occlusion_view() const
+{
+    return _ssaoFinalImage.imageView != VK_NULL_HANDLE
+        ? _ssaoFinalImage.imageView
+        : _shadowMapImage.imageView;
+}
+
+VkSampler VulkanEngine::ssao_occlusion_sampler() const
+{
+    return _ssaoSampler != VK_NULL_HANDLE ? _ssaoSampler : _prepassSampler;
+}
+
+void VulkanEngine::init_descriptor_pools()
 {
     std::vector<DescriptorAllocatorGrowable::PoolSizeRatio> sizes =
     {
@@ -100,7 +112,10 @@ void VulkanEngine::init_descriptors()
     for (FrameData& frame : _frames) {
         frame._frameDescriptors.init(_device, 1000, sizes);
     }
+}
 
+void VulkanEngine::init_background_descriptors()
+{
     // make the descriptor set layout for our compute to draw
     {
         DescriptorLayoutBuilder builder;
@@ -111,6 +126,22 @@ void VulkanEngine::init_descriptors()
         _drawImageDescriptorLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
     }
 
+    // allocate a descriptor set for our draw image
+
+    _drawImageDescriptors = globalDescriptorAllocator.allocate(_device, _drawImageDescriptorLayout);
+
+    DescriptorWriter writer;
+    writer.write_image(
+        0,
+        _drawImage.imageView,
+        VK_NULL_HANDLE,
+        VK_IMAGE_LAYOUT_GENERAL,
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+    writer.update_set(_device, _drawImageDescriptors);
+}
+
+void VulkanEngine::init_post_process_descriptors()
+{
     {
         DescriptorLayoutBuilder builder;
         builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
@@ -146,7 +177,10 @@ void VulkanEngine::init_descriptors()
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         fxaaWriter.update_set(_device, _fxaaInputDescriptor);
     }
+}
 
+void VulkanEngine::init_scene_descriptors()
+{
     {
         DescriptorLayoutBuilder builder;
         builder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
@@ -171,6 +205,79 @@ void VulkanEngine::init_descriptors()
                 VK_SHADER_STAGE_COMPUTE_BIT);
     }
 
+    // A device that could not provide an occlusion format still has to bind
+    // something at binding 2.  The shadow map is the one image guaranteed to
+    // exist by this point; the flag in the scene block keeps it unread.
+    const VkImageView occlusionView = ssao_occlusion_view();
+    const VkSampler occlusionSampler = ssao_occlusion_sampler();
+
+    for (FrameData& frame : _frames) {
+        frame.sceneBuffer = create_buffer(
+            sizeof(GPUSceneData),
+            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        // These sets live for the frame's lifetime.  They cannot come from
+        // _frameDescriptors because that allocator is reset every frame.
+        frame.sceneDescriptor = globalDescriptorAllocator.allocate(
+            _device, _gpuSceneDataDescriptorLayout);
+        DescriptorWriter sceneWriter;
+        sceneWriter.write_buffer(
+            0,
+            frame.sceneBuffer.buffer,
+            sizeof(GPUSceneData),
+            0,
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        sceneWriter.write_image(
+            1,
+            _shadowMapImage.imageView,
+            _shadowSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        sceneWriter.write_image(
+            2,
+            occlusionView,
+            occlusionSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        sceneWriter.update_set(_device, frame.sceneDescriptor);
+
+        for (uint32_t view = 0; view < PortalViewCount; ++view) {
+            frame.portalSceneBuffers[view] = create_buffer(
+                sizeof(GPUSceneData),
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VMA_MEMORY_USAGE_CPU_TO_GPU);
+            frame.portalSceneDescriptors[view] = globalDescriptorAllocator.allocate(
+                _device, _gpuSceneDataDescriptorLayout);
+
+            DescriptorWriter portalSceneWriter;
+            portalSceneWriter.write_buffer(
+                0,
+                frame.portalSceneBuffers[view].buffer,
+                sizeof(GPUSceneData),
+                0,
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+            portalSceneWriter.write_image(
+                1,
+                _shadowMapImage.imageView,
+                _shadowSampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            // Bound so the layout is satisfied, never read: a portal camera
+            // sets the flag in its own scene block to zero.
+            portalSceneWriter.write_image(
+                2,
+                occlusionView,
+                occlusionSampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            portalSceneWriter.update_set(
+                _device, frame.portalSceneDescriptors[view]);
+        }
+    }
+}
+
+void VulkanEngine::init_ssao_descriptors()
+{
     if (_ssaoFormat != VK_FORMAT_UNDEFINED) {
         // The sampling pass: the two prepass buffers it reads, the rotation
         // noise, the image it writes, and the kernel it walks.
@@ -273,6 +380,45 @@ void VulkanEngine::init_descriptors()
 
     }
 
+    const VkImageView occlusionView = ssao_occlusion_view();
+
+    {
+        // All three occlusion stages at once, for the debug views.  The layout
+        // exists whether or not occlusion does, because the render-debug
+        // pipeline is built against it either way.
+        DescriptorLayoutBuilder builder;
+        builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        _ssaoDebugDescriptorLayout = builder.build(
+            _device, VK_SHADER_STAGE_FRAGMENT_BIT);
+        _ssaoDebugDescriptor = globalDescriptorAllocator.allocate(
+            _device, _ssaoDebugDescriptorLayout);
+
+        // Nearest, because a debug view should show the stored texel rather
+        // than a filtered version of it.
+        const std::array<VkImageView, 3> stages{
+            _ssaoRawImage.imageView != VK_NULL_HANDLE
+                ? _ssaoRawImage.imageView : occlusionView,
+            _ssaoBlurImage.imageView != VK_NULL_HANDLE
+                ? _ssaoBlurImage.imageView : occlusionView,
+            _ssaoFinalImage.imageView != VK_NULL_HANDLE
+                ? _ssaoFinalImage.imageView : occlusionView};
+        DescriptorWriter debugWriter;
+        for (int binding = 0; binding < 3; ++binding) {
+            debugWriter.write_image(
+                binding,
+                stages[binding],
+                _prepassSampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        }
+        debugWriter.update_set(_device, _ssaoDebugDescriptor);
+    }
+}
+
+void VulkanEngine::init_prepass_descriptors()
+{
     {
         // Camera depth and view-space normals, the inputs every screen-space
         // pass shares.  Neither image is recreated at runtime, so one set
@@ -300,7 +446,10 @@ void VulkanEngine::init_descriptors()
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         writer.update_set(_device, _prepassImageDescriptor);
     }
+}
 
+void VulkanEngine::init_ssgi_descriptors()
+{
     {
         DescriptorLayoutBuilder builder;
         builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
@@ -452,125 +601,10 @@ void VulkanEngine::init_descriptors()
                 _device, _ssgiCompositeDescriptors[historyIndex]);
         }
     }
+}
 
-    // A device that could not provide an occlusion format still has to bind
-    // something at binding 2.  The shadow map is the one image guaranteed to
-    // exist by this point; the flag in the scene block keeps it unread.
-    const VkImageView occlusionView = _ssaoFinalImage.imageView != VK_NULL_HANDLE
-        ? _ssaoFinalImage.imageView
-        : _shadowMapImage.imageView;
-
-    {
-        // All three occlusion stages at once, for the debug views.  The layout
-        // exists whether or not occlusion does, because the render-debug
-        // pipeline is built against it either way.
-        DescriptorLayoutBuilder builder;
-        builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        _ssaoDebugDescriptorLayout = builder.build(
-            _device, VK_SHADER_STAGE_FRAGMENT_BIT);
-        _ssaoDebugDescriptor = globalDescriptorAllocator.allocate(
-            _device, _ssaoDebugDescriptorLayout);
-
-        // Nearest, because a debug view should show the stored texel rather
-        // than a filtered version of it.
-        const std::array<VkImageView, 3> stages{
-            _ssaoRawImage.imageView != VK_NULL_HANDLE
-                ? _ssaoRawImage.imageView : occlusionView,
-            _ssaoBlurImage.imageView != VK_NULL_HANDLE
-                ? _ssaoBlurImage.imageView : occlusionView,
-            _ssaoFinalImage.imageView != VK_NULL_HANDLE
-                ? _ssaoFinalImage.imageView : occlusionView};
-        DescriptorWriter debugWriter;
-        for (int binding = 0; binding < 3; ++binding) {
-            debugWriter.write_image(
-                binding,
-                stages[binding],
-                _prepassSampler,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        }
-        debugWriter.update_set(_device, _ssaoDebugDescriptor);
-    }
-
-    for (FrameData& frame : _frames) {
-        frame.sceneBuffer = create_buffer(
-            sizeof(GPUSceneData),
-            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU);
-        // These sets live for the frame's lifetime.  They cannot come from
-        // _frameDescriptors because that allocator is reset every frame.
-        frame.sceneDescriptor = globalDescriptorAllocator.allocate(
-            _device, _gpuSceneDataDescriptorLayout);
-        DescriptorWriter sceneWriter;
-        sceneWriter.write_buffer(
-            0,
-            frame.sceneBuffer.buffer,
-            sizeof(GPUSceneData),
-            0,
-            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-        sceneWriter.write_image(
-            1,
-            _shadowMapImage.imageView,
-            _shadowSampler,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        sceneWriter.write_image(
-            2,
-            occlusionView,
-            _ssaoSampler != VK_NULL_HANDLE ? _ssaoSampler : _prepassSampler,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        sceneWriter.update_set(_device, frame.sceneDescriptor);
-
-        for (uint32_t view = 0; view < PortalViewCount; ++view) {
-            frame.portalSceneBuffers[view] = create_buffer(
-                sizeof(GPUSceneData),
-                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                VMA_MEMORY_USAGE_CPU_TO_GPU);
-            frame.portalSceneDescriptors[view] = globalDescriptorAllocator.allocate(
-                _device, _gpuSceneDataDescriptorLayout);
-
-            DescriptorWriter portalSceneWriter;
-            portalSceneWriter.write_buffer(
-                0,
-                frame.portalSceneBuffers[view].buffer,
-                sizeof(GPUSceneData),
-                0,
-                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-            portalSceneWriter.write_image(
-                1,
-                _shadowMapImage.imageView,
-                _shadowSampler,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-            // Bound so the layout is satisfied, never read: a portal camera
-            // sets the flag in its own scene block to zero.
-            portalSceneWriter.write_image(
-                2,
-                occlusionView,
-                _ssaoSampler != VK_NULL_HANDLE ? _ssaoSampler : _prepassSampler,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-            portalSceneWriter.update_set(
-                _device, frame.portalSceneDescriptors[view]);
-        }
-    }
-
-    // allocate a descriptor set for our draw image
-
-    _drawImageDescriptors = globalDescriptorAllocator.allocate(_device, _drawImageDescriptorLayout);
-
-    DescriptorWriter writer;
-    writer.write_image(
-        0,
-        _drawImage.imageView,
-        VK_NULL_HANDLE,
-        VK_IMAGE_LAYOUT_GENERAL,
-        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-    writer.update_set(_device, _drawImageDescriptors);
-
+void VulkanEngine::init_descriptor_cleanup()
+{
     //make sure both the des alloc and new layout get cleaned up properly
     _mainDeletionQueue.push_function([&](){
         globalDescriptorAllocator.destroy_pools(_device);
@@ -595,6 +629,18 @@ void VulkanEngine::init_descriptors()
         vkDestroyDescriptorSetLayout(
             _device, _ssgiCompositeDescriptorLayout, nullptr);
     });
+}
+
+void VulkanEngine::init_descriptors()
+{
+    init_descriptor_pools();
+    init_background_descriptors();
+    init_post_process_descriptors();
+    init_prepass_descriptors();
+    init_ssao_descriptors();
+    init_ssgi_descriptors();
+    init_scene_descriptors();
+    init_descriptor_cleanup();
 }
 
 void VulkanEngine::init_pipelines()
