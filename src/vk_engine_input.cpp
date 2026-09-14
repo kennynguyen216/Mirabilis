@@ -78,13 +78,13 @@ bool VulkanEngine::process_event(const SDL_Event& e)
             !_editorCameraLooking &&
             !ImGui::GetIO().WantCaptureKeyboard) {
             if (e.key.keysym.sym == SDLK_w) {
-                _gizmoOperation = EditorGizmoOperation::Translate;
+                _editorGizmo.operation = EditorGizmoOperation::Translate;
             } else if (e.key.keysym.sym == SDLK_e) {
-                _gizmoOperation = EditorGizmoOperation::Rotate;
+                _editorGizmo.operation = EditorGizmoOperation::Rotate;
             } else if (e.key.keysym.sym == SDLK_r) {
-                _gizmoOperation = EditorGizmoOperation::Scale;
+                _editorGizmo.operation = EditorGizmoOperation::Scale;
             } else if (e.key.keysym.sym == SDLK_s) {
-                _gizmoSnapping = !_gizmoSnapping;
+                _editorGizmo.snapping = !_editorGizmo.snapping;
             }
         }
         if (e.type == SDL_KEYDOWN &&

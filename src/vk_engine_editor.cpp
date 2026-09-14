@@ -387,18 +387,21 @@ void VulkanEngine::draw_editor_gizmo()
     ImGuizmo::SetRect(0.0f, 0.0f, displaySize.x, displaySize.y);
 
     ImGuizmo::OPERATION operation = ImGuizmo::TRANSLATE;
-    float snapValues[3]{_translationSnap, _translationSnap, _translationSnap};
-    switch (_gizmoOperation) {
+    float snapValues[3]{
+        _editorGizmo.translationSnap,
+        _editorGizmo.translationSnap,
+        _editorGizmo.translationSnap};
+    switch (_editorGizmo.operation) {
     case EditorGizmoOperation::Translate:
         operation = ImGuizmo::TRANSLATE;
         break;
     case EditorGizmoOperation::Rotate:
         operation = ImGuizmo::ROTATE;
-        snapValues[0] = _rotationSnapDegrees;
+        snapValues[0] = _editorGizmo.rotationSnapDegrees;
         break;
     case EditorGizmoOperation::Scale:
         operation = ImGuizmo::SCALE;
-        snapValues[0] = _scaleSnap;
+        snapValues[0] = _editorGizmo.scaleSnap;
         break;
     }
 
@@ -406,10 +409,10 @@ void VulkanEngine::draw_editor_gizmo()
             glm::value_ptr(camera.getViewMatrix()),
             glm::value_ptr(gizmoProjection),
             operation,
-            _gizmoLocalSpace ? ImGuizmo::LOCAL : ImGuizmo::WORLD,
+            _editorGizmo.localSpace ? ImGuizmo::LOCAL : ImGuizmo::WORLD,
             glm::value_ptr(worldTransform),
             nullptr,
-            _gizmoSnapping ? snapValues : nullptr)) {
+            _editorGizmo.snapping ? snapValues : nullptr)) {
         return;
     }
 
@@ -419,7 +422,7 @@ void VulkanEngine::draw_editor_gizmo()
         // because an aperture has no depth.
         authoredPortal->position = glm::vec3(worldTransform[3]);
         orient_portal(*authoredPortal, glm::vec3(worldTransform[2]));
-        if (_gizmoOperation == EditorGizmoOperation::Scale) {
+        if (_editorGizmo.operation == EditorGizmoOperation::Scale) {
             authoredPortal->halfWidth = std::max(
                 0.1f, authoredPortal->halfWidth * glm::length(glm::vec3(worldTransform[0])));
             authoredPortal->halfHeight = std::max(
@@ -672,29 +675,31 @@ void VulkanEngine::draw_editor_menu()
         if (ImGui::BeginMenu("Gizmo")) {
             if (ImGui::MenuItem(
                     "Move", "W",
-                    _gizmoOperation == EditorGizmoOperation::Translate)) {
-                _gizmoOperation = EditorGizmoOperation::Translate;
+                    _editorGizmo.operation == EditorGizmoOperation::Translate)) {
+                _editorGizmo.operation = EditorGizmoOperation::Translate;
             }
             if (ImGui::MenuItem(
                     "Rotate", "E",
-                    _gizmoOperation == EditorGizmoOperation::Rotate)) {
-                _gizmoOperation = EditorGizmoOperation::Rotate;
+                    _editorGizmo.operation == EditorGizmoOperation::Rotate)) {
+                _editorGizmo.operation = EditorGizmoOperation::Rotate;
             }
             if (ImGui::MenuItem(
                     "Scale", "R",
-                    _gizmoOperation == EditorGizmoOperation::Scale)) {
-                _gizmoOperation = EditorGizmoOperation::Scale;
+                    _editorGizmo.operation == EditorGizmoOperation::Scale)) {
+                _editorGizmo.operation = EditorGizmoOperation::Scale;
             }
             ImGui::Separator();
-            ImGui::MenuItem("Local space", nullptr, &_gizmoLocalSpace);
-            ImGui::MenuItem("Enable snapping", "S", &_gizmoSnapping);
-            if (_gizmoOperation == EditorGizmoOperation::Translate) {
-                ImGui::DragFloat("Move snap", &_translationSnap, 0.05f, 0.05f, 10.0f);
-            } else if (_gizmoOperation == EditorGizmoOperation::Rotate) {
+            ImGui::MenuItem("Local space", nullptr, &_editorGizmo.localSpace);
+            ImGui::MenuItem("Enable snapping", "S", &_editorGizmo.snapping);
+            if (_editorGizmo.operation == EditorGizmoOperation::Translate) {
                 ImGui::DragFloat(
-                    "Rotation snap", &_rotationSnapDegrees, 1.0f, 1.0f, 180.0f);
+                    "Move snap", &_editorGizmo.translationSnap, 0.05f, 0.05f, 10.0f);
+            } else if (_editorGizmo.operation == EditorGizmoOperation::Rotate) {
+                ImGui::DragFloat(
+                    "Rotation snap", &_editorGizmo.rotationSnapDegrees, 1.0f, 1.0f, 180.0f);
             } else {
-                ImGui::DragFloat("Scale snap", &_scaleSnap, 0.05f, 0.01f, 10.0f);
+                ImGui::DragFloat(
+                    "Scale snap", &_editorGizmo.scaleSnap, 0.05f, 0.01f, 10.0f);
             }
             ImGui::EndMenu();
         }

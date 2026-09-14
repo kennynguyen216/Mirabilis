@@ -734,12 +734,15 @@ class VulkanEngine{
         std::array<char, 260> _gltfPathInput{};
         std::array<char, 260> _texturePathInput{};
         SceneObjectID _materialEditorObject{InvalidSceneObject};
-        EditorGizmoOperation _gizmoOperation{EditorGizmoOperation::Translate};
-        bool _gizmoLocalSpace{false};
-        bool _gizmoSnapping{true};
-        float _translationSnap{0.5f};
-        float _rotationSnapDegrees{15.0f};
-        float _scaleSnap{0.1f};
+        struct EditorGizmoState {
+            EditorGizmoOperation operation{EditorGizmoOperation::Translate};
+            bool localSpace{false};
+            bool snapping{true};
+            float translationSnap{0.5f};
+            float rotationSnapDegrees{15.0f};
+            float scaleSnap{0.1f};
+        };
+        EditorGizmoState _editorGizmo;
         struct PhysicsStepState {
             float portalTraversalCooldown{0.0f};
             float accumulator{0.0f};
