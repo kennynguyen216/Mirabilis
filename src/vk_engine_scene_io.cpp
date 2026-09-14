@@ -59,6 +59,15 @@ struct SavedPreloadedPortal {
     Portal portal{};
 };
 
+struct SavedLightingSettings {
+    int skyboxSelection{0};
+    glm::vec3 sunlightDirection{0.0f, 1.0f, 0.5f};
+    bool shadowsEnabled{true};
+    float shadowRadius{60.0f};
+    float shadowDepthBias{0.0006f};
+    float shadowNormalBias{0.08f};
+};
+
 const char* scene_asset_name(SceneAssetKind kind)
 {
     switch (kind) {
@@ -483,7 +492,13 @@ bool VulkanEngine::load_editor_scene()
     // Absent in scenes saved before lighting was stored, and in that case
     // every value below keeps whatever the engine already had.  That is why
     // adding the block does not need a scene version bump.
-    int pendingSkyboxSelection = _skyboxSelection;
+    SavedLightingSettings pendingLighting{
+        .skyboxSelection = _skyboxSelection,
+        .sunlightDirection = _sunlightDirection,
+        .shadowsEnabled = _shadowsEnabled,
+        .shadowRadius = _shadowRadius,
+        .shadowDepthBias = _shadowDepthBias,
+        .shadowNormalBias = _shadowNormalBias};
     simdjson::dom::object jsonLighting;
     if (document["lighting"].get_object().get(jsonLighting) == simdjson::SUCCESS) {
         std::string_view skyboxId;
@@ -491,7 +506,7 @@ bool VulkanEngine::load_editor_scene()
             simdjson::SUCCESS) {
             for (size_t index = 0; index < SkyboxIds.size(); ++index) {
                 if (skyboxId == SkyboxIds[index]) {
-                    pendingSkyboxSelection = static_cast<int>(index);
+                    pendingLighting.skyboxSelection = static_cast<int>(index);
                     break;
                 }
             }
@@ -503,25 +518,25 @@ bool VulkanEngine::load_editor_scene()
             glm::dot(loadedSunDirection, loadedSunDirection) >= 0.000001f) {
             // A zero direction cannot define a light camera, so a scene
             // carrying one is ignored rather than allowed to break the pass.
-            _sunlightDirection = loadedSunDirection;
+            pendingLighting.sunlightDirection = loadedSunDirection;
         }
-        bool shadowsEnabled = _shadowsEnabled;
+        bool shadowsEnabled = pendingLighting.shadowsEnabled;
         if (jsonLighting["shadowsEnabled"].get_bool().get(shadowsEnabled) ==
             simdjson::SUCCESS) {
-            _shadowsEnabled = shadowsEnabled;
+            pendingLighting.shadowsEnabled = shadowsEnabled;
         }
         double numeric = 0.0;
         if (jsonLighting["shadowRadius"].get_double().get(numeric) ==
             simdjson::SUCCESS) {
-            _shadowRadius = static_cast<float>(numeric);
+            pendingLighting.shadowRadius = static_cast<float>(numeric);
         }
         if (jsonLighting["shadowDepthBias"].get_double().get(numeric) ==
             simdjson::SUCCESS) {
-            _shadowDepthBias = static_cast<float>(numeric);
+            pendingLighting.shadowDepthBias = static_cast<float>(numeric);
         }
         if (jsonLighting["shadowNormalBias"].get_double().get(numeric) ==
             simdjson::SUCCESS) {
-            _shadowNormalBias = static_cast<float>(numeric);
+            pendingLighting.shadowNormalBias = static_cast<float>(numeric);
         }
     }
 
@@ -892,8 +907,13 @@ bool VulkanEngine::load_editor_scene()
     _ssaoSettings = pendingSSAO;
     _ssaoSceneOverride = pendingSSAOOverride;
     _traceLighting = pendingReference;
-    if (pendingSkyboxSelection != _skyboxSelection &&
-        !set_skybox(pendingSkyboxSelection)) {
+    _sunlightDirection = pendingLighting.sunlightDirection;
+    _shadowsEnabled = pendingLighting.shadowsEnabled;
+    _shadowRadius = pendingLighting.shadowRadius;
+    _shadowDepthBias = pendingLighting.shadowDepthBias;
+    _shadowNormalBias = pendingLighting.shadowNormalBias;
+    if (pendingLighting.skyboxSelection != _skyboxSelection &&
+        !set_skybox(pendingLighting.skyboxSelection)) {
         fmt::print(
             "Scene skybox could not be loaded; keeping {}\n",
             SkyboxDisplayNames[_skyboxSelection]);
