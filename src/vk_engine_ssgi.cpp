@@ -1,4 +1,5 @@
 #include "vk_engine.h"
+#include "vk_engine_render_helpers.h"
 
 #include <algorithm>
 #include <array>
@@ -665,16 +666,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-    const bool debugRequestsSSGI =
-        _renderDebugView == RenderDebugView::SSGIRaw ||
-        _renderDebugView == RenderDebugView::SSGIHitMiss ||
-        _renderDebugView == RenderDebugView::SSGISteps ||
-        _renderDebugView == RenderDebugView::SSGITemporal ||
-        _renderDebugView == RenderDebugView::SSGIHistoryRejection ||
-        _renderDebugView == RenderDebugView::SSGIReprojection ||
-        _renderDebugView == RenderDebugView::SSGIFiltered ||
-        _renderDebugView == RenderDebugView::SSGIFallback ||
-        _renderDebugView == RenderDebugView::SSGIReferenceDifference;
+    const bool debugRequestsSSGI = is_ssgi_debug_view(_renderDebugView);
     const bool runSSGI = (_ssgiEnabled || debugRequestsSSGI) &&
         _ssgiPipeline != VK_NULL_HANDLE &&
         _ssgiTemporalPipeline != VK_NULL_HANDLE;

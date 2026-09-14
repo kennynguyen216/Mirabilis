@@ -1,4 +1,5 @@
 #include "vk_engine.h"
+#include "vk_engine_render_helpers.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1580,46 +1581,19 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                     // Reading a half-finished buffer directly is far more
                     // informative than trying to infer a projection or
                     // orientation mistake from a finished effect.
-                    const char* debugViewNames[] = {
-                        "Final lighting",
-                        "Camera depth",
-                        "View normals",
-                        "View position",
-                        "World position",
-                        "Occlusion (raw)",
-                        "Occlusion (blurred once)",
-                        "Occlusion (final)",
-                        "Albedo (linear)",
-                        "Motion vectors",
-                        "Portal mask",
-                        "Direct lighting source",
-                        "SSGI (raw noisy indirect)",
-                        "SSGI hit/miss",
-                        "SSGI steps",
-                        "SSGI (temporal)",
-                        "SSGI history rejection",
-                        "SSGI reprojection",
-                        "SSGI (filtered)",
-                        "SSGI fallback only",
-                        "SSGI vs loaded reference (difference)"};
                     int debugView = static_cast<int>(_renderDebugView);
                     if (ImGui::Combo(
                             "Debug View",
                             &debugView,
-                            debugViewNames,
-                            IM_ARRAYSIZE(debugViewNames))) {
+                            RenderDebugViewNames.data(),
+                            static_cast<int>(RenderDebugViewNames.size()))) {
                         _renderDebugView = static_cast<RenderDebugView>(debugView);
                     }
                     // Easy to misread otherwise: these buffers hold the light
                     // arriving at a surface, not the colour it reflects.  A
                     // white wall and a red one under the same bounce now look
                     // identical here, and differ only after the composite.
-                    const bool showsIndirectRadiance =
-                        _renderDebugView == RenderDebugView::SSGIRaw ||
-                        _renderDebugView == RenderDebugView::SSGITemporal ||
-                        _renderDebugView == RenderDebugView::SSGIFiltered ||
-                        _renderDebugView == RenderDebugView::SSGIFallback;
-                    if (showsIndirectRadiance) {
+                    if (is_ssgi_indirect_radiance_view(_renderDebugView)) {
                         ImGui::TextDisabled(
                             "SSGI buffers hold incident radiance; albedo is");
                         ImGui::TextDisabled(
