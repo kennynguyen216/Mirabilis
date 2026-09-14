@@ -856,10 +856,14 @@ class VulkanEngine{
             bool enabled{true};
         };
         PrepassState _prepass;
-        AllocatedImage _gbufferAlbedoImage;
-        AllocatedImage _gbufferVelocityImage;
-        AllocatedImage _directLightingImage;
-        AllocatedImage _portalMaskImage;
+        struct SceneRenderTargets {
+            AllocatedImage gbufferAlbedo;
+            AllocatedImage gbufferVelocity;
+            AllocatedImage directLighting;
+            AllocatedImage portalMask;
+            std::array<AllocatedImage, 2> directLightingHistory{};
+        };
+        SceneRenderTargets _sceneTargets;
         struct SSGIState {
             AllocatedImage rawImage;
             AllocatedImage debugImage;
@@ -926,7 +930,6 @@ class VulkanEngine{
             std::array<bool, FRAME_OVERLAP> timingWritten{};
         };
         SSGIState _ssgi;
-        std::array<AllocatedImage, 2> _directLightingHistory{};
         struct SSAOState {
             // Ambient occlusion, at half resolution.  Three images rather than
             // one because a compute pass cannot read and write the same

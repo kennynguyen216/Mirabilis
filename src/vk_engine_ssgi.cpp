@@ -113,16 +113,16 @@ void VulkanEngine::init_ssgi_descriptors()
                 globalDescriptorAllocator.allocate(
                     _device, _ssgi.debugDescriptorLayout);
             DescriptorWriter debugWriter;
-            debugWriter.write_image(0, _gbufferAlbedoImage.imageView,
+            debugWriter.write_image(0, _sceneTargets.gbufferAlbedo.imageView,
                 _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-            debugWriter.write_image(1, _gbufferVelocityImage.imageView,
+            debugWriter.write_image(1, _sceneTargets.gbufferVelocity.imageView,
                 _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-            debugWriter.write_image(2, _portalMaskImage.imageView,
+            debugWriter.write_image(2, _sceneTargets.portalMask.imageView,
                 _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-            debugWriter.write_image(3, _directLightingImage.imageView,
+            debugWriter.write_image(3, _sceneTargets.directLighting.imageView,
                 _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             debugWriter.write_image(4, _ssgi.rawImage.imageView,
@@ -226,7 +226,7 @@ void VulkanEngine::init_ssgi_descriptors()
             // draw_ssgi() leaves the forward pass's base-colour target in
             // SHADER_READ_ONLY_OPTIMAL, and it still holds this frame's
             // albedo when the composite runs immediately afterwards.
-            compositeWriter.write_image(4, _gbufferAlbedoImage.imageView,
+            compositeWriter.write_image(4, _sceneTargets.gbufferAlbedo.imageView,
                 _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             compositeWriter.update_set(
@@ -264,17 +264,17 @@ void VulkanEngine::init_ssgi_resources()
         "HDR/velocity");
 
     const VkExtent3D extent = _drawImage.imageExtent;
-    _gbufferAlbedoImage = create_image(
+    _sceneTargets.gbufferAlbedo = create_image(
         extent, VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    _gbufferVelocityImage = create_image(
+    _sceneTargets.gbufferVelocity = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    _directLightingImage = create_image(
+    _sceneTargets.directLighting = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-    _portalMaskImage = create_image(
+    _sceneTargets.portalMask = create_image(
         extent, VK_FORMAT_R8_UNORM,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     _ssgi.rawImage = create_image(
@@ -344,7 +344,7 @@ void VulkanEngine::init_ssgi_resources()
         fmt::print("Loaded SSGI reference: {} ({}x{})\n",
             referencePath, width, height);
     }
-    for (AllocatedImage& history : _directLightingHistory) {
+    for (AllocatedImage& history : _sceneTargets.directLightingHistory) {
         history = create_image(
             extent, VK_FORMAT_R16G16B16A16_SFLOAT,
             VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
@@ -355,12 +355,12 @@ void VulkanEngine::init_ssgi_resources()
     // into one side of the pair.
     immediate_submit([&](VkCommandBuffer cmd) {
         const std::array<AllocatedImage*, 6> sampledImages{
-            &_gbufferAlbedoImage,
-            &_gbufferVelocityImage,
-            &_directLightingImage,
-            &_portalMaskImage,
-            &_directLightingHistory[0],
-            &_directLightingHistory[1]};
+            &_sceneTargets.gbufferAlbedo,
+            &_sceneTargets.gbufferVelocity,
+            &_sceneTargets.directLighting,
+            &_sceneTargets.portalMask,
+            &_sceneTargets.directLightingHistory[0],
+            &_sceneTargets.directLightingHistory[1]};
         for (const AllocatedImage* image : sampledImages) {
             vkutil::transition_image(
                 cmd, image->image, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -420,10 +420,10 @@ void VulkanEngine::init_ssgi_resources()
     }
 
     _mainDeletionQueue.push_function([this]() {
-        destroy_image(_gbufferAlbedoImage);
-        destroy_image(_gbufferVelocityImage);
-        destroy_image(_directLightingImage);
-        destroy_image(_portalMaskImage);
+        destroy_image(_sceneTargets.gbufferAlbedo);
+        destroy_image(_sceneTargets.gbufferVelocity);
+        destroy_image(_sceneTargets.directLighting);
+        destroy_image(_sceneTargets.portalMask);
         destroy_image(_ssgi.rawImage);
         destroy_image(_ssgi.debugImage);
         destroy_image(_ssgi.fallbackImage);
@@ -437,7 +437,7 @@ void VulkanEngine::init_ssgi_resources()
         destroy_image(_ssgi.filterScratchImage);
         destroy_image(_ssgi.filteredImage);
         destroy_image(_ssgi.referenceImage);
-        for (const AllocatedImage& history : _directLightingHistory) {
+        for (const AllocatedImage& history : _sceneTargets.directLightingHistory) {
             destroy_image(history);
         }
     });
@@ -562,7 +562,7 @@ void VulkanEngine::init_ssgi_pipelines()
     builder.set_multisampling_none();
     builder.disable_blending();
     builder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
-    builder.set_color_attachment_format(_portalMaskImage.imageFormat);
+    builder.set_color_attachment_format(_sceneTargets.portalMask.imageFormat);
     builder.set_depth_format(_depthImage.imageFormat);
     builder.set_stencil_format(_depthImage.imageFormat);
     _ssgi.portalMaskPipeline.pipeline = builder.build_pipeline(_device);
@@ -588,15 +588,15 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
     // debug views. Direct lighting is copied into a ping-pong history so the
     // march never samples an image being rendered this frame.
     vkutil::transition_image(
-        cmd, _gbufferAlbedoImage.image,
+        cmd, _sceneTargets.gbufferAlbedo.image,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     vkutil::transition_image(
-        cmd, _gbufferVelocityImage.image,
+        cmd, _sceneTargets.gbufferVelocity.image,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     vkutil::transition_image(
-        cmd, _directLightingImage.image,
+        cmd, _sceneTargets.directLighting.image,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
@@ -610,21 +610,21 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
     const uint32_t writeIndex = _ssgi.historyWriteIndex;
     const uint32_t readIndex = 1u - writeIndex;
     vkutil::transition_image(
-        cmd, _directLightingHistory[writeIndex].image,
+        cmd, _sceneTargets.directLightingHistory[writeIndex].image,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     vkutil::copy_image_to_image(
         cmd,
-        _directLightingImage.image,
-        _directLightingHistory[writeIndex].image,
+        _sceneTargets.directLighting.image,
+        _sceneTargets.directLightingHistory[writeIndex].image,
         _drawExtent,
         _drawExtent);
     vkutil::transition_image(
-        cmd, _directLightingHistory[writeIndex].image,
+        cmd, _sceneTargets.directLightingHistory[writeIndex].image,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     vkutil::transition_image(
-        cmd, _directLightingImage.image,
+        cmd, _sceneTargets.directLighting.image,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
@@ -857,20 +857,20 @@ void VulkanEngine::write_ssgi_trace_descriptors()
         ssgiWriter.write_image(3, _prepass.normalImage.imageView, _prepass.sampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(4, _gbufferAlbedoImage.imageView, _prepass.sampler,
+        ssgiWriter.write_image(4, _sceneTargets.gbufferAlbedo.imageView, _prepass.sampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(5, _directLightingHistory[readIndex].imageView,
+        ssgiWriter.write_image(5, _sceneTargets.directLightingHistory[readIndex].imageView,
             _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(6, _portalMaskImage.imageView, _prepass.sampler,
+        ssgiWriter.write_image(6, _sceneTargets.portalMask.imageView, _prepass.sampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         ssgiWriter.write_image(7, _skyboxImage.imageView,
             _skyboxEnvironmentSampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(8, _gbufferVelocityImage.imageView,
+        ssgiWriter.write_image(8, _sceneTargets.gbufferVelocity.imageView,
             _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         ssgiWriter.write_image(9, _ssgi.temporalHistory[writeIndex].imageView,

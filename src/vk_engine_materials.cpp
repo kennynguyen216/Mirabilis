@@ -85,9 +85,9 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     builder.set_multisampling_none();
     const std::array<VkFormat, 4> mainFormats{
         engine->_drawImage.imageFormat,
-        engine->_gbufferAlbedoImage.imageFormat,
-        engine->_gbufferVelocityImage.imageFormat,
-        engine->_directLightingImage.imageFormat};
+        engine->_sceneTargets.gbufferAlbedo.imageFormat,
+        engine->_sceneTargets.gbufferVelocity.imageFormat,
+        engine->_sceneTargets.directLighting.imageFormat};
     builder.set_color_attachment_formats(mainFormats);
     builder.disable_blending();
     builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
@@ -305,4 +305,3 @@ MaterialInstance GLTFMetallic_Roughness::write_material(
     writer.update_set(device, material.materialSet);
     return material;
 }
-

@@ -33,12 +33,12 @@ RenderObject VulkanEngine::make_portal_render_object(
 void VulkanEngine::draw_ssgi_portal_mask(VkCommandBuffer cmd)
 {
     vkutil::transition_image(
-        cmd, _portalMaskImage.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        cmd, _sceneTargets.portalMask.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
     VkClearValue clear{};
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
-        _portalMaskImage.imageView, &clear,
+        _sceneTargets.portalMask.imageView, &clear,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
         _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
@@ -103,7 +103,7 @@ void VulkanEngine::draw_ssgi_portal_mask(VkCommandBuffer cmd)
 
     vkCmdEndRendering(cmd);
     vkutil::transition_image(
-        cmd, _portalMaskImage.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        cmd, _sceneTargets.portalMask.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 

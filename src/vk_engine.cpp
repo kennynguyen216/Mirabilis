@@ -596,13 +596,13 @@ void VulkanEngine::draw(float deltaTime)
 	vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
-    vkutil::transition_image(cmd, _gbufferAlbedoImage.image,
+    vkutil::transition_image(cmd, _sceneTargets.gbufferAlbedo.image,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    vkutil::transition_image(cmd, _gbufferVelocityImage.image,
+    vkutil::transition_image(cmd, _sceneTargets.gbufferVelocity.image,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    vkutil::transition_image(cmd, _directLightingImage.image,
+    vkutil::transition_image(cmd, _sceneTargets.directLighting.image,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 	stats.drawcall_count = 0;

@@ -308,13 +308,13 @@ void VulkanEngine::draw_geometry(
     VkClearValue clear{};
     if (writeGBuffer) {
         colorAttachments[1] = vkinit::attachment_info(
-            _gbufferAlbedoImage.imageView, &clear,
+            _sceneTargets.gbufferAlbedo.imageView, &clear,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         colorAttachments[2] = vkinit::attachment_info(
-            _gbufferVelocityImage.imageView, &clear,
+            _sceneTargets.gbufferVelocity.imageView, &clear,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         colorAttachments[3] = vkinit::attachment_info(
-            _directLightingImage.imageView, &clear,
+            _sceneTargets.directLighting.imageView, &clear,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     }
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
