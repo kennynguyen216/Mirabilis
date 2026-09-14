@@ -839,18 +839,7 @@ void VulkanEngine::draw_ssgi_composite(VkCommandBuffer cmd)
         _drawExtent, &colorAttachment, nullptr);
     vkCmdBeginRendering(cmd, &renderInfo);
 
-    VkViewport viewport{};
-    viewport.width = static_cast<float>(_drawExtent.width);
-    viewport.height = static_cast<float>(_drawExtent.height);
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
-    vkCmdSetViewport(cmd, 0, 1, &viewport);
-    VkRect2D scissor{};
-    scissor.extent = _drawExtent;
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
-    vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
-    vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
-    vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
+    set_fullscreen_dynamic_state(cmd, _drawExtent);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
         _ssgiCompositePipeline.pipeline);

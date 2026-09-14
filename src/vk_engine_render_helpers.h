@@ -9,6 +9,26 @@
 
 bool is_visible(const RenderObject& object, const glm::mat4& viewProjection);
 
+inline void set_fullscreen_dynamic_state(VkCommandBuffer cmd, VkExtent2D extent)
+{
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(extent.width);
+    viewport.height = static_cast<float>(extent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.extent = extent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    // Several fullscreen passes have no stencil attachment, but the shared
+    // PipelineBuilder makes stencil state dynamic on every pipeline.
+    vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+    vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
+    vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
+}
+
 struct PickedFormat {
     VkFormat format{VK_FORMAT_UNDEFINED};
     VkFormatFeatureFlags2 features{0};

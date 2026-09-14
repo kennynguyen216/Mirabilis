@@ -1,4 +1,5 @@
 #include "vk_engine.h"
+#include "vk_engine_render_helpers.h"
 
 #include <vk_images.h>
 #include <vk_initializers.h>
@@ -228,21 +229,7 @@ void VulkanEngine::draw_tonemap(VkCommandBuffer cmd)
     // _drawExtent rather than the allocation, for the same reason the
     // anti-aliasing pass uses it: below a resolution scale of 1 the rest of
     // the image holds nothing this frame produced.
-    VkViewport viewport{};
-    viewport.width = static_cast<float>(_drawExtent.width);
-    viewport.height = static_cast<float>(_drawExtent.height);
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
-    vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-    VkRect2D scissor{};
-    scissor.extent = _drawExtent;
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
-    // No stencil attachment here either, but the shared builder makes stencil
-    // state dynamic on every pipeline it produces.
-    vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
-    vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
-    vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
+    set_fullscreen_dynamic_state(cmd, _drawExtent);
 
     vkCmdBindPipeline(
         cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _tonemapPipeline.pipeline);
@@ -306,21 +293,7 @@ void VulkanEngine::draw_fxaa(VkCommandBuffer cmd)
     // _drawExtent, not the allocation: at a resolution scale below 1 the rest
     // of the image holds nothing this frame rendered, and the copy to the
     // swapchain reads only this region anyway.
-    VkViewport viewport{};
-    viewport.width = static_cast<float>(_drawExtent.width);
-    viewport.height = static_cast<float>(_drawExtent.height);
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
-    vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-    VkRect2D scissor{};
-    scissor.extent = _drawExtent;
-    vkCmdSetScissor(cmd, 0, 1, &scissor);
-    // No stencil attachment here, but the shared builder makes stencil state
-    // dynamic on every pipeline it produces.
-    vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
-    vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
-    vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
+    set_fullscreen_dynamic_state(cmd, _drawExtent);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _fxaaPipeline.pipeline);
     vkCmdBindDescriptorSets(
