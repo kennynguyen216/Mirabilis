@@ -310,30 +310,15 @@ void VulkanEngine::init_ssao_resources()
 
     // Nearest and repeating: the point is a hard 16x16 tile of distinct
     // rotations, and filtering between them would average the noise away.
-    VkSamplerCreateInfo noiseSamplerInfo{
-        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    noiseSamplerInfo.magFilter = VK_FILTER_NEAREST;
-    noiseSamplerInfo.minFilter = VK_FILTER_NEAREST;
-    noiseSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    noiseSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    noiseSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    noiseSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    noiseSamplerInfo.maxLod = 0.0f;
+    VkSamplerCreateInfo noiseSamplerInfo = sampler_info(VK_FILTER_NEAREST);
     VK_CHECK(vkCreateSampler(
         _device, &noiseSamplerInfo, nullptr, &_ssaoNoiseSampler));
 
     // Linear and clamped, for the half-to-full resolution step in material
     // shading.  The bilateral blur has already preserved the edges, so a plain
     // bilinear lift is enough to start with.
-    VkSamplerCreateInfo ssaoSamplerInfo{
-        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    ssaoSamplerInfo.magFilter = VK_FILTER_LINEAR;
-    ssaoSamplerInfo.minFilter = VK_FILTER_LINEAR;
-    ssaoSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    ssaoSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    ssaoSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    ssaoSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    ssaoSamplerInfo.maxLod = 0.0f;
+    VkSamplerCreateInfo ssaoSamplerInfo = sampler_info(
+        VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
     VK_CHECK(vkCreateSampler(_device, &ssaoSamplerInfo, nullptr, &_ssaoSampler));
 
     _mainDeletionQueue.push_function([this]() {

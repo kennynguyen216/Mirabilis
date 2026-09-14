@@ -16,6 +16,7 @@
 #include <unordered_set>
 
 #include "vk_engine.h"
+#include "vk_engine_render_helpers.h"
 
 namespace {
 
@@ -304,15 +305,15 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
     scene->descriptorPool.init(engine->_device, materialCount, descriptorRatios);
 
     for (const fastgltf::Sampler& sampler : gltf.samplers) {
-        VkSamplerCreateInfo samplerInfo{
-            .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        VkSamplerCreateInfo samplerInfo = sampler_info(
+            extract_filter(
+                sampler.magFilter.value_or(fastgltf::Filter::Nearest)),
+            VK_SAMPLER_ADDRESS_MODE_REPEAT,
+            extract_mipmap_mode(
+                sampler.minFilter.value_or(fastgltf::Filter::Nearest)),
+            VK_LOD_CLAMP_NONE);
         samplerInfo.minLod = 0.0f;
-        samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
-        samplerInfo.magFilter = extract_filter(
-            sampler.magFilter.value_or(fastgltf::Filter::Nearest));
         samplerInfo.minFilter = extract_filter(
-            sampler.minFilter.value_or(fastgltf::Filter::Nearest));
-        samplerInfo.mipmapMode = extract_mipmap_mode(
             sampler.minFilter.value_or(fastgltf::Filter::Nearest));
 
         // Anisotropy only means anything for a minifying linear filter, which

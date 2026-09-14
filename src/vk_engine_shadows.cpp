@@ -46,18 +46,11 @@ void VulkanEngine::init_shadow_resources()
     // results, which is what makes each PCF tap cheap.  The white border
     // leaves everything outside the shadowed box lit, instead of stamping a
     // dark square edge onto the world.
-    VkSamplerCreateInfo samplerInfo{
-        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    samplerInfo.magFilter = shadowFilter;
-    samplerInfo.minFilter = shadowFilter;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    VkSamplerCreateInfo samplerInfo = sampler_info(
+        shadowFilter, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER);
     samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
     samplerInfo.compareEnable = VK_TRUE;
     samplerInfo.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-    samplerInfo.maxLod = 0.0f;
     VK_CHECK(vkCreateSampler(_device, &samplerInfo, nullptr, &_shadowSampler));
 
     _mainDeletionQueue.push_function([this]() {

@@ -83,6 +83,24 @@ inline void set_fullscreen_dynamic_state(VkCommandBuffer cmd, VkExtent2D extent)
     vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
 }
 
+inline VkSamplerCreateInfo sampler_info(
+    VkFilter filter,
+    VkSamplerAddressMode addressMode = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+    VkSamplerMipmapMode mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+    float maxLod = 0.0f)
+{
+    VkSamplerCreateInfo info{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    info.magFilter = filter;
+    info.minFilter = filter;
+    info.mipmapMode = mipmapMode;
+    info.addressModeU = addressMode;
+    info.addressModeV = addressMode;
+    info.addressModeW = addressMode;
+    info.maxLod = maxLod;
+    return info;
+}
+
 struct PickedFormat {
     VkFormat format{VK_FORMAT_UNDEFINED};
     VkFormatFeatureFlags2 features{0};

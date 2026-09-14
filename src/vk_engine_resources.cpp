@@ -1,4 +1,5 @@
 #include "vk_engine.h"
+#include "vk_engine_render_helpers.h"
 
 #include <algorithm>
 #include <array>
@@ -38,15 +39,14 @@ void VulkanEngine::init_default_images_and_samplers()
         VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_SAMPLED_BIT);
     
-    VkSamplerCreateInfo samplerInfo{.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    samplerInfo.magFilter = VK_FILTER_NEAREST;
-    samplerInfo.minFilter = VK_FILTER_NEAREST;
+    VkSamplerCreateInfo samplerInfo = sampler_info(VK_FILTER_NEAREST);
     VK_CHECK(vkCreateSampler(_device, &samplerInfo, nullptr, &_defaultSamplerNearest));
-    samplerInfo.magFilter = VK_FILTER_LINEAR;
-    samplerInfo.minFilter = VK_FILTER_LINEAR;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerInfo = sampler_info(
+        VK_FILTER_LINEAR,
+        VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        VK_LOD_CLAMP_NONE);
     samplerInfo.minLod = 0.0f;
-    samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
     // This is the fallback material sampler for every glTF texture whose
     // sampler index is absent, so it needs the same anisotropy the explicit
     // ones get; without it a Sponza material with no sampler declaration
@@ -61,15 +61,12 @@ void VulkanEngine::init_default_images_and_samplers()
     // The supplied asset is a 2:1 equirectangular panorama.  Horizontal
     // wrapping joins its left/right edges; clamping vertically avoids pulling
     // texels from the opposite pole when looking straight up or down.
-    VkSamplerCreateInfo skyboxSamplerInfo{
-        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    skyboxSamplerInfo.magFilter = VK_FILTER_LINEAR;
-    skyboxSamplerInfo.minFilter = VK_FILTER_LINEAR;
-    skyboxSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    skyboxSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    VkSamplerCreateInfo skyboxSamplerInfo = sampler_info(
+        VK_FILTER_LINEAR,
+        VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        VK_SAMPLER_MIPMAP_MODE_LINEAR);
     skyboxSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     skyboxSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    skyboxSamplerInfo.maxLod = 0.0f;
     VK_CHECK(vkCreateSampler(_device, &skyboxSamplerInfo, nullptr, &_skyboxSampler));
     // The same panorama, but readable past level 0.  Only the SSGI trace uses
     // it: the visible background must stay at full sharpness, while a traced

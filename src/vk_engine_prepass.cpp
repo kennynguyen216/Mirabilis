@@ -80,15 +80,8 @@ void VulkanEngine::init_depth_normal_resources()
     // Nearest and clamped: these buffers are read per pixel, and filtering
     // across a silhouette would blend two unrelated surfaces into a position
     // that exists nowhere in the scene.
-    VkSamplerCreateInfo samplerInfo{
-        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    samplerInfo.magFilter = VK_FILTER_NEAREST;
-    samplerInfo.minFilter = VK_FILTER_NEAREST;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.maxLod = 0.0f;
+    VkSamplerCreateInfo samplerInfo = sampler_info(
+        VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
     VK_CHECK(vkCreateSampler(_device, &samplerInfo, nullptr, &_prepassSampler));
 
     _mainDeletionQueue.push_function([this]() {
