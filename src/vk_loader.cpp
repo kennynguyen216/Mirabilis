@@ -228,6 +228,120 @@ void build_gltf_nodes(
     }
 }
 
+template <typename UploadMesh>
+std::vector<std::shared_ptr<MeshAsset>> build_gltf_meshes(
+    LoadedGLTF& scene,
+    const fastgltf::Asset& gltf,
+    const std::vector<std::shared_ptr<GLTFMaterial>>& materials,
+    UploadMesh&& uploadMesh)
+{
+    std::vector<std::shared_ptr<MeshAsset>> meshes;
+    meshes.reserve(gltf.meshes.size());
+    std::vector<uint32_t> indices;
+    std::vector<Vertex> vertices;
+
+    for (size_t meshIndex = 0; meshIndex < gltf.meshes.size(); ++meshIndex) {
+        const fastgltf::Mesh& mesh = gltf.meshes[meshIndex];
+        auto newMesh = std::make_shared<MeshAsset>();
+        newMesh->name = object_name(mesh.name, "mesh_", meshIndex);
+        meshes.push_back(newMesh);
+        scene.meshes[newMesh->name] = newMesh;
+
+        indices.clear();
+        vertices.clear();
+
+        for (const auto& primitive : mesh.primitives) {
+            const auto positionAttribute = primitive.findAttribute("POSITION");
+            if (positionAttribute == primitive.attributes.end() ||
+                !primitive.indicesAccessor.has_value()) {
+                continue;
+            }
+
+            GeoSurface surface{};
+            surface.startIndex = static_cast<uint32_t>(indices.size());
+            const auto& indexAccessor =
+                gltf.accessors[primitive.indicesAccessor.value()];
+            surface.count = static_cast<uint32_t>(indexAccessor.count);
+
+            const size_t firstVertex = vertices.size();
+            const auto& positionAccessor = gltf.accessors[positionAttribute->second];
+            vertices.resize(vertices.size() + positionAccessor.count);
+            for (size_t i = firstVertex; i < vertices.size(); ++i) {
+                vertices[i].normal = glm::vec3(0.0f, 0.0f, 1.0f);
+                vertices[i].color = glm::vec4(1.0f);
+            }
+
+            fastgltf::iterateAccessorWithIndex<glm::vec3>(
+                gltf,
+                positionAccessor,
+                [&](glm::vec3 position, size_t index) {
+                    vertices[firstVertex + index].position = position;
+                });
+            fastgltf::iterateAccessor<uint32_t>(
+                gltf,
+                indexAccessor,
+                [&](uint32_t index) {
+                    indices.push_back(index + static_cast<uint32_t>(firstVertex));
+                });
+
+            if (const auto normals = primitive.findAttribute("NORMAL");
+                normals != primitive.attributes.end()) {
+                fastgltf::iterateAccessorWithIndex<glm::vec3>(
+                    gltf,
+                    gltf.accessors[normals->second],
+                    [&](glm::vec3 normal, size_t index) {
+                        vertices[firstVertex + index].normal = normal;
+                    });
+            }
+            if (const auto uv = primitive.findAttribute("TEXCOORD_0");
+                uv != primitive.attributes.end()) {
+                fastgltf::iterateAccessorWithIndex<glm::vec2>(
+                    gltf,
+                    gltf.accessors[uv->second],
+                    [&](glm::vec2 texcoord, size_t index) {
+                        vertices[firstVertex + index].uv_x = texcoord.x;
+                        vertices[firstVertex + index].uv_y = texcoord.y;
+                    });
+            }
+            if (const auto colors = primitive.findAttribute("COLOR_0");
+                colors != primitive.attributes.end()) {
+                fastgltf::iterateAccessorWithIndex<glm::vec4>(
+                    gltf,
+                    gltf.accessors[colors->second],
+                    [&](glm::vec4 color, size_t index) {
+                        vertices[firstVertex + index].color = color;
+                    });
+            }
+
+            if (positionAccessor.count > 0) {
+                glm::vec3 minPosition = vertices[firstVertex].position;
+                glm::vec3 maxPosition = vertices[firstVertex].position;
+                for (size_t i = firstVertex; i < vertices.size(); ++i) {
+                    minPosition = glm::min(minPosition, vertices[i].position);
+                    maxPosition = glm::max(maxPosition, vertices[i].position);
+                }
+                surface.bounds.origin = (maxPosition + minPosition) * 0.5f;
+                surface.bounds.extents = (maxPosition - minPosition) * 0.5f;
+                surface.bounds.sphereRadius = glm::length(surface.bounds.extents);
+            }
+
+            if (primitive.materialIndex.has_value() &&
+                primitive.materialIndex.value() < materials.size()) {
+                surface.material = materials[primitive.materialIndex.value()];
+            } else {
+                surface.material = materials.front();
+            }
+            newMesh->surfaces.push_back(surface);
+        }
+
+        if (!vertices.empty() && !indices.empty()) {
+            newMesh->meshBuffers = uploadMesh(indices, vertices);
+        }
+    }
+
+    return meshes;
+}
+
 } // namespace
 
 LoadedGLTF::~LoadedGLTF()
@@ -647,109 +761,12 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         materialCount,
         filePath);
 
-    std::vector<std::shared_ptr<MeshAsset>> meshes;
-    meshes.reserve(gltf.meshes.size());
-    std::vector<uint32_t> indices;
-    std::vector<Vertex> vertices;
-
-    for (size_t meshIndex = 0; meshIndex < gltf.meshes.size(); ++meshIndex) {
-        const fastgltf::Mesh& mesh = gltf.meshes[meshIndex];
-        auto newMesh = std::make_shared<MeshAsset>();
-        newMesh->name = object_name(mesh.name, "mesh_", meshIndex);
-        meshes.push_back(newMesh);
-        scene->meshes[newMesh->name] = newMesh;
-
-        indices.clear();
-        vertices.clear();
-
-        for (const auto& primitive : mesh.primitives) {
-            const auto positionAttribute = primitive.findAttribute("POSITION");
-            if (positionAttribute == primitive.attributes.end() ||
-                !primitive.indicesAccessor.has_value()) {
-                continue;
-            }
-
-            GeoSurface surface{};
-            surface.startIndex = static_cast<uint32_t>(indices.size());
-            const auto& indexAccessor =
-                gltf.accessors[primitive.indicesAccessor.value()];
-            surface.count = static_cast<uint32_t>(indexAccessor.count);
-
-            const size_t firstVertex = vertices.size();
-            const auto& positionAccessor = gltf.accessors[positionAttribute->second];
-            vertices.resize(vertices.size() + positionAccessor.count);
-            for (size_t i = firstVertex; i < vertices.size(); ++i) {
-                vertices[i].normal = glm::vec3(0.0f, 0.0f, 1.0f);
-                vertices[i].color = glm::vec4(1.0f);
-            }
-
-            fastgltf::iterateAccessorWithIndex<glm::vec3>(
-                gltf,
-                positionAccessor,
-                [&](glm::vec3 position, size_t index) {
-                    vertices[firstVertex + index].position = position;
-                });
-            fastgltf::iterateAccessor<uint32_t>(
-                gltf,
-                indexAccessor,
-                [&](uint32_t index) {
-                    indices.push_back(index + static_cast<uint32_t>(firstVertex));
-                });
-
-            if (const auto normals = primitive.findAttribute("NORMAL");
-                normals != primitive.attributes.end()) {
-                fastgltf::iterateAccessorWithIndex<glm::vec3>(
-                    gltf,
-                    gltf.accessors[normals->second],
-                    [&](glm::vec3 normal, size_t index) {
-                        vertices[firstVertex + index].normal = normal;
-                    });
-            }
-            if (const auto uv = primitive.findAttribute("TEXCOORD_0");
-                uv != primitive.attributes.end()) {
-                fastgltf::iterateAccessorWithIndex<glm::vec2>(
-                    gltf,
-                    gltf.accessors[uv->second],
-                    [&](glm::vec2 texcoord, size_t index) {
-                        vertices[firstVertex + index].uv_x = texcoord.x;
-                        vertices[firstVertex + index].uv_y = texcoord.y;
-                    });
-            }
-            if (const auto colors = primitive.findAttribute("COLOR_0");
-                colors != primitive.attributes.end()) {
-                fastgltf::iterateAccessorWithIndex<glm::vec4>(
-                    gltf,
-                    gltf.accessors[colors->second],
-                    [&](glm::vec4 color, size_t index) {
-                        vertices[firstVertex + index].color = color;
-                    });
-            }
-
-            if (positionAccessor.count > 0) {
-                glm::vec3 minPosition = vertices[firstVertex].position;
-                glm::vec3 maxPosition = vertices[firstVertex].position;
-                for (size_t i = firstVertex; i < vertices.size(); ++i) {
-                    minPosition = glm::min(minPosition, vertices[i].position);
-                    maxPosition = glm::max(maxPosition, vertices[i].position);
-                }
-                surface.bounds.origin = (maxPosition + minPosition) * 0.5f;
-                surface.bounds.extents = (maxPosition - minPosition) * 0.5f;
-                surface.bounds.sphereRadius = glm::length(surface.bounds.extents);
-            }
-
-            if (primitive.materialIndex.has_value() &&
-                primitive.materialIndex.value() < materials.size()) {
-                surface.material = materials[primitive.materialIndex.value()];
-            } else {
-                surface.material = materials.front();
-            }
-            newMesh->surfaces.push_back(surface);
-        }
-
-        if (!vertices.empty() && !indices.empty()) {
-            newMesh->meshBuffers = engine->uploadMesh(indices, vertices);
-        }
-    }
+    auto uploadMesh = [&](std::vector<uint32_t>& indices,
+                          std::vector<Vertex>& vertices) {
+        return engine->uploadMesh(indices, vertices);
+    };
+    std::vector<std::shared_ptr<MeshAsset>> meshes =
+        build_gltf_meshes(*scene, gltf, materials, uploadMesh);
 
     build_gltf_nodes(*scene, gltf, meshes);
 
