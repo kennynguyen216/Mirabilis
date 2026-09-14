@@ -106,9 +106,9 @@ void VulkanEngine::update_physics(float deltaTime)
     const glm::vec3 previousPosition = _playerMovement.position;
     _playerMovement.integrate(_playerInput, deltaTime);
 
-    _portalTraversalCooldown = std::max(
-        0.0f, _portalTraversalCooldown - deltaTime);
-    if (_portalTraversalCooldown <= 0.0f) {
+    _physicsStep.portalTraversalCooldown = std::max(
+        0.0f, _physicsStep.portalTraversalCooldown - deltaTime);
+    if (_physicsStep.portalTraversalCooldown <= 0.0f) {
         bool traversed = false;
         const auto tryBidirectionalPair = [&](const Portal& first,
                                                const Portal& second) {
@@ -171,7 +171,7 @@ void VulkanEngine::respawn_player()
     mainCamera.position = _playerMovement.position + glm::vec3(0.0f, 1.7f, 0.0f);
     mainCamera.velocity = glm::vec3(0.0f);
     _playerMovement.jumpBufferRemaining = 0.0f;
-    _portalTraversalCooldown = 0.0f;
+    _physicsStep.portalTraversalCooldown = 0.0f;
     reset_time_trial();
 }
 
@@ -325,11 +325,11 @@ bool VulkanEngine::try_traverse_portal(
     // ends of the interpolation onto the new value makes those ticks use it
     // directly, and leaves the next frame's turn starting from here.
     _playerInput.yaw = mainCamera.yaw;
-    _previousPlayerYaw = mainCamera.yaw;
-    _targetPlayerYaw = mainCamera.yaw;
+    _physicsStep.previousPlayerYaw = mainCamera.yaw;
+    _physicsStep.targetPlayerYaw = mainCamera.yaw;
 
     // Prevent the next fixed tick from immediately re-entering the exit.
-    _portalTraversalCooldown = 0.15f;
+    _physicsStep.portalTraversalCooldown = 0.15f;
     return true;
 }
 
@@ -442,7 +442,7 @@ void VulkanEngine::retract_portals()
     // stale portal opening if its former wall is edited after retraction.
     _bluePortal = Portal{};
     _orangePortal = Portal{};
-    _portalTraversalCooldown = 0.0f;
+    _physicsStep.portalTraversalCooldown = 0.0f;
     rebuild_collision_from_scene();
 }
 

@@ -740,16 +740,19 @@ class VulkanEngine{
         float _translationSnap{0.5f};
         float _rotationSnapDegrees{15.0f};
         float _scaleSnap{0.1f};
-        float _portalTraversalCooldown{0.0f};
-        float _physicsAccumulator{0.0f};
-        // Camera yaw is sampled once per rendered frame, but physics runs at a
-        // fixed step that can tick up to MaxPhysicsSteps times for that one
-        // frame.  Holding both ends of the frame's turn lets each tick receive
-        // its own share of it, so air control and strafing stay the same at 30
-        // and 300 fps.  Portal traversal snaps both: that rotation is a
-        // discontinuity, not something the player turned through.
-        float _previousPlayerYaw{0.0f};
-        float _targetPlayerYaw{0.0f};
+        struct PhysicsStepState {
+            float portalTraversalCooldown{0.0f};
+            float accumulator{0.0f};
+            // Camera yaw is sampled once per rendered frame, but physics runs at a
+            // fixed step that can tick up to MaxPhysicsSteps times for that one
+            // frame.  Holding both ends of the frame's turn lets each tick receive
+            // its own share of it, so air control and strafing stay the same at 30
+            // and 300 fps.  Portal traversal snaps both: that rotation is a
+            // discontinuity, not something the player turned through.
+            float previousPlayerYaw{0.0f};
+            float targetPlayerYaw{0.0f};
+        };
+        PhysicsStepState _physicsStep;
         struct TimeTrialState {
             float seconds{0.0f};
             float bestSeconds{-1.0f};

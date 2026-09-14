@@ -168,8 +168,8 @@ void VulkanEngine::init()
     mainCamera.position = glm::vec3(0.0f, 5.0f, 12.0f);
     mainCamera.pitch = glm::radians(-20.0f);
     mainCamera.yaw = 0.0f;
-    _previousPlayerYaw = mainCamera.yaw;
-    _targetPlayerYaw = mainCamera.yaw;
+    _physicsStep.previousPlayerYaw = mainCamera.yaw;
+    _physicsStep.targetPlayerYaw = mainCamera.yaw;
 
     _playerMovement.position = _playerMovement.settings.spawnPosition;
     _playerMovement.velocity = glm::vec3(0.0f);
@@ -216,7 +216,7 @@ void VulkanEngine::set_editor_mode(bool enabled)
         _noClip.down = false;
     }
     _editorCameraLooking = false;
-    _physicsAccumulator = 0.0f;
+    _physicsStep.accumulator = 0.0f;
     _timeTrial.playerInsideStartTrigger = false;
     _timeTrial.playerInsideFinishTrigger = false;
 
@@ -859,35 +859,35 @@ void VulkanEngine::run(){
 
         if (_editorMode) {
             _editorCamera.update(deltaTime);
-            _physicsAccumulator = 0.0f;
+            _physicsStep.accumulator = 0.0f;
             // Leaving the editor should not make the first tick back in play
             // sweep through however far the editor camera was turned.
-            _previousPlayerYaw = mainCamera.yaw;
+            _physicsStep.previousPlayerYaw = mainCamera.yaw;
         } else {
-            _physicsAccumulator = std::min(
-                _physicsAccumulator + deltaTime,
+            _physicsStep.accumulator = std::min(
+                _physicsStep.accumulator + deltaTime,
                 PhysicsDt * static_cast<float>(MaxPhysicsSteps));
             // Where this frame's turn ends.  update_physics() may overwrite
             // both ends of it partway through if the player crosses a portal,
             // which is why the loop reads the members rather than a local.
-            _targetPlayerYaw = mainCamera.yaw;
+            _physicsStep.targetPlayerYaw = mainCamera.yaw;
             // Clamped to at least one: the accumulator can sit a hair above
             // PhysicsDt while the division truncates to zero, and dividing by
             // that below would hand the first tick an infinite fraction.
             const int stepCount = std::max(
-                1, static_cast<int>(_physicsAccumulator / PhysicsDt));
+                1, static_cast<int>(_physicsStep.accumulator / PhysicsDt));
             int stepIndex = 0;
-            while (_physicsAccumulator >= PhysicsDt) {
+            while (_physicsStep.accumulator >= PhysicsDt) {
                 ++stepIndex;
                 _playerInput.yaw = lerp_yaw(
-                    _previousPlayerYaw,
-                    _targetPlayerYaw,
+                    _physicsStep.previousPlayerYaw,
+                    _physicsStep.targetPlayerYaw,
                     static_cast<float>(stepIndex) /
                         static_cast<float>(stepCount));
                 update_physics(PhysicsDt);
-                _physicsAccumulator -= PhysicsDt;
+                _physicsStep.accumulator -= PhysicsDt;
             }
-            _previousPlayerYaw = _targetPlayerYaw;
+            _physicsStep.previousPlayerYaw = _physicsStep.targetPlayerYaw;
         }
 
         ImGui_ImplVulkan_NewFrame();
