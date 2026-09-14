@@ -247,14 +247,18 @@ void VulkanEngine::draw_inspector_panel()
                         ? "(white)"
                         : object->material.baseColorTexturePath.c_str());
                 if (ImGui::Button("Choose Base Color Texture...")) {
-                    _materialEditorObject = object->id;
+                    _materialEditor.object = object->id;
                     std::fill(
-                        _texturePathInput.begin(), _texturePathInput.end(), '\0');
+                        _materialEditor.texturePathInput.begin(),
+                        _materialEditor.texturePathInput.end(),
+                        '\0');
                     const std::string& path = object->material.baseColorTexturePath;
                     std::copy_n(
                         path.data(),
-                        std::min(path.size(), _texturePathInput.size() - 1),
-                        _texturePathInput.data());
+                        std::min(
+                            path.size(),
+                            _materialEditor.texturePathInput.size() - 1),
+                        _materialEditor.texturePathInput.data());
                     ImGui::OpenPopup("Base Color Texture");
                 }
                 ImGui::SameLine();
@@ -278,15 +282,15 @@ void VulkanEngine::draw_inspector_panel()
                     "Enter a PNG/JPG path relative to bin/Debug.");
                 ImGui::InputText(
                     "##TexturePath",
-                    _texturePathInput.data(),
-                    _texturePathInput.size());
+                    _materialEditor.texturePathInput.data(),
+                    _materialEditor.texturePathInput.size());
                 SceneObject* materialObject =
-                    _scene.get(_materialEditorObject);
+                    _scene.get(_materialEditor.object);
                 ImGui::BeginDisabled(materialObject == nullptr);
                 if (ImGui::Button("Apply")) {
                     materialObject->material.enabled = true;
                     materialObject->material.baseColorTexturePath =
-                        _texturePathInput.data();
+                        _materialEditor.texturePathInput.data();
                     _sceneDirty = true;
                     ImGui::CloseCurrentPopup();
                 }
