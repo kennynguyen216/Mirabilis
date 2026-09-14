@@ -815,9 +815,9 @@ void VulkanEngine::draw_editor_menu()
     }
 
     if (ImGui::BeginMenu("Window")) {
-        ImGui::MenuItem("Show Debug Panels", nullptr, &_showDebugPanels);
+        ImGui::MenuItem("Show Debug Panels", nullptr, &_editorUi.showDebugPanels);
         if (ImGui::MenuItem("Reset Editor Layout")) {
-            _resetEditorLayoutRequested = true;
+            _editorUi.resetLayoutRequested = true;
         }
         ImGui::EndMenu();
     }
@@ -879,11 +879,11 @@ void VulkanEngine::setup_default_dock_layout(uint32_t dockspaceID)
 {
     // A saved ImGui layout wins after the first run.  This block only builds
     // the initial editor arrangement, or runs again from Window > Reset.
-    if (!_resetEditorLayoutRequested && ImGui::DockBuilderGetNode(dockspaceID) != nullptr) {
+    if (!_editorUi.resetLayoutRequested && ImGui::DockBuilderGetNode(dockspaceID) != nullptr) {
         return;
     }
 
-    _resetEditorLayoutRequested = false;
+    _editorUi.resetLayoutRequested = false;
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::DockBuilderRemoveNode(dockspaceID);
     ImGui::DockBuilderAddNode(
@@ -1851,7 +1851,7 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
         draw_hierarchy_panel();
         draw_inspector_panel();
     
-        if (_showDebugPanels) {
+        if (_editorUi.showDebugPanels) {
             if (ImGui::Begin("Render Settings")) {
                 draw_path_trace_ui();
                 ImGui::SliderFloat("Resolution Scale", &renderScale, 0.3f, 1.0f);
@@ -1897,7 +1897,7 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
     const float horizontalSpeed = glm::length(glm::vec2(
         _playerMovement.velocity.x,
         _playerMovement.velocity.z));
-    if (_editorMode && _showDebugPanels) {
+    if (_editorMode && _editorUi.showDebugPanels) {
         draw_statistics_panel(horizontalSpeed);
     }
     

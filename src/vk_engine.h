@@ -726,8 +726,11 @@ class VulkanEngine{
         };
         NoClipState _noClip;
         bool _editorCameraLooking{false};
-        bool _showDebugPanels{false};
-        bool _resetEditorLayoutRequested{false};
+        struct EditorUiState {
+            bool showDebugPanels{false};
+            bool resetLayoutRequested{false};
+        };
+        EditorUiState _editorUi;
         bool _sceneDirty{false};
         std::string _activeSceneFilename{"sandbox.json"};
         std::array<char, 64> _sceneNameInput{};
