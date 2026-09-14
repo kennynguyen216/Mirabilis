@@ -687,7 +687,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             _ssgi.velocityRejection);
         pushConstants.quality = glm::uvec4(
             static_cast<uint32_t>(std::clamp(_ssgi.raysPerPixel, 1, 8)),
-            0u, 0u, 0u);
+            _drawExtent.width, _drawExtent.height, 0u);
         vkCmdPushConstants(
             cmd, _ssgi.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
             0, sizeof(pushConstants), &pushConstants);
@@ -754,6 +754,9 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             filterPush.control = glm::ivec4(
                 static_cast<int>(ssgiExtent.width),
                 static_cast<int>(ssgiExtent.height), 1, 0);
+            filterPush.frame = glm::ivec4(
+                static_cast<int>(_drawExtent.width),
+                static_cast<int>(_drawExtent.height), 0, 0);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                 _ssgi.filterPipelineLayout, 0, 1,
                 &_ssgi.filterDescriptors[writeIndex], 0, nullptr);

@@ -448,6 +448,20 @@ void VulkanEngine::draw_geometry(
     for (uint32_t drawIndex : opaqueDraws) {
         draw(drawContext.OpaqueSurfaces[drawIndex]);
     }
+    // The transparent pipeline is built for the draw image alone, so it must
+    // not blend into the G-buffer targets this pass carries.  Restart with
+    // just the draw image, loading the colour and depth the opaque draws
+    // stored.  An override pipeline already matches this pass as it is.
+    if (writeGBuffer && overridePipeline == nullptr &&
+        !drawContext.TransparentSurfaces.empty()) {
+        vkCmdEndRendering(cmd);
+        renderInfo.colorAttachmentCount = 1;
+        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        stencilAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        vkCmdBeginRendering(cmd, &renderInfo);
+        lastPipeline = nullptr;
+        lastMaterial = nullptr;
+    }
     for (const RenderObject& renderObject : drawContext.TransparentSurfaces) {
         draw(renderObject);
     }

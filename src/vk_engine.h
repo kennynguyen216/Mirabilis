@@ -129,13 +129,16 @@ struct SSGIPushConstants {
     // x = temporal history weight, y = depth rejection threshold,
     // z = normal dot threshold, w = velocity rejection threshold.
     glm::vec4 temporal{0.0f};
-    // x = rays per pixel; remaining components reserved.
+    // x = rays per pixel, yz = live draw extent (the region of the
+    // full-size G-buffer and prepass images written this frame).
     glm::uvec4 quality{1u, 0u, 0u, 0u};
 };
 
 struct SSGIFilterPushConstants {
     glm::ivec4 control{0};
     glm::vec4 settings{0.0f};
+    // xy = live draw extent, for the full-size depth and normal inputs.
+    glm::ivec4 frame{0};
 };
 
 struct SSGICompositePushConstants {
@@ -669,6 +672,11 @@ class VulkanEngine{
             VkImageUsageFlags usage,
             bool mipmapped = false);
         void destroy_image(const AllocatedImage& image);
+        // A CPU copy of RGBA8 pixels for the software path tracer.  Opt-in,
+        // because the tracer reads base colour alone and copying every
+        // uploaded normal and roughness map costs gigabytes on Sponza.
+        static std::shared_ptr<TraceTextureSource> make_trace_texture(
+            const void* rgba, VkExtent3D size);
         void init_imgui();
         void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
         void update_physics(float deltaTime);

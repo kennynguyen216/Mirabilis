@@ -452,6 +452,12 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
                 format,
                 VK_IMAGE_USAGE_SAMPLED_BIT,
                 true);
+            // Base colour is the only sRGB role, and the only map the path
+            // tracer samples, so it is the only one worth a CPU copy.
+            if (format == VK_FORMAT_R8G8B8A8_SRGB) {
+                loadedImage.traceSource = VulkanEngine::make_trace_texture(
+                    pixels, loadedImage.imageExtent);
+            }
         };
 
         auto reportDecodeFailure = [&]() {
