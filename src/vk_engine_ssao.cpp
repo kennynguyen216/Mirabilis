@@ -353,19 +353,11 @@ void VulkanEngine::init_ssao_pipelines()
         return;
     }
 
-    VkShaderModule ssaoShader = VK_NULL_HANDLE;
-    VkShaderModule blurShader = VK_NULL_HANDLE;
-    if (!vkutil::load_shader_module(
-            "../../shaders/ssao.comp.spv", _device, &ssaoShader) ||
-        !vkutil::load_shader_module(
-            "../../shaders/ssao_blur.comp.spv", _device, &blurShader)) {
+    ScopedShaderModule ssaoShader(_device);
+    ScopedShaderModule blurShader(_device);
+    if (!ssaoShader.load("../../shaders/ssao.comp.spv") ||
+        !blurShader.load("../../shaders/ssao_blur.comp.spv")) {
         fmt::print("Error loading ambient occlusion shaders\n");
-        if (ssaoShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, ssaoShader, nullptr);
-        }
-        if (blurShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, blurShader, nullptr);
-        }
         return;
     }
 
@@ -414,7 +406,7 @@ void VulkanEngine::init_ssao_pipelines()
         VkPipelineShaderStageCreateInfo stage{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        stage.module = ssaoShader;
+        stage.module = ssaoShader.get();
         stage.pName = "main";
         stage.pSpecializationInfo = &specialization;
 
@@ -436,7 +428,7 @@ void VulkanEngine::init_ssao_pipelines()
     VkPipelineShaderStageCreateInfo blurStage{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     blurStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    blurStage.module = blurShader;
+    blurStage.module = blurShader.get();
     blurStage.pName = "main";
     VkComputePipelineCreateInfo blurCreateInfo{
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
@@ -449,9 +441,6 @@ void VulkanEngine::init_ssao_pipelines()
         &blurCreateInfo,
         nullptr,
         &_ssaoBlurPipeline));
-
-    vkDestroyShaderModule(_device, blurShader, nullptr);
-    vkDestroyShaderModule(_device, ssaoShader, nullptr);
 
     _mainDeletionQueue.push_function([this]() {
         vkDestroyPipeline(_device, _ssaoBlurPipeline, nullptr);

@@ -445,53 +445,23 @@ void VulkanEngine::init_ssgi_resources()
 
 void VulkanEngine::init_ssgi_pipelines()
 {
-    VkShaderModule computeShader = VK_NULL_HANDLE;
-    VkShaderModule temporalShader = VK_NULL_HANDLE;
-    VkShaderModule filterShader = VK_NULL_HANDLE;
-    VkShaderModule compositeVertexShader = VK_NULL_HANDLE;
-    VkShaderModule compositeFragmentShader = VK_NULL_HANDLE;
-    VkShaderModule meshVertexShader = VK_NULL_HANDLE;
-    VkShaderModule maskFragmentShader = VK_NULL_HANDLE;
-    if (!vkutil::load_shader_module(
-            "../../shaders/ssgi.comp.spv", _device, &computeShader) ||
-        !vkutil::load_shader_module(
-            "../../shaders/ssgi_temporal.comp.spv", _device,
-            &temporalShader) ||
-        !vkutil::load_shader_module(
-            "../../shaders/ssgi_bilateral.comp.spv", _device, &filterShader) ||
-        !vkutil::load_shader_module(
-            "../../shaders/render_debug.vert.spv", _device,
-            &compositeVertexShader) ||
-        !vkutil::load_shader_module(
-            "../../shaders/ssgi_composite.frag.spv", _device,
-            &compositeFragmentShader) ||
-        !vkutil::load_shader_module(
-            "../../shaders/mesh.vert.spv", _device, &meshVertexShader) ||
-        !vkutil::load_shader_module(
-            "../../shaders/portal_mask_output.frag.spv", _device,
-            &maskFragmentShader)) {
+    ScopedShaderModule computeShader(_device);
+    ScopedShaderModule temporalShader(_device);
+    ScopedShaderModule filterShader(_device);
+    ScopedShaderModule compositeVertexShader(_device);
+    ScopedShaderModule compositeFragmentShader(_device);
+    ScopedShaderModule meshVertexShader(_device);
+    ScopedShaderModule maskFragmentShader(_device);
+    if (!computeShader.load("../../shaders/ssgi.comp.spv") ||
+        !temporalShader.load("../../shaders/ssgi_temporal.comp.spv") ||
+        !filterShader.load("../../shaders/ssgi_bilateral.comp.spv") ||
+        !compositeVertexShader.load("../../shaders/render_debug.vert.spv") ||
+        !compositeFragmentShader.load(
+            "../../shaders/ssgi_composite.frag.spv") ||
+        !meshVertexShader.load("../../shaders/mesh.vert.spv") ||
+        !maskFragmentShader.load(
+            "../../shaders/portal_mask_output.frag.spv")) {
         fmt::print("Error loading SSGI shaders\n");
-        if (computeShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, computeShader, nullptr);
-        }
-        if (temporalShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, temporalShader, nullptr);
-        }
-        if (filterShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, filterShader, nullptr);
-        }
-        if (compositeVertexShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, compositeVertexShader, nullptr);
-        }
-        if (compositeFragmentShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, compositeFragmentShader, nullptr);
-        }
-        if (meshVertexShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, meshVertexShader, nullptr);
-        }
-        if (maskFragmentShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, maskFragmentShader, nullptr);
-        }
         return;
     }
 
@@ -515,11 +485,11 @@ void VulkanEngine::init_ssgi_pipelines()
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     computeInfo.layout = _ssgiPipelineLayout;
     computeInfo.stage = vkinit::pipeline_shader_stage_create_info(
-        VK_SHADER_STAGE_COMPUTE_BIT, computeShader);
+        VK_SHADER_STAGE_COMPUTE_BIT, computeShader.get());
     VK_CHECK(vkCreateComputePipelines(
         _device, VK_NULL_HANDLE, 1, &computeInfo, nullptr, &_ssgiPipeline));
     computeInfo.stage = vkinit::pipeline_shader_stage_create_info(
-        VK_SHADER_STAGE_COMPUTE_BIT, temporalShader);
+        VK_SHADER_STAGE_COMPUTE_BIT, temporalShader.get());
     VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1,
         &computeInfo, nullptr, &_ssgiTemporalPipeline));
 
@@ -537,7 +507,7 @@ void VulkanEngine::init_ssgi_pipelines()
         &_ssgiFilterPipelineLayout));
     computeInfo.layout = _ssgiFilterPipelineLayout;
     computeInfo.stage = vkinit::pipeline_shader_stage_create_info(
-        VK_SHADER_STAGE_COMPUTE_BIT, filterShader);
+        VK_SHADER_STAGE_COMPUTE_BIT, filterShader.get());
     VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1,
         &computeInfo, nullptr, &_ssgiFilterPipeline));
 
@@ -556,7 +526,7 @@ void VulkanEngine::init_ssgi_pipelines()
     PipelineBuilder compositeBuilder;
     compositeBuilder._pipelineLayout = _ssgiCompositePipeline.layout;
     compositeBuilder.set_shaders(
-        compositeVertexShader, compositeFragmentShader);
+        compositeVertexShader.get(), compositeFragmentShader.get());
     compositeBuilder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     compositeBuilder.set_polygon_mode(VK_POLYGON_MODE_FILL);
     compositeBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
@@ -585,7 +555,7 @@ void VulkanEngine::init_ssgi_pipelines()
 
     PipelineBuilder builder;
     builder._pipelineLayout = _ssgiPortalMaskPipeline.layout;
-    builder.set_shaders(meshVertexShader, maskFragmentShader);
+    builder.set_shaders(meshVertexShader.get(), maskFragmentShader.get());
     builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
     builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
@@ -596,14 +566,6 @@ void VulkanEngine::init_ssgi_pipelines()
     builder.set_depth_format(_depthImage.imageFormat);
     builder.set_stencil_format(_depthImage.imageFormat);
     _ssgiPortalMaskPipeline.pipeline = builder.build_pipeline(_device);
-
-    vkDestroyShaderModule(_device, maskFragmentShader, nullptr);
-    vkDestroyShaderModule(_device, meshVertexShader, nullptr);
-    vkDestroyShaderModule(_device, computeShader, nullptr);
-    vkDestroyShaderModule(_device, temporalShader, nullptr);
-    vkDestroyShaderModule(_device, filterShader, nullptr);
-    vkDestroyShaderModule(_device, compositeFragmentShader, nullptr);
-    vkDestroyShaderModule(_device, compositeVertexShader, nullptr);
 
     _mainDeletionQueue.push_function([this]() {
         vkDestroyPipeline(_device, _ssgiPipeline, nullptr);
