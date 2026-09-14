@@ -166,7 +166,7 @@ void VulkanEngine::draw_path_trace_ui() {
         edited|=ImGui::SliderFloat("Environment intensity",&_traceLighting.environment.x,0,4);
         bool black=_traceLighting.environment.y>0.5f;
         if(ImGui::Checkbox("Black environment",&black)) {edited=true;_traceLighting.environment.y=black?1.f:0.f;}
-        if(edited) _sceneDirty=true;
+        if(edited) _sceneDocument.dirty=true;
         if(ImGui::Button("Reset accumulation")) _traceWasActive=false;
         ImGui::Text("Samples %u | GPU %.2f ms (max %.2f)",_traceSamples,_traceGpuMs,_traceMaxGpuMs);
         ImGui::Text("Triangles %zu | BVH nodes %zu | revision %llu",_traceTriangles.size(),_traceNodes.size(),_traceSceneRevision);
@@ -561,7 +561,7 @@ void VulkanEngine::capture_path_trace(const char* filename) {
 #else
         <<"Debug"
 #endif
-        <<"\nScene: "<<_activeSceneFilename<<"\nTrace revision: "<<_traceSceneRevision<<"\nScene hash: "<<_traceSceneHash
+        <<"\nScene: "<<_sceneDocument.activeFilename<<"\nTrace revision: "<<_traceSceneRevision<<"\nScene hash: "<<_traceSceneHash
         <<"\nDimensions: "<<_drawExtent.width<<" x "<<_drawExtent.height<<"\nRender scale: "<<renderScale<<"\nSamples: "<<_traceSamples
         <<"\nSeed: "<<_traceBaseSeed<<"\nDepth: "<<_traceMaxDepth<<"\nExposure EV: "<<_traceExposure<<"\nMax GPU dispatch ms: "<<_traceMaxGpuMs
         <<"\nMaterial model: "<<_traceMaterialModel<<"\nPortal limit: "<<_tracePortalLimit<<"\nPortal apertures: "<<_tracePortals.size()
@@ -649,7 +649,7 @@ void VulkanEngine::capture_ssgi(const char* filename)
     writePfm(std::string(filename) + ".indirect.pfm", values);
 
     std::ofstream metadata(std::string(filename) + ".txt");
-    metadata << "Scene: " << _activeSceneFilename
+    metadata << "Scene: " << _sceneDocument.activeFilename
         << "\nDimensions: " << extent.width << " x " << extent.height
         << "\nFull draw dimensions: " << _drawExtent.width << " x "
         << _drawExtent.height << "\nPreset: " << _ssgi.qualityPreset

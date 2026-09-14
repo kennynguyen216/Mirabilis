@@ -731,8 +731,11 @@ class VulkanEngine{
             bool resetLayoutRequested{false};
         };
         EditorUiState _editorUi;
-        bool _sceneDirty{false};
-        std::string _activeSceneFilename{"sandbox.json"};
+        struct SceneDocumentState {
+            bool dirty{false};
+            std::string activeFilename{"sandbox.json"};
+        };
+        SceneDocumentState _sceneDocument;
         struct EditorInputState {
             std::array<char, 64> sceneName{};
             std::array<char, 260> gltfPath{};

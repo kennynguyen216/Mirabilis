@@ -291,7 +291,7 @@ void VulkanEngine::draw_inspector_panel()
                     materialObject->material.enabled = true;
                     materialObject->material.baseColorTexturePath =
                         _materialEditor.texturePathInput.data();
-                    _sceneDirty = true;
+                    _sceneDocument.dirty = true;
                     ImGui::CloseCurrentPopup();
                 }
                 ImGui::EndDisabled();
@@ -302,7 +302,7 @@ void VulkanEngine::draw_inspector_panel()
                 ImGui::EndPopup();
             }
             if (changed && !driven) {
-                _sceneDirty = true;
+                _sceneDocument.dirty = true;
                 rebuild_collision_from_scene();
             }
 
@@ -432,7 +432,7 @@ void VulkanEngine::draw_editor_gizmo()
             authoredPortal->halfHeight = std::max(
                 0.1f, authoredPortal->halfHeight * glm::length(glm::vec3(worldTransform[1])));
         }
-        _sceneDirty = true;
+        _sceneDocument.dirty = true;
         return;
     }
 
@@ -446,7 +446,7 @@ void VulkanEngine::draw_editor_gizmo()
     object->localTransform = transform_from_matrix(localTransform);
 
     // Keep collision and portal raycasts coherent while the arrow is dragged.
-    _sceneDirty = true;
+    _sceneDocument.dirty = true;
     rebuild_collision_from_scene();
 }
 
@@ -548,10 +548,10 @@ void VulkanEngine::draw_editor_menu()
         if (ImGui::MenuItem("Save Scene As...")) {
             _editorInputs.sceneName.fill('\0');
             const size_t copyLength = std::min(
-                _activeSceneFilename.size(), _editorInputs.sceneName.size() - 1);
+                _sceneDocument.activeFilename.size(), _editorInputs.sceneName.size() - 1);
             std::memcpy(
                 _editorInputs.sceneName.data(),
-                _activeSceneFilename.data(),
+                _sceneDocument.activeFilename.data(),
                 copyLength);
             ImGui::OpenPopup("Save Scene As");
         }
@@ -579,7 +579,7 @@ void VulkanEngine::draw_editor_menu()
                 if (ImGui::MenuItem(
                         filename.c_str(),
                         nullptr,
-                        filename == _activeSceneFilename)) {
+                        filename == _sceneDocument.activeFilename)) {
                     load_editor_scene_named(filename);
                 }
             }
@@ -587,8 +587,8 @@ void VulkanEngine::draw_editor_menu()
         }
         ImGui::Separator();
         ImGui::TextDisabled("../../assets/scenes/%s%s",
-            _activeSceneFilename.c_str(),
-            _sceneDirty ? "  (unsaved changes)" : "");
+            _sceneDocument.activeFilename.c_str(),
+            _sceneDocument.dirty ? "  (unsaved changes)" : "");
         ImGui::EndMenu();
     }
 
@@ -763,7 +763,7 @@ void VulkanEngine::draw_editor_menu()
                     }
                     changed |= ImGui::DragFloat("Half Width", &portal.halfWidth, 0.02f, 0.1f, 20.0f);
                     changed |= ImGui::DragFloat("Half Height", &portal.halfHeight, 0.02f, 0.1f, 20.0f);
-                    if (changed) _sceneDirty = true;
+                    if (changed) _sceneDocument.dirty = true;
                     ImGui::TextDisabled("Ctrl-click a numeric field to type an exact value.");
                     const glm::vec3 right = glm::normalize(
                         glm::cross(portal.up, portal.normal));
@@ -939,7 +939,7 @@ bool VulkanEngine::delete_selected_scene_object()
     }
 
     _selectedSceneObject = InvalidSceneObject;
-    _sceneDirty = true;
+    _sceneDocument.dirty = true;
     rebuild_collision_from_scene();
     return true;
 }
@@ -1018,7 +1018,7 @@ bool VulkanEngine::duplicate_selected_scene_object()
     if (duplicateID == InvalidSceneObject) return false;
 
     _selectedSceneObject = duplicateID;
-    _sceneDirty = true;
+    _sceneDocument.dirty = true;
     rebuild_collision_from_scene();
     return true;
 }
@@ -1083,7 +1083,7 @@ SceneObjectID VulkanEngine::create_editor_actor(
     object->hasCollision = collidable;
     object->portalPlaceable = portalPlaceable;
     _selectedSceneObject = id;
-    _sceneDirty = true;
+    _sceneDocument.dirty = true;
     rebuild_collision_from_scene();
     return id;
 }
@@ -1180,7 +1180,7 @@ SceneObjectID VulkanEngine::create_room_with_center_pole_prefab()
     }
 
     _selectedSceneObject = rootID;
-    _sceneDirty = true;
+    _sceneDocument.dirty = true;
     rebuild_collision_from_scene();
     return rootID;
 }
@@ -1257,7 +1257,7 @@ SceneObjectID VulkanEngine::create_closed_long_room_prefab()
     }
 
     _selectedSceneObject = rootID;
-    _sceneDirty = true;
+    _sceneDocument.dirty = true;
     rebuild_collision_from_scene();
     return rootID;
 }
@@ -1299,7 +1299,7 @@ SceneObjectID VulkanEngine::import_gltf_actor(std::string_view modelPath)
     object->model = *model;
 
     _selectedSceneObject = id;
-    _sceneDirty = true;
+    _sceneDocument.dirty = true;
     return id;
 }
 
@@ -1403,7 +1403,7 @@ void VulkanEngine::draw_sun_shadow_settings()
             "Shadow Softness", &_shadow.filterRadius,
             0.0f, 12.0f, "%.2f texels");
         if (lightingEdited) {
-            _sceneDirty = true;
+            _sceneDocument.dirty = true;
         }
     }
 }
@@ -1422,7 +1422,7 @@ void VulkanEngine::draw_ambient_occlusion_settings()
                 ImGui::Checkbox("Globally Enabled", &_ssao.globalEnabled);
             if (ImGui::Checkbox("Override For This Scene", &_ssao.sceneOverride)) {
                 if (!_ssao.sceneOverride) _ssao.settings = SSAOSettings{};
-                _sceneDirty = true;
+                _sceneDocument.dirty = true;
             }
             ImGui::BeginDisabled(!_ssao.sceneOverride);
             bool occlusionEdited = false;
@@ -1437,13 +1437,13 @@ void VulkanEngine::draw_ambient_occlusion_settings()
             occlusionEdited |= ImGui::SliderFloat(
                 "Power", &_ssao.settings.power, 0.25f, 4.0f);
             if (occlusionEdited) {
-                _sceneDirty = true;
+                _sceneDocument.dirty = true;
             }
             ImGui::EndDisabled();
             if (ImGui::Button("Reset to Project Defaults")) {
                 _ssao.settings = SSAOSettings{};
                 _ssao.sceneOverride = false;
-                _sceneDirty = true;
+                _sceneDocument.dirty = true;
             }
 
             const char* qualityNames[] = {"Low", "Medium", "High"};
@@ -1870,7 +1870,7 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                         SkyboxDisplayNames.data(),
                         static_cast<int>(SkyboxDisplayNames.size()))) {
                     if (set_skybox(skyboxSelection)) {
-                        _sceneDirty = true;
+                        _sceneDocument.dirty = true;
                     }
                 }
                 if (_skyboxImage.imageFormat ==

@@ -479,7 +479,7 @@ void VulkanEngine::place_authored_portal_endpoint()
     } else {
         _authoredPortals.draft = candidate;
     }
-    _sceneDirty = true;
+    _sceneDocument.dirty = true;
     rebuild_collision_from_scene();
 }
 
@@ -487,7 +487,7 @@ void VulkanEngine::clear_authored_portals()
 {
     _authoredPortals.pairs.clear();
     _authoredPortals.draft.reset();
-    _sceneDirty = true;
+    _sceneDocument.dirty = true;
     rebuild_collision_from_scene();
 }
 
@@ -577,7 +577,7 @@ bool VulkanEngine::create_three_room_pole_chain()
                      secondOpening.rightHalfWidth),
         makeEndpoint(thirdOpening.rightCenter, glm::vec3(0, 0, 1),
                      thirdOpening.rightHalfWidth)});
-    _sceneDirty = true;
+    _sceneDocument.dirty = true;
     rebuild_collision_from_scene();
     return true;
 }

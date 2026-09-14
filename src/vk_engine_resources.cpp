@@ -640,7 +640,7 @@ void VulkanEngine::init_default_scene()
     // A missing file simply leaves the starter sandbox intact on the first
     // launch.  After the first File > Save Scene, this restores the level.
     restore_last_editor_scene_name();
-    if (const char* testScene = SDL_getenv("MIRABILIS_TEST_SCENE")) _activeSceneFilename = testScene;
+    if (const char* testScene = SDL_getenv("MIRABILIS_TEST_SCENE")) _sceneDocument.activeFilename = testScene;
     load_editor_scene();
 }
 

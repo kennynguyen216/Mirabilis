@@ -418,7 +418,7 @@ void VulkanEngine::cleanup()
         // The explicit File > Save Scene command is still useful for named
         // checkpoints, but closing the editor should not discard unsaved
         // level construction work.
-        if (_sceneDirty && !SDL_getenv("MIRABILIS_TEST_FRAMES")) {
+        if (_sceneDocument.dirty && !SDL_getenv("MIRABILIS_TEST_FRAMES")) {
             save_editor_scene();
         }
 
@@ -770,7 +770,7 @@ void VulkanEngine::run(){
                 event.key.keysym.sym = code;
                 process_event(event);
             };
-            const std::string originalScene = _activeSceneFilename;
+            const std::string originalScene = _sceneDocument.activeFilename;
             respawn_player();
             _playerMovement.position.x += 0.4f;
             _playerMovement.previousPosition = _playerMovement.position;

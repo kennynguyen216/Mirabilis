@@ -237,7 +237,7 @@ void VulkanEngine::create_runtime_scene_objects()
 
 bool VulkanEngine::save_editor_scene()
 {
-    const std::filesystem::path scenePath = editor_scene_path(_activeSceneFilename);
+    const std::filesystem::path scenePath = editor_scene_path(_sceneDocument.activeFilename);
     std::error_code directoryError;
     std::filesystem::create_directories(scenePath.parent_path(), directoryError);
     if (directoryError) {
@@ -389,10 +389,10 @@ bool VulkanEngine::save_editor_scene()
         return false;
     }
 
-    _sceneDirty = false;
+    _sceneDocument.dirty = false;
     if (!SDL_getenv("MIRABILIS_TEST_FRAMES")) {
         std::ofstream lastSceneFile(LastEditorScenePath, std::ios::trunc);
-        if (lastSceneFile) lastSceneFile << _activeSceneFilename << '\n';
+        if (lastSceneFile) lastSceneFile << _sceneDocument.activeFilename << '\n';
     }
     fmt::print("Saved editor scene: {}\n", scenePath.string());
     return true;
@@ -405,12 +405,12 @@ bool VulkanEngine::save_editor_scene_as(std::string_view sceneName)
         fmt::print("Invalid scene filename: {}\n", sceneName);
         return false;
     }
-    const std::string previousFilename = _activeSceneFilename;
-    _activeSceneFilename = *filename;
+    const std::string previousFilename = _sceneDocument.activeFilename;
+    _sceneDocument.activeFilename = *filename;
     if (save_editor_scene()) {
         return true;
     }
-    _activeSceneFilename = previousFilename;
+    _sceneDocument.activeFilename = previousFilename;
     return false;
 }
 
@@ -423,7 +423,7 @@ void VulkanEngine::restore_last_editor_scene_name()
     }
     const std::optional<std::string> normalized = normalize_scene_filename(filename);
     if (normalized.has_value() && std::filesystem::exists(editor_scene_path(*normalized))) {
-        _activeSceneFilename = *normalized;
+        _sceneDocument.activeFilename = *normalized;
     }
 }
 
@@ -545,7 +545,7 @@ bool read_saved_material(
 
 bool VulkanEngine::load_editor_scene()
 {
-    const std::filesystem::path scenePath = editor_scene_path(_activeSceneFilename);
+    const std::filesystem::path scenePath = editor_scene_path(_sceneDocument.activeFilename);
     if (!std::filesystem::exists(scenePath)) {
         return false;
     }
@@ -955,10 +955,10 @@ bool VulkanEngine::load_editor_scene()
     // A newly loaded scene supplies the gameplay spawn. Ordinary editor/play
     // toggles can then preserve the paused player's position.
     respawn_player();
-    _sceneDirty = false;
+    _sceneDocument.dirty = false;
     if (!SDL_getenv("MIRABILIS_TEST_FRAMES")) {
         std::ofstream lastSceneFile(LastEditorScenePath, std::ios::trunc);
-        if (lastSceneFile) lastSceneFile << _activeSceneFilename << '\n';
+        if (lastSceneFile) lastSceneFile << _sceneDocument.activeFilename << '\n';
     }
     rebuild_collision_from_scene();
     fmt::print("Loaded editor scene: {}\n", scenePath.string());
@@ -971,12 +971,12 @@ bool VulkanEngine::load_editor_scene_named(std::string_view sceneName)
     if (!filename.has_value()) {
         return false;
     }
-    const std::string previousFilename = _activeSceneFilename;
-    _activeSceneFilename = *filename;
+    const std::string previousFilename = _sceneDocument.activeFilename;
+    _sceneDocument.activeFilename = *filename;
     if (load_editor_scene()) {
         return true;
     }
-    _activeSceneFilename = previousFilename;
+    _sceneDocument.activeFilename = previousFilename;
     return false;
 }
 
