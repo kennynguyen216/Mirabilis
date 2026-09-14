@@ -22,6 +22,7 @@ add_executable (engine
   vk_engine_materials.cpp
   vk_engine_portals.cpp
   vk_engine_renderer.cpp
+  vk_engine_ssgi.cpp
   vk_engine_ssao.cpp
   vk_engine_resources.cpp
   vk_engine_scene.cpp

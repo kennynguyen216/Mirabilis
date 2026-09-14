@@ -120,60 +120,6 @@ void VulkanEngine::init_default_images_and_samplers()
     write_ssgi_trace_descriptors();
 }
 
-void VulkanEngine::write_ssgi_trace_descriptors()
-{
-    for (uint32_t writeIndex = 0; writeIndex < _ssgiDescriptors.size();
-         ++writeIndex) {
-        const uint32_t readIndex = 1u - writeIndex;
-        DescriptorWriter ssgiWriter;
-        ssgiWriter.write_image(0, _ssgiRawImage.imageView, VK_NULL_HANDLE,
-            VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-        ssgiWriter.write_image(1, _ssgiDebugImage.imageView, VK_NULL_HANDLE,
-            VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-        ssgiWriter.write_image(2, _prepassDepthImage.imageView, _prepassSampler,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(3, _prepassNormalImage.imageView, _prepassSampler,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(4, _gbufferAlbedoImage.imageView, _prepassSampler,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(5, _directLightingHistory[readIndex].imageView,
-            _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(6, _portalMaskImage.imageView, _prepassSampler,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(7, _skyboxImage.imageView,
-            _skyboxEnvironmentSampler,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(8, _gbufferVelocityImage.imageView,
-            _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(9, _ssgiTemporalHistory[writeIndex].imageView,
-            VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
-            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-        ssgiWriter.write_image(10, _ssgiTemporalDiagnosticImage.imageView,
-            VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
-            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-        ssgiWriter.write_image(11, _ssgiTemporalHistory[readIndex].imageView,
-            _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(12, _ssgiMetadataHistory[readIndex].imageView,
-            _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(13, _ssgiMetadataHistory[writeIndex].imageView,
-            VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
-            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-        ssgiWriter.write_image(14, _ssgiFallbackImage.imageView,
-            VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
-            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-        ssgiWriter.update_set(_device, _ssgiDescriptors[writeIndex]);
-    }
-}
-
 bool VulkanEngine::set_skybox(int selection)
 {
     if (selection < 0 ||
