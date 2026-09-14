@@ -14,25 +14,25 @@ void VulkanEngine::init_prepass_descriptors()
         DescriptorLayoutBuilder builder;
         builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        _prepassImageDescriptorLayout = builder.build(
+        _prepass.imageDescriptorLayout = builder.build(
             _device, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT);
-        _prepassImageDescriptor = globalDescriptorAllocator.allocate(
-            _device, _prepassImageDescriptorLayout);
+        _prepass.imageDescriptor = globalDescriptorAllocator.allocate(
+            _device, _prepass.imageDescriptorLayout);
 
         DescriptorWriter writer;
         writer.write_image(
             0,
-            _prepassDepthImage.imageView,
-            _prepassSampler,
+            _prepass.depthImage.imageView,
+            _prepass.sampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         writer.write_image(
             1,
-            _prepassNormalImage.imageView,
-            _prepassSampler,
+            _prepass.normalImage.imageView,
+            _prepass.sampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        writer.update_set(_device, _prepassImageDescriptor);
+        writer.update_set(_device, _prepass.imageDescriptor);
     }
 }
 
@@ -66,13 +66,13 @@ void VulkanEngine::init_depth_normal_resources()
     // resolution scale is below 1, which is what lets renderScale change
     // without recreating any of these images.
     const VkExtent3D prepassExtent = _drawImage.imageExtent;
-    _prepassDepthImage = create_image(
+    _prepass.depthImage = create_image(
         prepassExtent,
         prepassDepthFormat,
         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     // Wider than normals need, but trivial to read in the debug views. Two
     // signed 16-bit channels with octahedral encoding is the later saving.
-    _prepassNormalImage = create_image(
+    _prepass.normalImage = create_image(
         prepassExtent,
         VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
@@ -82,12 +82,12 @@ void VulkanEngine::init_depth_normal_resources()
     // that exists nowhere in the scene.
     VkSamplerCreateInfo samplerInfo = sampler_info(
         VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
-    VK_CHECK(vkCreateSampler(_device, &samplerInfo, nullptr, &_prepassSampler));
+    VK_CHECK(vkCreateSampler(_device, &samplerInfo, nullptr, &_prepass.sampler));
 
     _mainDeletionQueue.push_function([this]() {
-        vkDestroySampler(_device, _prepassSampler, nullptr);
-        destroy_image(_prepassNormalImage);
-        destroy_image(_prepassDepthImage);
+        vkDestroySampler(_device, _prepass.sampler, nullptr);
+        destroy_image(_prepass.normalImage);
+        destroy_image(_prepass.depthImage);
     });
 }
 
@@ -113,10 +113,10 @@ void VulkanEngine::init_depth_normal_pipeline()
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &matrixRange;
     VK_CHECK(vkCreatePipelineLayout(
-        _device, &layoutInfo, nullptr, &_depthNormalPipeline.layout));
+        _device, &layoutInfo, nullptr, &_prepass.pipeline.layout));
 
     PipelineBuilder builder;
-    builder._pipelineLayout = _depthNormalPipeline.layout;
+    builder._pipelineLayout = _prepass.pipeline.layout;
     builder.set_shaders(vertexShader.get(), fragmentShader.get());
     builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
@@ -127,13 +127,13 @@ void VulkanEngine::init_depth_normal_pipeline()
     builder.set_multisampling_none();
     builder.disable_blending();
     builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
-    builder.set_color_attachment_format(_prepassNormalImage.imageFormat);
-    builder.set_depth_format(_prepassDepthImage.imageFormat);
-    _depthNormalPipeline.pipeline = builder.build_pipeline(_device);
+    builder.set_color_attachment_format(_prepass.normalImage.imageFormat);
+    builder.set_depth_format(_prepass.depthImage.imageFormat);
+    _prepass.pipeline.pipeline = builder.build_pipeline(_device);
 
     _mainDeletionQueue.push_function([this]() {
-        vkDestroyPipeline(_device, _depthNormalPipeline.pipeline, nullptr);
-        vkDestroyPipelineLayout(_device, _depthNormalPipeline.layout, nullptr);
+        vkDestroyPipeline(_device, _prepass.pipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _prepass.pipeline.layout, nullptr);
     });
 }
 
@@ -162,10 +162,10 @@ void VulkanEngine::init_depth_normal_mask_pipeline()
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &matrixRange;
     VK_CHECK(vkCreatePipelineLayout(
-        _device, &layoutInfo, nullptr, &_depthNormalMaskPipeline.layout));
+        _device, &layoutInfo, nullptr, &_prepass.maskPipeline.layout));
 
     PipelineBuilder builder;
-    builder._pipelineLayout = _depthNormalMaskPipeline.layout;
+    builder._pipelineLayout = _prepass.maskPipeline.layout;
     builder.set_shaders(vertexShader.get(), fragmentShader.get());
     builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
@@ -175,13 +175,13 @@ void VulkanEngine::init_depth_normal_mask_pipeline()
     builder.set_multisampling_none();
     builder.disable_blending();
     builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
-    builder.set_color_attachment_format(_prepassNormalImage.imageFormat);
-    builder.set_depth_format(_prepassDepthImage.imageFormat);
-    _depthNormalMaskPipeline.pipeline = builder.build_pipeline(_device);
+    builder.set_color_attachment_format(_prepass.normalImage.imageFormat);
+    builder.set_depth_format(_prepass.depthImage.imageFormat);
+    _prepass.maskPipeline.pipeline = builder.build_pipeline(_device);
 
     _mainDeletionQueue.push_function([this]() {
-        vkDestroyPipeline(_device, _depthNormalMaskPipeline.pipeline, nullptr);
-        vkDestroyPipelineLayout(_device, _depthNormalMaskPipeline.layout, nullptr);
+        vkDestroyPipeline(_device, _prepass.maskPipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _prepass.maskPipeline.layout, nullptr);
     });
 }
 
@@ -191,12 +191,12 @@ void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
 
     vkutil::transition_image(
         cmd,
-        _prepassNormalImage.image,
+        _prepass.normalImage.image,
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     vkutil::transition_image(
         cmd,
-        _prepassDepthImage.image,
+        _prepass.depthImage.image,
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
         VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -209,14 +209,14 @@ void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
     normalClear.color.float32[2] = 0.0f;
     normalClear.color.float32[3] = 0.0f;
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
-        _prepassNormalImage.imageView,
+        _prepass.normalImage.imageView,
         &normalClear,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     // depth_attachment_info already clears to 0, the far value under the main
     // camera's reversed depth. This pass shares that convention deliberately,
     // unlike the shadow map, so its depth could later replace the main one.
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
-        _prepassDepthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+        _prepass.depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
 
     VkRenderingInfo renderInfo = vkinit::rendering_info(
         _drawExtent, &colorAttachment, &depthAttachment);
@@ -238,23 +238,23 @@ void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
     vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
     vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
 
-    if (_depthNormalPipeline.pipeline != VK_NULL_HANDLE) {
+    if (_prepass.pipeline.pipeline != VK_NULL_HANDLE) {
         // Both prepass layouts declare the scene set at index 0 with the same
         // push constant range, which makes them compatible for that set: it
         // survives a switch between the two pipelines and is bound once.
         vkCmdBindPipeline(
-            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _depthNormalPipeline.pipeline);
+            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _prepass.pipeline.pipeline);
         vkCmdBindDescriptorSets(
             cmd,
             VK_PIPELINE_BIND_POINT_GRAPHICS,
-            _depthNormalPipeline.layout,
+            _prepass.pipeline.layout,
             0,
             1,
             &get_current_frame().sceneDescriptor,
             0,
             nullptr);
 
-        VkPipeline lastPipeline = _depthNormalPipeline.pipeline;
+        VkPipeline lastPipeline = _prepass.pipeline.pipeline;
         MaterialInstance* lastMaterial = nullptr;
         VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
         // mainDrawContext and the main camera's frustum test, because these
@@ -271,10 +271,10 @@ void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
 
             const bool masked = renderObject.material != nullptr &&
                 renderObject.material->passType == MaterialPass::Mask &&
-                _depthNormalMaskPipeline.pipeline != VK_NULL_HANDLE;
+                _prepass.maskPipeline.pipeline != VK_NULL_HANDLE;
             const MaterialPipeline& active = masked
-                ? _depthNormalMaskPipeline
-                : _depthNormalPipeline;
+                ? _prepass.maskPipeline
+                : _prepass.pipeline;
             if (active.pipeline != lastPipeline) {
                 lastPipeline = active.pipeline;
                 vkCmdBindPipeline(
@@ -322,12 +322,12 @@ void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
 
     vkutil::transition_image(
         cmd,
-        _prepassNormalImage.image,
+        _prepass.normalImage.image,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     vkutil::transition_image(
         cmd,
-        _prepassDepthImage.image,
+        _prepass.depthImage.image,
         VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_IMAGE_ASPECT_DEPTH_BIT);

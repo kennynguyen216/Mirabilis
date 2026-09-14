@@ -18,7 +18,7 @@ void VulkanEngine::init_render_debug_pipeline()
 
     VkDescriptorSetLayout layouts[] = {
         _gpuSceneDataDescriptorLayout,
-        _prepassImageDescriptorLayout,
+        _prepass.imageDescriptorLayout,
         _ssao.debugDescriptorLayout,
         _ssgi.debugDescriptorLayout};
     VkPushConstantRange settingsRange{
@@ -162,7 +162,7 @@ void VulkanEngine::draw_render_debug(VkCommandBuffer cmd)
         cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _renderDebugPipeline.pipeline);
     const std::array<VkDescriptorSet, 4> sets{
         get_current_frame().sceneDescriptor,
-        _prepassImageDescriptor,
+        _prepass.imageDescriptor,
         _ssao.debugDescriptor,
         _ssgi.debugDescriptors[1u - _ssgi.historyWriteIndex]};
     vkCmdBindDescriptorSets(

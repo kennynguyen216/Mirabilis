@@ -1529,7 +1529,7 @@ void VulkanEngine::draw_antialiasing_settings()
 void VulkanEngine::draw_screen_buffer_settings()
 {
     if (ImGui::CollapsingHeader("Screen-Space Buffers")) {
-        ImGui::Checkbox("Depth/Normal Prepass", &_depthNormalPrepassEnabled);
+        ImGui::Checkbox("Depth/Normal Prepass", &_prepass.enabled);
         // Reading a half-finished buffer directly is far more informative than
         // trying to infer a projection or orientation mistake from a finished
         // effect.

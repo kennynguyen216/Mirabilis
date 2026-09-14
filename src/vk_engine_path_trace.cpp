@@ -80,7 +80,7 @@ void VulkanEngine::init_path_trace() {
     writer.write_image(1,_traceAccum.imageView,VK_NULL_HANDLE,VK_IMAGE_LAYOUT_GENERAL,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
     writer.write_image(8,_traceDirect.imageView,VK_NULL_HANDLE,VK_IMAGE_LAYOUT_GENERAL,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
     writer.write_image(9,_traceIndirect.imageView,VK_NULL_HANDLE,VK_IMAGE_LAYOUT_GENERAL,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-    writer.write_image(5,_whiteImage.imageView,_prepassSampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    writer.write_image(5,_whiteImage.imageView,_prepass.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     writer.update_set(_device,_traceSet);
     _traceSupported=true;
     update_trace_scene();
@@ -191,7 +191,7 @@ void VulkanEngine::validate_path_trace() {
         _drawExtent=extent; update_scene(0);
         pc=camera_push(render_camera(),extent); pc.control.w=4; pc.settings.y=float(_traceTriangles.size());
         DescriptorWriter writer;
-        writer.write_image(5,_prepassDepthImage.imageView,_prepassSampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.write_image(5,_prepass.depthImage.imageView,_prepass.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         writer.update_set(_device,_traceSet);
     }
     auto buffer=create_buffer(extent.width*extent.height*sizeof(glm::vec4),VK_BUFFER_USAGE_TRANSFER_DST_BIT,VMA_MEMORY_USAGE_GPU_TO_CPU);
@@ -357,7 +357,7 @@ void VulkanEngine::validate_path_trace() {
             }
         }
         DescriptorWriter writer;
-        writer.write_image(5,_whiteImage.imageView,_prepassSampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.write_image(5,_whiteImage.imageView,_prepass.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         writer.update_set(_device,_traceSet);
     }
     vmaUnmapMemory(_allocator,buffer.allocation);

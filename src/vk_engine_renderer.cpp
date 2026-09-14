@@ -87,7 +87,7 @@ VkImageView VulkanEngine::ssao_occlusion_view() const
 
 VkSampler VulkanEngine::ssao_occlusion_sampler() const
 {
-    return _ssao.sampler != VK_NULL_HANDLE ? _ssao.sampler : _prepassSampler;
+    return _ssao.sampler != VK_NULL_HANDLE ? _ssao.sampler : _prepass.sampler;
 }
 
 void VulkanEngine::init_descriptor_pools()
@@ -246,7 +246,7 @@ void VulkanEngine::init_descriptor_cleanup()
         vkDestroyDescriptorSetLayout(_device, _drawImageDescriptorLayout, nullptr);
         vkDestroyDescriptorSetLayout(_device, _singleImageDescriptorLayout, nullptr);
         vkDestroyDescriptorSetLayout(_device, _gpuSceneDataDescriptorLayout, nullptr);
-        vkDestroyDescriptorSetLayout(_device, _prepassImageDescriptorLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _prepass.imageDescriptorLayout, nullptr);
         vkDestroyDescriptorSetLayout(_device, _ssao.descriptorLayout, nullptr);
         vkDestroyDescriptorSetLayout(_device, _ssao.blurDescriptorLayout, nullptr);
         vkDestroyDescriptorSetLayout(_device, _ssao.debugDescriptorLayout, nullptr);

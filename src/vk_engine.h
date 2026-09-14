@@ -828,13 +828,27 @@ class VulkanEngine{
         ShadowState _shadow;
         glm::mat4 _previousMainViewProjection{1.0f};
         bool _previousMainViewProjectionValid{false};
-        // Depth and view-space normals for the main camera, written before
-        // the colour pass.  Ambient occlusion is the first consumer, but
-        // reflections, outlines, and depth-aware fog need the same two
-        // images.  They are deliberately separate from _depthImage, whose
-        // depth and stencil contents the portal passes overwrite.
-        AllocatedImage _prepassDepthImage;
-        AllocatedImage _prepassNormalImage;
+        struct PrepassState {
+            // Depth and view-space normals for the main camera, written before
+            // the colour pass.  Ambient occlusion is the first consumer, but
+            // reflections, outlines, and depth-aware fog need the same two
+            // images.  They are deliberately separate from _depthImage, whose
+            // depth and stencil contents the portal passes overwrite.
+            AllocatedImage depthImage;
+            AllocatedImage normalImage;
+            VkSampler sampler{};
+            VkDescriptorSetLayout imageDescriptorLayout{};
+            // The prepass targets are allocated once at window size, so one
+            // persistent set describes them for the whole run.
+            VkDescriptorSet imageDescriptor{};
+            MaterialPipeline pipeline;
+            // Alpha-tested prepass.  Without it, occlusion and screen-space GI
+            // would be computed against the quad a leaf texture is drawn on
+            // rather than against the leaves.
+            MaterialPipeline maskPipeline;
+            bool enabled{true};
+        };
+        PrepassState _prepass;
         AllocatedImage _gbufferAlbedoImage;
         AllocatedImage _gbufferVelocityImage;
         AllocatedImage _directLightingImage;
@@ -906,18 +920,7 @@ class VulkanEngine{
         };
         SSGIState _ssgi;
         std::array<AllocatedImage, 2> _directLightingHistory{};
-        VkSampler _prepassSampler{};
-        VkDescriptorSetLayout _prepassImageDescriptorLayout{};
-        // The prepass targets are allocated once at window size, so one
-        // persistent set describes them for the whole run.
-        VkDescriptorSet _prepassImageDescriptor{};
-        MaterialPipeline _depthNormalPipeline;
-        // Alpha-tested prepass.  Without it, occlusion and screen-space GI
-        // would be computed against the quad a leaf texture is drawn on
-        // rather than against the leaves.
-        MaterialPipeline _depthNormalMaskPipeline;
         MaterialPipeline _renderDebugPipeline;
-        bool _depthNormalPrepassEnabled{true};
         struct SSAOState {
             // Ambient occlusion, at half resolution.  Three images rather than
             // one because a compute pass cannot read and write the same

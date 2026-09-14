@@ -42,14 +42,14 @@ void VulkanEngine::init_ssao_descriptors()
         DescriptorWriter ssaoWriter;
         ssaoWriter.write_image(
             0,
-            _prepassDepthImage.imageView,
-            _prepassSampler,
+            _prepass.depthImage.imageView,
+            _prepass.sampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         ssaoWriter.write_image(
             1,
-            _prepassNormalImage.imageView,
-            _prepassSampler,
+            _prepass.normalImage.imageView,
+            _prepass.sampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         ssaoWriter.write_image(
@@ -81,19 +81,19 @@ void VulkanEngine::init_ssao_descriptors()
             blurWriter.write_image(
                 0,
                 source.imageView,
-                _prepassSampler,
+                _prepass.sampler,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             blurWriter.write_image(
                 1,
-                _prepassDepthImage.imageView,
-                _prepassSampler,
+                _prepass.depthImage.imageView,
+                _prepass.sampler,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             blurWriter.write_image(
                 2,
-                _prepassNormalImage.imageView,
-                _prepassSampler,
+                _prepass.normalImage.imageView,
+                _prepass.sampler,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             blurWriter.write_image(
@@ -144,7 +144,7 @@ void VulkanEngine::init_ssao_descriptors()
             debugWriter.write_image(
                 binding,
                 stages[binding],
-                _prepassSampler,
+                _prepass.sampler,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         }
@@ -169,7 +169,7 @@ bool VulkanEngine::ssao_active() const
     return _ssao.globalEnabled && _ssao.settings.enabled &&
         _ssao.blurPipeline != VK_NULL_HANDLE &&
         _ssao.pipelines[_ssao.quality] != VK_NULL_HANDLE &&
-        _depthNormalPipeline.pipeline != VK_NULL_HANDLE;
+        _prepass.pipeline.pipeline != VK_NULL_HANDLE;
 }
 
 void VulkanEngine::init_ssao_resources()

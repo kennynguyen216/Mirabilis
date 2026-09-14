@@ -81,7 +81,7 @@ void VulkanEngine::apply_max_fidelity_settings()
     _postProcess.fxaaSubpixelStrength = 0.25f;
     _postProcess.fxaaShowEdges = false;
 
-    _depthNormalPrepassEnabled = true;
+    _prepass.enabled = true;
     _ssgi.enabled = true;
     apply_ssgi_quality_preset(4);
     _ssgi.intensity = 0.35f;
@@ -551,7 +551,7 @@ void VulkanEngine::draw(float deltaTime)
 	// so does ambient occlusion, which is built entirely out of them.
 	const bool showRenderDebugView = _renderDebugView != RenderDebugView::None;
 	const bool occlusionActive = ssao_active();
-	if (_depthNormalPrepassEnabled || showRenderDebugView || occlusionActive ||
+	if (_prepass.enabled || showRenderDebugView || occlusionActive ||
         _ssgi.enabled) {
 		draw_depth_normal_prepass(cmd);
 	}

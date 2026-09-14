@@ -114,39 +114,39 @@ void VulkanEngine::init_ssgi_descriptors()
                     _device, _ssgi.debugDescriptorLayout);
             DescriptorWriter debugWriter;
             debugWriter.write_image(0, _gbufferAlbedoImage.imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             debugWriter.write_image(1, _gbufferVelocityImage.imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             debugWriter.write_image(2, _portalMaskImage.imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             debugWriter.write_image(3, _directLightingImage.imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             debugWriter.write_image(4, _ssgi.rawImage.imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             debugWriter.write_image(5, _ssgi.debugImage.imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             debugWriter.write_image(6,
                 _ssgi.temporalHistory[historyIndex].imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             debugWriter.write_image(7,
                 _ssgi.temporalDiagnosticImage.imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             debugWriter.write_image(8, _ssgi.filteredImage.imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             debugWriter.write_image(9, _ssgi.referenceImage.imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             debugWriter.write_image(10, _ssgi.fallbackImage.imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             debugWriter.update_set(
                 _device, _ssgi.debugDescriptors[historyIndex]);
@@ -167,32 +167,32 @@ void VulkanEngine::init_ssgi_descriptors()
             DescriptorWriter filterWriter;
             filterWriter.write_image(0,
                 _ssgi.temporalHistory[historyIndex].imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             filterWriter.write_image(1, _ssgi.filterScratchImage.imageView,
                 VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-            filterWriter.write_image(2, _prepassDepthImage.imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            filterWriter.write_image(2, _prepass.depthImage.imageView,
+                _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-            filterWriter.write_image(3, _prepassNormalImage.imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            filterWriter.write_image(3, _prepass.normalImage.imageView,
+                _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             filterWriter.update_set(
                 _device, _ssgi.filterDescriptors[historyIndex]);
         }
         DescriptorWriter verticalWriter;
         verticalWriter.write_image(0, _ssgi.filterScratchImage.imageView,
-            _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+            _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         verticalWriter.write_image(1, _ssgi.filteredImage.imageView,
             VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-        verticalWriter.write_image(2, _prepassDepthImage.imageView,
-            _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        verticalWriter.write_image(2, _prepass.depthImage.imageView,
+            _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        verticalWriter.write_image(3, _prepassNormalImage.imageView,
-            _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        verticalWriter.write_image(3, _prepass.normalImage.imageView,
+            _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         verticalWriter.update_set(_device, _ssgi.filterDescriptors[2]);
 
@@ -211,23 +211,23 @@ void VulkanEngine::init_ssgi_descriptors()
                     _device, _ssgi.compositeDescriptorLayout);
             DescriptorWriter compositeWriter;
             compositeWriter.write_image(0, _ssgi.filteredImage.imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             compositeWriter.write_image(1,
                 _ssgi.metadataHistory[historyIndex].imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+                _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-            compositeWriter.write_image(2, _prepassDepthImage.imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            compositeWriter.write_image(2, _prepass.depthImage.imageView,
+                _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-            compositeWriter.write_image(3, _prepassNormalImage.imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            compositeWriter.write_image(3, _prepass.normalImage.imageView,
+                _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             // draw_ssgi() leaves the forward pass's base-colour target in
             // SHADER_READ_ONLY_OPTIMAL, and it still holds this frame's
             // albedo when the composite runs immediately afterwards.
             compositeWriter.write_image(4, _gbufferAlbedoImage.imageView,
-                _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             compositeWriter.update_set(
                 _device, _ssgi.compositeDescriptors[historyIndex]);
@@ -851,19 +851,19 @@ void VulkanEngine::write_ssgi_trace_descriptors()
             VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         ssgiWriter.write_image(1, _ssgi.debugImage.imageView, VK_NULL_HANDLE,
             VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-        ssgiWriter.write_image(2, _prepassDepthImage.imageView, _prepassSampler,
+        ssgiWriter.write_image(2, _prepass.depthImage.imageView, _prepass.sampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(3, _prepassNormalImage.imageView, _prepassSampler,
+        ssgiWriter.write_image(3, _prepass.normalImage.imageView, _prepass.sampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(4, _gbufferAlbedoImage.imageView, _prepassSampler,
+        ssgiWriter.write_image(4, _gbufferAlbedoImage.imageView, _prepass.sampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         ssgiWriter.write_image(5, _directLightingHistory[readIndex].imageView,
-            _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        ssgiWriter.write_image(6, _portalMaskImage.imageView, _prepassSampler,
+        ssgiWriter.write_image(6, _portalMaskImage.imageView, _prepass.sampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         ssgiWriter.write_image(7, _skyboxImage.imageView,
@@ -871,7 +871,7 @@ void VulkanEngine::write_ssgi_trace_descriptors()
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         ssgiWriter.write_image(8, _gbufferVelocityImage.imageView,
-            _prepassSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         ssgiWriter.write_image(9, _ssgi.temporalHistory[writeIndex].imageView,
             VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
@@ -880,10 +880,10 @@ void VulkanEngine::write_ssgi_trace_descriptors()
             VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         ssgiWriter.write_image(11, _ssgi.temporalHistory[readIndex].imageView,
-            _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+            _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         ssgiWriter.write_image(12, _ssgi.metadataHistory[readIndex].imageView,
-            _prepassSampler, VK_IMAGE_LAYOUT_GENERAL,
+            _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         ssgiWriter.write_image(13, _ssgi.metadataHistory[writeIndex].imageView,
             VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
