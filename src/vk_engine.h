@@ -351,9 +351,16 @@ class VulkanEngine{
     void update_trace_scene();
     std::vector<TraceBVHNode> _traceNodes;
     AllocatedBuffer _traceNodeBuffer{};
-    int _traceDebugView{8};
-    int _traceMaxDepth{2};
-    int _traceBaseSeed{1337};
+    struct PathTraceSettings {
+        int debugView{8};
+        int maxDepth{2};
+        int baseSeed{1337};
+        float exposure{0};
+        TraceLighting lighting{};
+        int materialModel{1};
+        int portalLimit{2};
+    };
+    PathTraceSettings _traceSettings;
     void capture_path_trace(const char* filename);
     void capture_ssgi(const char* filename);
     std::vector<glm::vec4> read_ssgi_image(
@@ -361,22 +368,18 @@ class VulkanEngine{
     uint32_t _traceSamples{0};
     uint64_t _traceInputHash{0};
     bool _traceWasActive{false};
-    float _traceExposure{0};
     VkQueryPool _traceTimestampPool{};
     bool _traceTimingWritten[FRAME_OVERLAP]{};
     float _traceGpuMs{0}, _traceMaxGpuMs{0};
-    TraceLighting _traceLighting{};
     AllocatedBuffer _traceLightBuffer{}, _traceEmitterBuffer{};
     AllocatedImage _traceDirect{}, _traceIndirect{};
     std::vector<uint32_t> _traceEmitters;
     std::vector<glm::vec4> read_trace_image(const AllocatedImage& image);
     std::vector<uint32_t> _traceTexels;
     AllocatedBuffer _traceTexelBuffer{};
-    int _traceMaterialModel{1};
     uint64_t _traceDrawHash{0};
     std::vector<TracePortal> _tracePortals;
     AllocatedBuffer _tracePortalBuffer{};
-    int _tracePortalLimit{2};
     VkExtent2D _windowExtent{1280, 720};
 
     FrameData _frames[FRAME_OVERLAP];

@@ -359,9 +359,9 @@ bool VulkanEngine::save_editor_scene()
     // Map resolution is deliberately not here; that is a quality setting for
     // the machine, not a property of the level.
     file << ",\n  \"referenceLighting\": {\"sunRadiance\": ";
-    writeVec3(glm::vec3(_traceLighting.sunRadiance));
-    file << ", \"environmentIntensity\": " << _traceLighting.environment.x
-         << ", \"blackEnvironment\": " << (_traceLighting.environment.y>0.5f?"true":"false") << '}';
+    writeVec3(glm::vec3(_traceSettings.lighting.sunRadiance));
+    file << ", \"environmentIntensity\": " << _traceSettings.lighting.environment.x
+         << ", \"blackEnvironment\": " << (_traceSettings.lighting.environment.y>0.5f?"true":"false") << '}';
     const int savedSkybox = std::clamp(
         _skyboxSelection, 0, static_cast<int>(SkyboxIds.size()) - 1);
     file << ",\n  \"lighting\": {\"skybox\": \""
@@ -940,7 +940,7 @@ bool VulkanEngine::load_editor_scene()
     // Past every path that could still have failed.
     _ssao.settings = pendingSSAO;
     _ssao.sceneOverride = pendingSSAOOverride;
-    _traceLighting = pendingReference;
+    _traceSettings.lighting = pendingReference;
     _shadow.sunlightDirection = pendingLighting.sunlightDirection;
     _shadow.enabled = pendingLighting.shadowsEnabled;
     _shadow.radius = pendingLighting.shadowRadius;

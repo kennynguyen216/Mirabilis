@@ -110,8 +110,8 @@ void VulkanEngine::destroy_path_trace() {
 void VulkanEngine::draw_path_trace(VkCommandBuffer cmd) {
     update_trace_scene();
     auto pc=camera_push(render_camera(),_drawExtent);
-    pc.settings.y=float(_traceTriangles.size()); pc.settings.z=float(_traceDebugView);
-    pc.sampling=glm::uvec4(_traceMaxDepth,_traceBaseSeed,_traceMaterialModel,_tracePortalLimit);
+    pc.settings.y=float(_traceTriangles.size()); pc.settings.z=float(_traceSettings.debugView);
+    pc.sampling=glm::uvec4(_traceSettings.maxDepth,_traceSettings.baseSeed,_traceSettings.materialModel,_traceSettings.portalLimit);
     uint64_t hash=1469598103934665603ull;
     auto append=[&](const void* data,size_t bytes) {auto p=static_cast<const uint8_t*>(data); for(size_t i=0;i<bytes;++i) {hash^=p[i];hash*=1099511628211ull;}};
     append(&pc.origin,64); append(&_drawExtent,sizeof(_drawExtent)); append(&renderScale,sizeof(renderScale));
@@ -122,7 +122,7 @@ void VulkanEngine::draw_path_trace(VkCommandBuffer cmd) {
     }
     _traceWasActive=true;
     pc.control.z=_traceSamples++;
-    pc.origin.w=std::exp2(_traceExposure);
+    pc.origin.w=std::exp2(_traceSettings.exposure);
     const uint32_t slot=uint32_t(_frameNumber%FRAME_OVERLAP);
     if(_traceTimestampPool) {
         if(_traceTimingWritten[slot]) {
@@ -157,20 +157,20 @@ void VulkanEngine::draw_path_trace_ui() {
         _rendererMode=(_traceSupported&&mode==1)?RendererMode::SoftwarePathTrace:RendererMode::Raster;
     ImGui::TextWrapped("%s",_traceStatus.c_str());
     if(_rendererMode==RendererMode::SoftwarePathTrace) {
-        ImGui::Combo("Trace view",&_traceDebugView,"Geometric normal\0Shading normal\0Distance\0Albedo\0Material ID\0Node visits\0Triangle tests\0One noisy sample\0Accumulated radiance\0Nonfinite / traversal errors\0Direct radiance\0Indirect radiance\0Portal traversals\0Portal limit\0");
-        ImGui::SliderInt("Surface scattering events",&_traceMaxDepth,1,4);
-        ImGui::InputInt("Base seed",&_traceBaseSeed);
-        ImGui::Combo("Material model",&_traceMaterialModel,"Lambertian reference\0GGX + dielectric\0");
-        ImGui::SliderFloat("Exposure (EV)",&_traceExposure,-6,6);
-        bool edited=ImGui::ColorEdit3("Reference sun radiance",&_traceLighting.sunRadiance.x,ImGuiColorEditFlags_Float|ImGuiColorEditFlags_HDR);
-        edited|=ImGui::SliderFloat("Environment intensity",&_traceLighting.environment.x,0,4);
-        bool black=_traceLighting.environment.y>0.5f;
-        if(ImGui::Checkbox("Black environment",&black)) {edited=true;_traceLighting.environment.y=black?1.f:0.f;}
+        ImGui::Combo("Trace view",&_traceSettings.debugView,"Geometric normal\0Shading normal\0Distance\0Albedo\0Material ID\0Node visits\0Triangle tests\0One noisy sample\0Accumulated radiance\0Nonfinite / traversal errors\0Direct radiance\0Indirect radiance\0Portal traversals\0Portal limit\0");
+        ImGui::SliderInt("Surface scattering events",&_traceSettings.maxDepth,1,4);
+        ImGui::InputInt("Base seed",&_traceSettings.baseSeed);
+        ImGui::Combo("Material model",&_traceSettings.materialModel,"Lambertian reference\0GGX + dielectric\0");
+        ImGui::SliderFloat("Exposure (EV)",&_traceSettings.exposure,-6,6);
+        bool edited=ImGui::ColorEdit3("Reference sun radiance",&_traceSettings.lighting.sunRadiance.x,ImGuiColorEditFlags_Float|ImGuiColorEditFlags_HDR);
+        edited|=ImGui::SliderFloat("Environment intensity",&_traceSettings.lighting.environment.x,0,4);
+        bool black=_traceSettings.lighting.environment.y>0.5f;
+        if(ImGui::Checkbox("Black environment",&black)) {edited=true;_traceSettings.lighting.environment.y=black?1.f:0.f;}
         if(edited) _sceneDocument.dirty=true;
         if(ImGui::Button("Reset accumulation")) _traceWasActive=false;
         ImGui::Text("Samples %u | GPU %.2f ms (max %.2f)",_traceSamples,_traceGpuMs,_traceMaxGpuMs);
         ImGui::Text("Triangles %zu | BVH nodes %zu | revision %llu",_traceTriangles.size(),_traceNodes.size(),_traceSceneRevision);
-        ImGui::SliderInt("Portal traversals per path",&_tracePortalLimit,0,4);
+        ImGui::SliderInt("Portal traversals per path",&_traceSettings.portalLimit,0,4);
         ImGui::Text("Portal apertures %zu (same scene)",_tracePortals.size());
         ImGui::TextWrapped("Portal limit terminates the path in black. Unlinked apertures are marked as invalid.");
     }
@@ -182,11 +182,11 @@ void VulkanEngine::validate_path_trace() {
     update_trace_scene();
     const VkExtent2D extent{17,13};
     Camera camera; camera.yaw=0.37f; camera.pitch=-0.21f;
-    if(const char* depth=std::getenv("MIRABILIS_TEST_DEPTH")) _traceMaxDepth=std::clamp(std::atoi(depth),1,4);
-    if(const char* limit=std::getenv("MIRABILIS_TEST_PORTAL_LIMIT")) _tracePortalLimit=std::clamp(std::atoi(limit),0,4);
+    if(const char* depth=std::getenv("MIRABILIS_TEST_DEPTH")) _traceSettings.maxDepth=std::clamp(std::atoi(depth),1,4);
+    if(const char* limit=std::getenv("MIRABILIS_TEST_PORTAL_LIMIT")) _traceSettings.portalLimit=std::clamp(std::atoi(limit),0,4);
     for (uint32_t diagnostic=1;diagnostic<=12;++diagnostic) {
     auto pc=camera_push(camera,extent); pc.control.w=diagnostic; pc.settings.y=float(_traceTriangles.size());
-    pc.sampling=glm::uvec4(2,1337,1,_tracePortalLimit);
+    pc.sampling=glm::uvec4(2,1337,1,_traceSettings.portalLimit);
     if(diagnostic==4) {
         _drawExtent=extent; update_scene(0);
         pc=camera_push(render_camera(),extent); pc.control.w=4; pc.settings.y=float(_traceTriangles.size());
@@ -270,7 +270,7 @@ void VulkanEngine::validate_path_trace() {
                     if(t>0.0001f&&t<=distance+0.0001f&&std::abs(glm::dot(local,glm::vec3(portal.rightWidth)))<=portal.rightWidth.w&&std::abs(glm::dot(local,glm::vec3(portal.upHeight)))<=portal.upHeight.w) {selected=int(i);distance=t;}
                 }
                 if(selected<0) break;
-                if(count>=uint32_t(_tracePortalLimit)) {limited=true;break;}
+                if(count>=uint32_t(_traceSettings.portalLimit)) {limited=true;break;}
                 const auto& portal=_tracePortals[selected];++count;
                 origin=glm::vec3(portal.transfer*glm::vec4(origin+direction*distance,1));
                 direction=glm::normalize(glm::vec3(portal.transfer*glm::vec4(direction,0)));origin+=direction*0.0004f;
@@ -388,7 +388,7 @@ void VulkanEngine::update_trace_scene() {
     uint64_t drawHash=1469598103934665603ull;
     auto append=[&](const void* data,size_t bytes) {auto p=static_cast<const uint8_t*>(data);for(size_t i=0;i<bytes;++i) {drawHash^=p[i];drawHash*=1099511628211ull;}};
     append(&_shadow.sunlightDirection,sizeof(_shadow.sunlightDirection));
-    append(&_traceLighting.sunRadiance,2*sizeof(glm::vec4));
+    append(&_traceSettings.lighting.sunRadiance,2*sizeof(glm::vec4));
     append(portals.data(),portals.size()*sizeof(TracePortal));
     for(const auto& draw:worldDrawContext.OpaqueSurfaces) {
         append(&draw.transform,sizeof(draw.transform)); append(&draw.vertexBufferAddress,sizeof(draw.vertexBufferAddress));
@@ -441,8 +441,8 @@ void VulkanEngine::update_trace_scene() {
     }
     uint64_t hash=1469598103934665603ull;
     const auto hashBytes=[&](const void* data,size_t size) { auto p=static_cast<const unsigned char*>(data); for(size_t i=0;i<size;++i) { hash^=p[i]; hash*=1099511628211ull; } };
-    _traceLighting.sunDirection=glm::vec4(glm::normalize(glm::dot(_shadow.sunlightDirection,_shadow.sunlightDirection)>1e-10f?_shadow.sunlightDirection:glm::vec3(0,1,0)),0);
-    hashBytes(&_traceLighting.sunDirection,3*sizeof(glm::vec4));
+    _traceSettings.lighting.sunDirection=glm::vec4(glm::normalize(glm::dot(_shadow.sunlightDirection,_shadow.sunlightDirection)>1e-10f?_shadow.sunlightDirection:glm::vec3(0,1,0)),0);
+    hashBytes(&_traceSettings.lighting.sunDirection,3*sizeof(glm::vec4));
     hashBytes(triangles.data(),triangles.size()*sizeof(TraceTriangle)); hashBytes(materials.data(),materials.size()*sizeof(TraceMaterial));
     hashBytes(texels.data(),texels.size()*sizeof(uint32_t));
     hashBytes(portals.data(),portals.size()*sizeof(TracePortal));
@@ -452,14 +452,14 @@ void VulkanEngine::update_trace_scene() {
     _traceTriangles=std::move(triangles); _traceMaterials=std::move(materials);
     _traceTexels=std::move(texels);
     _tracePortals=std::move(portals);
-    _traceLighting.counts.y=uint32_t(_tracePortals.size());
+    _traceSettings.lighting.counts.y=uint32_t(_tracePortals.size());
     _traceNodes=build_trace_bvh(_traceTriangles);
     _traceEmitters.clear();
     for(uint32_t i=0;i<_traceTriangles.size();++i) {
         const auto& m=_traceMaterials[_traceTriangles[i].meta.x];
         if(glm::length(glm::vec3(m.emission))>0) _traceEmitters.push_back(i);
     }
-    _traceLighting.counts.x=uint32_t(_traceEmitters.size());
+    _traceSettings.lighting.counts.x=uint32_t(_traceEmitters.size());
     if(std::getenv("MIRABILIS_TEST_FRAMES")) validate_trace_bvh(_traceTriangles,_traceNodes);
     auto upload=[&](AllocatedBuffer& buffer,const void* data,size_t bytes,size_t minimum) {
         destroy_buffer(buffer); buffer=create_buffer(std::max(bytes,minimum),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
@@ -475,7 +475,7 @@ void VulkanEngine::update_trace_scene() {
     upload(_tracePortalBuffer,_tracePortals.data(),_tracePortals.size()*sizeof(TracePortal),sizeof(TracePortal));
     destroy_buffer(_traceLightBuffer);
     _traceLightBuffer=create_buffer(sizeof(TraceLighting),VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
-    std::memcpy(_traceLightBuffer.info.pMappedData,&_traceLighting,sizeof(_traceLighting));
+    std::memcpy(_traceLightBuffer.info.pMappedData,&_traceSettings.lighting,sizeof(_traceSettings.lighting));
     vmaFlushAllocation(_allocator,_traceLightBuffer.allocation,0,VK_WHOLE_SIZE);
     DescriptorWriter writer;
     writer.write_buffer(6,_traceLightBuffer.buffer,sizeof(TraceLighting),0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
@@ -543,7 +543,7 @@ void VulkanEngine::capture_path_trace(const char* filename) {
             glm::vec3 value(values[size_t(y)*_drawExtent.width+x]);
             if(!std::isfinite(value.x)||!std::isfinite(value.y)||!std::isfinite(value.z)) {++invalid;value=glm::vec3(0);}
             sum+=(value.x+value.y+value.z)/3;
-            value=glm::max(value,glm::vec3(0))*std::exp2(_traceExposure);
+            value=glm::max(value,glm::vec3(0))*std::exp2(_traceSettings.exposure);
             value=value/(1.f+value);
             for(int c=0;c<3;++c) value[c]=value[c]<=0.0031308f?12.92f*value[c]:1.055f*std::pow(value[c],1.f/2.4f)-0.055f;
             for(int c=2;c>=0;--c) bitmap.put(char(glm::clamp(value[c]*255.f+0.5f,0.f,255.f)));
@@ -551,7 +551,7 @@ void VulkanEngine::capture_path_trace(const char* filename) {
         for(uint32_t pad=_drawExtent.width*3;pad<stride;++pad) bitmap.put(0);
     }
 
-    fmt::print("GI capture {}: {}x{}, depth={}, seed={}, linear mean={}, nonfinite={}\n",filename,_drawExtent.width,_drawExtent.height,_traceMaxDepth,_traceBaseSeed,sum/pixels,invalid);
+    fmt::print("GI capture {}: {}x{}, depth={}, seed={}, linear mean={}, nonfinite={}\n",filename,_drawExtent.width,_drawExtent.height,_traceSettings.maxDepth,_traceSettings.baseSeed,sum/pixels,invalid);
     VkPhysicalDeviceProperties properties{}; vkGetPhysicalDeviceProperties(_chosenGPU,&properties);
     std::ofstream metadata(std::string(filename)+".txt");
     metadata<<"GPU: "<<properties.deviceName<<"\nDriver integer: "<<properties.driverVersion<<"\nVulkan API integer: "<<properties.apiVersion
@@ -563,14 +563,14 @@ void VulkanEngine::capture_path_trace(const char* filename) {
 #endif
         <<"\nScene: "<<_sceneDocument.activeFilename<<"\nTrace revision: "<<_traceSceneRevision<<"\nScene hash: "<<_traceSceneHash
         <<"\nDimensions: "<<_drawExtent.width<<" x "<<_drawExtent.height<<"\nRender scale: "<<renderScale<<"\nSamples: "<<_traceSamples
-        <<"\nSeed: "<<_traceBaseSeed<<"\nDepth: "<<_traceMaxDepth<<"\nExposure EV: "<<_traceExposure<<"\nMax GPU dispatch ms: "<<_traceMaxGpuMs
-        <<"\nMaterial model: "<<_traceMaterialModel<<"\nPortal limit: "<<_tracePortalLimit<<"\nPortal apertures: "<<_tracePortals.size()
+        <<"\nSeed: "<<_traceSettings.baseSeed<<"\nDepth: "<<_traceSettings.maxDepth<<"\nExposure EV: "<<_traceSettings.exposure<<"\nMax GPU dispatch ms: "<<_traceMaxGpuMs
+        <<"\nMaterial model: "<<_traceSettings.materialModel<<"\nPortal limit: "<<_traceSettings.portalLimit<<"\nPortal apertures: "<<_tracePortals.size()
         <<"\nSource revision/state: "<<(std::getenv("MIRABILIS_SOURCE_STATE")?std::getenv("MIRABILIS_SOURCE_STATE"):"unrecorded; use scripts/validate_software_trace.ps1 for source manifest")
         <<"\nCamera: "<<render_camera().position.x<<","<<render_camera().position.y<<","<<render_camera().position.z
         <<" pitch="<<render_camera().pitch<<" yaw="<<render_camera().yaw<<"\n";
     fmt::print("GI capture samples={} max GPU dispatch={} ms\n",_traceSamples,_traceMaxGpuMs);
-    metadata<<"Sun radiance: "<<_traceLighting.sunRadiance.x<<","<<_traceLighting.sunRadiance.y<<","<<_traceLighting.sunRadiance.z
-        <<"\nEnvironment intensity: "<<_traceLighting.environment.x<<" black="<<(_traceLighting.environment.y>0.5f)
+    metadata<<"Sun radiance: "<<_traceSettings.lighting.sunRadiance.x<<","<<_traceSettings.lighting.sunRadiance.y<<","<<_traceSettings.lighting.sunRadiance.z
+        <<"\nEnvironment intensity: "<<_traceSettings.lighting.environment.x<<" black="<<(_traceSettings.lighting.environment.y>0.5f)
         <<"\nEmitter triangles: "<<_traceEmitters.size()<<"\nDirect mean: "<<directSum/pixels<<"\nIndirect mean: "<<indirectSum/pixels<<"\n";
     if(std::getenv("MIRABILIS_EXPECT_BLACK")&&sum!=0) std::abort();
     if(std::getenv("MIRABILIS_EXPECT_LIT")&&(directSum<=0||indirectSum<=0)) std::abort();

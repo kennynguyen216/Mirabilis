@@ -520,7 +520,7 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
         occlusionFraction.y / static_cast<float>(_drawExtent.height),
         occlusionFraction.x - 0.5f / occlusionAllocation.x,
         occlusionFraction.y - 0.5f / occlusionAllocation.y);
-    data.ssgiFallbackSettings = _traceLighting.environment;
+    data.ssgiFallbackSettings = _traceSettings.lighting.environment;
     // Ambient and SSGI are two answers to one question, so how they divide it
     // travels with every camera rather than being decided in the shader.
     data.indirectSettings = glm::vec4(

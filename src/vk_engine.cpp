@@ -907,10 +907,10 @@ void VulkanEngine::run(){
         const bool testInvalidation=frameLimit&&SDL_getenv("MIRABILIS_TEST_INVALIDATION");
         const int testFrame=_frameNumber;
         if(testInvalidation) {
-            if(testFrame==2) _traceExposure+=1;
-            if(testFrame==3) ++_traceBaseSeed;
+            if(testFrame==2) _traceSettings.exposure+=1;
+            if(testFrame==3) ++_traceSettings.baseSeed;
             if(testFrame==4) _editorCamera.position.x+=0.1f;
-            if(testFrame==5) _traceMaxDepth=1;
+            if(testFrame==5) _traceSettings.maxDepth=1;
             if(testFrame>=6&&testFrame<=8) {
                 for(auto& object:_scene.objects) if(object.alive&&object.visible&&object.material.enabled) {
                     if(testFrame==6) object.material.colorTint.r*=0.5f;
@@ -921,10 +921,10 @@ void VulkanEngine::run(){
             }
             if(testFrame==9) renderScale=0.5f;
             if(testFrame==10) _traceWasActive=false;
-            if(testFrame==11) _traceLighting.sunRadiance.x+=1;
-            if(testFrame==12) _traceLighting.environment.x+=0.25f;
-            if(testFrame==13) _traceMaterialModel=1-_traceMaterialModel;
-            if(testFrame==14) _tracePortalLimit=1;
+            if(testFrame==11) _traceSettings.lighting.sunRadiance.x+=1;
+            if(testFrame==12) _traceSettings.lighting.environment.x+=0.25f;
+            if(testFrame==13) _traceSettings.materialModel=1-_traceSettings.materialModel;
+            if(testFrame==14) _traceSettings.portalLimit=1;
             if(testFrame==15) _shadow.sunlightDirection.x+=0.25f;
             if(testFrame==16) {
                 for(auto& object:_scene.objects) if(object.alive&&object.visible&&object.material.enabled) {
