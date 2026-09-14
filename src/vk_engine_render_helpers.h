@@ -48,6 +48,7 @@ public:
     }
 
     VkShaderModule get() const { return _module; }
+    operator VkShaderModule() const { return _module; }
 
 private:
     void reset()

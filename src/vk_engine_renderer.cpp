@@ -547,18 +547,17 @@ void VulkanEngine::init_background_pipelines()
     computeLayout.pPushConstantRanges = &pushConstant;
     computeLayout.pushConstantRangeCount = 1;
 
-    VkShaderModule gradientShader;
-	if (!vkutil::load_shader_module("../../shaders/gradient_color.comp.spv", _device, &gradientShader))
+    ScopedShaderModule gradientShader(_device);
+	if (!gradientShader.load("../../shaders/gradient_color.comp.spv"))
 	{
 		fmt::print("Error loading gradient_color compute shader\n");
 		return;
 	}
 
-    VkShaderModule skyShader;
-	if (!vkutil::load_shader_module("../../shaders/sky.comp.spv", _device, &skyShader))
+    ScopedShaderModule skyShader(_device);
+	if (!skyShader.load("../../shaders/sky.comp.spv"))
 	{
 		fmt::print("Error loading sky compute shader\n");
-		vkDestroyShaderModule(_device, gradientShader, nullptr);
 		return;
 	}
 
@@ -596,9 +595,6 @@ void VulkanEngine::init_background_pipelines()
     backgroundEffects.clear();
     backgroundEffects.push_back(gradient);
     backgroundEffects.push_back(sky);
-
-    vkDestroyShaderModule(_device, gradientShader, nullptr);
-    vkDestroyShaderModule(_device, skyShader, nullptr);
 
 	_mainDeletionQueue.push_function([this, gradientPipeline = gradient.pipeline, skyPipeline = sky.pipeline]() {
 		vkDestroyPipeline(_device, gradientPipeline, nullptr);

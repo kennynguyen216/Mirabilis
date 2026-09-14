@@ -1,4 +1,5 @@
 #include "vk_engine.h"
+#include "vk_engine_render_helpers.h"
 
 #include <vk_initializers.h>
 #include <vk_loader.h>
@@ -6,72 +7,38 @@
 
 void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
 {
-    VkShaderModule fragmentShader = VK_NULL_HANDLE;
-    VkShaderModule vertexShader = VK_NULL_HANDLE;
-    VkShaderModule portalMaskVertexShader = VK_NULL_HANDLE;
-    VkShaderModule portalViewVertexShader = VK_NULL_HANDLE;
-    VkShaderModule maskFragmentShader = VK_NULL_HANDLE;
-    VkShaderModule portalViewFragmentShader = VK_NULL_HANDLE;
-    VkShaderModule portalViewMaskFragmentShader = VK_NULL_HANDLE;
-    VkShaderModule portalCompositeFragmentShader = VK_NULL_HANDLE;
-    VkShaderModule portalMaskFragmentShader = VK_NULL_HANDLE;
-    VkShaderModule portalSkyVertexShader = VK_NULL_HANDLE;
-    VkShaderModule portalSkyFragmentShader = VK_NULL_HANDLE;
-    VkShaderModule colliderDebugVertexShader = VK_NULL_HANDLE;
-    VkShaderModule colliderDebugFragmentShader = VK_NULL_HANDLE;
-    if (!vkutil::load_shader_module("../../shaders/mesh.frag.spv", engine->_device, &fragmentShader) ||
-        !vkutil::load_shader_module("../../shaders/mesh.vert.spv", engine->_device, &vertexShader) ||
-        !vkutil::load_shader_module("../../shaders/portal_mask.vert.spv", engine->_device, &portalMaskVertexShader) ||
-        !vkutil::load_shader_module("../../shaders/portal_view.vert.spv", engine->_device, &portalViewVertexShader) ||
-        !vkutil::load_shader_module("../../shaders/mesh_mask.frag.spv", engine->_device, &maskFragmentShader) ||
-        !vkutil::load_shader_module("../../shaders/portal_view.frag.spv", engine->_device, &portalViewFragmentShader) ||
-        !vkutil::load_shader_module("../../shaders/portal_view_mask.frag.spv", engine->_device, &portalViewMaskFragmentShader) ||
-        !vkutil::load_shader_module("../../shaders/portal_composite.frag.spv", engine->_device, &portalCompositeFragmentShader) ||
-        !vkutil::load_shader_module("../../shaders/portal_mask_output.frag.spv", engine->_device, &portalMaskFragmentShader) ||
-        !vkutil::load_shader_module("../../shaders/portal_sky.vert.spv", engine->_device, &portalSkyVertexShader) ||
-        !vkutil::load_shader_module("../../shaders/portal_sky.frag.spv", engine->_device, &portalSkyFragmentShader) ||
-        !vkutil::load_shader_module("../../shaders/collider_debug.vert.spv", engine->_device, &colliderDebugVertexShader) ||
-        !vkutil::load_shader_module("../../shaders/collider_debug.frag.spv", engine->_device, &colliderDebugFragmentShader)) {
+    ScopedShaderModule fragmentShader(engine->_device);
+    ScopedShaderModule vertexShader(engine->_device);
+    ScopedShaderModule portalMaskVertexShader(engine->_device);
+    ScopedShaderModule portalViewVertexShader(engine->_device);
+    ScopedShaderModule maskFragmentShader(engine->_device);
+    ScopedShaderModule portalViewFragmentShader(engine->_device);
+    ScopedShaderModule portalViewMaskFragmentShader(engine->_device);
+    ScopedShaderModule portalCompositeFragmentShader(engine->_device);
+    ScopedShaderModule portalMaskFragmentShader(engine->_device);
+    ScopedShaderModule portalSkyVertexShader(engine->_device);
+    ScopedShaderModule portalSkyFragmentShader(engine->_device);
+    ScopedShaderModule colliderDebugVertexShader(engine->_device);
+    ScopedShaderModule colliderDebugFragmentShader(engine->_device);
+    if (!fragmentShader.load("../../shaders/mesh.frag.spv") ||
+        !vertexShader.load("../../shaders/mesh.vert.spv") ||
+        !portalMaskVertexShader.load("../../shaders/portal_mask.vert.spv") ||
+        !portalViewVertexShader.load("../../shaders/portal_view.vert.spv") ||
+        !maskFragmentShader.load("../../shaders/mesh_mask.frag.spv") ||
+        !portalViewFragmentShader.load("../../shaders/portal_view.frag.spv") ||
+        !portalViewMaskFragmentShader.load(
+            "../../shaders/portal_view_mask.frag.spv") ||
+        !portalCompositeFragmentShader.load(
+            "../../shaders/portal_composite.frag.spv") ||
+        !portalMaskFragmentShader.load(
+            "../../shaders/portal_mask_output.frag.spv") ||
+        !portalSkyVertexShader.load("../../shaders/portal_sky.vert.spv") ||
+        !portalSkyFragmentShader.load("../../shaders/portal_sky.frag.spv") ||
+        !colliderDebugVertexShader.load(
+            "../../shaders/collider_debug.vert.spv") ||
+        !colliderDebugFragmentShader.load(
+            "../../shaders/collider_debug.frag.spv")) {
         fmt::print("Error loading material shaders\n");
-        if (fragmentShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(engine->_device, fragmentShader, nullptr);
-        }
-        if (vertexShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(engine->_device, vertexShader, nullptr);
-        }
-        if (portalMaskVertexShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(engine->_device, portalMaskVertexShader, nullptr);
-        }
-        if (portalViewVertexShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(engine->_device, portalViewVertexShader, nullptr);
-        }
-        if (maskFragmentShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(engine->_device, maskFragmentShader, nullptr);
-        }
-        if (portalViewFragmentShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(engine->_device, portalViewFragmentShader, nullptr);
-        }
-        if (portalViewMaskFragmentShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(engine->_device, portalViewMaskFragmentShader, nullptr);
-        }
-        if (portalCompositeFragmentShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(engine->_device, portalCompositeFragmentShader, nullptr);
-        }
-        if (portalMaskFragmentShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(engine->_device, portalMaskFragmentShader, nullptr);
-        }
-        if (portalSkyVertexShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(engine->_device, portalSkyVertexShader, nullptr);
-        }
-        if (portalSkyFragmentShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(engine->_device, portalSkyFragmentShader, nullptr);
-        }
-        if (colliderDebugVertexShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(engine->_device, colliderDebugVertexShader, nullptr);
-        }
-        if (colliderDebugFragmentShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(engine->_device, colliderDebugFragmentShader, nullptr);
-        }
         return;
     }
 
@@ -256,20 +223,6 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     colliderDebugBuilder.set_stencil_format(engine->_depthImage.imageFormat);
     engine->_colliderDebugPipeline.pipeline =
         colliderDebugBuilder.build_pipeline(engine->_device);
-
-    vkDestroyShaderModule(engine->_device, fragmentShader, nullptr);
-    vkDestroyShaderModule(engine->_device, maskFragmentShader, nullptr);
-    vkDestroyShaderModule(engine->_device, vertexShader, nullptr);
-    vkDestroyShaderModule(engine->_device, portalMaskVertexShader, nullptr);
-    vkDestroyShaderModule(engine->_device, portalViewVertexShader, nullptr);
-    vkDestroyShaderModule(engine->_device, portalViewFragmentShader, nullptr);
-    vkDestroyShaderModule(engine->_device, portalViewMaskFragmentShader, nullptr);
-    vkDestroyShaderModule(engine->_device, portalCompositeFragmentShader, nullptr);
-    vkDestroyShaderModule(engine->_device, portalMaskFragmentShader, nullptr);
-    vkDestroyShaderModule(engine->_device, portalSkyVertexShader, nullptr);
-    vkDestroyShaderModule(engine->_device, portalSkyFragmentShader, nullptr);
-    vkDestroyShaderModule(engine->_device, colliderDebugVertexShader, nullptr);
-    vkDestroyShaderModule(engine->_device, colliderDebugFragmentShader, nullptr);
 
     engine->_mainDeletionQueue.push_function([this, engine]() {
         vkDestroyPipeline(engine->_device, opaquePipeline.pipeline, nullptr);

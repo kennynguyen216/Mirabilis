@@ -1,4 +1,5 @@
 #include "vk_engine.h"
+#include "vk_engine_render_helpers.h"
 #include "vk_images.h"
 #include "vk_pipelines.h"
 #include "imgui.h"
@@ -42,8 +43,8 @@ void VulkanEngine::init_path_trace() {
     if (!(format.optimalTilingFeatures&VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) || !(queues[_graphicsQueueFamily].queueFlags&VK_QUEUE_COMPUTE_BIT)) {
         _traceStatus="Software tracing unavailable: RGBA32F storage or compute queue unsupported; using Raster."; return;
     }
-    VkShaderModule shader{};
-    if (!vkutil::load_shader_module("../../shaders/path_trace.comp.spv",_device,&shader)) {
+    ScopedShaderModule shader(_device);
+    if (!shader.load("../../shaders/path_trace.comp.spv")) {
         _traceStatus="Software shader missing; build Shaders. Using Raster."; return;
     }
     DescriptorLayoutBuilder builder;
@@ -66,9 +67,8 @@ void VulkanEngine::init_path_trace() {
     VK_CHECK(vkCreatePipelineLayout(_device,&layout,nullptr,&_traceLayout));
     VkComputePipelineCreateInfo pipeline{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     pipeline.layout=_traceLayout;
-    pipeline.stage={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,nullptr,0,VK_SHADER_STAGE_COMPUTE_BIT,shader,"main",nullptr};
+    pipeline.stage={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,nullptr,0,VK_SHADER_STAGE_COMPUTE_BIT,shader.get(),"main",nullptr};
     const VkResult result=vkCreateComputePipelines(_device,VK_NULL_HANDLE,1,&pipeline,nullptr,&_tracePipeline);
-    vkDestroyShaderModule(_device,shader,nullptr);
     if (result!=VK_SUCCESS) { _traceStatus="Software pipeline unavailable; using Raster."; return; }
     _traceAccum=create_image(_drawImage.imageExtent,VK_FORMAT_R32G32B32A32_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     _traceDirect=create_image(_drawImage.imageExtent,VK_FORMAT_R32G32B32A32_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
