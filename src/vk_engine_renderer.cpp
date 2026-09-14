@@ -1,4 +1,5 @@
 #include "vk_engine.h"
+#include "vk_engine_render_helpers.h"
 
 #include <algorithm>
 #include <array>
@@ -17,14 +18,6 @@
 #include <vk_pipelines.h>
 
 namespace {
-
-glm::vec3 normalized_sun_direction(const glm::vec3& direction)
-{
-    if (glm::dot(direction, direction) < 0.000001f) {
-        return glm::normalize(glm::vec3(0.0f, 1.0f, 0.5f));
-    }
-    return glm::normalize(direction);
-}
 
 void set_previous_world_rows(
     GPUDrawPushConstants& pushConstants,
