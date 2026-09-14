@@ -458,6 +458,91 @@ void VulkanEngine::save_ao_preferences() const
     if (!file) fmt::print("Could not save ambient occlusion preferences\n");
 }
 
+namespace {
+
+bool read_saved_material(
+    simdjson::dom::object jsonObject,
+    SavedSceneObject& saved,
+    const std::filesystem::path& scenePath)
+{
+    simdjson::dom::element materialTint;
+    simdjson::dom::element uvScale;
+    std::string_view baseColorTexture;
+
+    bool materialEnabled = false;
+    const simdjson::error_code materialResult =
+        jsonObject["materialEnabled"].get_bool().get(materialEnabled);
+    if (materialResult == simdjson::NO_SUCH_FIELD) {
+        return true;
+    }
+    if (materialResult != simdjson::SUCCESS) {
+        fmt::print("Invalid material flag in editor scene: {}\n", scenePath.string());
+        return false;
+    }
+
+    double metallic = 0.0;
+    double roughness = 0.8;
+    if (jsonObject["baseColorTexture"].get_string().get(baseColorTexture) ||
+        jsonObject["materialTint"].get(materialTint) ||
+        jsonObject["uvScale"].get(uvScale) ||
+        !read_json_vec4(materialTint, saved.material.colorTint) ||
+        !read_json_vec2(uvScale, saved.material.uvScale) ||
+        jsonObject["materialMetallic"].get_double().get(metallic) ||
+        jsonObject["materialRoughness"].get_double().get(roughness) ||
+        saved.material.uvScale.x <= 0.0f ||
+        saved.material.uvScale.y <= 0.0f ||
+        metallic < 0.0 || metallic > 1.0 ||
+        roughness < 0.0 || roughness > 1.0) {
+        fmt::print("Invalid material in editor scene: {}\n", scenePath.string());
+        return false;
+    }
+
+    saved.material.enabled = materialEnabled;
+    saved.material.baseColorTexturePath = baseColorTexture;
+    saved.material.metallic = static_cast<float>(metallic);
+    saved.material.roughness = static_cast<float>(roughness);
+    double transmission = 0.0;
+    double ior = 1.5;
+    if (jsonObject["transmission"].get_double().get(transmission) ==
+            simdjson::SUCCESS &&
+        std::isfinite(transmission)) {
+        saved.material.transmission =
+            float(std::clamp(transmission, 0.0, 1.0));
+    }
+    if (jsonObject["ior"].get_double().get(ior) == simdjson::SUCCESS &&
+        std::isfinite(ior)) {
+        saved.material.ior = float(std::clamp(ior, 1.0, 3.0));
+    }
+    simdjson::dom::element emission;
+    if (jsonObject["emissionColor"].get(emission) == simdjson::SUCCESS) {
+        if (!read_json_vec3(emission, saved.material.emissionColor)) {
+            return false;
+        }
+        saved.material.emissionColor = glm::clamp(
+            saved.material.emissionColor, glm::vec3(0), glm::vec3(10000));
+    }
+    double strength = 0.0;
+    if (jsonObject["emissionStrength"].get_double().get(strength) ==
+            simdjson::SUCCESS &&
+        std::isfinite(strength)) {
+        saved.material.emissionStrength =
+            float(std::clamp(strength, 0.0, 10000.0));
+    }
+    bool debugChecker = false;
+    const simdjson::error_code checkerResult =
+        jsonObject["materialDebugChecker"].get_bool().get(debugChecker);
+    if (checkerResult != simdjson::SUCCESS &&
+        checkerResult != simdjson::NO_SUCH_FIELD) {
+        fmt::print("Invalid checker material flag in editor scene: {}\n",
+            scenePath.string());
+        return false;
+    }
+    saved.material.debugChecker = debugChecker;
+    return true;
+}
+
+} // namespace
+
 bool VulkanEngine::load_editor_scene()
 {
     const std::filesystem::path scenePath = editor_scene_path(_activeSceneFilename);
@@ -651,13 +736,10 @@ bool VulkanEngine::load_editor_scene()
         simdjson::dom::element scale;
         simdjson::dom::element colliderCenter;
         simdjson::dom::element colliderHalfExtents;
-        simdjson::dom::element materialTint;
-        simdjson::dom::element uvScale;
         std::string_view name;
         std::string_view assetName;
         std::string_view timeTrialRoleName;
         std::string_view modelPath;
-        std::string_view baseColorTexture;
         uint64_t id = 0;
         int64_t parent = -1;
         int64_t layer = 0;
@@ -736,55 +818,7 @@ bool VulkanEngine::load_editor_scene()
 
         // Material fields are optional so every scene saved before this
         // component existed remains loadable with its original defaults.
-        bool materialEnabled = false;
-        const simdjson::error_code materialResult =
-            jsonObject["materialEnabled"].get_bool().get(materialEnabled);
-        if (materialResult == simdjson::SUCCESS) {
-            double metallic = 0.0;
-            double roughness = 0.8;
-            if (jsonObject["baseColorTexture"].get_string().get(baseColorTexture) ||
-                jsonObject["materialTint"].get(materialTint) ||
-                jsonObject["uvScale"].get(uvScale) ||
-                !read_json_vec4(materialTint, saved.material.colorTint) ||
-                !read_json_vec2(uvScale, saved.material.uvScale) ||
-                jsonObject["materialMetallic"].get_double().get(metallic) ||
-                jsonObject["materialRoughness"].get_double().get(roughness) ||
-                saved.material.uvScale.x <= 0.0f ||
-                saved.material.uvScale.y <= 0.0f ||
-                metallic < 0.0 || metallic > 1.0 ||
-                roughness < 0.0 || roughness > 1.0) {
-                fmt::print("Invalid material in editor scene: {}\n", scenePath.string());
-                return false;
-            }
-            saved.material.enabled = materialEnabled;
-            saved.material.baseColorTexturePath = baseColorTexture;
-            saved.material.metallic = static_cast<float>(metallic);
-            saved.material.roughness = static_cast<float>(roughness);
-            double transmission=0,ior=1.5;
-            if(jsonObject["transmission"].get_double().get(transmission)==simdjson::SUCCESS&&std::isfinite(transmission))
-                saved.material.transmission=float(std::clamp(transmission,0.0,1.0));
-            if(jsonObject["ior"].get_double().get(ior)==simdjson::SUCCESS&&std::isfinite(ior))
-                saved.material.ior=float(std::clamp(ior,1.0,3.0));
-            simdjson::dom::element emission;
-            if(jsonObject["emissionColor"].get(emission)==simdjson::SUCCESS) {
-                if(!read_json_vec3(emission,saved.material.emissionColor)) return false;
-                saved.material.emissionColor=glm::clamp(saved.material.emissionColor,glm::vec3(0),glm::vec3(10000));
-            }
-            double strength=0;
-            if(jsonObject["emissionStrength"].get_double().get(strength)==simdjson::SUCCESS&&std::isfinite(strength))
-                saved.material.emissionStrength=float(std::clamp(strength,0.0,10000.0));
-            bool debugChecker = false;
-            const simdjson::error_code checkerResult =
-                jsonObject["materialDebugChecker"].get_bool().get(debugChecker);
-            if (checkerResult != simdjson::SUCCESS &&
-                checkerResult != simdjson::NO_SUCH_FIELD) {
-                fmt::print("Invalid checker material flag in editor scene: {}\n",
-                    scenePath.string());
-                return false;
-            }
-            saved.material.debugChecker = debugChecker;
-        } else if (materialResult != simdjson::NO_SUCH_FIELD) {
-            fmt::print("Invalid material flag in editor scene: {}\n", scenePath.string());
+        if (!read_saved_material(jsonObject, saved, scenePath)) {
             return false;
         }
         // Version 1 accidentally wrote Player Model even though its Player
