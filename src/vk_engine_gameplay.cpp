@@ -177,14 +177,14 @@ void VulkanEngine::respawn_player()
 
 void VulkanEngine::reset_time_trial()
 {
-    _timeTrialSeconds = 0.0f;
-    _timeTrialRunning = false;
-    _timeTrialFinished = false;
+    _timeTrial.seconds = 0.0f;
+    _timeTrial.running = false;
+    _timeTrial.finished = false;
     // Treat the next overlap as a fresh entry. This makes the editor's Reset
     // button useful even when the player is currently standing in the start
     // volume.
-    _playerInsideStartTrigger = false;
-    _playerInsideFinishTrigger = false;
+    _timeTrial.playerInsideStartTrigger = false;
+    _timeTrial.playerInsideFinishTrigger = false;
 }
 
 void VulkanEngine::update_time_trial(float deltaTime)
@@ -218,27 +218,27 @@ void VulkanEngine::update_time_trial(float deltaTime)
         }
     }
 
-    if (insideStart && !_playerInsideStartTrigger) {
-        _timeTrialSeconds = 0.0f;
-        _timeTrialRunning = true;
-        _timeTrialFinished = false;
+    if (insideStart && !_timeTrial.playerInsideStartTrigger) {
+        _timeTrial.seconds = 0.0f;
+        _timeTrial.running = true;
+        _timeTrial.finished = false;
     }
 
-    if (_timeTrialRunning) {
-        _timeTrialSeconds += deltaTime;
+    if (_timeTrial.running) {
+        _timeTrial.seconds += deltaTime;
     }
 
-    if (insideFinish && !_playerInsideFinishTrigger && _timeTrialRunning) {
-        _timeTrialRunning = false;
-        _timeTrialFinished = true;
-        if (_timeTrialBestSeconds < 0.0f ||
-            _timeTrialSeconds < _timeTrialBestSeconds) {
-            _timeTrialBestSeconds = _timeTrialSeconds;
+    if (insideFinish && !_timeTrial.playerInsideFinishTrigger && _timeTrial.running) {
+        _timeTrial.running = false;
+        _timeTrial.finished = true;
+        if (_timeTrial.bestSeconds < 0.0f ||
+            _timeTrial.seconds < _timeTrial.bestSeconds) {
+            _timeTrial.bestSeconds = _timeTrial.seconds;
         }
     }
 
-    _playerInsideStartTrigger = insideStart;
-    _playerInsideFinishTrigger = insideFinish;
+    _timeTrial.playerInsideStartTrigger = insideStart;
+    _timeTrial.playerInsideFinishTrigger = insideFinish;
 }
 
 bool VulkanEngine::try_traverse_portal(

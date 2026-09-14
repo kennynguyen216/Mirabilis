@@ -747,12 +747,15 @@ class VulkanEngine{
         // discontinuity, not something the player turned through.
         float _previousPlayerYaw{0.0f};
         float _targetPlayerYaw{0.0f};
-        float _timeTrialSeconds{0.0f};
-        float _timeTrialBestSeconds{-1.0f};
-        bool _timeTrialRunning{false};
-        bool _timeTrialFinished{false};
-        bool _playerInsideStartTrigger{false};
-        bool _playerInsideFinishTrigger{false};
+        struct TimeTrialState {
+            float seconds{0.0f};
+            float bestSeconds{-1.0f};
+            bool running{false};
+            bool finished{false};
+            bool playerInsideStartTrigger{false};
+            bool playerInsideFinishTrigger{false};
+        };
+        TimeTrialState _timeTrial;
         static constexpr float PhysicsDt = 1.0f / 120.0f;
         static constexpr int MaxPhysicsSteps = 8;
 

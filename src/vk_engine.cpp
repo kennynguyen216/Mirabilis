@@ -217,8 +217,8 @@ void VulkanEngine::set_editor_mode(bool enabled)
     }
     _editorCameraLooking = false;
     _physicsAccumulator = 0.0f;
-    _playerInsideStartTrigger = false;
-    _playerInsideFinishTrigger = false;
+    _timeTrial.playerInsideStartTrigger = false;
+    _timeTrial.playerInsideFinishTrigger = false;
 
     if (enabled) {
         // Start where the player was looking, then let the editor camera move

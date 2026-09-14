@@ -1801,26 +1801,26 @@ void VulkanEngine::draw_play_overlay(float horizontalSpeed)
         IM_COL32(150, 165, 185, 210),
         "LMB Blue | RMB Orange | R Retract | F1 Respawn | F2 No Clip");
 
-    const char* timerState = _timeTrialRunning
+    const char* timerState = _timeTrial.running
         ? "RUNNING"
-        : (_timeTrialFinished ? "FINISHED" : "READY");
+        : (_timeTrial.finished ? "FINISHED" : "READY");
     const std::string timerLabel = fmt::format(
         "{}  {:02}:{:06.3f}",
         timerState,
-        static_cast<int>(_timeTrialSeconds / 60.0f),
-        std::fmod(_timeTrialSeconds, 60.0f));
+        static_cast<int>(_timeTrial.seconds / 60.0f),
+        std::fmod(_timeTrial.seconds, 60.0f));
     const ImVec2 timerSize = ImGui::CalcTextSize(timerLabel.c_str());
     crosshair->AddText(
         ImVec2(center.x - timerSize.x * 0.5f, 26.0f),
-        _timeTrialFinished
+        _timeTrial.finished
             ? IM_COL32(100, 245, 155, 255)
             : IM_COL32(235, 240, 250, 255),
         timerLabel.c_str());
-    if (_timeTrialBestSeconds >= 0.0f) {
+    if (_timeTrial.bestSeconds >= 0.0f) {
         const std::string bestLabel = fmt::format(
             "BEST {:02}:{:06.3f}",
-            static_cast<int>(_timeTrialBestSeconds / 60.0f),
-            std::fmod(_timeTrialBestSeconds, 60.0f));
+            static_cast<int>(_timeTrial.bestSeconds / 60.0f),
+            std::fmod(_timeTrial.bestSeconds, 60.0f));
         const ImVec2 bestSize = ImGui::CalcTextSize(bestLabel.c_str());
         crosshair->AddText(
             ImVec2(center.x - bestSize.x * 0.5f, 48.0f),
