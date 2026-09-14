@@ -543,6 +543,7 @@ class VulkanEngine{
         void init_default_data();
         bool set_skybox(int selection);
         void update_skybox_descriptors();
+        void write_ssgi_trace_descriptors();
         void init_default_images_and_samplers();
         void init_default_meshes();
         void init_default_materials();

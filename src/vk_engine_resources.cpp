@@ -117,6 +117,11 @@ void VulkanEngine::init_default_images_and_samplers()
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     skyboxWriter.update_set(_device, _skyboxDescriptor);
 
+    write_ssgi_trace_descriptors();
+}
+
+void VulkanEngine::write_ssgi_trace_descriptors()
+{
     for (uint32_t writeIndex = 0; writeIndex < _ssgiDescriptors.size();
          ++writeIndex) {
         const uint32_t readIndex = 1u - writeIndex;
