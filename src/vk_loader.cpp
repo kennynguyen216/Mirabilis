@@ -58,6 +58,176 @@ VkSamplerMipmapMode extract_mipmap_mode(fastgltf::Filter filter)
     }
 }
 
+std::optional<fastgltf::Asset> parse_gltf_asset(
+    fastgltf::GltfDataBuffer& data,
+    const std::filesystem::path& filePath,
+    fastgltf::Options options)
+{
+    fastgltf::Parser parser{};
+    const auto fileType = fastgltf::determineGltfFileType(&data);
+
+    if (fileType == fastgltf::GltfType::glTF) {
+        auto load = parser.loadGLTF(&data, filePath.parent_path(), options);
+        if (!load) {
+            fmt::print(
+                "Failed to load GLTF: {}\n",
+                fastgltf::to_underlying(load.error()));
+            return {};
+        }
+        return std::move(load.get());
+    }
+    if (fileType == fastgltf::GltfType::GLB) {
+        auto load = parser.loadBinaryGLTF(&data, filePath.parent_path(), options);
+        if (!load) {
+            fmt::print(
+                "Failed to load GLB: {}\n",
+                fastgltf::to_underlying(load.error()));
+            return {};
+        }
+        return std::move(load.get());
+    }
+
+    fmt::print("Failed to determine GLTF container type\n");
+    return {};
+}
+
+void create_gltf_samplers(
+    VulkanEngine* engine,
+    LoadedGLTF& scene,
+    const fastgltf::Asset& gltf)
+{
+    for (const fastgltf::Sampler& sampler : gltf.samplers) {
+        VkSamplerCreateInfo samplerInfo = sampler_info(
+            extract_filter(
+                sampler.magFilter.value_or(fastgltf::Filter::Nearest)),
+            VK_SAMPLER_ADDRESS_MODE_REPEAT,
+            extract_mipmap_mode(
+                sampler.minFilter.value_or(fastgltf::Filter::Nearest)),
+            VK_LOD_CLAMP_NONE);
+        samplerInfo.minLod = 0.0f;
+        samplerInfo.minFilter = extract_filter(
+            sampler.minFilter.value_or(fastgltf::Filter::Nearest));
+
+        // Anisotropy only means anything for a minifying linear filter, which
+        // is exactly the oblique floor and arch case it exists for.  Leaving it
+        // off for NEAREST keeps an intentionally crisp texture crisp.
+        const float anisotropy = engine->material_anisotropy();
+        if (anisotropy > 1.0f && samplerInfo.minFilter == VK_FILTER_LINEAR) {
+            samplerInfo.anisotropyEnable = VK_TRUE;
+            samplerInfo.maxAnisotropy = anisotropy;
+        }
+
+        VkSampler newSampler = VK_NULL_HANDLE;
+        VK_CHECK(vkCreateSampler(
+            engine->_device, &samplerInfo, nullptr, &newSampler));
+        scene.samplers.push_back(newSampler);
+    }
+}
+
+void print_gltf_texture_summary(
+    const std::unordered_map<uint64_t, AllocatedImage>& imageCache,
+    VulkanEngine* engine,
+    size_t boundBaseColorCount,
+    size_t boundMetalRoughCount,
+    size_t materialCount,
+    const std::filesystem::path& filePath)
+{
+    size_t srgbCount = 0;
+    size_t linearCount = 0;
+    size_t estimatedBytes = 0;
+    for (const auto& [key, image] : imageCache) {
+        if (image.image == engine->_errorCheckerboardImage.image) {
+            continue;
+        }
+        (key & 1) ? ++srgbCount : ++linearCount;
+        const size_t baseLevel = size_t(image.imageExtent.width) *
+            image.imageExtent.height * 4;
+        // A full chain converges on 4/3 of the base level.
+        estimatedBytes += baseLevel + baseLevel / 3;
+    }
+    fmt::print(
+        "GLTF textures: {} sRGB + {} linear, ~{:.1f} MB with mips; "
+        "{}/{} materials bound base colour, {}/{} metallic-roughness ({})\n",
+        srgbCount,
+        linearCount,
+        double(estimatedBytes) / (1024.0 * 1024.0),
+        boundBaseColorCount,
+        materialCount,
+        boundMetalRoughCount,
+        materialCount,
+        filePath.filename().string());
+}
+
+void build_gltf_nodes(
+    LoadedGLTF& scene,
+    const fastgltf::Asset& gltf,
+    const std::vector<std::shared_ptr<MeshAsset>>& meshes)
+{
+    std::vector<std::shared_ptr<Node>> nodes;
+    nodes.reserve(gltf.nodes.size());
+    for (size_t nodeIndex = 0; nodeIndex < gltf.nodes.size(); ++nodeIndex) {
+        const fastgltf::Node& source = gltf.nodes[nodeIndex];
+        std::shared_ptr<Node> newNode;
+        if (source.meshIndex.has_value() &&
+            source.meshIndex.value() < meshes.size()) {
+            auto meshNode = std::make_shared<MeshNode>();
+            meshNode->mesh = meshes[source.meshIndex.value()];
+            newNode = meshNode;
+        } else {
+            newNode = std::make_shared<Node>();
+        }
+
+        std::visit(
+            fastgltf::visitor{
+                [&](const fastgltf::Node::TransformMatrix& matrix) {
+                    std::memcpy(
+                        &newNode->localTransform,
+                        matrix.data(),
+                        sizeof(newNode->localTransform));
+                },
+                [&](const fastgltf::Node::TRS& transform) {
+                    const glm::vec3 translation(
+                        transform.translation[0],
+                        transform.translation[1],
+                        transform.translation[2]);
+                    const glm::quat rotation(
+                        transform.rotation[3],
+                        transform.rotation[0],
+                        transform.rotation[1],
+                        transform.rotation[2]);
+                    const glm::vec3 scale(
+                        transform.scale[0],
+                        transform.scale[1],
+                        transform.scale[2]);
+                    newNode->localTransform =
+                        glm::translate(glm::mat4(1.0f), translation) *
+                        glm::toMat4(rotation) *
+                        glm::scale(glm::mat4(1.0f), scale);
+                }},
+            source.transform);
+
+        nodes.push_back(newNode);
+        scene.nodes[object_name(source.name, "node_", nodeIndex)] = newNode;
+    }
+
+    for (size_t nodeIndex = 0; nodeIndex < gltf.nodes.size(); ++nodeIndex) {
+        for (const size_t childIndex : gltf.nodes[nodeIndex].children) {
+            if (childIndex >= nodes.size()) {
+                continue;
+            }
+            nodes[nodeIndex]->children.push_back(nodes[childIndex]);
+            nodes[childIndex]->parent = nodes[nodeIndex];
+        }
+    }
+
+    for (const auto& node : nodes) {
+        if (node->parent.expired()) {
+            scene.topNodes.push_back(node);
+            node->refreshTransform(glm::mat4(1.0f));
+        }
+    }
+}
+
 } // namespace
 
 LoadedGLTF::~LoadedGLTF()
@@ -136,28 +306,12 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         fastgltf::Options::LoadGLBBuffers |
         fastgltf::Options::LoadExternalBuffers;
 
-    fastgltf::Parser parser{};
-    fastgltf::Asset gltf;
-    const auto fileType = fastgltf::determineGltfFileType(&data);
-
-    if (fileType == fastgltf::GltfType::glTF) {
-        auto load = parser.loadGLTF(&data, filePath.parent_path(), gltfOptions);
-        if (!load) {
-            fmt::print("Failed to load GLTF: {}\n", fastgltf::to_underlying(load.error()));
-            return {};
-        }
-        gltf = std::move(load.get());
-    } else if (fileType == fastgltf::GltfType::GLB) {
-        auto load = parser.loadBinaryGLTF(&data, filePath.parent_path(), gltfOptions);
-        if (!load) {
-            fmt::print("Failed to load GLB: {}\n", fastgltf::to_underlying(load.error()));
-            return {};
-        }
-        gltf = std::move(load.get());
-    } else {
-        fmt::print("Failed to determine GLTF container type\n");
+    std::optional<fastgltf::Asset> parsed =
+        parse_gltf_asset(data, filePath, gltfOptions);
+    if (!parsed.has_value()) {
         return {};
     }
+    fastgltf::Asset gltf = std::move(*parsed);
 
     // The format is the caller's, not the file's: the same PNG byte for byte
     // is sRGB-encoded when it arrives as base color and linear when it arrives
@@ -304,32 +458,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1.0f}};
     scene->descriptorPool.init(engine->_device, materialCount, descriptorRatios);
 
-    for (const fastgltf::Sampler& sampler : gltf.samplers) {
-        VkSamplerCreateInfo samplerInfo = sampler_info(
-            extract_filter(
-                sampler.magFilter.value_or(fastgltf::Filter::Nearest)),
-            VK_SAMPLER_ADDRESS_MODE_REPEAT,
-            extract_mipmap_mode(
-                sampler.minFilter.value_or(fastgltf::Filter::Nearest)),
-            VK_LOD_CLAMP_NONE);
-        samplerInfo.minLod = 0.0f;
-        samplerInfo.minFilter = extract_filter(
-            sampler.minFilter.value_or(fastgltf::Filter::Nearest));
-
-        // Anisotropy only means anything for a minifying linear filter, which
-        // is exactly the oblique floor and arch case it exists for.  Leaving it
-        // off for NEAREST keeps an intentionally crisp texture crisp.
-        const float anisotropy = engine->material_anisotropy();
-        if (anisotropy > 1.0f && samplerInfo.minFilter == VK_FILTER_LINEAR) {
-            samplerInfo.anisotropyEnable = VK_TRUE;
-            samplerInfo.maxAnisotropy = anisotropy;
-        }
-
-        VkSampler newSampler = VK_NULL_HANDLE;
-        VK_CHECK(vkCreateSampler(
-            engine->_device, &samplerInfo, nullptr, &newSampler));
-        scene->samplers.push_back(newSampler);
-    }
+    create_gltf_samplers(engine, *scene, gltf);
 
     // Images are uploaded on demand rather than up front, because the correct
     // format is a property of the role the material assigns the image, not of
@@ -510,32 +639,13 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
     // exactly the images this scene will occupy.  Reporting it here is what
     // makes a texture budget arguable later: file size on disk says nothing,
     // and the mip chain adds a third again on top of the base level.
-    {
-        size_t srgbCount = 0;
-        size_t linearCount = 0;
-        size_t estimatedBytes = 0;
-        for (const auto& [key, image] : imageCache) {
-            if (image.image == engine->_errorCheckerboardImage.image) {
-                continue;
-            }
-            (key & 1) ? ++srgbCount : ++linearCount;
-            const size_t baseLevel = size_t(image.imageExtent.width) *
-                image.imageExtent.height * 4;
-            // A full chain converges on 4/3 of the base level.
-            estimatedBytes += baseLevel + baseLevel / 3;
-        }
-        fmt::print(
-            "GLTF textures: {} sRGB + {} linear, ~{:.1f} MB with mips; "
-            "{}/{} materials bound base colour, {}/{} metallic-roughness ({})\n",
-            srgbCount,
-            linearCount,
-            double(estimatedBytes) / (1024.0 * 1024.0),
-            boundBaseColorCount,
-            materialCount,
-            boundMetalRoughCount,
-            materialCount,
-            filePath.filename().string());
-    }
+    print_gltf_texture_summary(
+        imageCache,
+        engine,
+        boundBaseColorCount,
+        boundMetalRoughCount,
+        materialCount,
+        filePath);
 
     std::vector<std::shared_ptr<MeshAsset>> meshes;
     meshes.reserve(gltf.meshes.size());
@@ -641,69 +751,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         }
     }
 
-    std::vector<std::shared_ptr<Node>> nodes;
-    nodes.reserve(gltf.nodes.size());
-    for (size_t nodeIndex = 0; nodeIndex < gltf.nodes.size(); ++nodeIndex) {
-        const fastgltf::Node& source = gltf.nodes[nodeIndex];
-        std::shared_ptr<Node> newNode;
-        if (source.meshIndex.has_value() &&
-            source.meshIndex.value() < meshes.size()) {
-            auto meshNode = std::make_shared<MeshNode>();
-            meshNode->mesh = meshes[source.meshIndex.value()];
-            newNode = meshNode;
-        } else {
-            newNode = std::make_shared<Node>();
-        }
-
-        std::visit(
-            fastgltf::visitor{
-                [&](const fastgltf::Node::TransformMatrix& matrix) {
-                    std::memcpy(
-                        &newNode->localTransform,
-                        matrix.data(),
-                        sizeof(newNode->localTransform));
-                },
-                [&](const fastgltf::Node::TRS& transform) {
-                    const glm::vec3 translation(
-                        transform.translation[0],
-                        transform.translation[1],
-                        transform.translation[2]);
-                    const glm::quat rotation(
-                        transform.rotation[3],
-                        transform.rotation[0],
-                        transform.rotation[1],
-                        transform.rotation[2]);
-                    const glm::vec3 scale(
-                        transform.scale[0],
-                        transform.scale[1],
-                        transform.scale[2]);
-                    newNode->localTransform =
-                        glm::translate(glm::mat4(1.0f), translation) *
-                        glm::toMat4(rotation) *
-                        glm::scale(glm::mat4(1.0f), scale);
-                }},
-            source.transform);
-
-        nodes.push_back(newNode);
-        scene->nodes[object_name(source.name, "node_", nodeIndex)] = newNode;
-    }
-
-    for (size_t nodeIndex = 0; nodeIndex < gltf.nodes.size(); ++nodeIndex) {
-        for (const size_t childIndex : gltf.nodes[nodeIndex].children) {
-            if (childIndex >= nodes.size()) {
-                continue;
-            }
-            nodes[nodeIndex]->children.push_back(nodes[childIndex]);
-            nodes[childIndex]->parent = nodes[nodeIndex];
-        }
-    }
-
-    for (const auto& node : nodes) {
-        if (node->parent.expired()) {
-            scene->topNodes.push_back(node);
-            node->refreshTransform(glm::mat4(1.0f));
-        }
-    }
+    build_gltf_nodes(*scene, gltf, meshes);
 
     return scene;
 }
