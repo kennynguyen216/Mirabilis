@@ -345,7 +345,7 @@ bool VulkanEngine::save_editor_scene()
              << ", \"halfHeight\": " << portal.halfHeight << '}';
     };
     bool firstPortal = true;
-    for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+    for (const AuthoredPortalPair& pair : _authoredPortals.pairs) {
         if (!firstPortal) file << ", ";
         writePortal(pair.first);
         file << ", ";
@@ -903,8 +903,8 @@ bool VulkanEngine::load_editor_scene()
     }
     create_runtime_scene_objects();
     retract_portals();
-    _authoredPortalPairs.clear();
-    _authoredPortalDraft.reset();
+    _authoredPortals.pairs.clear();
+    _authoredPortals.draft.reset();
     for (size_t portalIndex = 0; portalIndex < savedPreloadedPortals.size(); portalIndex += 2) {
         const auto blueHost = restoredIDs.find(savedPreloadedPortals[portalIndex].oldHostWallObject);
         const auto orangeHost = restoredIDs.find(savedPreloadedPortals[portalIndex + 1].oldHostWallObject);
@@ -932,7 +932,7 @@ bool VulkanEngine::load_editor_scene()
         pair.second.hostWallObject = orangeIsFreestanding
             ? InvalidSceneObject
             : orangeHost->second;
-        _authoredPortalPairs.push_back(std::move(pair));
+        _authoredPortals.pairs.push_back(std::move(pair));
     }
     reset_time_trial();
     _selectedSceneObject = InvalidSceneObject;

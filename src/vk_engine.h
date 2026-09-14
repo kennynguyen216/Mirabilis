@@ -778,10 +778,13 @@ class VulkanEngine{
         Portal _bluePortal;
         Portal _orangePortal;
         static constexpr size_t MaxAuthoredPortalPairs = (MaxPortalSurfaces - 2) / 2;
-        std::vector<AuthoredPortalPair> _authoredPortalPairs;
-        std::optional<Portal> _authoredPortalDraft;
-        int _selectedAuthoredPortalPair{-1};
-        bool _selectedAuthoredPortalSecond{false};
+        struct AuthoredPortalState {
+            std::vector<AuthoredPortalPair> pairs;
+            std::optional<Portal> draft;
+            int selectedPair{-1};
+            bool selectedSecond{false};
+        };
+        AuthoredPortalState _authoredPortals;
         static constexpr uint32_t PortalCameraTargetCount = 2;
         struct PortalCameraState {
             VkExtent2D extent{640, 360};

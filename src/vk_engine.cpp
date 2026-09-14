@@ -630,7 +630,7 @@ void VulkanEngine::draw(float deltaTime)
     // it for a frame-rate-sized safety band exposed the solid host wall before
     // physics teleported the player, causing the black flash.
     draw_portal_masks(cmd);
-    if (_portalCameras.useOffscreen && _authoredPortalPairs.empty()) {
+    if (_portalCameras.useOffscreen && _authoredPortals.pairs.empty()) {
         draw_offscreen_portal_views(cmd);
     } else {
         draw_portal_views(cmd);
@@ -932,7 +932,7 @@ void VulkanEngine::run(){
                     object.material.emissionStrength+=1; break;
                 }
             }
-            if(testFrame==17&&!_authoredPortalPairs.empty()) _authoredPortalPairs[0].first.position.x+=0.125f;
+            if(testFrame==17&&!_authoredPortals.pairs.empty()) _authoredPortals.pairs[0].first.position.x+=0.125f;
         }
         draw(deltaTime);
         if (frameLimit && SDL_getenv("MIRABILIS_SSGI_BENCHMARK") &&

@@ -207,7 +207,7 @@ void VulkanEngine::update_scene(float deltaTime)
             updatePortalView(_orangePortal, _bluePortal, OrangePortalView);
         }
         uint32_t viewIndex = 2;
-        for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+        for (const AuthoredPortalPair& pair : _authoredPortals.pairs) {
             updatePortalView(pair.first, pair.second, viewIndex++);
             updatePortalView(pair.second, pair.first, viewIndex++);
         }

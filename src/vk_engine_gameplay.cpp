@@ -132,7 +132,7 @@ void VulkanEngine::update_physics(float deltaTime)
         if (_bluePortal.placed && _orangePortal.placed) {
             traversed = tryBidirectionalPair(_bluePortal, _orangePortal);
         }
-        for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+        for (const AuthoredPortalPair& pair : _authoredPortals.pairs) {
             if (!traversed) {
                 traversed = tryBidirectionalPair(pair.first, pair.second);
             }
@@ -380,7 +380,7 @@ void VulkanEngine::rebuild_collision_from_scene()
         if (_orangePortal.placed && _orangePortal.hostWallObject == object.id) {
             carve_portal_opening(wallPieces, _orangePortal);
         }
-        for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+        for (const AuthoredPortalPair& pair : _authoredPortals.pairs) {
             if (pair.first.hostWallObject == object.id) carve_portal_opening(wallPieces, pair.first);
             if (pair.second.hostWallObject == object.id) carve_portal_opening(wallPieces, pair.second);
         }
@@ -448,7 +448,7 @@ void VulkanEngine::retract_portals()
 
 void VulkanEngine::place_authored_portal_endpoint()
 {
-    if (_authoredPortalPairs.size() >= MaxAuthoredPortalPairs) {
+    if (_authoredPortals.pairs.size() >= MaxAuthoredPortalPairs) {
         return;
     }
     const Camera& camera = render_camera();
@@ -467,17 +467,17 @@ void VulkanEngine::place_authored_portal_endpoint()
         return portals_overlap(candidate, existing);
     };
     if (overlapsExisting(_bluePortal) || overlapsExisting(_orangePortal) ||
-        (_authoredPortalDraft.has_value() && overlapsExisting(*_authoredPortalDraft))) {
+        (_authoredPortals.draft.has_value() && overlapsExisting(*_authoredPortals.draft))) {
         return;
     }
-    for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+    for (const AuthoredPortalPair& pair : _authoredPortals.pairs) {
         if (overlapsExisting(pair.first) || overlapsExisting(pair.second)) return;
     }
-    if (_authoredPortalDraft.has_value()) {
-        _authoredPortalPairs.push_back(AuthoredPortalPair{*_authoredPortalDraft, candidate});
-        _authoredPortalDraft.reset();
+    if (_authoredPortals.draft.has_value()) {
+        _authoredPortals.pairs.push_back(AuthoredPortalPair{*_authoredPortals.draft, candidate});
+        _authoredPortals.draft.reset();
     } else {
-        _authoredPortalDraft = candidate;
+        _authoredPortals.draft = candidate;
     }
     _sceneDirty = true;
     rebuild_collision_from_scene();
@@ -485,8 +485,8 @@ void VulkanEngine::place_authored_portal_endpoint()
 
 void VulkanEngine::clear_authored_portals()
 {
-    _authoredPortalPairs.clear();
-    _authoredPortalDraft.reset();
+    _authoredPortals.pairs.clear();
+    _authoredPortals.draft.reset();
     _sceneDirty = true;
     rebuild_collision_from_scene();
 }
@@ -565,14 +565,14 @@ bool VulkanEngine::create_three_room_pole_chain()
     const Opening firstOpening = openingForRoom(rooms[0]);
     const Opening secondOpening = openingForRoom(rooms[1]);
     const Opening thirdOpening = openingForRoom(rooms[2]);
-    _authoredPortalPairs.clear();
-    _authoredPortalDraft.reset();
-    _authoredPortalPairs.push_back(AuthoredPortalPair{
+    _authoredPortals.pairs.clear();
+    _authoredPortals.draft.reset();
+    _authoredPortals.pairs.push_back(AuthoredPortalPair{
         makeEndpoint(firstOpening.leftCenter, glm::vec3(0, 0, -1),
                      firstOpening.leftHalfWidth),
         makeEndpoint(secondOpening.leftCenter, glm::vec3(0, 0, 1),
                      secondOpening.leftHalfWidth)});
-    _authoredPortalPairs.push_back(AuthoredPortalPair{
+    _authoredPortals.pairs.push_back(AuthoredPortalPair{
         makeEndpoint(secondOpening.rightCenter, glm::vec3(0, 0, -1),
                      secondOpening.rightHalfWidth),
         makeEndpoint(thirdOpening.rightCenter, glm::vec3(0, 0, 1),

@@ -95,7 +95,7 @@ void VulkanEngine::draw_ssgi_portal_mask(VkCommandBuffer cmd)
             drawPortal(_bluePortal, _bluePortalMaterial);
             drawPortal(_orangePortal, _orangePortalMaterial);
         }
-        for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+        for (const AuthoredPortalPair& pair : _authoredPortals.pairs) {
             drawPortal(pair.first, _bluePortalMaterial);
             drawPortal(pair.second, _orangePortalMaterial);
         }
@@ -110,7 +110,7 @@ void VulkanEngine::draw_ssgi_portal_mask(VkCommandBuffer cmd)
 void VulkanEngine::draw_portal_masks(VkCommandBuffer cmd)
 {
     const bool hasPlayerPair = _bluePortal.placed && _orangePortal.placed;
-    if (!hasPlayerPair && _authoredPortalPairs.empty()) {
+    if (!hasPlayerPair && _authoredPortals.pairs.empty()) {
         return;
     }
 
@@ -180,7 +180,7 @@ void VulkanEngine::draw_portal_masks(VkCommandBuffer cmd)
         drawPair(_bluePortal, _orangePortal, viewIndex,
                  _bluePortalMaterial, _orangePortalMaterial);
     }
-    for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+    for (const AuthoredPortalPair& pair : _authoredPortals.pairs) {
         drawPair(pair.first, pair.second, viewIndex,
                  _bluePortalMaterial, _orangePortalMaterial);
     }
@@ -199,7 +199,7 @@ void VulkanEngine::draw_portal_masks(VkCommandBuffer cmd)
         clearPairDepth(_bluePortal, _orangePortal,
                        _bluePortalMaterial, _orangePortalMaterial);
     }
-    for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+    for (const AuthoredPortalPair& pair : _authoredPortals.pairs) {
         clearPairDepth(pair.first, pair.second,
                        _bluePortalMaterial, _orangePortalMaterial);
     }
@@ -279,7 +279,7 @@ void VulkanEngine::draw_recursive_portal_mask(
 void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
 {
     const bool hasPlayerPair = _bluePortal.placed && _orangePortal.placed;
-    if (!hasPlayerPair && _authoredPortalPairs.empty()) {
+    if (!hasPlayerPair && _authoredPortals.pairs.empty()) {
         return;
     }
 
@@ -323,7 +323,7 @@ void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
         drawSurface(_bluePortal, _bluePortalMaterial);
         drawSurface(_orangePortal, _orangePortalMaterial);
     }
-    for (const AuthoredPortalPair& pair : _authoredPortalPairs) {
+    for (const AuthoredPortalPair& pair : _authoredPortals.pairs) {
         drawSurface(pair.first, _bluePortalMaterial);
         drawSurface(pair.second, _orangePortalMaterial);
     }

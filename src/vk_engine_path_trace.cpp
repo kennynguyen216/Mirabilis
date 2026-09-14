@@ -384,7 +384,7 @@ void VulkanEngine::update_trace_scene() {
     };
     addPortal(_bluePortal,_orangePortal.placed?&_orangePortal:nullptr);
     addPortal(_orangePortal,_bluePortal.placed?&_bluePortal:nullptr);
-    for(const auto& pair:_authoredPortalPairs) {addPortal(pair.first,&pair.second);addPortal(pair.second,&pair.first);}
+    for(const auto& pair:_authoredPortals.pairs) {addPortal(pair.first,&pair.second);addPortal(pair.second,&pair.first);}
     uint64_t drawHash=1469598103934665603ull;
     auto append=[&](const void* data,size_t bytes) {auto p=static_cast<const uint8_t*>(data);for(size_t i=0;i<bytes;++i) {drawHash^=p[i];drawHash*=1099511628211ull;}};
     append(&_shadow.sunlightDirection,sizeof(_shadow.sunlightDirection));

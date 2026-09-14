@@ -348,10 +348,10 @@ void VulkanEngine::draw_editor_gizmo()
 {
     SceneObject* object = _scene.get(_selectedSceneObject);
     Portal* authoredPortal = nullptr;
-    if (object == nullptr && _selectedAuthoredPortalPair >= 0 &&
-        _selectedAuthoredPortalPair < static_cast<int>(_authoredPortalPairs.size())) {
-        AuthoredPortalPair& pair = _authoredPortalPairs[_selectedAuthoredPortalPair];
-        authoredPortal = _selectedAuthoredPortalSecond ? &pair.second : &pair.first;
+    if (object == nullptr && _authoredPortals.selectedPair >= 0 &&
+        _authoredPortals.selectedPair < static_cast<int>(_authoredPortals.pairs.size())) {
+        AuthoredPortalPair& pair = _authoredPortals.pairs[_authoredPortals.selectedPair];
+        authoredPortal = _authoredPortals.selectedSecond ? &pair.second : &pair.first;
     }
     if ((object == nullptr && authoredPortal == nullptr) ||
         (object != nullptr && object->transformDrivenExternally)) {
@@ -513,18 +513,18 @@ void VulkanEngine::select_scene_object_at_screen_position(
             closestPortalSecond = second;
         }
     };
-    for (size_t pairIndex = 0; pairIndex < _authoredPortalPairs.size(); ++pairIndex) {
-        testPortal(_authoredPortalPairs[pairIndex].first, static_cast<int>(pairIndex), false);
-        testPortal(_authoredPortalPairs[pairIndex].second, static_cast<int>(pairIndex), true);
+    for (size_t pairIndex = 0; pairIndex < _authoredPortals.pairs.size(); ++pairIndex) {
+        testPortal(_authoredPortals.pairs[pairIndex].first, static_cast<int>(pairIndex), false);
+        testPortal(_authoredPortals.pairs[pairIndex].second, static_cast<int>(pairIndex), true);
     }
 
     if (closestPortalPair >= 0) {
         _selectedSceneObject = InvalidSceneObject;
-        _selectedAuthoredPortalPair = closestPortalPair;
-        _selectedAuthoredPortalSecond = closestPortalSecond;
+        _authoredPortals.selectedPair = closestPortalPair;
+        _authoredPortals.selectedSecond = closestPortalSecond;
     } else if (closestObject != InvalidSceneObject) {
         _selectedSceneObject = closestObject;
-        _selectedAuthoredPortalPair = -1;
+        _authoredPortals.selectedPair = -1;
     }
 }
 
@@ -713,30 +713,30 @@ void VulkanEngine::draw_editor_menu()
         }
         ImGui::SeparatorText("Authored Portal Links");
         ImGui::TextDisabled("Endpoints are freestanding; they appear five metres ahead of the editor camera.");
-        ImGui::BeginDisabled(_authoredPortalPairs.size() >= MaxAuthoredPortalPairs);
+        ImGui::BeginDisabled(_authoredPortals.pairs.size() >= MaxAuthoredPortalPairs);
         if (ImGui::MenuItem(
-                _authoredPortalDraft.has_value()
+                _authoredPortals.draft.has_value()
                     ? "Place Second Endpoint"
                     : "Place First Endpoint")) {
             place_authored_portal_endpoint();
         }
         ImGui::EndDisabled();
         if (ImGui::MenuItem("Clear Authored Links", nullptr, false,
-                            !_authoredPortalPairs.empty() || _authoredPortalDraft.has_value())) {
+                            !_authoredPortals.pairs.empty() || _authoredPortals.draft.has_value())) {
             clear_authored_portals();
         }
         if (ImGui::MenuItem("Set Up Three-Room Pole Chain", nullptr, false,
-                            _authoredPortalPairs.empty())) {
+                            _authoredPortals.pairs.empty())) {
             create_three_room_pole_chain();
         }
         ImGui::TextDisabled("Creates Room 1 -> 2 -> 3 links at their center poles.");
-        ImGui::TextDisabled("Links: %zu / %zu%s", _authoredPortalPairs.size(),
+        ImGui::TextDisabled("Links: %zu / %zu%s", _authoredPortals.pairs.size(),
                             MaxAuthoredPortalPairs,
-                            _authoredPortalDraft.has_value() ? " (one endpoint waiting)" : "");
-        for (size_t pairIndex = 0; pairIndex < _authoredPortalPairs.size(); ++pairIndex) {
-            AuthoredPortalPair& pair = _authoredPortalPairs[pairIndex];
+                            _authoredPortals.draft.has_value() ? " (one endpoint waiting)" : "");
+        for (size_t pairIndex = 0; pairIndex < _authoredPortals.pairs.size(); ++pairIndex) {
+            AuthoredPortalPair& pair = _authoredPortals.pairs[pairIndex];
             ImGui::PushID(static_cast<int>(pairIndex));
-            if (_selectedAuthoredPortalPair == static_cast<int>(pairIndex)) {
+            if (_authoredPortals.selectedPair == static_cast<int>(pairIndex)) {
                 ImGui::SetNextItemOpen(true, ImGuiCond_Once);
             }
             if (ImGui::TreeNode("Link", "Link %zu", pairIndex + 1)) {
@@ -778,9 +778,9 @@ void VulkanEngine::draw_editor_menu()
                 editEndpoint("First endpoint", pair.first);
                 ImGui::Separator();
                 editEndpoint("Second endpoint", pair.second);
-                if (_selectedAuthoredPortalPair == static_cast<int>(pairIndex)) {
+                if (_authoredPortals.selectedPair == static_cast<int>(pairIndex)) {
                     ImGui::TextDisabled("Selected: %s endpoint",
-                        _selectedAuthoredPortalSecond ? "second" : "first");
+                        _authoredPortals.selectedSecond ? "second" : "first");
                 }
                 ImGui::TreePop();
             }
