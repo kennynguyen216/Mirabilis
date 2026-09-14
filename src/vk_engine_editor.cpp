@@ -821,7 +821,7 @@ void VulkanEngine::draw_editor_menu()
         ImGui::MenuItem(
             "Show Collider Bounds",
             nullptr,
-            &_showColliderBounds,
+            &_debugViews.showColliderBounds,
             _editorMode);
         if (!_editorMode) {
             ImGui::TextDisabled("Enter Edit Mode to show collider bounds.");
@@ -1486,7 +1486,7 @@ void VulkanEngine::draw_tonemap_settings()
             // rather than on both at once.
             ImGui::Checkbox(
                 "Bypass Curve (encode only)", &_postProcess.tonemapBypassCurve);
-            if (_renderDebugView != RenderDebugView::None) {
+            if (_debugViews.view != RenderDebugView::None) {
                 ImGui::TextDisabled("Inactive while a debug view is shown.");
             }
         }
@@ -1518,7 +1518,7 @@ void VulkanEngine::draw_antialiasing_settings()
                 ImGui::TextDisabled(
                     "Inactive: FXAA reads the tonemapped image.");
             }
-            if (_renderDebugView != RenderDebugView::None) {
+            if (_debugViews.view != RenderDebugView::None) {
                 ImGui::TextDisabled(
                     "Suspended while a debug view is shown.");
             }
@@ -1533,27 +1533,27 @@ void VulkanEngine::draw_screen_buffer_settings()
         // Reading a half-finished buffer directly is far more informative than
         // trying to infer a projection or orientation mistake from a finished
         // effect.
-        int debugView = static_cast<int>(_renderDebugView);
+        int debugView = static_cast<int>(_debugViews.view);
         if (ImGui::Combo(
                 "Debug View",
                 &debugView,
                 RenderDebugViewNames.data(),
                 static_cast<int>(RenderDebugViewNames.size()))) {
-            _renderDebugView = static_cast<RenderDebugView>(debugView);
+            _debugViews.view = static_cast<RenderDebugView>(debugView);
         }
         // Easy to misread otherwise: these buffers hold the light arriving at
         // a surface, not the colour it reflects.  A white wall and a red one
         // under the same bounce now look identical here, and differ only after
         // the composite.
-        if (is_ssgi_indirect_radiance_view(_renderDebugView)) {
+        if (is_ssgi_indirect_radiance_view(_debugViews.view)) {
             ImGui::TextDisabled(
                 "SSGI buffers hold incident radiance; albedo is");
             ImGui::TextDisabled(
                 "applied in the composite, not in the trace.");
         }
-        if (_renderDebugView == RenderDebugView::Depth) {
+        if (_debugViews.view == RenderDebugView::Depth) {
             ImGui::SliderFloat(
-                "Depth View Range", &_renderDebugDepthRange, 5.0f, 500.0f);
+                "Depth View Range", &_debugViews.depthRange, 5.0f, 500.0f);
         }
         ImGui::SeparatorText("SSGI Milestone 5");
         ImGui::Checkbox("Run SSGI", &_ssgi.enabled);

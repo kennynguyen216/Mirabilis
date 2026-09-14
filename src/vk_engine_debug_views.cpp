@@ -31,10 +31,10 @@ void VulkanEngine::init_render_debug_pipeline()
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &settingsRange;
     VK_CHECK(vkCreatePipelineLayout(
-        _device, &layoutInfo, nullptr, &_renderDebugPipeline.layout));
+        _device, &layoutInfo, nullptr, &_debugViews.renderPipeline.layout));
 
     PipelineBuilder builder;
-    builder._pipelineLayout = _renderDebugPipeline.layout;
+    builder._pipelineLayout = _debugViews.renderPipeline.layout;
     builder.set_shaders(vertexShader.get(), fragmentShader.get());
     builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
@@ -46,11 +46,11 @@ void VulkanEngine::init_render_debug_pipeline()
     builder.disable_depthtest();
     builder.set_color_attachment_format(_drawImage.imageFormat);
     builder.set_depth_format(VK_FORMAT_UNDEFINED);
-    _renderDebugPipeline.pipeline = builder.build_pipeline(_device);
+    _debugViews.renderPipeline.pipeline = builder.build_pipeline(_device);
 
     _mainDeletionQueue.push_function([this]() {
-        vkDestroyPipeline(_device, _renderDebugPipeline.pipeline, nullptr);
-        vkDestroyPipelineLayout(_device, _renderDebugPipeline.layout, nullptr);
+        vkDestroyPipeline(_device, _debugViews.renderPipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _debugViews.renderPipeline.layout, nullptr);
     });
 }
 
@@ -78,9 +78,9 @@ void VulkanEngine::draw_collider_debug_bounds(VkCommandBuffer cmd)
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     vkCmdBindPipeline(
-        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _colliderDebugPipeline.pipeline);
+        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _debugViews.colliderPipeline.pipeline);
     for (const SceneObject& object : _scene.objects) {
-        if (!_showColliderBounds || !object.alive || !object.hasCollision) {
+        if (!_debugViews.showColliderBounds || !object.alive || !object.hasCollision) {
             continue;
         }
 
@@ -113,7 +113,7 @@ void VulkanEngine::draw_collider_debug_bounds(VkCommandBuffer cmd)
         pushConstants.model = colliderTransform;
         vkCmdPushConstants(
             cmd,
-            _colliderDebugPipeline.layout,
+            _debugViews.colliderPipeline.layout,
             VK_SHADER_STAGE_VERTEX_BIT,
             0,
             sizeof(ColliderDebugPushConstants),
@@ -133,7 +133,7 @@ void VulkanEngine::draw_collider_debug_bounds(VkCommandBuffer cmd)
         pushConstants.model = glm::inverse(_shadow.sunViewProjection) * clipBox;
         vkCmdPushConstants(
             cmd,
-            _colliderDebugPipeline.layout,
+            _debugViews.colliderPipeline.layout,
             VK_SHADER_STAGE_VERTEX_BIT,
             0,
             sizeof(ColliderDebugPushConstants),
@@ -146,7 +146,7 @@ void VulkanEngine::draw_collider_debug_bounds(VkCommandBuffer cmd)
 
 void VulkanEngine::draw_render_debug(VkCommandBuffer cmd)
 {
-    if (_renderDebugPipeline.pipeline == VK_NULL_HANDLE) {
+    if (_debugViews.renderPipeline.pipeline == VK_NULL_HANDLE) {
         return;
     }
 
@@ -159,7 +159,7 @@ void VulkanEngine::draw_render_debug(VkCommandBuffer cmd)
     set_fullscreen_dynamic_state(cmd, _drawExtent);
 
     vkCmdBindPipeline(
-        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _renderDebugPipeline.pipeline);
+        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _debugViews.renderPipeline.pipeline);
     const std::array<VkDescriptorSet, 4> sets{
         get_current_frame().sceneDescriptor,
         _prepass.imageDescriptor,
@@ -168,7 +168,7 @@ void VulkanEngine::draw_render_debug(VkCommandBuffer cmd)
     vkCmdBindDescriptorSets(
         cmd,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
-        _renderDebugPipeline.layout,
+        _debugViews.renderPipeline.layout,
         0,
         static_cast<uint32_t>(sets.size()),
         sets.data(),
@@ -177,13 +177,13 @@ void VulkanEngine::draw_render_debug(VkCommandBuffer cmd)
 
     RenderDebugPushConstants pushConstants{};
     pushConstants.settings = glm::vec4(
-        static_cast<float>(static_cast<int>(_renderDebugView)),
+        static_cast<float>(static_cast<int>(_debugViews.view)),
         static_cast<float>(_drawExtent.width),
         static_cast<float>(_drawExtent.height),
-        _renderDebugDepthRange);
+        _debugViews.depthRange);
     vkCmdPushConstants(
         cmd,
-        _renderDebugPipeline.layout,
+        _debugViews.renderPipeline.layout,
         VK_SHADER_STAGE_FRAGMENT_BIT,
         0,
         sizeof(RenderDebugPushConstants),

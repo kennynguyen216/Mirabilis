@@ -85,7 +85,7 @@ void VulkanEngine::apply_max_fidelity_settings()
     _ssgi.enabled = true;
     apply_ssgi_quality_preset(4);
     _ssgi.intensity = 0.35f;
-    _renderDebugView = RenderDebugView::None;
+    _debugViews.view = RenderDebugView::None;
 }
 
 void VulkanEngine::init() 
@@ -151,7 +151,7 @@ void VulkanEngine::init()
         const int value = std::clamp(std::atoi(debugView),
             static_cast<int>(RenderDebugView::None),
             static_cast<int>(RenderDebugView::SSGIReferenceDifference));
-        _renderDebugView = static_cast<RenderDebugView>(value);
+        _debugViews.view = static_cast<RenderDebugView>(value);
     }
     if (const char* preset = SDL_getenv("MIRABILIS_SSGI_PRESET")) {
         apply_ssgi_quality_preset(std::atoi(preset));
@@ -549,7 +549,7 @@ void VulkanEngine::draw(float deltaTime)
 	// Camera depth and view-space normals for the screen-space passes.  A
 	// debug view samples those images, so it also forces the pass to run, and
 	// so does ambient occlusion, which is built entirely out of them.
-	const bool showRenderDebugView = _renderDebugView != RenderDebugView::None;
+	const bool showRenderDebugView = _debugViews.view != RenderDebugView::None;
 	const bool occlusionActive = ssao_active();
 	if (_prepass.enabled || showRenderDebugView || occlusionActive ||
         _ssgi.enabled) {
@@ -647,7 +647,7 @@ void VulkanEngine::draw(float deltaTime)
     // Collider bounds are an editor-only overlay.  They are intentionally
     // drawn after portal composition, so they never affect playable portal
     // views or the saved scene itself.
-    if (_editorMode && (_showColliderBounds || _shadow.showBounds)) {
+    if (_editorMode && (_debugViews.showColliderBounds || _shadow.showBounds)) {
         draw_collider_debug_bounds(cmd);
     }
 

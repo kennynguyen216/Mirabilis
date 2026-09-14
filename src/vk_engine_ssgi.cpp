@@ -628,7 +628,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-    const bool debugRequestsSSGI = is_ssgi_debug_view(_renderDebugView);
+    const bool debugRequestsSSGI = is_ssgi_debug_view(_debugViews.view);
     const bool runSSGI = (_ssgi.enabled || debugRequestsSSGI) &&
         _ssgi.pipeline != VK_NULL_HANDLE &&
         _ssgi.temporalPipeline != VK_NULL_HANDLE;

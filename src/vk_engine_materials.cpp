@@ -206,10 +206,10 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
         engine->_device,
         &colliderDebugLayoutInfo,
         nullptr,
-        &engine->_colliderDebugPipeline.layout));
+        &engine->_debugViews.colliderPipeline.layout));
 
     PipelineBuilder colliderDebugBuilder;
-    colliderDebugBuilder._pipelineLayout = engine->_colliderDebugPipeline.layout;
+    colliderDebugBuilder._pipelineLayout = engine->_debugViews.colliderPipeline.layout;
     colliderDebugBuilder.set_shaders(
         colliderDebugVertexShader, colliderDebugFragmentShader);
     colliderDebugBuilder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_LINE_LIST);
@@ -221,7 +221,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     colliderDebugBuilder.set_color_attachment_format(engine->_drawImage.imageFormat);
     colliderDebugBuilder.set_depth_format(engine->_depthImage.imageFormat);
     colliderDebugBuilder.set_stencil_format(engine->_depthImage.imageFormat);
-    engine->_colliderDebugPipeline.pipeline =
+    engine->_debugViews.colliderPipeline.pipeline =
         colliderDebugBuilder.build_pipeline(engine->_device);
 
     engine->_mainDeletionQueue.push_function([this, engine]() {
@@ -237,10 +237,10 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
         vkDestroyPipeline(engine->_device, portalOffscreenPipeline.pipeline, nullptr);
         vkDestroyPipeline(engine->_device, portalCompositePipeline.pipeline, nullptr);
         vkDestroyPipeline(engine->_device, engine->_portalSkyPipeline.pipeline, nullptr);
-        vkDestroyPipeline(engine->_device, engine->_colliderDebugPipeline.pipeline, nullptr);
+        vkDestroyPipeline(engine->_device, engine->_debugViews.colliderPipeline.pipeline, nullptr);
         vkDestroyPipelineLayout(engine->_device, opaquePipeline.layout, nullptr);
         vkDestroyPipelineLayout(engine->_device, engine->_portalSkyPipeline.layout, nullptr);
-        vkDestroyPipelineLayout(engine->_device, engine->_colliderDebugPipeline.layout, nullptr);
+        vkDestroyPipelineLayout(engine->_device, engine->_debugViews.colliderPipeline.layout, nullptr);
         vkDestroyDescriptorSetLayout(engine->_device, materialLayout, nullptr);
     });
 }

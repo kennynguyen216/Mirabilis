@@ -724,7 +724,6 @@ class VulkanEngine{
         float _noClipSpeed{12.0f};
         bool _editorCameraLooking{false};
         bool _showDebugPanels{false};
-        bool _showColliderBounds{false};
         bool _resetEditorLayoutRequested{false};
         bool _sceneDirty{false};
         std::string _activeSceneFilename{"sandbox.json"};
@@ -793,7 +792,15 @@ class VulkanEngine{
         bool _portalRecursionEnabled{true};
         std::array<GPUSceneData, PortalViewCount> _portalSceneData{};
         MaterialPipeline _portalSkyPipeline;
-        MaterialPipeline _colliderDebugPipeline;
+        struct DebugViewState {
+            MaterialPipeline colliderPipeline;
+            MaterialPipeline renderPipeline;
+            bool showColliderBounds{false};
+            RenderDebugView view{RenderDebugView::None};
+            // How far from the camera reads as white in the depth debug view.
+            float depthRange{60.0f};
+        };
+        DebugViewState _debugViews;
         // One directional shadow map covers a box centred on the active
         // camera.  Every camera in the frame - main and portal - samples it,
         // because the lookup is done from world-space positions.
@@ -920,7 +927,6 @@ class VulkanEngine{
         };
         SSGIState _ssgi;
         std::array<AllocatedImage, 2> _directLightingHistory{};
-        MaterialPipeline _renderDebugPipeline;
         struct SSAOState {
             // Ambient occlusion, at half resolution.  Three images rather than
             // one because a compute pass cannot read and write the same
@@ -1023,9 +1029,6 @@ class VulkanEngine{
             bool fxaaShowEdges{false};
         };
         PostProcessState _postProcess;
-        RenderDebugView _renderDebugView{RenderDebugView::None};
-        // How far from the camera reads as white in the depth debug view.
-        float _renderDebugDepthRange{60.0f};
         // The sandbox level lives here: the floor, the boundary walls, the
         // portal test panels, and the player body all render and collide from
         // these objects.  Nothing about the level is hard-coded twice.
