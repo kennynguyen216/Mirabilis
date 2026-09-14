@@ -1360,6 +1360,172 @@ void VulkanEngine::assign_scene_asset(
     }
 }
 
+void VulkanEngine::draw_movement_tuning_panel()
+{
+    if (ImGui::Begin("Movement Tuning")) {
+        PlayerMovementSettings& movement = _playerMovement.settings;
+        ImGui::SliderFloat("Gravity", &movement.gravity, 1.0f, 60.0f);
+        ImGui::SliderFloat("Jump Speed", &movement.jumpSpeed, 1.0f, 20.0f);
+        ImGui::SliderFloat(
+            "Ground Speed", &movement.maxGroundSpeed, 1.0f, 20.0f);
+        ImGui::SliderFloat(
+            "Ground Accel", &movement.groundAcceleration, 1.0f, 100.0f);
+        ImGui::SliderFloat(
+            "Ground Friction", &movement.groundFriction, 0.0f, 20.0f);
+        ImGui::SliderFloat("Air Accel", &movement.airAcceleration, 0.0f, 50.0f);
+        ImGui::SliderFloat(
+            "Air Wish Cap", &movement.airWishSpeedCap, 0.1f, 20.0f);
+        ImGui::SliderFloat(
+            "Jump Buffer", &movement.jumpBufferSeconds, 0.0f, 0.25f);
+    }
+    ImGui::End();
+}
+
+void VulkanEngine::draw_statistics_panel(float horizontalSpeed)
+{
+    if (ImGui::Begin("Statistics")) {
+        ImGui::Text("Speed %.2f", horizontalSpeed);
+        ImGui::Text("Frame time %.3f ms", stats.frametime);
+        ImGui::Text("Scene update %.3f ms", stats.scene_update_time);
+        ImGui::Text("Mesh draw %.3f ms", stats.mesh_draw_time);
+        ImGui::Text("Triangles %d", stats.triangle_count);
+        ImGui::Separator();
+        ImGui::Text("World draw calls %d", stats.world_drawcall_count);
+        ImGui::Text("Portal draw calls %d", stats.portal_drawcall_count);
+        ImGui::Text("Total draw calls %d", stats.drawcall_count);
+        ImGui::Separator();
+        // The shadow and prepass passes walk the scene again with their own
+        // culling, so none of their cost appears in the counters above.
+        ImGui::Text(
+            "Shadow map %ux%u %s",
+            ShadowMapResolution,
+            ShadowMapResolution,
+            _shadowFormatName);
+        ImGui::Text(
+            "Shadow draws %d (%d tris)",
+            stats.shadow_drawcall_count,
+            stats.shadow_triangle_count);
+        ImGui::Text("Shadow record %.3f ms", stats.shadow_record_time);
+        ImGui::Text(
+            "Prepass draws %d (%d tris)",
+            stats.prepass_drawcall_count,
+            stats.prepass_triangle_count);
+        ImGui::Text("Prepass record %.3f ms", stats.prepass_record_time);
+        ImGui::Separator();
+        if (stats.ssao_kernel_samples == 0) {
+            ImGui::Text("Ambient occlusion: off");
+        } else {
+            ImGui::Text(
+                "AO %dx%d %s, %d samples",
+                stats.ssao_width,
+                stats.ssao_height,
+                _ssaoFormatName,
+                stats.ssao_kernel_samples);
+            // Three dispatches take microseconds to record and milliseconds to
+            // run, so a CPU number here would be actively misleading.  It is
+            // labelled when that is all the device can provide.
+            const char* unit = stats.ssao_time_is_gpu ? "ms" : "ms CPU";
+            ImGui::Text("  sample  %.3f %s", stats.ssao_raw_time, unit);
+            ImGui::Text(
+                "  blur H  %.3f %s", stats.ssao_blur_horizontal_time, unit);
+            ImGui::Text(
+                "  blur V  %.3f %s", stats.ssao_blur_vertical_time, unit);
+            ImGui::Text("  total   %.3f %s", stats.ssao_total_time, unit);
+        }
+        ImGui::Separator();
+        ImGui::Text(
+            "Portal mode: %s",
+            _useOffscreenPortalCameras
+                ? "Offscreen camera (primary only)"
+                : (_portalRecursionEnabled
+                    ? "Direct stencil (one recursive level)"
+                    : "Direct stencil (primary only)"));
+    }
+    ImGui::End();
+}
+
+void VulkanEngine::draw_play_overlay(float horizontalSpeed)
+{
+    ImGui::SetNextWindowPos(
+        ImVec2(ImGui::GetIO().DisplaySize.x - 18.0f, 18.0f),
+        ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.78f);
+    if (ImGui::Begin("Play Controls", nullptr,
+            ImGuiWindowFlags_AlwaysAutoResize |
+            ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_NoSavedSettings)) {
+        if (ImGui::Button("Respawn (F1)")) respawn_player();
+        ImGui::SameLine();
+        if (ImGui::Button(_noClipMode
+                ? "Disable No Clip (F2)"
+                : "Enable No Clip (F2)")) {
+            _noClipMode = !_noClipMode;
+            _noClipUp = false;
+            _noClipDown = false;
+            _playerMovement.velocity = glm::vec3(0.0f);
+        }
+        if (_noClipMode) {
+            ImGui::SliderFloat("No Clip Speed", &_noClipSpeed, 2.0f, 40.0f);
+            ImGui::TextDisabled("WASD move, Space up, Ctrl down");
+        }
+    }
+    ImGui::End();
+
+    const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImDrawList* crosshair = ImGui::GetForegroundDrawList();
+    // Portal-style status reticle: blue is left mouse and orange is right
+    // mouse. Bright means the portal is placed; dim means it is available and
+    // the next click will create it.
+    const ImU32 bluePortalColor = _bluePortal.placed
+        ? IM_COL32(45, 195, 255, 255)
+        : IM_COL32(45, 195, 255, 90);
+    const ImU32 orangePortalColor = _orangePortal.placed
+        ? IM_COL32(255, 155, 35, 255)
+        : IM_COL32(255, 155, 35, 90);
+    crosshair->PathArcTo(
+        center, 16.0f, IM_PI * 0.5f, IM_PI * 1.5f, 14);
+    crosshair->PathStroke(bluePortalColor, ImDrawFlags_None, 2.5f);
+    crosshair->PathArcTo(
+        center, 16.0f, -IM_PI * 0.5f, IM_PI * 0.5f, 14);
+    crosshair->PathStroke(orangePortalColor, ImDrawFlags_None, 2.5f);
+    const std::string speedLabel = fmt::format("Speed {:.1f}", horizontalSpeed);
+    crosshair->AddText(
+        ImVec2(18.0f, ImGui::GetIO().DisplaySize.y - 34.0f),
+        IM_COL32(220, 230, 245, 255),
+        speedLabel.c_str());
+    crosshair->AddText(
+        ImVec2(18.0f, ImGui::GetIO().DisplaySize.y - 56.0f),
+        IM_COL32(150, 165, 185, 210),
+        "LMB Blue | RMB Orange | R Retract | F1 Respawn | F2 No Clip");
+
+    const char* timerState = _timeTrialRunning
+        ? "RUNNING"
+        : (_timeTrialFinished ? "FINISHED" : "READY");
+    const std::string timerLabel = fmt::format(
+        "{}  {:02}:{:06.3f}",
+        timerState,
+        static_cast<int>(_timeTrialSeconds / 60.0f),
+        std::fmod(_timeTrialSeconds, 60.0f));
+    const ImVec2 timerSize = ImGui::CalcTextSize(timerLabel.c_str());
+    crosshair->AddText(
+        ImVec2(center.x - timerSize.x * 0.5f, 26.0f),
+        _timeTrialFinished
+            ? IM_COL32(100, 245, 155, 255)
+            : IM_COL32(235, 240, 250, 255),
+        timerLabel.c_str());
+    if (_timeTrialBestSeconds >= 0.0f) {
+        const std::string bestLabel = fmt::format(
+            "BEST {:02}:{:06.3f}",
+            static_cast<int>(_timeTrialBestSeconds / 60.0f),
+            std::fmod(_timeTrialBestSeconds, 60.0f));
+        const ImVec2 bestSize = ImGui::CalcTextSize(bestLabel.c_str());
+        crosshair->AddText(
+            ImVec2(center.x - bestSize.x * 0.5f, 48.0f),
+            IM_COL32(255, 210, 90, 255),
+            bestLabel.c_str());
+    }
+}
+
 void VulkanEngine::draw_frame_ui(float deltaTime)
 {
     if (_editorMode) {
@@ -1726,18 +1892,7 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
             }
             ImGui::End();
     
-            if (ImGui::Begin("Movement Tuning")) {
-                PlayerMovementSettings& movement = _playerMovement.settings;
-                ImGui::SliderFloat("Gravity", &movement.gravity, 1.0f, 60.0f);
-                ImGui::SliderFloat("Jump Speed", &movement.jumpSpeed, 1.0f, 20.0f);
-                ImGui::SliderFloat("Ground Speed", &movement.maxGroundSpeed, 1.0f, 20.0f);
-                ImGui::SliderFloat("Ground Accel", &movement.groundAcceleration, 1.0f, 100.0f);
-                ImGui::SliderFloat("Ground Friction", &movement.groundFriction, 0.0f, 20.0f);
-                ImGui::SliderFloat("Air Accel", &movement.airAcceleration, 0.0f, 50.0f);
-                ImGui::SliderFloat("Air Wish Cap", &movement.airWishSpeedCap, 0.1f, 20.0f);
-                ImGui::SliderFloat("Jump Buffer", &movement.jumpBufferSeconds, 0.0f, 0.25f);
-            }
-            ImGui::End();
+            draw_movement_tuning_panel();
         }
     }
     
@@ -1750,147 +1905,10 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
         _playerMovement.velocity.x,
         _playerMovement.velocity.z));
     if (_editorMode && _showDebugPanels) {
-        if (ImGui::Begin("Statistics")) {
-            ImGui::Text("Speed %.2f", horizontalSpeed);
-            ImGui::Text("Frame time %.3f ms", stats.frametime);
-            ImGui::Text("Scene update %.3f ms", stats.scene_update_time);
-            ImGui::Text("Mesh draw %.3f ms", stats.mesh_draw_time);
-            ImGui::Text("Triangles %d", stats.triangle_count);
-            ImGui::Separator();
-            ImGui::Text("World draw calls %d", stats.world_drawcall_count);
-            ImGui::Text("Portal draw calls %d", stats.portal_drawcall_count);
-            ImGui::Text("Total draw calls %d", stats.drawcall_count);
-            ImGui::Separator();
-            // The shadow and prepass passes walk the scene again with their
-            // own culling, so none of their cost appears in the counters
-            // above.
-            ImGui::Text(
-                "Shadow map %ux%u %s",
-                ShadowMapResolution,
-                ShadowMapResolution,
-                _shadowFormatName);
-            ImGui::Text(
-                "Shadow draws %d (%d tris)",
-                stats.shadow_drawcall_count,
-                stats.shadow_triangle_count);
-            ImGui::Text("Shadow record %.3f ms", stats.shadow_record_time);
-            ImGui::Text(
-                "Prepass draws %d (%d tris)",
-                stats.prepass_drawcall_count,
-                stats.prepass_triangle_count);
-            ImGui::Text("Prepass record %.3f ms", stats.prepass_record_time);
-            ImGui::Separator();
-            if (stats.ssao_kernel_samples == 0) {
-                ImGui::Text("Ambient occlusion: off");
-            } else {
-                ImGui::Text(
-                    "AO %dx%d %s, %d samples",
-                    stats.ssao_width,
-                    stats.ssao_height,
-                    _ssaoFormatName,
-                    stats.ssao_kernel_samples);
-                // Three dispatches take microseconds to record and
-                // milliseconds to run, so a CPU number here would be
-                // actively misleading.  It is labelled when that is all
-                // the device can provide.
-                const char* unit = stats.ssao_time_is_gpu ? "ms" : "ms CPU";
-                ImGui::Text("  sample  %.3f %s", stats.ssao_raw_time, unit);
-                ImGui::Text(
-                    "  blur H  %.3f %s", stats.ssao_blur_horizontal_time, unit);
-                ImGui::Text(
-                    "  blur V  %.3f %s", stats.ssao_blur_vertical_time, unit);
-                ImGui::Text("  total   %.3f %s", stats.ssao_total_time, unit);
-            }
-            ImGui::Separator();
-            ImGui::Text(
-                "Portal mode: %s",
-                _useOffscreenPortalCameras
-                    ? "Offscreen camera (primary only)"
-                    : (_portalRecursionEnabled
-                        ? "Direct stencil (one recursive level)"
-                        : "Direct stencil (primary only)"));
-        }
-        ImGui::End();
+        draw_statistics_panel(horizontalSpeed);
     }
     
     if (!_editorMode) {
-        ImGui::SetNextWindowPos(
-            ImVec2(ImGui::GetIO().DisplaySize.x - 18.0f, 18.0f),
-            ImGuiCond_Always, ImVec2(1.0f, 0.0f));
-        ImGui::SetNextWindowBgAlpha(0.78f);
-        if (ImGui::Begin("Play Controls", nullptr,
-                ImGuiWindowFlags_AlwaysAutoResize |
-                ImGuiWindowFlags_NoCollapse |
-                ImGuiWindowFlags_NoSavedSettings)) {
-            if (ImGui::Button("Respawn (F1)")) respawn_player();
-            ImGui::SameLine();
-            if (ImGui::Button(_noClipMode
-                    ? "Disable No Clip (F2)"
-                    : "Enable No Clip (F2)")) {
-                _noClipMode = !_noClipMode;
-                _noClipUp = false;
-                _noClipDown = false;
-                _playerMovement.velocity = glm::vec3(0.0f);
-            }
-            if (_noClipMode) {
-                ImGui::SliderFloat("No Clip Speed", &_noClipSpeed, 2.0f, 40.0f);
-                ImGui::TextDisabled("WASD move, Space up, Ctrl down");
-            }
-        }
-        ImGui::End();
-
-        const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-        ImDrawList* crosshair = ImGui::GetForegroundDrawList();
-        // Portal-style status reticle: blue is left mouse and orange is
-        // right mouse. Bright means the portal is placed; dim means it is
-        // available and the next click will create it.
-        const ImU32 bluePortalColor = _bluePortal.placed
-            ? IM_COL32(45, 195, 255, 255)
-            : IM_COL32(45, 195, 255, 90);
-        const ImU32 orangePortalColor = _orangePortal.placed
-            ? IM_COL32(255, 155, 35, 255)
-            : IM_COL32(255, 155, 35, 90);
-        crosshair->PathArcTo(
-            center, 16.0f, IM_PI * 0.5f, IM_PI * 1.5f, 14);
-        crosshair->PathStroke(bluePortalColor, ImDrawFlags_None, 2.5f);
-        crosshair->PathArcTo(
-            center, 16.0f, -IM_PI * 0.5f, IM_PI * 0.5f, 14);
-        crosshair->PathStroke(orangePortalColor, ImDrawFlags_None, 2.5f);
-        const std::string speedLabel = fmt::format("Speed {:.1f}", horizontalSpeed);
-        crosshair->AddText(
-            ImVec2(18.0f, ImGui::GetIO().DisplaySize.y - 34.0f),
-            IM_COL32(220, 230, 245, 255),
-            speedLabel.c_str());
-        crosshair->AddText(
-            ImVec2(18.0f, ImGui::GetIO().DisplaySize.y - 56.0f),
-            IM_COL32(150, 165, 185, 210),
-            "LMB Blue | RMB Orange | R Retract | F1 Respawn | F2 No Clip");
-    
-        const char* timerState = _timeTrialRunning
-            ? "RUNNING"
-            : (_timeTrialFinished ? "FINISHED" : "READY");
-        const std::string timerLabel = fmt::format(
-            "{}  {:02}:{:06.3f}",
-            timerState,
-            static_cast<int>(_timeTrialSeconds / 60.0f),
-            std::fmod(_timeTrialSeconds, 60.0f));
-        const ImVec2 timerSize = ImGui::CalcTextSize(timerLabel.c_str());
-        crosshair->AddText(
-            ImVec2(center.x - timerSize.x * 0.5f, 26.0f),
-            _timeTrialFinished
-                ? IM_COL32(100, 245, 155, 255)
-                : IM_COL32(235, 240, 250, 255),
-            timerLabel.c_str());
-        if (_timeTrialBestSeconds >= 0.0f) {
-            const std::string bestLabel = fmt::format(
-                "BEST {:02}:{:06.3f}",
-                static_cast<int>(_timeTrialBestSeconds / 60.0f),
-                std::fmod(_timeTrialBestSeconds, 60.0f));
-            const ImVec2 bestSize = ImGui::CalcTextSize(bestLabel.c_str());
-            crosshair->AddText(
-                ImVec2(center.x - bestSize.x * 0.5f, 48.0f),
-                IM_COL32(255, 210, 90, 255),
-                bestLabel.c_str());
-        }
+        draw_play_overlay(horizontalSpeed);
     }
 }

@@ -520,6 +520,9 @@ class VulkanEngine{
         void init_vulkan();
         bool process_event(const SDL_Event& event);
         void draw_frame_ui(float deltaTime);
+        void draw_movement_tuning_panel();
+        void draw_statistics_panel(float horizontalSpeed);
+        void draw_play_overlay(float horizontalSpeed);
         void init_swapchain();
         void init_commands();
         void init_sync_structures();
