@@ -342,22 +342,22 @@ void VulkanEngine::draw_geometry_to_portal_camera(
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
         colorTarget.imageView, &clearColor, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
-        _portalCameraDepthImage.imageView,
+        _portalCameras.depthImage.imageView,
         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
     VkRenderingInfo renderInfo = vkinit::rendering_info(
-        _portalCameraExtent, &colorAttachment, &depthAttachment);
+        _portalCameras.extent, &colorAttachment, &depthAttachment);
     renderInfo.pStencilAttachment = &stencilAttachment;
 
     vkCmdBeginRendering(cmd, &renderInfo);
     VkViewport viewport{};
-    viewport.width = static_cast<float>(_portalCameraExtent.width);
-    viewport.height = static_cast<float>(_portalCameraExtent.height);
+    viewport.width = static_cast<float>(_portalCameras.extent.width);
+    viewport.height = static_cast<float>(_portalCameras.extent.height);
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     VkRect2D scissor{};
-    scissor.extent = _portalCameraExtent;
+    scissor.extent = _portalCameras.extent;
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     // Every object in this pass shares one camera, and all but the
@@ -435,7 +435,7 @@ void VulkanEngine::draw_offscreen_portal_views(VkCommandBuffer cmd)
 
     FrameData& frame = get_current_frame();
     const auto renderCamera = [&](uint32_t targetIndex, uint32_t viewIndex) {
-        AllocatedImage& target = _portalCameraImages[targetIndex];
+        AllocatedImage& target = _portalCameras.images[targetIndex];
         // Every target is completely cleared before use, so the old contents
         // are irrelevant. This is valid from either first-use or shader-read.
         vkutil::transition_image(
@@ -445,7 +445,7 @@ void VulkanEngine::draw_offscreen_portal_views(VkCommandBuffer cmd)
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         vkutil::transition_image(
             cmd,
-            _portalCameraDepthImage.image,
+            _portalCameras.depthImage.image,
             VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
             VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
@@ -469,7 +469,7 @@ void VulkanEngine::draw_offscreen_portal_views(VkCommandBuffer cmd)
 
     DrawContext blueComposite{};
     blueComposite.OpaqueSurfaces.push_back(make_portal_render_object(
-        _bluePortal, _portalCameraMaterials[0]));
+        _bluePortal, _portalCameras.materials[0]));
     draw_geometry(
         cmd,
         blueComposite,
@@ -485,7 +485,7 @@ void VulkanEngine::draw_offscreen_portal_views(VkCommandBuffer cmd)
 
     DrawContext orangeComposite{};
     orangeComposite.OpaqueSurfaces.push_back(make_portal_render_object(
-        _orangePortal, _portalCameraMaterials[1]));
+        _orangePortal, _portalCameras.materials[1]));
     draw_geometry(
         cmd,
         orangeComposite,
@@ -611,52 +611,52 @@ GPUSceneData VulkanEngine::build_portal_scene_data(
 void VulkanEngine::init_portal_camera_targets()
 {
     const VkExtent3D targetExtent{
-        _portalCameraExtent.width,
-        _portalCameraExtent.height,
+        _portalCameras.extent.width,
+        _portalCameras.extent.height,
         1};
-    for (AllocatedImage& image : _portalCameraImages) {
+    for (AllocatedImage& image : _portalCameras.images) {
         image = create_image(
             targetExtent,
             _drawImage.imageFormat,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     }
-    _portalCameraDepthImage = create_image(
+    _portalCameras.depthImage = create_image(
         targetExtent,
         _depthImage.imageFormat,
         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
 
     for (uint32_t index = 0; index < PortalCameraTargetCount; ++index) {
-        _portalCameraMaterialBuffers[index] = create_buffer(
+        _portalCameras.materialBuffers[index] = create_buffer(
             sizeof(GLTFMetallic_Roughness::MaterialConstants),
             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
             VMA_MEMORY_USAGE_CPU_TO_GPU);
         auto* constants = static_cast<GLTFMetallic_Roughness::MaterialConstants*>(
-            _portalCameraMaterialBuffers[index].info.pMappedData);
+            _portalCameras.materialBuffers[index].info.pMappedData);
         *constants = {};
         constants->colorFactors = glm::vec4(1.0f);
 
         GLTFMetallic_Roughness::MaterialResources resources{};
-        resources.colorImage = _portalCameraImages[index];
+        resources.colorImage = _portalCameras.images[index];
         resources.colorSampler = _defaultSamplerLinear;
         resources.metalRoughImage = _whiteImage;
         resources.metalRoughSampler = _defaultSamplerLinear;
-        resources.dataBuffer = _portalCameraMaterialBuffers[index].buffer;
-        _portalCameraMaterials[index] = metalRoughMaterial.write_material(
+        resources.dataBuffer = _portalCameras.materialBuffers[index].buffer;
+        _portalCameras.materials[index] = metalRoughMaterial.write_material(
             _device,
             MaterialPass::MainColor,
             resources,
             globalDescriptorAllocator);
-        _portalCameraMaterials[index].pipeline =
+        _portalCameras.materials[index].pipeline =
             &metalRoughMaterial.portalCompositePipeline;
     }
 
     _mainDeletionQueue.push_function([this]() {
-        for (const AllocatedBuffer& buffer : _portalCameraMaterialBuffers) {
+        for (const AllocatedBuffer& buffer : _portalCameras.materialBuffers) {
             destroy_buffer(buffer);
         }
-        for (const AllocatedImage& image : _portalCameraImages) {
+        for (const AllocatedImage& image : _portalCameras.images) {
             destroy_image(image);
         }
-        destroy_image(_portalCameraDepthImage);
+        destroy_image(_portalCameras.depthImage);
     });
 }

@@ -790,8 +790,8 @@ void VulkanEngine::draw_editor_menu()
         ImGui::MenuItem(
             "Use Offscreen Camera Experiment",
             nullptr,
-            &_useOffscreenPortalCameras);
-        ImGui::BeginDisabled(_useOffscreenPortalCameras);
+            &_portalCameras.useOffscreen);
+        ImGui::BeginDisabled(_portalCameras.useOffscreen);
         ImGui::MenuItem(
             "Direct Stencil Recursion",
             nullptr,
@@ -1738,7 +1738,7 @@ void VulkanEngine::draw_statistics_panel(float horizontalSpeed)
         ImGui::Separator();
         ImGui::Text(
             "Portal mode: %s",
-            _useOffscreenPortalCameras
+            _portalCameras.useOffscreen
                 ? "Offscreen camera (primary only)"
                 : (_portalRecursionEnabled
                     ? "Direct stencil (one recursive level)"

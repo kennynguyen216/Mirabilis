@@ -630,7 +630,7 @@ void VulkanEngine::draw(float deltaTime)
     // it for a frame-rate-sized safety band exposed the solid host wall before
     // physics teleported the player, causing the black flash.
     draw_portal_masks(cmd);
-    if (_useOffscreenPortalCameras && _authoredPortalPairs.empty()) {
+    if (_portalCameras.useOffscreen && _authoredPortalPairs.empty()) {
         draw_offscreen_portal_views(cmd);
     } else {
         draw_portal_views(cmd);

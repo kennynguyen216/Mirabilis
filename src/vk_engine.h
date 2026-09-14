@@ -783,12 +783,15 @@ class VulkanEngine{
         int _selectedAuthoredPortalPair{-1};
         bool _selectedAuthoredPortalSecond{false};
         static constexpr uint32_t PortalCameraTargetCount = 2;
-        VkExtent2D _portalCameraExtent{640, 360};
-        std::array<AllocatedImage, PortalCameraTargetCount> _portalCameraImages{};
-        AllocatedImage _portalCameraDepthImage;
-        std::array<AllocatedBuffer, PortalCameraTargetCount> _portalCameraMaterialBuffers{};
-        std::array<MaterialInstance, PortalCameraTargetCount> _portalCameraMaterials{};
-        bool _useOffscreenPortalCameras{false};
+        struct PortalCameraState {
+            VkExtent2D extent{640, 360};
+            std::array<AllocatedImage, PortalCameraTargetCount> images{};
+            AllocatedImage depthImage;
+            std::array<AllocatedBuffer, PortalCameraTargetCount> materialBuffers{};
+            std::array<MaterialInstance, PortalCameraTargetCount> materials{};
+            bool useOffscreen{false};
+        };
+        PortalCameraState _portalCameras;
         bool _portalRecursionEnabled{true};
         std::array<GPUSceneData, PortalViewCount> _portalSceneData{};
         MaterialPipeline _portalSkyPipeline;
