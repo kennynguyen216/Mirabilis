@@ -100,19 +100,11 @@ void VulkanEngine::init_depth_normal_resources()
 
 void VulkanEngine::init_depth_normal_pipeline()
 {
-    VkShaderModule vertexShader = VK_NULL_HANDLE;
-    VkShaderModule fragmentShader = VK_NULL_HANDLE;
-    if (!vkutil::load_shader_module(
-            "../../shaders/depth_normal.vert.spv", _device, &vertexShader) ||
-        !vkutil::load_shader_module(
-            "../../shaders/depth_normal.frag.spv", _device, &fragmentShader)) {
+    ScopedShaderModule vertexShader(_device);
+    ScopedShaderModule fragmentShader(_device);
+    if (!vertexShader.load("../../shaders/depth_normal.vert.spv") ||
+        !fragmentShader.load("../../shaders/depth_normal.frag.spv")) {
         fmt::print("Error loading depth/normal prepass shaders\n");
-        if (vertexShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, vertexShader, nullptr);
-        }
-        if (fragmentShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, fragmentShader, nullptr);
-        }
         return;
     }
 
@@ -132,7 +124,7 @@ void VulkanEngine::init_depth_normal_pipeline()
 
     PipelineBuilder builder;
     builder._pipelineLayout = _depthNormalPipeline.layout;
-    builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_shaders(vertexShader.get(), fragmentShader.get());
     builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
     // Every rasterizer state below matches the main opaque pipeline. If the
@@ -146,9 +138,6 @@ void VulkanEngine::init_depth_normal_pipeline()
     builder.set_depth_format(_prepassDepthImage.imageFormat);
     _depthNormalPipeline.pipeline = builder.build_pipeline(_device);
 
-    vkDestroyShaderModule(_device, fragmentShader, nullptr);
-    vkDestroyShaderModule(_device, vertexShader, nullptr);
-
     _mainDeletionQueue.push_function([this]() {
         vkDestroyPipeline(_device, _depthNormalPipeline.pipeline, nullptr);
         vkDestroyPipelineLayout(_device, _depthNormalPipeline.layout, nullptr);
@@ -157,19 +146,11 @@ void VulkanEngine::init_depth_normal_pipeline()
 
 void VulkanEngine::init_depth_normal_mask_pipeline()
 {
-    VkShaderModule vertexShader = VK_NULL_HANDLE;
-    VkShaderModule fragmentShader = VK_NULL_HANDLE;
-    if (!vkutil::load_shader_module(
-            "../../shaders/depth_normal_mask.vert.spv", _device, &vertexShader) ||
-        !vkutil::load_shader_module(
-            "../../shaders/depth_normal_mask.frag.spv", _device, &fragmentShader)) {
+    ScopedShaderModule vertexShader(_device);
+    ScopedShaderModule fragmentShader(_device);
+    if (!vertexShader.load("../../shaders/depth_normal_mask.vert.spv") ||
+        !fragmentShader.load("../../shaders/depth_normal_mask.frag.spv")) {
         fmt::print("Error loading alpha-tested prepass shaders\n");
-        if (vertexShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, vertexShader, nullptr);
-        }
-        if (fragmentShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, fragmentShader, nullptr);
-        }
         return;
     }
 
@@ -192,7 +173,7 @@ void VulkanEngine::init_depth_normal_mask_pipeline()
 
     PipelineBuilder builder;
     builder._pipelineLayout = _depthNormalMaskPipeline.layout;
-    builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_shaders(vertexShader.get(), fragmentShader.get());
     builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
     // Matching the opaque prepass for the same reason it matches the main
@@ -204,9 +185,6 @@ void VulkanEngine::init_depth_normal_mask_pipeline()
     builder.set_color_attachment_format(_prepassNormalImage.imageFormat);
     builder.set_depth_format(_prepassDepthImage.imageFormat);
     _depthNormalMaskPipeline.pipeline = builder.build_pipeline(_device);
-
-    vkDestroyShaderModule(_device, fragmentShader, nullptr);
-    vkDestroyShaderModule(_device, vertexShader, nullptr);
 
     _mainDeletionQueue.push_function([this]() {
         vkDestroyPipeline(_device, _depthNormalMaskPipeline.pipeline, nullptr);

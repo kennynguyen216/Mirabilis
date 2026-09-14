@@ -2,12 +2,65 @@
 
 #include "vk_engine.h"
 
+#include <vk_pipelines.h>
+
 #include <array>
 #include <initializer_list>
 
 #include <glm/geometric.hpp>
 
 bool is_visible(const RenderObject& object, const glm::mat4& viewProjection);
+
+class ScopedShaderModule {
+public:
+    explicit ScopedShaderModule(VkDevice device)
+        : _device(device)
+    {
+    }
+
+    ScopedShaderModule(const ScopedShaderModule&) = delete;
+    ScopedShaderModule& operator=(const ScopedShaderModule&) = delete;
+
+    ScopedShaderModule(ScopedShaderModule&& other) noexcept
+        : _device(other._device)
+        , _module(other._module)
+    {
+        other._module = VK_NULL_HANDLE;
+    }
+
+    ScopedShaderModule& operator=(ScopedShaderModule&& other) noexcept
+    {
+        if (this != &other) {
+            reset();
+            _device = other._device;
+            _module = other._module;
+            other._module = VK_NULL_HANDLE;
+        }
+        return *this;
+    }
+
+    ~ScopedShaderModule() { reset(); }
+
+    bool load(const char* path)
+    {
+        reset();
+        return vkutil::load_shader_module(path, _device, &_module);
+    }
+
+    VkShaderModule get() const { return _module; }
+
+private:
+    void reset()
+    {
+        if (_module != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(_device, _module, nullptr);
+            _module = VK_NULL_HANDLE;
+        }
+    }
+
+    VkDevice _device{VK_NULL_HANDLE};
+    VkShaderModule _module{VK_NULL_HANDLE};
+};
 
 inline void set_fullscreen_dynamic_state(VkCommandBuffer cmd, VkExtent2D extent)
 {

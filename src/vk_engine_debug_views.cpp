@@ -8,19 +8,11 @@
 
 void VulkanEngine::init_render_debug_pipeline()
 {
-    VkShaderModule vertexShader = VK_NULL_HANDLE;
-    VkShaderModule fragmentShader = VK_NULL_HANDLE;
-    if (!vkutil::load_shader_module(
-            "../../shaders/render_debug.vert.spv", _device, &vertexShader) ||
-        !vkutil::load_shader_module(
-            "../../shaders/render_debug.frag.spv", _device, &fragmentShader)) {
+    ScopedShaderModule vertexShader(_device);
+    ScopedShaderModule fragmentShader(_device);
+    if (!vertexShader.load("../../shaders/render_debug.vert.spv") ||
+        !fragmentShader.load("../../shaders/render_debug.frag.spv")) {
         fmt::print("Error loading render debug shaders\n");
-        if (vertexShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, vertexShader, nullptr);
-        }
-        if (fragmentShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, fragmentShader, nullptr);
-        }
         return;
     }
 
@@ -43,7 +35,7 @@ void VulkanEngine::init_render_debug_pipeline()
 
     PipelineBuilder builder;
     builder._pipelineLayout = _renderDebugPipeline.layout;
-    builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_shaders(vertexShader.get(), fragmentShader.get());
     builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
     builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
@@ -55,9 +47,6 @@ void VulkanEngine::init_render_debug_pipeline()
     builder.set_color_attachment_format(_drawImage.imageFormat);
     builder.set_depth_format(VK_FORMAT_UNDEFINED);
     _renderDebugPipeline.pipeline = builder.build_pipeline(_device);
-
-    vkDestroyShaderModule(_device, fragmentShader, nullptr);
-    vkDestroyShaderModule(_device, vertexShader, nullptr);
 
     _mainDeletionQueue.push_function([this]() {
         vkDestroyPipeline(_device, _renderDebugPipeline.pipeline, nullptr);

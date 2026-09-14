@@ -68,9 +68,8 @@ void VulkanEngine::init_shadow_resources()
 
 void VulkanEngine::init_shadow_pipeline()
 {
-    VkShaderModule shadowVertexShader = VK_NULL_HANDLE;
-    if (!vkutil::load_shader_module(
-            "../../shaders/shadow_depth.vert.spv", _device, &shadowVertexShader)) {
+    ScopedShaderModule shadowVertexShader(_device);
+    if (!shadowVertexShader.load("../../shaders/shadow_depth.vert.spv")) {
         fmt::print("Error loading shadow depth shader\n");
         return;
     }
@@ -89,7 +88,7 @@ void VulkanEngine::init_shadow_pipeline()
 
     PipelineBuilder builder;
     builder._pipelineLayout = _shadowPipeline.layout;
-    builder.set_vertex_only_shader(shadowVertexShader);
+    builder.set_vertex_only_shader(shadowVertexShader.get());
     builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
     // The level's walls and floors are single-sided quads, so culling here
@@ -106,8 +105,6 @@ void VulkanEngine::init_shadow_pipeline()
     builder.set_depth_format(_shadowMapImage.imageFormat);
     _shadowPipeline.pipeline = builder.build_pipeline(_device);
 
-    vkDestroyShaderModule(_device, shadowVertexShader, nullptr);
-
     _mainDeletionQueue.push_function([this]() {
         vkDestroyPipeline(_device, _shadowPipeline.pipeline, nullptr);
         vkDestroyPipelineLayout(_device, _shadowPipeline.layout, nullptr);
@@ -116,19 +113,11 @@ void VulkanEngine::init_shadow_pipeline()
 
 void VulkanEngine::init_shadow_mask_pipeline()
 {
-    VkShaderModule vertexShader = VK_NULL_HANDLE;
-    VkShaderModule fragmentShader = VK_NULL_HANDLE;
-    if (!vkutil::load_shader_module(
-            "../../shaders/shadow_depth_mask.vert.spv", _device, &vertexShader) ||
-        !vkutil::load_shader_module(
-            "../../shaders/shadow_depth_mask.frag.spv", _device, &fragmentShader)) {
+    ScopedShaderModule vertexShader(_device);
+    ScopedShaderModule fragmentShader(_device);
+    if (!vertexShader.load("../../shaders/shadow_depth_mask.vert.spv") ||
+        !fragmentShader.load("../../shaders/shadow_depth_mask.frag.spv")) {
         fmt::print("Error loading alpha-tested shadow shaders\n");
-        if (vertexShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, vertexShader, nullptr);
-        }
-        if (fragmentShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, fragmentShader, nullptr);
-        }
         return;
     }
 
@@ -150,7 +139,7 @@ void VulkanEngine::init_shadow_mask_pipeline()
 
     PipelineBuilder builder;
     builder._pipelineLayout = _shadowMaskPipeline.layout;
-    builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_shaders(vertexShader.get(), fragmentShader.get());
     builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
     // Every state below matches the opaque shadow pipeline exactly.  Where a
@@ -164,9 +153,6 @@ void VulkanEngine::init_shadow_mask_pipeline()
     builder.enable_depth_bias(1.25f, 2.75f);
     builder.set_depth_format(_shadowMapImage.imageFormat);
     _shadowMaskPipeline.pipeline = builder.build_pipeline(_device);
-
-    vkDestroyShaderModule(_device, fragmentShader, nullptr);
-    vkDestroyShaderModule(_device, vertexShader, nullptr);
 
     _mainDeletionQueue.push_function([this]() {
         vkDestroyPipeline(_device, _shadowMaskPipeline.pipeline, nullptr);

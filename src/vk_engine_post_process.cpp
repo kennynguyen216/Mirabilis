@@ -93,22 +93,14 @@ void VulkanEngine::init_post_process_resources()
 
 void VulkanEngine::init_tonemap_pipeline()
 {
-    VkShaderModule vertexShader = VK_NULL_HANDLE;
-    VkShaderModule fragmentShader = VK_NULL_HANDLE;
+    ScopedShaderModule vertexShader(_device);
+    ScopedShaderModule fragmentShader(_device);
     // The same fullscreen triangle the anti-aliasing pass uses.  It binds
     // nothing and interpolates nothing, so there is no reason for a second
     // copy of it.
-    if (!vkutil::load_shader_module(
-            "../../shaders/fxaa.vert.spv", _device, &vertexShader) ||
-        !vkutil::load_shader_module(
-            "../../shaders/tonemap.frag.spv", _device, &fragmentShader)) {
+    if (!vertexShader.load("../../shaders/fxaa.vert.spv") ||
+        !fragmentShader.load("../../shaders/tonemap.frag.spv")) {
         fmt::print("Error loading tonemap shaders\n");
-        if (vertexShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, vertexShader, nullptr);
-        }
-        if (fragmentShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, fragmentShader, nullptr);
-        }
         return;
     }
 
@@ -126,7 +118,7 @@ void VulkanEngine::init_tonemap_pipeline()
 
     PipelineBuilder builder;
     builder._pipelineLayout = _tonemapPipeline.layout;
-    builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_shaders(vertexShader.get(), fragmentShader.get());
     builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
     builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
@@ -137,9 +129,6 @@ void VulkanEngine::init_tonemap_pipeline()
     builder.set_depth_format(VK_FORMAT_UNDEFINED);
     _tonemapPipeline.pipeline = builder.build_pipeline(_device);
 
-    vkDestroyShaderModule(_device, fragmentShader, nullptr);
-    vkDestroyShaderModule(_device, vertexShader, nullptr);
-
     _mainDeletionQueue.push_function([this]() {
         vkDestroyPipeline(_device, _tonemapPipeline.pipeline, nullptr);
         vkDestroyPipelineLayout(_device, _tonemapPipeline.layout, nullptr);
@@ -148,19 +137,11 @@ void VulkanEngine::init_tonemap_pipeline()
 
 void VulkanEngine::init_fxaa_pipeline()
 {
-    VkShaderModule vertexShader = VK_NULL_HANDLE;
-    VkShaderModule fragmentShader = VK_NULL_HANDLE;
-    if (!vkutil::load_shader_module(
-            "../../shaders/fxaa.vert.spv", _device, &vertexShader) ||
-        !vkutil::load_shader_module(
-            "../../shaders/fxaa.frag.spv", _device, &fragmentShader)) {
+    ScopedShaderModule vertexShader(_device);
+    ScopedShaderModule fragmentShader(_device);
+    if (!vertexShader.load("../../shaders/fxaa.vert.spv") ||
+        !fragmentShader.load("../../shaders/fxaa.frag.spv")) {
         fmt::print("Error loading FXAA shaders\n");
-        if (vertexShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, vertexShader, nullptr);
-        }
-        if (fragmentShader != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(_device, fragmentShader, nullptr);
-        }
         return;
     }
 
@@ -180,7 +161,7 @@ void VulkanEngine::init_fxaa_pipeline()
 
     PipelineBuilder builder;
     builder._pipelineLayout = _fxaaPipeline.layout;
-    builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_shaders(vertexShader.get(), fragmentShader.get());
     builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
     builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
@@ -192,9 +173,6 @@ void VulkanEngine::init_fxaa_pipeline()
     builder.set_color_attachment_format(_postProcessImage.imageFormat);
     builder.set_depth_format(VK_FORMAT_UNDEFINED);
     _fxaaPipeline.pipeline = builder.build_pipeline(_device);
-
-    vkDestroyShaderModule(_device, fragmentShader, nullptr);
-    vkDestroyShaderModule(_device, vertexShader, nullptr);
 
     _mainDeletionQueue.push_function([this]() {
         vkDestroyPipeline(_device, _fxaaPipeline.pipeline, nullptr);
