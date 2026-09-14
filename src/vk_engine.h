@@ -733,8 +733,11 @@ class VulkanEngine{
         EditorUiState _editorUi;
         bool _sceneDirty{false};
         std::string _activeSceneFilename{"sandbox.json"};
-        std::array<char, 64> _sceneNameInput{};
-        std::array<char, 260> _gltfPathInput{};
+        struct EditorInputState {
+            std::array<char, 64> sceneName{};
+            std::array<char, 260> gltfPath{};
+        };
+        EditorInputState _editorInputs;
         struct MaterialEditorState {
             std::array<char, 260> texturePathInput{};
             SceneObjectID object{InvalidSceneObject};

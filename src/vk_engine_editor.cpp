@@ -546,11 +546,13 @@ void VulkanEngine::draw_editor_menu()
             save_editor_scene();
         }
         if (ImGui::MenuItem("Save Scene As...")) {
-            _sceneNameInput.fill('\0');
+            _editorInputs.sceneName.fill('\0');
             const size_t copyLength = std::min(
-                _activeSceneFilename.size(), _sceneNameInput.size() - 1);
+                _activeSceneFilename.size(), _editorInputs.sceneName.size() - 1);
             std::memcpy(
-                _sceneNameInput.data(), _activeSceneFilename.data(), copyLength);
+                _editorInputs.sceneName.data(),
+                _activeSceneFilename.data(),
+                copyLength);
             ImGui::OpenPopup("Save Scene As");
         }
         if (ImGui::MenuItem("Reload Current Scene")) {
@@ -668,7 +670,7 @@ void VulkanEngine::draw_editor_menu()
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Import GLB/glTF...")) {
-            _gltfPathInput.fill('\0');
+            _editorInputs.gltfPath.fill('\0');
             ImGui::OpenPopup("Import GLB/glTF");
         }
         ImGui::EndMenu();
@@ -847,10 +849,11 @@ void VulkanEngine::draw_editor_menu()
     if (ImGui::BeginPopupModal(
             "Save Scene As", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextUnformatted("Scene files are stored in assets/scenes.");
-        ImGui::InputText("Filename", _sceneNameInput.data(), _sceneNameInput.size());
+        ImGui::InputText(
+            "Filename", _editorInputs.sceneName.data(), _editorInputs.sceneName.size());
         ImGui::TextDisabled(".json is added automatically.");
         if (ImGui::Button("Save")) {
-            if (save_editor_scene_as(_sceneNameInput.data())) {
+            if (save_editor_scene_as(_editorInputs.sceneName.data())) {
                 ImGui::CloseCurrentPopup();
             }
         }
@@ -865,9 +868,10 @@ void VulkanEngine::draw_editor_menu()
             "Import GLB/glTF", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextUnformatted("Enter an asset path relative to bin/Debug.");
         ImGui::TextDisabled("Example: ../../assets/my_model.glb");
-        ImGui::InputText("Asset path", _gltfPathInput.data(), _gltfPathInput.size());
+        ImGui::InputText(
+            "Asset path", _editorInputs.gltfPath.data(), _editorInputs.gltfPath.size());
         if (ImGui::Button("Import")) {
-            if (import_gltf_actor(_gltfPathInput.data()) != InvalidSceneObject) {
+            if (import_gltf_actor(_editorInputs.gltfPath.data()) != InvalidSceneObject) {
                 ImGui::CloseCurrentPopup();
             }
         }
