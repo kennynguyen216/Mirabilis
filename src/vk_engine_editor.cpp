@@ -1556,53 +1556,53 @@ void VulkanEngine::draw_screen_buffer_settings()
                 "Depth View Range", &_renderDebugDepthRange, 5.0f, 500.0f);
         }
         ImGui::SeparatorText("SSGI Milestone 5");
-        ImGui::Checkbox("Run SSGI", &_ssgiEnabled);
+        ImGui::Checkbox("Run SSGI", &_ssgi.enabled);
         const char* ssgiPresets[] = {
             "Validation (full resolution)",
             "High (half resolution)",
             "Balanced (half resolution)",
             "Performance (half resolution)",
             "Peak (full resolution, 8 rays)"};
-        int ssgiPreset = _ssgiQualityPreset;
+        int ssgiPreset = _ssgi.qualityPreset;
         if (ImGui::Combo("Quality Preset", &ssgiPreset,
                 ssgiPresets, IM_ARRAYSIZE(ssgiPresets))) {
             apply_ssgi_quality_preset(ssgiPreset);
         }
-        ImGui::SliderInt("Ray Steps", &_ssgiStepCount, 8, 96);
-        ImGui::SliderInt("Rays Per Pixel", &_ssgiRaysPerPixel, 1, 8);
-        ImGui::SliderFloat("Ray Length", &_ssgiRayLength, 1.0f, 40.0f, "%.2f");
-        ImGui::SliderFloat("Thickness", &_ssgiThickness, 0.01f, 2.0f, "%.3f");
+        ImGui::SliderInt("Ray Steps", &_ssgi.stepCount, 8, 96);
+        ImGui::SliderInt("Rays Per Pixel", &_ssgi.raysPerPixel, 1, 8);
+        ImGui::SliderFloat("Ray Length", &_ssgi.rayLength, 1.0f, 40.0f, "%.2f");
+        ImGui::SliderFloat("Thickness", &_ssgi.thickness, 0.01f, 2.0f, "%.3f");
         ImGui::SliderFloat(
-            "Start Offset", &_ssgiStartOffset, 0.001f, 0.5f, "%.3f");
+            "Start Offset", &_ssgi.startOffset, 0.001f, 0.5f, "%.3f");
         ImGui::SliderFloat(
-            "History Weight", &_ssgiHistoryWeight, 0.0f, 0.98f, "%.3f");
+            "History Weight", &_ssgi.historyWeight, 0.0f, 0.98f, "%.3f");
         ImGui::SliderFloat(
-            "History Depth Reject", &_ssgiDepthRejection,
+            "History Depth Reject", &_ssgi.depthRejection,
             0.0001f, 0.02f, "%.4f");
         ImGui::SliderFloat(
-            "History Normal Reject", &_ssgiNormalRejection,
+            "History Normal Reject", &_ssgi.normalRejection,
             0.0f, 1.0f, "%.3f");
         ImGui::SliderFloat(
-            "History Velocity Reject", &_ssgiVelocityRejection,
+            "History Velocity Reject", &_ssgi.velocityRejection,
             0.005f, 0.5f, "%.3f");
         ImGui::SeparatorText("SSGI Milestone 6");
-        ImGui::Checkbox("Spatial Filter", &_ssgiSpatialFilterEnabled);
-        ImGui::SliderInt("Filter Radius", &_ssgiFilterRadius, 1, 8);
+        ImGui::Checkbox("Spatial Filter", &_ssgi.spatialFilterEnabled);
+        ImGui::SliderInt("Filter Radius", &_ssgi.filterRadius, 1, 8);
         ImGui::SliderFloat(
-            "Filter Depth Falloff", &_ssgiFilterDepthFalloff,
+            "Filter Depth Falloff", &_ssgi.filterDepthFalloff,
             10.0f, 4000.0f, "%.1f");
         ImGui::SliderFloat(
-            "Filter Normal Power", &_ssgiFilterNormalPower,
+            "Filter Normal Power", &_ssgi.filterNormalPower,
             1.0f, 128.0f, "%.1f");
         ImGui::SeparatorText("SSGI Milestone 7");
         ImGui::SliderFloat(
-            "Indirect Intensity", &_ssgiIntensity, 0.0f, 2.0f, "%.2f");
+            "Indirect Intensity", &_ssgi.intensity, 0.0f, 2.0f, "%.2f");
         // Enabling SSGI used to delete the flat ambient term outright, which
         // is why turning it on read as a large drop in brightness rather than
         // as indirect light.  The two are alternative answers to the same
         // question, so the split between them is now visible and adjustable.
         ImGui::SliderFloat(
-            "Ambient Retention", &_ssgiAmbientRetention, 0.0f, 1.0f, "%.2f");
+            "Ambient Retention", &_ssgi.ambientRetention, 0.0f, 1.0f, "%.2f");
         ImGui::TextDisabled("0: SSGI replaces flat ambient.");
         ImGui::TextDisabled(
             "1: SSGI adds on top of it, which counts sky fill");
@@ -1612,8 +1612,8 @@ void VulkanEngine::draw_screen_buffer_settings()
         // A traced ray that leaves the depth buffer has to be filled from
         // somewhere.  The analytic gradient is what the software path tracer
         // still uses, so it stays reachable for reference comparisons.
-        ImGui::Checkbox("Miss Rays Sample Skybox", &_ssgiTraceEnvironmentMap);
-        if (_ssgiTraceEnvironmentMap) {
+        ImGui::Checkbox("Miss Rays Sample Skybox", &_ssgi.traceEnvironmentMap);
+        if (_ssgi.traceEnvironmentMap) {
             ImGui::TextDisabled(
                 "Misses read %s at mip %.1f.",
                 SkyboxDisplayNames[_skyboxSelection],

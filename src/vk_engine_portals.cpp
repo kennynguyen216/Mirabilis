@@ -60,15 +60,15 @@ void VulkanEngine::draw_ssgi_portal_mask(VkCommandBuffer cmd)
     vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
     vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
 
-    if (_ssgiPortalMaskPipeline.pipeline != VK_NULL_HANDLE) {
+    if (_ssgi.portalMaskPipeline.pipeline != VK_NULL_HANDLE) {
         vkCmdBindPipeline(
             cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-            _ssgiPortalMaskPipeline.pipeline);
+            _ssgi.portalMaskPipeline.pipeline);
         const VkDescriptorSet sceneDescriptor =
             get_current_frame().sceneDescriptor;
         vkCmdBindDescriptorSets(
             cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-            _ssgiPortalMaskPipeline.layout, 0, 1,
+            _ssgi.portalMaskPipeline.layout, 0, 1,
             &sceneDescriptor, 0, nullptr);
 
         const auto drawPortal = [&](const Portal& portal,
@@ -76,7 +76,7 @@ void VulkanEngine::draw_ssgi_portal_mask(VkCommandBuffer cmd)
             const RenderObject object = make_portal_render_object(portal, material);
             vkCmdBindDescriptorSets(
                 cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                _ssgiPortalMaskPipeline.layout, 1, 1,
+                _ssgi.portalMaskPipeline.layout, 1, 1,
                 &material.materialSet, 0, nullptr);
             vkCmdBindIndexBuffer(
                 cmd, object.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
@@ -84,7 +84,7 @@ void VulkanEngine::draw_ssgi_portal_mask(VkCommandBuffer cmd)
             pushConstants.worldMatrix = object.transform;
             pushConstants.vertexBuffer = object.vertexBufferAddress;
             vkCmdPushConstants(
-                cmd, _ssgiPortalMaskPipeline.layout,
+                cmd, _ssgi.portalMaskPipeline.layout,
                 VK_SHADER_STAGE_VERTEX_BIT, 0,
                 sizeof(pushConstants), &pushConstants);
             vkCmdDrawIndexed(

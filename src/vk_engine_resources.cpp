@@ -259,7 +259,7 @@ bool VulkanEngine::set_skybox(int selection)
     _skyboxImage = std::move(newImage);
     _skyboxSelection = selection;
     update_skybox_descriptors();
-    _ssgiHistoryValid = false;
+    _ssgi.historyValid = false;
     destroy_image(oldImage);
     return true;
 }
@@ -291,7 +291,7 @@ void VulkanEngine::update_skybox_descriptors()
         writer.update_set(_device, _skyboxDescriptor);
         writer.clear();
     }
-    for (VkDescriptorSet descriptor : _ssgiDescriptors) {
+    for (VkDescriptorSet descriptor : _ssgi.descriptors) {
         if (descriptor == VK_NULL_HANDLE) {
             continue;
         }

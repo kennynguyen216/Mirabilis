@@ -250,11 +250,11 @@ void VulkanEngine::init_descriptor_cleanup()
         vkDestroyDescriptorSetLayout(_device, _ssao.descriptorLayout, nullptr);
         vkDestroyDescriptorSetLayout(_device, _ssao.blurDescriptorLayout, nullptr);
         vkDestroyDescriptorSetLayout(_device, _ssao.debugDescriptorLayout, nullptr);
-        vkDestroyDescriptorSetLayout(_device, _ssgiDescriptorLayout, nullptr);
-        vkDestroyDescriptorSetLayout(_device, _ssgiDebugDescriptorLayout, nullptr);
-        vkDestroyDescriptorSetLayout(_device, _ssgiFilterDescriptorLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _ssgi.descriptorLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _ssgi.debugDescriptorLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _ssgi.filterDescriptorLayout, nullptr);
         vkDestroyDescriptorSetLayout(
-            _device, _ssgiCompositeDescriptorLayout, nullptr);
+            _device, _ssgi.compositeDescriptorLayout, nullptr);
     });
 }
 
@@ -502,8 +502,8 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
     data.screenSpaceSettings = glm::vec4(
         ssao_active() ? 1.0f : 0.0f,
         _ssao.ambientOnly ? 1.0f : 0.0f,
-        _ssgiEnabled ? 1.0f : 0.0f,
-        _ssgiHalfResolution ? 1.0f : 0.0f);
+        _ssgi.enabled ? 1.0f : 0.0f,
+        _ssgi.halfResolution ? 1.0f : 0.0f);
     // One multiply takes a fragment coordinate to its occlusion texel.  It
     // folds together the half resolution, the render scale, and the fact that
     // the image stays allocated at window size, none of which a fragment
@@ -524,8 +524,8 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
     // Ambient and SSGI are two answers to one question, so how they divide it
     // travels with every camera rather than being decided in the shader.
     data.indirectSettings = glm::vec4(
-        _ssgiAmbientRetention,
-        _ssgiTraceEnvironmentMap ? 1.0f : 0.0f,
+        _ssgi.ambientRetention,
+        _ssgi.traceEnvironmentMap ? 1.0f : 0.0f,
         _skyboxEnvironmentLod,
         _skyboxIndirectClamp);
     return data;
@@ -625,12 +625,12 @@ void VulkanEngine::init_gpu_timestamps()
     VK_CHECK(vkCreateQueryPool(_device, &poolInfo, nullptr, &_timestampPool));
     poolInfo.queryCount = FRAME_OVERLAP * SSGITimestampsPerFrame;
     VK_CHECK(vkCreateQueryPool(
-        _device, &poolInfo, nullptr, &_ssgiTimestampPool));
+        _device, &poolInfo, nullptr, &_ssgi.timestampPool));
     _gpuTimingSupported = true;
 
     _mainDeletionQueue.push_function([this]() {
         vkDestroyQueryPool(_device, _timestampPool, nullptr);
-        vkDestroyQueryPool(_device, _ssgiTimestampPool, nullptr);
+        vkDestroyQueryPool(_device, _ssgi.timestampPool, nullptr);
     });
 }
 
@@ -670,11 +670,11 @@ void VulkanEngine::read_gpu_timestamps(uint32_t frameIndex)
     stats.ssao_time_is_gpu = true;
     }
 
-    if (_ssgiTimingWritten[frameIndex]) {
-        _ssgiTimingWritten[frameIndex] = false;
+    if (_ssgi.timingWritten[frameIndex]) {
+        _ssgi.timingWritten[frameIndex] = false;
         std::array<uint64_t, SSGITimestampsPerFrame> ssgiTicks{};
         const VkResult ssgiResult = vkGetQueryPoolResults(
-            _device, _ssgiTimestampPool,
+            _device, _ssgi.timestampPool,
             frameIndex * SSGITimestampsPerFrame,
             SSGITimestampsPerFrame, sizeof(ssgiTicks), ssgiTicks.data(),
             sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);

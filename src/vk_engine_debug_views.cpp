@@ -20,7 +20,7 @@ void VulkanEngine::init_render_debug_pipeline()
         _gpuSceneDataDescriptorLayout,
         _prepassImageDescriptorLayout,
         _ssao.debugDescriptorLayout,
-        _ssgiDebugDescriptorLayout};
+        _ssgi.debugDescriptorLayout};
     VkPushConstantRange settingsRange{
         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
         .offset = 0,
@@ -164,7 +164,7 @@ void VulkanEngine::draw_render_debug(VkCommandBuffer cmd)
         get_current_frame().sceneDescriptor,
         _prepassImageDescriptor,
         _ssao.debugDescriptor,
-        _ssgiDebugDescriptors[1u - _ssgiHistoryWriteIndex]};
+        _ssgi.debugDescriptors[1u - _ssgi.historyWriteIndex]};
     vkCmdBindDescriptorSets(
         cmd,
         VK_PIPELINE_BIND_POINT_GRAPHICS,

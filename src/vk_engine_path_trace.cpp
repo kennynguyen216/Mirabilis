@@ -615,13 +615,13 @@ std::vector<glm::vec4> VulkanEngine::read_ssgi_image(
 
 void VulkanEngine::capture_ssgi(const char* filename)
 {
-    if (_rendererMode == RendererMode::SoftwarePathTrace || !_ssgiEnabled) {
+    if (_rendererMode == RendererMode::SoftwarePathTrace || !_ssgi.enabled) {
         fmt::print("SSGI capture skipped: raster SSGI is not active\n");
         return;
     }
     const VkExtent2D extent = active_ssgi_extent();
     const size_t pixels = size_t(extent.width) * extent.height;
-    const auto values = read_ssgi_image(_ssgiFilteredImage, extent);
+    const auto values = read_ssgi_image(_ssgi.filteredImage, extent);
     double sum = 0.0;
     uint32_t invalid = 0;
     for (const glm::vec4& value : values) {
@@ -652,18 +652,18 @@ void VulkanEngine::capture_ssgi(const char* filename)
     metadata << "Scene: " << _activeSceneFilename
         << "\nDimensions: " << extent.width << " x " << extent.height
         << "\nFull draw dimensions: " << _drawExtent.width << " x "
-        << _drawExtent.height << "\nPreset: " << _ssgiQualityPreset
-        << "\nRays per pixel: " << _ssgiRaysPerPixel
-        << "\nRay steps: " << _ssgiStepCount
-        << "\nRay length: " << _ssgiRayLength
-        << "\nThickness: " << _ssgiThickness
-        << "\nHistory weight: " << _ssgiHistoryWeight
-        << "\nFilter enabled: " << _ssgiSpatialFilterEnabled
-        << "\nFilter radius: " << _ssgiFilterRadius
-        << "\nIntensity: " << _ssgiIntensity
-        << "\nAmbient retention: " << _ssgiAmbientRetention
+        << _drawExtent.height << "\nPreset: " << _ssgi.qualityPreset
+        << "\nRays per pixel: " << _ssgi.raysPerPixel
+        << "\nRay steps: " << _ssgi.stepCount
+        << "\nRay length: " << _ssgi.rayLength
+        << "\nThickness: " << _ssgi.thickness
+        << "\nHistory weight: " << _ssgi.historyWeight
+        << "\nFilter enabled: " << _ssgi.spatialFilterEnabled
+        << "\nFilter radius: " << _ssgi.filterRadius
+        << "\nIntensity: " << _ssgi.intensity
+        << "\nAmbient retention: " << _ssgi.ambientRetention
         << "\nMiss fill: "
-        << (_ssgiTraceEnvironmentMap ? "environment map" : "analytic gradient")
+        << (_ssgi.traceEnvironmentMap ? "environment map" : "analytic gradient")
         << "\nEnvironment mip: " << _skyboxEnvironmentLod
         << "\nIndirect sky/sun split: " << _skyboxIndirectClamp
         // Captures taken before the albedo multiply moved to the

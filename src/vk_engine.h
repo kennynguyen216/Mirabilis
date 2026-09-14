@@ -839,77 +839,84 @@ class VulkanEngine{
         AllocatedImage _gbufferVelocityImage;
         AllocatedImage _directLightingImage;
         AllocatedImage _portalMaskImage;
-        AllocatedImage _ssgiRawImage;
-        AllocatedImage _ssgiDebugImage;
-        AllocatedImage _ssgiFallbackImage;
-        std::array<AllocatedImage, 2> _ssgiTemporalHistory{};
-        std::array<AllocatedImage, 2> _ssgiMetadataHistory{};
-        AllocatedImage _ssgiTemporalDiagnosticImage;
-        AllocatedImage _ssgiFilterScratchImage;
-        AllocatedImage _ssgiFilteredImage;
-        AllocatedImage _ssgiReferenceImage;
-        bool _ssgiReferenceLoaded{false};
+        struct SSGIState {
+            AllocatedImage rawImage;
+            AllocatedImage debugImage;
+            AllocatedImage fallbackImage;
+            std::array<AllocatedImage, 2> temporalHistory{};
+            std::array<AllocatedImage, 2> metadataHistory{};
+            AllocatedImage temporalDiagnosticImage;
+            AllocatedImage filterScratchImage;
+            AllocatedImage filteredImage;
+            AllocatedImage referenceImage;
+            bool referenceLoaded{false};
+            VkDescriptorSetLayout descriptorLayout{};
+            std::array<VkDescriptorSet, 2> descriptors{};
+            VkDescriptorSetLayout debugDescriptorLayout{};
+            std::array<VkDescriptorSet, 2> debugDescriptors{};
+            VkDescriptorSetLayout filterDescriptorLayout{};
+            std::array<VkDescriptorSet, 3> filterDescriptors{};
+            MaterialPipeline portalMaskPipeline;
+            VkPipelineLayout pipelineLayout{};
+            VkPipeline pipeline{};
+            VkPipeline temporalPipeline{};
+            VkPipelineLayout filterPipelineLayout{};
+            VkPipeline filterPipeline{};
+            VkDescriptorSetLayout compositeDescriptorLayout{};
+            std::array<VkDescriptorSet, 2> compositeDescriptors{};
+            MaterialPipeline compositePipeline;
+            bool enabled{true};
+            bool historyValid{false};
+            uint32_t historyWriteIndex{0};
+            VkExtent2D historyExtent{0, 0};
+            int stepCount{32};
+            int raysPerPixel{4};
+            float rayLength{12.0f};
+            float thickness{0.35f};
+            float startOffset{0.08f};
+            float historyWeight{0.92f};
+            float depthRejection{0.003f};
+            float normalRejection{0.85f};
+            float velocityRejection{0.10f};
+            bool spatialFilterEnabled{true};
+            int filterRadius{3};
+            float filterDepthFalloff{800.0f};
+            float filterNormalPower{32.0f};
+            float intensity{1.0f};
+            // How much of the flat ambient term survives while SSGI is on.
+            // Zero is the coherent setting in the sense that nothing is
+            // counted twice, but it is not the honest one yet: the bounce this
+            // renderer gathers comes from a direct-lighting buffer that
+            // excludes ambient, so stone out of the sun contributes nothing
+            // at all to it, and an arcade lit only by what the sun reaches
+            // reads far darker than the same geometry in life.  Half is a
+            // starting point to tune by eye, not a derived value, and it is a
+            // slider because the right answer depends on how enclosed the
+            // scene is.
+            float ambientRetention{0.5f};
+            // Fill ray misses from the selected skybox rather than the
+            // analytic gradient.  Turning this off restores parity with the
+            // software path tracer, which still lights its misses from the
+            // gradient.
+            bool traceEnvironmentMap{true};
+            bool halfResolution{false};
+            int qualityPreset{0};
+            VkQueryPool timestampPool{VK_NULL_HANDLE};
+            std::array<bool, FRAME_OVERLAP> timingWritten{};
+        };
+        SSGIState _ssgi;
         std::array<AllocatedImage, 2> _directLightingHistory{};
         VkSampler _prepassSampler{};
         VkDescriptorSetLayout _prepassImageDescriptorLayout{};
         // The prepass targets are allocated once at window size, so one
         // persistent set describes them for the whole run.
         VkDescriptorSet _prepassImageDescriptor{};
-        VkDescriptorSetLayout _ssgiDescriptorLayout{};
-        std::array<VkDescriptorSet, 2> _ssgiDescriptors{};
-        VkDescriptorSetLayout _ssgiDebugDescriptorLayout{};
-        std::array<VkDescriptorSet, 2> _ssgiDebugDescriptors{};
-        VkDescriptorSetLayout _ssgiFilterDescriptorLayout{};
-        std::array<VkDescriptorSet, 3> _ssgiFilterDescriptors{};
         MaterialPipeline _depthNormalPipeline;
         // Alpha-tested prepass.  Without it, occlusion and screen-space GI
         // would be computed against the quad a leaf texture is drawn on
         // rather than against the leaves.
         MaterialPipeline _depthNormalMaskPipeline;
         MaterialPipeline _renderDebugPipeline;
-        MaterialPipeline _ssgiPortalMaskPipeline;
-        VkPipelineLayout _ssgiPipelineLayout{};
-        VkPipeline _ssgiPipeline{};
-        VkPipeline _ssgiTemporalPipeline{};
-        VkPipelineLayout _ssgiFilterPipelineLayout{};
-        VkPipeline _ssgiFilterPipeline{};
-        VkDescriptorSetLayout _ssgiCompositeDescriptorLayout{};
-        std::array<VkDescriptorSet, 2> _ssgiCompositeDescriptors{};
-        MaterialPipeline _ssgiCompositePipeline;
-        bool _ssgiEnabled{true};
-        bool _ssgiHistoryValid{false};
-        uint32_t _ssgiHistoryWriteIndex{0};
-        VkExtent2D _ssgiHistoryExtent{0, 0};
-        int _ssgiStepCount{32};
-        int _ssgiRaysPerPixel{4};
-        float _ssgiRayLength{12.0f};
-        float _ssgiThickness{0.35f};
-        float _ssgiStartOffset{0.08f};
-        float _ssgiHistoryWeight{0.92f};
-        float _ssgiDepthRejection{0.003f};
-        float _ssgiNormalRejection{0.85f};
-        float _ssgiVelocityRejection{0.10f};
-        bool _ssgiSpatialFilterEnabled{true};
-        int _ssgiFilterRadius{3};
-        float _ssgiFilterDepthFalloff{800.0f};
-        float _ssgiFilterNormalPower{32.0f};
-        float _ssgiIntensity{1.0f};
-        // How much of the flat ambient term survives while SSGI is on.
-        // Zero is the coherent setting in the sense that nothing is counted
-        // twice, but it is not the honest one yet: the bounce this renderer
-        // gathers comes from a direct-lighting buffer that excludes ambient,
-        // so stone out of the sun contributes nothing at all to it, and an
-        // arcade lit only by what the sun reaches reads far darker than the
-        // same geometry in life.  Half is a starting point to tune by eye,
-        // not a derived value, and it is a slider because the right answer
-        // depends on how enclosed the scene is.
-        float _ssgiAmbientRetention{0.5f};
-        // Fill ray misses from the selected skybox rather than the analytic
-        // gradient.  Turning this off restores parity with the software path
-        // tracer, which still lights its misses from the gradient.
-        bool _ssgiTraceEnvironmentMap{true};
-        bool _ssgiHalfResolution{false};
-        int _ssgiQualityPreset{0};
         bool _depthNormalPrepassEnabled{true};
         struct SSAOState {
             // Ambient occlusion, at half resolution.  Three images rather than
@@ -967,8 +974,6 @@ class VulkanEngine{
         bool _gpuTimingSupported{false};
         std::array<bool, FRAME_OVERLAP> _timestampsPending{};
         static constexpr uint32_t SSGITimestampsPerFrame = 5;
-        VkQueryPool _ssgiTimestampPool{VK_NULL_HANDLE};
-        std::array<bool, FRAME_OVERLAP> _ssgiTimingWritten{};
         // Anti-aliasing runs last, on the composed colour, so one filter
         // covers world geometry, portal contents, and the debug overlays
         // without any pass needing to know about it.  It cannot read and

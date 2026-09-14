@@ -82,9 +82,9 @@ void VulkanEngine::apply_max_fidelity_settings()
     _fxaaShowEdges = false;
 
     _depthNormalPrepassEnabled = true;
-    _ssgiEnabled = true;
+    _ssgi.enabled = true;
     apply_ssgi_quality_preset(4);
-    _ssgiIntensity = 0.35f;
+    _ssgi.intensity = 0.35f;
     _renderDebugView = RenderDebugView::None;
 }
 
@@ -523,10 +523,10 @@ void VulkanEngine::draw(float deltaTime)
 			TimestampsPerFrame);
 		vkCmdResetQueryPool(
 			cmd,
-			_ssgiTimestampPool,
+			_ssgi.timestampPool,
 			(_frameNumber % FRAME_OVERLAP) * SSGITimestampsPerFrame,
 			SSGITimestampsPerFrame);
-		_ssgiTimingWritten[_frameNumber % FRAME_OVERLAP] = false;
+		_ssgi.timingWritten[_frameNumber % FRAME_OVERLAP] = false;
 	}
 
 	// The shadow and prepass counters are recorded before the main pass
@@ -552,7 +552,7 @@ void VulkanEngine::draw(float deltaTime)
 	const bool showRenderDebugView = _renderDebugView != RenderDebugView::None;
 	const bool occlusionActive = ssao_active();
 	if (_depthNormalPrepassEnabled || showRenderDebugView || occlusionActive ||
-        _ssgiEnabled) {
+        _ssgi.enabled) {
 		draw_depth_normal_prepass(cmd);
 	}
 
@@ -951,7 +951,7 @@ void VulkanEngine::run(){
                 const VkExtent2D extent = active_ssgi_extent();
                 fmt::print(
                     "SSGI benchmark: preset={} extent={}x{} average-frame-ms={:.3f} average-ssgi-gpu-ms={:.3f} samples={}\n",
-                    _ssgiQualityPreset, extent.width, extent.height,
+                    _ssgi.qualityPreset, extent.width, extent.height,
                     benchmarkMilliseconds / benchmarkFrames,
                     benchmarkSsgiMilliseconds / benchmarkFrames,
                     benchmarkFrames);
