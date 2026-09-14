@@ -76,10 +76,10 @@ void VulkanEngine::apply_max_fidelity_settings()
     _ssao.normalFalloff = 24.0f;
     _ssao.ambientOnly = false;
 
-    _fxaaEnabled = true;
-    _fxaaEdgeThreshold = 0.063f;
-    _fxaaSubpixelStrength = 0.25f;
-    _fxaaShowEdges = false;
+    _postProcess.fxaaEnabled = true;
+    _postProcess.fxaaEdgeThreshold = 0.063f;
+    _postProcess.fxaaSubpixelStrength = 0.25f;
+    _postProcess.fxaaShowEdges = false;
 
     _depthNormalPrepassEnabled = true;
     _ssgi.enabled = true;
@@ -661,25 +661,25 @@ void VulkanEngine::draw(float deltaTime)
     // depth, velocity - whose whole value is that nothing has reshaped it, and
     // a tone curve would do exactly that.  They present from the draw image on
     // the untouched path below, as they always have.
-    const bool tonemapping = _tonemapEnabled && !showRenderDebugView &&
-        _tonemapPipeline.pipeline != VK_NULL_HANDLE;
+    const bool tonemapping = _postProcess.tonemapEnabled && !showRenderDebugView &&
+        _postProcess.tonemapPipeline.pipeline != VK_NULL_HANDLE;
     if (tonemapping) {
         draw_tonemap(cmd);
-        presentSource = _tonemapImage.image;
+        presentSource = _postProcess.tonemapImage.image;
     }
 
     // Anti-aliasing sees the whole composed frame, so it smooths world
     // silhouettes, portal contents, and the overlay lines in one pass.  ImGui
     // is drawn after the copy, straight into the swapchain, and stays sharp.
     // It reads the tonemap's output, so it is only available when that ran.
-    if (tonemapping && _fxaaEnabled &&
-        _fxaaPipeline.pipeline != VK_NULL_HANDLE) {
+    if (tonemapping && _postProcess.fxaaEnabled &&
+        _postProcess.fxaaPipeline.pipeline != VK_NULL_HANDLE) {
         draw_fxaa(cmd);
-        presentSource = _postProcessImage.image;
+        presentSource = _postProcess.image.image;
     } else if (tonemapping) {
         vkutil::transition_image(
             cmd,
-            _tonemapImage.image,
+            _postProcess.tonemapImage.image,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     } else {

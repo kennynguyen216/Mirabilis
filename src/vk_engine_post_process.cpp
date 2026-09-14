@@ -15,32 +15,32 @@ void VulkanEngine::init_post_process_descriptors()
         // Both post-process passes want exactly that shape: one sampled
         // colour image.  Every image involved outlives every frame, so these
         // sets are written once here rather than rebuilt per frame.
-        _tonemapInputDescriptor = globalDescriptorAllocator.allocate(
+        _postProcess.tonemapInputDescriptor = globalDescriptorAllocator.allocate(
             _device, _singleImageDescriptorLayout);
 
         DescriptorWriter tonemapWriter;
         tonemapWriter.write_image(
             0,
             _drawImage.imageView,
-            _postProcessSampler,
+            _postProcess.sampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        tonemapWriter.update_set(_device, _tonemapInputDescriptor);
+        tonemapWriter.update_set(_device, _postProcess.tonemapInputDescriptor);
 
         // Anti-aliasing reads the tonemap's output, not the draw image.  Its
         // edge search compares lumas against fixed thresholds, which only
         // mean anything once the values are in display range.
-        _fxaaInputDescriptor = globalDescriptorAllocator.allocate(
+        _postProcess.fxaaInputDescriptor = globalDescriptorAllocator.allocate(
             _device, _singleImageDescriptorLayout);
 
         DescriptorWriter fxaaWriter;
         fxaaWriter.write_image(
             0,
-            _tonemapImage.imageView,
-            _postProcessSampler,
+            _postProcess.tonemapImage.imageView,
+            _postProcess.sampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        fxaaWriter.update_set(_device, _fxaaInputDescriptor);
+        fxaaWriter.update_set(_device, _postProcess.fxaaInputDescriptor);
     }
 }
 
@@ -55,16 +55,16 @@ void VulkanEngine::init_post_process_resources()
     // already reduced it to display range, so the extra twelve bits per pixel
     // of the HDR format would store nothing, and matching the swapchain lets
     // the final blit copy rather than convert.
-    _postProcessImage = create_image(
+    _postProcess.image = create_image(
         _drawImage.imageExtent,
         _swapchainImageFormat,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
 
-    // The tonemap's own target.  It is separate from _postProcessImage for
+    // The tonemap's own target.  It is separate from _postProcess.image for
     // the same reason that one is separate from _drawImage: anti-aliasing
     // reads this and writes that, and no pass may do both to one image.
-    _tonemapImage = create_image(
+    _postProcess.tonemapImage = create_image(
         _drawImage.imageExtent,
         _swapchainImageFormat,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -75,12 +75,12 @@ void VulkanEngine::init_post_process_resources()
     // because a filter kernel always reaches past the image at its border.
     VkSamplerCreateInfo samplerInfo = sampler_info(
         VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
-    VK_CHECK(vkCreateSampler(_device, &samplerInfo, nullptr, &_postProcessSampler));
+    VK_CHECK(vkCreateSampler(_device, &samplerInfo, nullptr, &_postProcess.sampler));
 
     _mainDeletionQueue.push_function([this]() {
-        vkDestroySampler(_device, _postProcessSampler, nullptr);
-        destroy_image(_tonemapImage);
-        destroy_image(_postProcessImage);
+        vkDestroySampler(_device, _postProcess.sampler, nullptr);
+        destroy_image(_postProcess.tonemapImage);
+        destroy_image(_postProcess.image);
     });
 }
 
@@ -107,10 +107,10 @@ void VulkanEngine::init_tonemap_pipeline()
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &settingsRange;
     VK_CHECK(vkCreatePipelineLayout(
-        _device, &layoutInfo, nullptr, &_tonemapPipeline.layout));
+        _device, &layoutInfo, nullptr, &_postProcess.tonemapPipeline.layout));
 
     PipelineBuilder builder;
-    builder._pipelineLayout = _tonemapPipeline.layout;
+    builder._pipelineLayout = _postProcess.tonemapPipeline.layout;
     builder.set_shaders(vertexShader.get(), fragmentShader.get());
     builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
@@ -118,13 +118,13 @@ void VulkanEngine::init_tonemap_pipeline()
     builder.set_multisampling_none();
     builder.disable_blending();
     builder.disable_depthtest();
-    builder.set_color_attachment_format(_tonemapImage.imageFormat);
+    builder.set_color_attachment_format(_postProcess.tonemapImage.imageFormat);
     builder.set_depth_format(VK_FORMAT_UNDEFINED);
-    _tonemapPipeline.pipeline = builder.build_pipeline(_device);
+    _postProcess.tonemapPipeline.pipeline = builder.build_pipeline(_device);
 
     _mainDeletionQueue.push_function([this]() {
-        vkDestroyPipeline(_device, _tonemapPipeline.pipeline, nullptr);
-        vkDestroyPipelineLayout(_device, _tonemapPipeline.layout, nullptr);
+        vkDestroyPipeline(_device, _postProcess.tonemapPipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _postProcess.tonemapPipeline.layout, nullptr);
     });
 }
 
@@ -150,10 +150,10 @@ void VulkanEngine::init_fxaa_pipeline()
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &settingsRange;
     VK_CHECK(vkCreatePipelineLayout(
-        _device, &layoutInfo, nullptr, &_fxaaPipeline.layout));
+        _device, &layoutInfo, nullptr, &_postProcess.fxaaPipeline.layout));
 
     PipelineBuilder builder;
-    builder._pipelineLayout = _fxaaPipeline.layout;
+    builder._pipelineLayout = _postProcess.fxaaPipeline.layout;
     builder.set_shaders(vertexShader.get(), fragmentShader.get());
     builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
@@ -163,13 +163,13 @@ void VulkanEngine::init_fxaa_pipeline()
     // to blend against and no depth to test.
     builder.disable_blending();
     builder.disable_depthtest();
-    builder.set_color_attachment_format(_postProcessImage.imageFormat);
+    builder.set_color_attachment_format(_postProcess.image.imageFormat);
     builder.set_depth_format(VK_FORMAT_UNDEFINED);
-    _fxaaPipeline.pipeline = builder.build_pipeline(_device);
+    _postProcess.fxaaPipeline.pipeline = builder.build_pipeline(_device);
 
     _mainDeletionQueue.push_function([this]() {
-        vkDestroyPipeline(_device, _fxaaPipeline.pipeline, nullptr);
-        vkDestroyPipelineLayout(_device, _fxaaPipeline.layout, nullptr);
+        vkDestroyPipeline(_device, _postProcess.fxaaPipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _postProcess.fxaaPipeline.layout, nullptr);
     });
 }
 
@@ -185,12 +185,12 @@ void VulkanEngine::draw_tonemap(VkCommandBuffer cmd)
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     vkutil::transition_image(
         cmd,
-        _tonemapImage.image,
+        _postProcess.tonemapImage.image,
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
-        _tonemapImage.imageView,
+        _postProcess.tonemapImage.imageView,
         nullptr,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingInfo renderInfo = vkinit::rendering_info(
@@ -203,26 +203,26 @@ void VulkanEngine::draw_tonemap(VkCommandBuffer cmd)
     set_fullscreen_dynamic_state(cmd, _drawExtent);
 
     vkCmdBindPipeline(
-        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _tonemapPipeline.pipeline);
+        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _postProcess.tonemapPipeline.pipeline);
     vkCmdBindDescriptorSets(
         cmd,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
-        _tonemapPipeline.layout,
+        _postProcess.tonemapPipeline.layout,
         0,
         1,
-        &_tonemapInputDescriptor,
+        &_postProcess.tonemapInputDescriptor,
         0,
         nullptr);
 
     TonemapPushConstants pushConstants{};
     pushConstants.settings = glm::vec4(
-        _tonemapExposure,
-        _tonemapOperator == 1 ? 1.0f : 0.0f,
-        _tonemapBypassCurve ? 1.0f : 0.0f,
+        _postProcess.tonemapExposure,
+        _postProcess.tonemapOperator == 1 ? 1.0f : 0.0f,
+        _postProcess.tonemapBypassCurve ? 1.0f : 0.0f,
         0.0f);
     vkCmdPushConstants(
         cmd,
-        _tonemapPipeline.layout,
+        _postProcess.tonemapPipeline.layout,
         VK_SHADER_STAGE_FRAGMENT_BIT,
         0,
         sizeof(TonemapPushConstants),
@@ -236,7 +236,7 @@ void VulkanEngine::draw_tonemap(VkCommandBuffer cmd)
     // it as a texture.  draw() transitions it for the blit if it does not.
     vkutil::transition_image(
         cmd,
-        _tonemapImage.image,
+        _postProcess.tonemapImage.image,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
@@ -249,12 +249,12 @@ void VulkanEngine::draw_fxaa(VkCommandBuffer cmd)
     // is why the pair exists.
     vkutil::transition_image(
         cmd,
-        _postProcessImage.image,
+        _postProcess.image.image,
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
-        _postProcessImage.imageView,
+        _postProcess.image.imageView,
         nullptr,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingInfo renderInfo = vkinit::rendering_info(
@@ -266,14 +266,14 @@ void VulkanEngine::draw_fxaa(VkCommandBuffer cmd)
     // swapchain reads only this region anyway.
     set_fullscreen_dynamic_state(cmd, _drawExtent);
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _fxaaPipeline.pipeline);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _postProcess.fxaaPipeline.pipeline);
     vkCmdBindDescriptorSets(
         cmd,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
-        _fxaaPipeline.layout,
+        _postProcess.fxaaPipeline.layout,
         0,
         1,
-        &_fxaaInputDescriptor,
+        &_postProcess.fxaaInputDescriptor,
         0,
         nullptr);
 
@@ -291,12 +291,12 @@ void VulkanEngine::draw_fxaa(VkCommandBuffer cmd)
 
     FXAAPushConstants pushConstants{};
     pushConstants.settings = glm::vec4(
-        texelSize.x, texelSize.y, _fxaaEdgeThreshold, _fxaaSubpixelStrength);
+        texelSize.x, texelSize.y, _postProcess.fxaaEdgeThreshold, _postProcess.fxaaSubpixelStrength);
     pushConstants.limits = glm::vec4(
-        renderedLimit.x, renderedLimit.y, _fxaaShowEdges ? 1.0f : 0.0f, 0.0f);
+        renderedLimit.x, renderedLimit.y, _postProcess.fxaaShowEdges ? 1.0f : 0.0f, 0.0f);
     vkCmdPushConstants(
         cmd,
-        _fxaaPipeline.layout,
+        _postProcess.fxaaPipeline.layout,
         VK_SHADER_STAGE_FRAGMENT_BIT,
         0,
         sizeof(FXAAPushConstants),
@@ -308,7 +308,7 @@ void VulkanEngine::draw_fxaa(VkCommandBuffer cmd)
 
     vkutil::transition_image(
         cmd,
-        _postProcessImage.image,
+        _postProcess.image.image,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 }

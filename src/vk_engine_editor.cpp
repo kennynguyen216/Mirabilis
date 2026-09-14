@@ -1466,26 +1466,26 @@ void VulkanEngine::draw_tonemap_settings()
 {
     if (ImGui::CollapsingHeader("Tonemapping")) {
         // Also a session preference, so none of it marks the level dirty.
-        ImGui::Checkbox("Enabled##Tonemapping", &_tonemapEnabled);
-        if (!_tonemapEnabled) {
+        ImGui::Checkbox("Enabled##Tonemapping", &_postProcess.tonemapEnabled);
+        if (!_postProcess.tonemapEnabled) {
             ImGui::TextDisabled(
                 "Linear HDR is written straight to an 8-bit\n"
                 "buffer: midtones read dark and highlights clip.");
         }
-        if (_tonemapEnabled) {
+        if (_postProcess.tonemapEnabled) {
             const char* operatorNames[] = {"ACES Filmic", "Reinhard"};
             ImGui::Combo(
                 "Operator",
-                &_tonemapOperator,
+                &_postProcess.tonemapOperator,
                 operatorNames,
                 IM_ARRAYSIZE(operatorNames));
             ImGui::SliderFloat(
-                "Exposure", &_tonemapExposure, 0.05f, 8.0f, "%.2f");
+                "Exposure", &_postProcess.tonemapExposure, 0.05f, 8.0f, "%.2f");
             // Separates the two things this pass does, so a frame that looks
             // wrong can be blamed on the curve or on the transfer function
             // rather than on both at once.
             ImGui::Checkbox(
-                "Bypass Curve (encode only)", &_tonemapBypassCurve);
+                "Bypass Curve (encode only)", &_postProcess.tonemapBypassCurve);
             if (_renderDebugView != RenderDebugView::None) {
                 ImGui::TextDisabled("Inactive while a debug view is shown.");
             }
@@ -1499,22 +1499,22 @@ void VulkanEngine::draw_antialiasing_settings()
         // A session preference rather than a scene property, so none of this
         // marks the level dirty.
         const char* modeNames[] = {"Off", "FXAA"};
-        int mode = _fxaaEnabled ? 1 : 0;
+        int mode = _postProcess.fxaaEnabled ? 1 : 0;
         if (ImGui::Combo("Mode", &mode, modeNames, IM_ARRAYSIZE(modeNames))) {
-            _fxaaEnabled = mode == 1;
+            _postProcess.fxaaEnabled = mode == 1;
         }
-        if (_fxaaEnabled) {
+        if (_postProcess.fxaaEnabled) {
             // Lower catches more edges; too low and the filter starts
             // softening texture detail that never aliased.
             ImGui::SliderFloat(
-                "Edge Threshold", &_fxaaEdgeThreshold, 0.03f, 0.25f, "%.3f");
+                "Edge Threshold", &_postProcess.fxaaEdgeThreshold, 0.03f, 0.25f, "%.3f");
             ImGui::SliderFloat(
-                "Subpixel Strength", &_fxaaSubpixelStrength, 0.0f, 1.0f, "%.2f");
+                "Subpixel Strength", &_postProcess.fxaaSubpixelStrength, 0.0f, 1.0f, "%.2f");
             // White marks every pixel the threshold accepted. Tuning against
             // this is far easier than judging the threshold from the finished
             // image.
-            ImGui::Checkbox("Debug Edges", &_fxaaShowEdges);
-            if (!_tonemapEnabled) {
+            ImGui::Checkbox("Debug Edges", &_postProcess.fxaaShowEdges);
+            if (!_postProcess.tonemapEnabled) {
                 ImGui::TextDisabled(
                     "Inactive: FXAA reads the tonemapped image.");
             }
