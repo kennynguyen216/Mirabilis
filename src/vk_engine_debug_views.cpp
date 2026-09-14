@@ -122,7 +122,7 @@ void VulkanEngine::draw_collider_debug_bounds(VkCommandBuffer cmd)
         ++stats.drawcall_count;
     }
 
-    if (_showShadowBounds) {
+    if (_shadow.showBounds) {
         // Convert the unit debug cube into the exact orthographic volume used
         // by the shadow map: clip x/y are [-1, 1], while Vulkan depth is [0, 1].
         const glm::mat4 clipBox = glm::translate(
@@ -130,7 +130,7 @@ void VulkanEngine::draw_collider_debug_bounds(VkCommandBuffer cmd)
             glm::mat4(1.0f), glm::vec3(2.0f, 2.0f, 1.0f));
         ColliderDebugPushConstants pushConstants{};
         pushConstants.viewProjection = sceneData.viewproj;
-        pushConstants.model = glm::inverse(_sunViewProjection) * clipBox;
+        pushConstants.model = glm::inverse(_shadow.sunViewProjection) * clipBox;
         vkCmdPushConstants(
             cmd,
             _colliderDebugPipeline.layout,

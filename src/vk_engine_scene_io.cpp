@@ -366,11 +366,11 @@ bool VulkanEngine::save_editor_scene()
         _skyboxSelection, 0, static_cast<int>(SkyboxIds.size()) - 1);
     file << ",\n  \"lighting\": {\"skybox\": \""
          << SkyboxIds[savedSkybox] << "\", \"sunDirection\": ";
-    writeVec3(_sunlightDirection);
-    file << ", \"shadowsEnabled\": " << (_shadowsEnabled ? "true" : "false")
-         << ", \"shadowRadius\": " << _shadowRadius
-         << ", \"shadowDepthBias\": " << _shadowDepthBias
-         << ", \"shadowNormalBias\": " << _shadowNormalBias << '}';
+    writeVec3(_shadow.sunlightDirection);
+    file << ", \"shadowsEnabled\": " << (_shadow.enabled ? "true" : "false")
+         << ", \"shadowRadius\": " << _shadow.radius
+         << ", \"shadowDepthBias\": " << _shadow.depthBias
+         << ", \"shadowNormalBias\": " << _shadow.normalBias << '}';
     // Ambient occlusion is lighting too: the radius that reads correctly
     // depends on the scale this level was authored at.  The sample count and
     // the resolution are absent for the same reason the shadow map size is -
@@ -579,11 +579,11 @@ bool VulkanEngine::load_editor_scene()
     // adding the block does not need a scene version bump.
     SavedLightingSettings pendingLighting{
         .skyboxSelection = _skyboxSelection,
-        .sunlightDirection = _sunlightDirection,
-        .shadowsEnabled = _shadowsEnabled,
-        .shadowRadius = _shadowRadius,
-        .shadowDepthBias = _shadowDepthBias,
-        .shadowNormalBias = _shadowNormalBias};
+        .sunlightDirection = _shadow.sunlightDirection,
+        .shadowsEnabled = _shadow.enabled,
+        .shadowRadius = _shadow.radius,
+        .shadowDepthBias = _shadow.depthBias,
+        .shadowNormalBias = _shadow.normalBias};
     simdjson::dom::object jsonLighting;
     if (document["lighting"].get_object().get(jsonLighting) == simdjson::SUCCESS) {
         std::string_view skyboxId;
@@ -941,11 +941,11 @@ bool VulkanEngine::load_editor_scene()
     _ssaoSettings = pendingSSAO;
     _ssaoSceneOverride = pendingSSAOOverride;
     _traceLighting = pendingReference;
-    _sunlightDirection = pendingLighting.sunlightDirection;
-    _shadowsEnabled = pendingLighting.shadowsEnabled;
-    _shadowRadius = pendingLighting.shadowRadius;
-    _shadowDepthBias = pendingLighting.shadowDepthBias;
-    _shadowNormalBias = pendingLighting.shadowNormalBias;
+    _shadow.sunlightDirection = pendingLighting.sunlightDirection;
+    _shadow.enabled = pendingLighting.shadowsEnabled;
+    _shadow.radius = pendingLighting.shadowRadius;
+    _shadow.depthBias = pendingLighting.shadowDepthBias;
+    _shadow.normalBias = pendingLighting.shadowNormalBias;
     if (pendingLighting.skyboxSelection != _skyboxSelection &&
         !set_skybox(pendingLighting.skyboxSelection)) {
         fmt::print(

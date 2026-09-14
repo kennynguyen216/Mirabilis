@@ -798,32 +798,36 @@ class VulkanEngine{
         // camera.  Every camera in the frame - main and portal - samples it,
         // because the lookup is done from world-space positions.
         static constexpr uint32_t ShadowMapResolution = 4096;
-        AllocatedImage _shadowMapImage;
-        // Alpha-tested shadow casting.  The opaque shadow pipeline binds no
-        // descriptors at all, so this one cannot share its layout: it needs
-        // the per-material set to sample the base colour's alpha.
-        MaterialPipeline _shadowMaskPipeline;
-        VkSampler _shadowSampler{};
-        MaterialPipeline _shadowPipeline;
-        glm::mat4 _sunViewProjection{1.0f};
+        struct ShadowState {
+            AllocatedImage mapImage;
+            // Alpha-tested shadow casting.  The opaque shadow pipeline binds
+            // no descriptors at all, so this one cannot share its layout: it
+            // needs the per-material set to sample the base colour's alpha.
+            MaterialPipeline maskPipeline;
+            VkSampler sampler{};
+            MaterialPipeline pipeline;
+            glm::mat4 sunViewProjection{1.0f};
+            // Points from a surface towards the sun, matching how the
+            // fragment shaders use it.  The light itself travels along its
+            // negation.
+            glm::vec3 sunlightDirection{0.0f, 1.0f, 0.5f};
+            bool enabled{true};
+            bool showBounds{false};
+            // Half-width of the shadowed box, in world units.
+            float radius{60.0f};
+            // Extra depth in front of and behind that box, so a caster
+            // standing outside the lit region still reaches the map.
+            float depthMargin{120.0f};
+            float depthBias{0.0006f};
+            float normalBias{0.08f};
+            float filterRadius{3.0f};
+            // Reported in the statistics panel; chosen from what the GPU
+            // actually supports rather than assumed.
+            const char* formatName{"none"};
+        };
+        ShadowState _shadow;
         glm::mat4 _previousMainViewProjection{1.0f};
         bool _previousMainViewProjectionValid{false};
-        // Points from a surface towards the sun, matching how the fragment
-        // shaders use it.  The light itself travels along its negation.
-        glm::vec3 _sunlightDirection{0.0f, 1.0f, 0.5f};
-        bool _shadowsEnabled{true};
-        bool _showShadowBounds{false};
-        // Half-width of the shadowed box, in world units.
-        float _shadowRadius{60.0f};
-        // Extra depth in front of and behind that box, so a caster standing
-        // outside the lit region still reaches the map.
-        float _shadowDepthMargin{120.0f};
-        float _shadowDepthBias{0.0006f};
-        float _shadowNormalBias{0.08f};
-        float _shadowFilterRadius{3.0f};
-        // Reported in the statistics panel; chosen from what the GPU
-        // actually supports rather than assumed.
-        const char* _shadowFormatName{"none"};
         // Depth and view-space normals for the main camera, written before
         // the colour pass.  Ambient occlusion is the first consumer, but
         // reflections, outlines, and depth-aware fog need the same two

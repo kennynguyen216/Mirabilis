@@ -1366,28 +1366,28 @@ void VulkanEngine::draw_sun_shadow_settings()
         // These are saved with the scene, so editing one is an edit to the
         // level rather than a session preference.
         bool lightingEdited = false;
-        lightingEdited |= ImGui::Checkbox("Cast Shadows", &_shadowsEnabled);
+        lightingEdited |= ImGui::Checkbox("Cast Shadows", &_shadow.enabled);
         // The direction points from a surface towards the sun.
         if (ImGui::SliderFloat3(
-                "Sun Direction", &_sunlightDirection.x, -1.0f, 1.0f)) {
+                "Sun Direction", &_shadow.sunlightDirection.x, -1.0f, 1.0f)) {
             lightingEdited = true;
-            if (glm::dot(_sunlightDirection, _sunlightDirection) <
+            if (glm::dot(_shadow.sunlightDirection, _shadow.sunlightDirection) <
                 0.000001f) {
                 // A zero direction cannot define a light camera.
-                _sunlightDirection = glm::vec3(0.0f, 1.0f, 0.5f);
+                _shadow.sunlightDirection = glm::vec3(0.0f, 1.0f, 0.5f);
             }
         }
         lightingEdited |= ImGui::SliderFloat(
-            "Shadow Radius", &_shadowRadius, 10.0f, 200.0f);
-        ImGui::Checkbox("Show Shadow Bounds", &_showShadowBounds);
+            "Shadow Radius", &_shadow.radius, 10.0f, 200.0f);
+        ImGui::Checkbox("Show Shadow Bounds", &_shadow.showBounds);
         // Too little bias and surfaces shadow themselves; too much and a
         // shadow detaches from the object casting it.
         lightingEdited |= ImGui::SliderFloat(
-            "Depth Bias", &_shadowDepthBias, 0.0f, 0.005f, "%.5f");
+            "Depth Bias", &_shadow.depthBias, 0.0f, 0.005f, "%.5f");
         lightingEdited |= ImGui::SliderFloat(
-            "Normal Bias", &_shadowNormalBias, 0.0f, 0.5f, "%.3f");
+            "Normal Bias", &_shadow.normalBias, 0.0f, 0.5f, "%.3f");
         ImGui::SliderFloat(
-            "Shadow Softness", &_shadowFilterRadius,
+            "Shadow Softness", &_shadow.filterRadius,
             0.0f, 12.0f, "%.2f texels");
         if (lightingEdited) {
             _sceneDirty = true;
@@ -1703,7 +1703,7 @@ void VulkanEngine::draw_statistics_panel(float horizontalSpeed)
             "Shadow map %ux%u %s",
             ShadowMapResolution,
             ShadowMapResolution,
-            _shadowFormatName);
+            _shadow.formatName);
         ImGui::Text(
             "Shadow draws %d (%d tris)",
             stats.shadow_drawcall_count,

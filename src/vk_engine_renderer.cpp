@@ -82,7 +82,7 @@ VkImageView VulkanEngine::ssao_occlusion_view() const
 {
     return _ssaoFinalImage.imageView != VK_NULL_HANDLE
         ? _ssaoFinalImage.imageView
-        : _shadowMapImage.imageView;
+        : _shadow.mapImage.imageView;
 }
 
 VkSampler VulkanEngine::ssao_occlusion_sampler() const
@@ -183,8 +183,8 @@ void VulkanEngine::init_scene_descriptors()
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         sceneWriter.write_image(
             1,
-            _shadowMapImage.imageView,
-            _shadowSampler,
+            _shadow.mapImage.imageView,
+            _shadow.sampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         sceneWriter.write_image(
@@ -212,8 +212,8 @@ void VulkanEngine::init_scene_descriptors()
                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
             portalSceneWriter.write_image(
                 1,
-                _shadowMapImage.imageView,
-                _shadowSampler,
+                _shadow.mapImage.imageView,
+                _shadow.sampler,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             // Bound so the layout is satisfied, never read: a portal camera
@@ -479,18 +479,18 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
     // the single directional sun light.
     data.ambientColor = glm::vec4(0.28f);
     data.sunlightDirection = glm::vec4(
-        normalized_sun_direction(_sunlightDirection), 1.0f);
+        normalized_sun_direction(_shadow.sunlightDirection), 1.0f);
     data.sunlightColor = glm::vec4(1.0f);
     // update_scene() settles this before any camera's buffer is filled, so
     // the portal views inherit exactly the main camera's shadow map.
-    data.sunViewProjection = _sunViewProjection;
+    data.sunViewProjection = _shadow.sunViewProjection;
     data.shadowSettings = glm::vec4(
-        _shadowDepthBias,
-        _shadowNormalBias,
+        _shadow.depthBias,
+        _shadow.normalBias,
         1.0f / static_cast<float>(ShadowMapResolution),
-        _shadowsEnabled ? 1.0f : 0.0f);
+        _shadow.enabled ? 1.0f : 0.0f);
     data.shadowFilterSettings = glm::vec4(
-        _shadowFilterRadius, 0.0f, 0.0f, 0.0f);
+        _shadow.filterRadius, 0.0f, 0.0f, 0.0f);
     // Screen-space passes get a depth buffer rather than a position per
     // fragment; these are what turn one back into the other.
     data.inverseProjection = glm::inverse(data.proj);

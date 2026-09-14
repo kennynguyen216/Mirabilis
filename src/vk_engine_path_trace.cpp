@@ -387,7 +387,7 @@ void VulkanEngine::update_trace_scene() {
     for(const auto& pair:_authoredPortalPairs) {addPortal(pair.first,&pair.second);addPortal(pair.second,&pair.first);}
     uint64_t drawHash=1469598103934665603ull;
     auto append=[&](const void* data,size_t bytes) {auto p=static_cast<const uint8_t*>(data);for(size_t i=0;i<bytes;++i) {drawHash^=p[i];drawHash*=1099511628211ull;}};
-    append(&_sunlightDirection,sizeof(_sunlightDirection));
+    append(&_shadow.sunlightDirection,sizeof(_shadow.sunlightDirection));
     append(&_traceLighting.sunRadiance,2*sizeof(glm::vec4));
     append(portals.data(),portals.size()*sizeof(TracePortal));
     for(const auto& draw:worldDrawContext.OpaqueSurfaces) {
@@ -441,7 +441,7 @@ void VulkanEngine::update_trace_scene() {
     }
     uint64_t hash=1469598103934665603ull;
     const auto hashBytes=[&](const void* data,size_t size) { auto p=static_cast<const unsigned char*>(data); for(size_t i=0;i<size;++i) { hash^=p[i]; hash*=1099511628211ull; } };
-    _traceLighting.sunDirection=glm::vec4(glm::normalize(glm::dot(_sunlightDirection,_sunlightDirection)>1e-10f?_sunlightDirection:glm::vec3(0,1,0)),0);
+    _traceLighting.sunDirection=glm::vec4(glm::normalize(glm::dot(_shadow.sunlightDirection,_shadow.sunlightDirection)>1e-10f?_shadow.sunlightDirection:glm::vec3(0,1,0)),0);
     hashBytes(&_traceLighting.sunDirection,3*sizeof(glm::vec4));
     hashBytes(triangles.data(),triangles.size()*sizeof(TraceTriangle)); hashBytes(materials.data(),materials.size()*sizeof(TraceMaterial));
     hashBytes(texels.data(),texels.size()*sizeof(uint32_t));

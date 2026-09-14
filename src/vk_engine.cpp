@@ -60,11 +60,11 @@ VulkanEngine& VulkanEngine::Get() {return *loadedEngine;}
 void VulkanEngine::apply_max_fidelity_settings()
 {
     renderScale = 1.0f;
-    _shadowsEnabled = true;
-    _showShadowBounds = false;
-    _shadowDepthBias = 0.0012f;
-    _shadowNormalBias = 0.15f;
-    _shadowFilterRadius = 6.0f;
+    _shadow.enabled = true;
+    _shadow.showBounds = false;
+    _shadow.depthBias = 0.0012f;
+    _shadow.normalBias = 0.15f;
+    _shadow.filterRadius = 6.0f;
 
     // SSAO is deliberately not run beside SSGI: its ambient contribution is
     // bypassed by the SSGI composite, so enabling it would spend GPU time
@@ -647,7 +647,7 @@ void VulkanEngine::draw(float deltaTime)
     // Collider bounds are an editor-only overlay.  They are intentionally
     // drawn after portal composition, so they never affect playable portal
     // views or the saved scene itself.
-    if (_editorMode && (_showColliderBounds || _showShadowBounds)) {
+    if (_editorMode && (_showColliderBounds || _shadow.showBounds)) {
         draw_collider_debug_bounds(cmd);
     }
 
@@ -925,7 +925,7 @@ void VulkanEngine::run(){
             if(testFrame==12) _traceLighting.environment.x+=0.25f;
             if(testFrame==13) _traceMaterialModel=1-_traceMaterialModel;
             if(testFrame==14) _tracePortalLimit=1;
-            if(testFrame==15) _sunlightDirection.x+=0.25f;
+            if(testFrame==15) _shadow.sunlightDirection.x+=0.25f;
             if(testFrame==16) {
                 for(auto& object:_scene.objects) if(object.alive&&object.visible&&object.material.enabled) {
                     object.material.emissionColor=glm::vec3(1);

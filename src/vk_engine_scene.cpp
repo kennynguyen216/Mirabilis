@@ -134,7 +134,7 @@ void VulkanEngine::update_scene(float deltaTime)
 
     // The shadowed box follows the active camera, so this has to be settled
     // before build_scene_data() copies it into any camera's buffer.
-    _sunViewProjection = compute_sun_view_projection(camera.position);
+    _shadow.sunViewProjection = compute_sun_view_projection(camera.position);
 
     sceneData = build_scene_data(camera.getViewMatrix());
     sceneData.previousViewProjection = _previousMainViewProjectionValid

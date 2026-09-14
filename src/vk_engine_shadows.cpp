@@ -35,9 +35,9 @@ void VulkanEngine::init_shadow_resources()
         fmt::print("No depth format supports sampled shadow comparison\n");
         abort();
     }
-    _shadowFormatName = string_VkFormat(shadowFormat);
+    _shadow.formatName = string_VkFormat(shadowFormat);
 
-    _shadowMapImage = create_image(
+    _shadow.mapImage = create_image(
         VkExtent3D{ShadowMapResolution, ShadowMapResolution, 1},
         shadowFormat,
         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
@@ -51,11 +51,11 @@ void VulkanEngine::init_shadow_resources()
     samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
     samplerInfo.compareEnable = VK_TRUE;
     samplerInfo.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-    VK_CHECK(vkCreateSampler(_device, &samplerInfo, nullptr, &_shadowSampler));
+    VK_CHECK(vkCreateSampler(_device, &samplerInfo, nullptr, &_shadow.sampler));
 
     _mainDeletionQueue.push_function([this]() {
-        vkDestroySampler(_device, _shadowSampler, nullptr);
-        destroy_image(_shadowMapImage);
+        vkDestroySampler(_device, _shadow.sampler, nullptr);
+        destroy_image(_shadow.mapImage);
     });
 }
 
@@ -77,10 +77,10 @@ void VulkanEngine::init_shadow_pipeline()
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushRange;
     VK_CHECK(vkCreatePipelineLayout(
-        _device, &layoutInfo, nullptr, &_shadowPipeline.layout));
+        _device, &layoutInfo, nullptr, &_shadow.pipeline.layout));
 
     PipelineBuilder builder;
-    builder._pipelineLayout = _shadowPipeline.layout;
+    builder._pipelineLayout = _shadow.pipeline.layout;
     builder.set_vertex_only_shader(shadowVertexShader.get());
     builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
@@ -95,12 +95,12 @@ void VulkanEngine::init_shadow_pipeline()
     // clears to 1 and keeps whatever lies nearest the sun.
     builder.enable_depthtest(true, VK_COMPARE_OP_LESS_OR_EQUAL);
     builder.enable_depth_bias(1.25f, 2.75f);
-    builder.set_depth_format(_shadowMapImage.imageFormat);
-    _shadowPipeline.pipeline = builder.build_pipeline(_device);
+    builder.set_depth_format(_shadow.mapImage.imageFormat);
+    _shadow.pipeline.pipeline = builder.build_pipeline(_device);
 
     _mainDeletionQueue.push_function([this]() {
-        vkDestroyPipeline(_device, _shadowPipeline.pipeline, nullptr);
-        vkDestroyPipelineLayout(_device, _shadowPipeline.layout, nullptr);
+        vkDestroyPipeline(_device, _shadow.pipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _shadow.pipeline.layout, nullptr);
     });
 }
 
@@ -128,10 +128,10 @@ void VulkanEngine::init_shadow_mask_pipeline()
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushRange;
     VK_CHECK(vkCreatePipelineLayout(
-        _device, &layoutInfo, nullptr, &_shadowMaskPipeline.layout));
+        _device, &layoutInfo, nullptr, &_shadow.maskPipeline.layout));
 
     PipelineBuilder builder;
-    builder._pipelineLayout = _shadowMaskPipeline.layout;
+    builder._pipelineLayout = _shadow.maskPipeline.layout;
     builder.set_shaders(vertexShader.get(), fragmentShader.get());
     builder.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
@@ -144,12 +144,12 @@ void VulkanEngine::init_shadow_mask_pipeline()
     builder.disable_color_attachment();
     builder.enable_depthtest(true, VK_COMPARE_OP_LESS_OR_EQUAL);
     builder.enable_depth_bias(1.25f, 2.75f);
-    builder.set_depth_format(_shadowMapImage.imageFormat);
-    _shadowMaskPipeline.pipeline = builder.build_pipeline(_device);
+    builder.set_depth_format(_shadow.mapImage.imageFormat);
+    _shadow.maskPipeline.pipeline = builder.build_pipeline(_device);
 
     _mainDeletionQueue.push_function([this]() {
-        vkDestroyPipeline(_device, _shadowMaskPipeline.pipeline, nullptr);
-        vkDestroyPipelineLayout(_device, _shadowMaskPipeline.layout, nullptr);
+        vkDestroyPipeline(_device, _shadow.maskPipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(_device, _shadow.maskPipeline.layout, nullptr);
     });
 }
 
@@ -159,13 +159,13 @@ void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
 
     vkutil::transition_image(
         cmd,
-        _shadowMapImage.image,
+        _shadow.mapImage.image,
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
         VK_IMAGE_ASPECT_DEPTH_BIT);
 
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
-        _shadowMapImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+        _shadow.mapImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
     // The main camera clears to 0 because its depth is reversed.  Here 1 is
     // the far value, and it means nothing stands between this texel and the
     // sun.
@@ -193,11 +193,11 @@ void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
     vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0xff);
     vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
 
-    if (_shadowsEnabled && _shadowPipeline.pipeline != VK_NULL_HANDLE) {
+    if (_shadow.enabled && _shadow.pipeline.pipeline != VK_NULL_HANDLE) {
         vkCmdBindPipeline(
-            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadowPipeline.pipeline);
+            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadow.pipeline.pipeline);
 
-        VkPipeline lastPipeline = _shadowPipeline.pipeline;
+        VkPipeline lastPipeline = _shadow.pipeline.pipeline;
         MaterialInstance* lastMaterial = nullptr;
         VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
         // portalViewDrawContext is the world plus the player's body, which is
@@ -206,22 +206,22 @@ void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
         // body the first-person camera sits inside.
         // Transparent surfaces intentionally do not cast yet: a blended
         // surface has no single silhouette to cast.  Masked ones do, and they
-        // go through _shadowMaskPipeline so foliage and grates cast their
+        // go through _shadow.maskPipeline so foliage and grates cast their
         // cutout rather than the rectangle it is painted on.
         for (const RenderObject& renderObject :
                 portalViewDrawContext.OpaqueSurfaces) {
             // Cull against the light, never against the player's camera: an
             // object behind the camera can still drop a shadow into view.
-            if (!is_visible(renderObject, _sunViewProjection)) {
+            if (!is_visible(renderObject, _shadow.sunViewProjection)) {
                 continue;
             }
 
             const bool masked = renderObject.material != nullptr &&
                 renderObject.material->passType == MaterialPass::Mask &&
-                _shadowMaskPipeline.pipeline != VK_NULL_HANDLE;
+                _shadow.maskPipeline.pipeline != VK_NULL_HANDLE;
             const MaterialPipeline& active = masked
-                ? _shadowMaskPipeline
-                : _shadowPipeline;
+                ? _shadow.maskPipeline
+                : _shadow.pipeline;
             if (active.pipeline != lastPipeline) {
                 lastPipeline = active.pipeline;
                 vkCmdBindPipeline(
@@ -254,7 +254,7 @@ void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
             }
 
             ShadowPushConstants pushConstants{};
-            pushConstants.lightMatrix = _sunViewProjection * renderObject.transform;
+            pushConstants.lightMatrix = _shadow.sunViewProjection * renderObject.transform;
             pushConstants.vertexBuffer = renderObject.vertexBufferAddress;
             vkCmdPushConstants(
                 cmd,
@@ -276,7 +276,7 @@ void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
 
     vkutil::transition_image(
         cmd,
-        _shadowMapImage.image,
+        _shadow.mapImage.image,
         VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -287,7 +287,7 @@ void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
 
 glm::mat4 VulkanEngine::compute_sun_view_projection(const glm::vec3& focusPoint) const
 {
-    const glm::vec3 toLight = normalized_sun_direction(_sunlightDirection);
+    const glm::vec3 toLight = normalized_sun_direction(_shadow.sunlightDirection);
     // glm::lookAt degenerates when its up vector lies along the view axis.
     const glm::vec3 up = std::abs(toLight.y) > 0.99f
         ? glm::vec3(0.0f, 0.0f, 1.0f)
@@ -301,18 +301,18 @@ glm::mat4 VulkanEngine::compute_sun_view_projection(const glm::vec3& focusPoint)
     // Without this the grid slides continuously under the world as the player
     // walks, and every shadow edge crawls.
     const float texelWorldSize =
-        (2.0f * _shadowRadius) / static_cast<float>(ShadowMapResolution);
+        (2.0f * _shadow.radius) / static_cast<float>(ShadowMapResolution);
     focus.x = std::floor(focus.x / texelWorldSize) * texelWorldSize;
     focus.y = std::floor(focus.y / texelWorldSize) * texelWorldSize;
 
     // The extra depth reaches casters standing outside the lit box; only the
     // x/y extent decides how much ground can receive a shadow.
-    const float depthHalfRange = _shadowRadius + _shadowDepthMargin;
+    const float depthHalfRange = _shadow.radius + _shadow.depthMargin;
     glm::mat4 projection = glm::ortho(
-        focus.x - _shadowRadius,
-        focus.x + _shadowRadius,
-        focus.y - _shadowRadius,
-        focus.y + _shadowRadius,
+        focus.x - _shadow.radius,
+        focus.x + _shadow.radius,
+        focus.y - _shadow.radius,
+        focus.y + _shadow.radius,
         -focus.z - depthHalfRange,
         -focus.z + depthHalfRange);
     // Vulkan's framebuffer Y runs opposite glm's, exactly as the main camera
