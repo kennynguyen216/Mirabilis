@@ -288,9 +288,9 @@ void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
     const auto drawSurface = [&](const Portal& source, MaterialInstance& material) {
         const uint32_t primaryStencil = surfaceIndex + 1;
         const uint32_t baseViewIndex = surfaceIndex * PortalRecursionDepth;
-        draw_portal_sky(cmd, _portalSceneData[baseViewIndex], primaryStencil);
+        draw_portal_sky(cmd, _portalRender.sceneData[baseViewIndex], primaryStencil);
         draw_geometry(cmd, portalViewDrawContext,
-                      _portalSceneData[baseViewIndex].viewproj,
+                      _portalRender.sceneData[baseViewIndex].viewproj,
                       frame.portalSceneDescriptors[baseViewIndex], false,
                       &metalRoughMaterial.portalViewPipeline,
                       &metalRoughMaterial.portalViewMaskPipeline,
@@ -307,10 +307,10 @@ void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
                 cmd, source, material,
                 frame.portalSceneDescriptors[baseViewIndex + level - 1],
                 parentStencil, recursiveStencil, recursionBit);
-            draw_portal_sky(cmd, _portalSceneData[baseViewIndex + level],
+            draw_portal_sky(cmd, _portalRender.sceneData[baseViewIndex + level],
                             recursiveStencil, recursiveStencil);
             draw_geometry(cmd, portalViewDrawContext,
-                          _portalSceneData[baseViewIndex + level].viewproj,
+                          _portalRender.sceneData[baseViewIndex + level].viewproj,
                           frame.portalSceneDescriptors[baseViewIndex + level], false,
                           &metalRoughMaterial.portalViewPipeline,
                           &metalRoughMaterial.portalViewMaskPipeline,
@@ -452,7 +452,7 @@ void VulkanEngine::draw_offscreen_portal_views(VkCommandBuffer cmd)
         draw_geometry_to_portal_camera(
             cmd,
             portalViewDrawContext,
-            _portalSceneData[viewIndex].viewproj,
+            _portalRender.sceneData[viewIndex].viewproj,
             frame.portalSceneDescriptors[viewIndex],
             target);
         vkutil::transition_image(
@@ -531,11 +531,11 @@ void VulkanEngine::draw_portal_sky(
     vkCmdSetStencilWriteMask(
         cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
     vkCmdBindPipeline(
-        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _portalSkyPipeline.pipeline);
+        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _portalRender.skyPipeline.pipeline);
     vkCmdBindDescriptorSets(
         cmd,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
-        _portalSkyPipeline.layout,
+        _portalRender.skyPipeline.layout,
         0,
         1,
         &_skyboxDescriptor,
@@ -560,7 +560,7 @@ void VulkanEngine::draw_portal_sky(
         glm::normalize(-glm::vec3(cameraWorld[2])), 0.0f);
     vkCmdPushConstants(
         cmd,
-        _portalSkyPipeline.layout,
+        _portalRender.skyPipeline.layout,
         VK_SHADER_STAGE_FRAGMENT_BIT,
         0,
         sizeof(PortalSkyPushConstants),

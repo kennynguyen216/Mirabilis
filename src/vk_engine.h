@@ -795,9 +795,12 @@ class VulkanEngine{
             bool useOffscreen{false};
         };
         PortalCameraState _portalCameras;
-        bool _portalRecursionEnabled{true};
-        std::array<GPUSceneData, PortalViewCount> _portalSceneData{};
-        MaterialPipeline _portalSkyPipeline;
+        struct PortalRenderState {
+            bool recursionEnabled{true};
+            std::array<GPUSceneData, PortalViewCount> sceneData{};
+            MaterialPipeline skyPipeline;
+        };
+        PortalRenderState _portalRender;
         struct DebugViewState {
             MaterialPipeline colliderPipeline;
             MaterialPipeline renderPipeline;

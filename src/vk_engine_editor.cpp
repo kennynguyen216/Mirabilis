@@ -795,7 +795,7 @@ void VulkanEngine::draw_editor_menu()
         ImGui::MenuItem(
             "Direct Stencil Recursion",
             nullptr,
-            &_portalRecursionEnabled);
+            &_portalRender.recursionEnabled);
         ImGui::EndDisabled();
         ImGui::EndMenu();
     }
@@ -1740,7 +1740,7 @@ void VulkanEngine::draw_statistics_panel(float horizontalSpeed)
             "Portal mode: %s",
             _portalCameras.useOffscreen
                 ? "Offscreen camera (primary only)"
-                : (_portalRecursionEnabled
+                : (_portalRender.recursionEnabled
                     ? "Direct stencil (one recursive level)"
                     : "Direct stencil (primary only)"));
     }

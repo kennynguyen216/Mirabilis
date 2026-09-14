@@ -186,12 +186,12 @@ void VulkanEngine::update_scene(float deltaTime)
 
             for (uint32_t level = 0; level < PortalRecursionDepth; ++level) {
                 const uint32_t viewIndex = surfaceIndex * PortalRecursionDepth + level;
-                _portalSceneData[viewIndex] = build_portal_scene_data(
+                _portalRender.sceneData[viewIndex] = build_portal_scene_data(
                     glm::lookAt(virtualPosition, virtualPosition + virtualForward, virtualUp),
                     viewDestination);
                 std::memcpy(
                     get_current_frame().portalSceneBuffers[viewIndex].info.pMappedData,
-                    &_portalSceneData[viewIndex], sizeof(GPUSceneData));
+                    &_portalRender.sceneData[viewIndex], sizeof(GPUSceneData));
                 virtualPosition = stabilize_portal_view_camera(viewDestination,
                     glm::vec3(transfer * glm::vec4(virtualPosition, 1.0f)));
                 virtualForward = glm::normalize(glm::vec3(
