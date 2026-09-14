@@ -88,11 +88,11 @@ void VulkanEngine::init_path_trace() {
     if(queues[_graphicsQueueFamily].timestampValidBits) {
         VkQueryPoolCreateInfo query{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
         query.queryType=VK_QUERY_TYPE_TIMESTAMP; query.queryCount=2*FRAME_OVERLAP;
-        VK_CHECK(vkCreateQueryPool(_device,&query,nullptr,&_traceTimestampPool));
+        VK_CHECK(vkCreateQueryPool(_device,&query,nullptr,&_traceRuntime.timestampPool));
     }
 }
 void VulkanEngine::destroy_path_trace() {
-    if(_traceTimestampPool) vkDestroyQueryPool(_device,_traceTimestampPool,nullptr);
+    if(_traceRuntime.timestampPool) vkDestroyQueryPool(_device,_traceRuntime.timestampPool,nullptr);
     destroy_buffer(_traceLightBuffer); destroy_buffer(_traceEmitterBuffer);
     destroy_buffer(_traceTexelBuffer);
     destroy_buffer(_tracePortalBuffer);
@@ -116,25 +116,25 @@ void VulkanEngine::draw_path_trace(VkCommandBuffer cmd) {
     auto append=[&](const void* data,size_t bytes) {auto p=static_cast<const uint8_t*>(data); for(size_t i=0;i<bytes;++i) {hash^=p[i];hash*=1099511628211ull;}};
     append(&pc.origin,64); append(&_drawExtent,sizeof(_drawExtent)); append(&renderScale,sizeof(renderScale));
     append(&pc.sampling,sizeof(pc.sampling)); append(&_traceSceneRevision,sizeof(_traceSceneRevision));
-    if(!_traceWasActive||hash!=_traceInputHash||_traceSamples>=16777216u) {
-        _traceSamples=0; _traceInputHash=hash;
+    if(!_traceRuntime.wasActive||hash!=_traceRuntime.inputHash||_traceRuntime.samples>=16777216u) {
+        _traceRuntime.samples=0; _traceRuntime.inputHash=hash;
         if(std::getenv("MIRABILIS_TEST_FRAMES")) fmt::print("GI accumulation reset: input hash={} revision={} extent={}x{}\n",hash,_traceSceneRevision,_drawExtent.width,_drawExtent.height);
     }
-    _traceWasActive=true;
-    pc.control.z=_traceSamples++;
+    _traceRuntime.wasActive=true;
+    pc.control.z=_traceRuntime.samples++;
     pc.origin.w=std::exp2(_traceSettings.exposure);
     const uint32_t slot=uint32_t(_frameNumber%FRAME_OVERLAP);
-    if(_traceTimestampPool) {
-        if(_traceTimingWritten[slot]) {
+    if(_traceRuntime.timestampPool) {
+        if(_traceRuntime.timingWritten[slot]) {
             uint64_t ticks[2]{};
-            if(vkGetQueryPoolResults(_device,_traceTimestampPool,slot*2,2,sizeof(ticks),ticks,sizeof(uint64_t),VK_QUERY_RESULT_64_BIT)==VK_SUCCESS) {
+            if(vkGetQueryPoolResults(_device,_traceRuntime.timestampPool,slot*2,2,sizeof(ticks),ticks,sizeof(uint64_t),VK_QUERY_RESULT_64_BIT)==VK_SUCCESS) {
                 VkPhysicalDeviceProperties properties{}; vkGetPhysicalDeviceProperties(_chosenGPU,&properties);
-                _traceGpuMs=float(ticks[1]-ticks[0])*properties.limits.timestampPeriod/1e6f;
-                _traceMaxGpuMs=std::max(_traceMaxGpuMs,_traceGpuMs);
+                _traceRuntime.gpuMs=float(ticks[1]-ticks[0])*properties.limits.timestampPeriod/1e6f;
+                _traceRuntime.maxGpuMs=std::max(_traceRuntime.maxGpuMs,_traceRuntime.gpuMs);
             }
         }
-        vkCmdResetQueryPool(cmd,_traceTimestampPool,slot*2,2);
-        vkCmdWriteTimestamp2(cmd,VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,_traceTimestampPool,slot*2);
+        vkCmdResetQueryPool(cmd,_traceRuntime.timestampPool,slot*2,2);
+        vkCmdWriteTimestamp2(cmd,VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,_traceRuntime.timestampPool,slot*2);
     }
     vkutil::transition_image(cmd,_drawImage.image,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_GENERAL);
     vkutil::transition_image(cmd,_traceAccum.image,_traceImageInitialized?VK_IMAGE_LAYOUT_GENERAL:VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_GENERAL);
@@ -145,9 +145,9 @@ void VulkanEngine::draw_path_trace(VkCommandBuffer cmd) {
     vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,_traceLayout,0,1,&_traceSet,0,nullptr);
     vkCmdPushConstants(cmd,_traceLayout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(pc),&pc);
     vkCmdDispatch(cmd,(_drawExtent.width+7)/8,(_drawExtent.height+7)/8,1);
-    if(_traceTimestampPool) {
-        vkCmdWriteTimestamp2(cmd,VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,_traceTimestampPool,slot*2+1);
-        _traceTimingWritten[slot]=true;
+    if(_traceRuntime.timestampPool) {
+        vkCmdWriteTimestamp2(cmd,VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,_traceRuntime.timestampPool,slot*2+1);
+        _traceRuntime.timingWritten[slot]=true;
     }
     vkutil::transition_image(cmd,_drawImage.image,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 }
@@ -167,8 +167,8 @@ void VulkanEngine::draw_path_trace_ui() {
         bool black=_traceSettings.lighting.environment.y>0.5f;
         if(ImGui::Checkbox("Black environment",&black)) {edited=true;_traceSettings.lighting.environment.y=black?1.f:0.f;}
         if(edited) _sceneDocument.dirty=true;
-        if(ImGui::Button("Reset accumulation")) _traceWasActive=false;
-        ImGui::Text("Samples %u | GPU %.2f ms (max %.2f)",_traceSamples,_traceGpuMs,_traceMaxGpuMs);
+        if(ImGui::Button("Reset accumulation")) _traceRuntime.wasActive=false;
+        ImGui::Text("Samples %u | GPU %.2f ms (max %.2f)",_traceRuntime.samples,_traceRuntime.gpuMs,_traceRuntime.maxGpuMs);
         ImGui::Text("Triangles %zu | BVH nodes %zu | revision %llu",_traceTriangles.size(),_traceNodes.size(),_traceSceneRevision);
         ImGui::SliderInt("Portal traversals per path",&_traceSettings.portalLimit,0,4);
         ImGui::Text("Portal apertures %zu (same scene)",_tracePortals.size());
@@ -562,13 +562,13 @@ void VulkanEngine::capture_path_trace(const char* filename) {
         <<"Debug"
 #endif
         <<"\nScene: "<<_sceneDocument.activeFilename<<"\nTrace revision: "<<_traceSceneRevision<<"\nScene hash: "<<_traceSceneHash
-        <<"\nDimensions: "<<_drawExtent.width<<" x "<<_drawExtent.height<<"\nRender scale: "<<renderScale<<"\nSamples: "<<_traceSamples
-        <<"\nSeed: "<<_traceSettings.baseSeed<<"\nDepth: "<<_traceSettings.maxDepth<<"\nExposure EV: "<<_traceSettings.exposure<<"\nMax GPU dispatch ms: "<<_traceMaxGpuMs
+        <<"\nDimensions: "<<_drawExtent.width<<" x "<<_drawExtent.height<<"\nRender scale: "<<renderScale<<"\nSamples: "<<_traceRuntime.samples
+        <<"\nSeed: "<<_traceSettings.baseSeed<<"\nDepth: "<<_traceSettings.maxDepth<<"\nExposure EV: "<<_traceSettings.exposure<<"\nMax GPU dispatch ms: "<<_traceRuntime.maxGpuMs
         <<"\nMaterial model: "<<_traceSettings.materialModel<<"\nPortal limit: "<<_traceSettings.portalLimit<<"\nPortal apertures: "<<_tracePortals.size()
         <<"\nSource revision/state: "<<(std::getenv("MIRABILIS_SOURCE_STATE")?std::getenv("MIRABILIS_SOURCE_STATE"):"unrecorded; use scripts/validate_software_trace.ps1 for source manifest")
         <<"\nCamera: "<<render_camera().position.x<<","<<render_camera().position.y<<","<<render_camera().position.z
         <<" pitch="<<render_camera().pitch<<" yaw="<<render_camera().yaw<<"\n";
-    fmt::print("GI capture samples={} max GPU dispatch={} ms\n",_traceSamples,_traceMaxGpuMs);
+    fmt::print("GI capture samples={} max GPU dispatch={} ms\n",_traceRuntime.samples,_traceRuntime.maxGpuMs);
     metadata<<"Sun radiance: "<<_traceSettings.lighting.sunRadiance.x<<","<<_traceSettings.lighting.sunRadiance.y<<","<<_traceSettings.lighting.sunRadiance.z
         <<"\nEnvironment intensity: "<<_traceSettings.lighting.environment.x<<" black="<<(_traceSettings.lighting.environment.y>0.5f)
         <<"\nEmitter triangles: "<<_traceEmitters.size()<<"\nDirect mean: "<<directSum/pixels<<"\nIndirect mean: "<<indirectSum/pixels<<"\n";

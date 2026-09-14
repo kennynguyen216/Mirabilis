@@ -365,12 +365,15 @@ class VulkanEngine{
     void capture_ssgi(const char* filename);
     std::vector<glm::vec4> read_ssgi_image(
         const AllocatedImage& image, VkExtent2D extent);
-    uint32_t _traceSamples{0};
-    uint64_t _traceInputHash{0};
-    bool _traceWasActive{false};
-    VkQueryPool _traceTimestampPool{};
-    bool _traceTimingWritten[FRAME_OVERLAP]{};
-    float _traceGpuMs{0}, _traceMaxGpuMs{0};
+    struct PathTraceRuntime {
+        uint32_t samples{0};
+        uint64_t inputHash{0};
+        bool wasActive{false};
+        VkQueryPool timestampPool{};
+        bool timingWritten[FRAME_OVERLAP]{};
+        float gpuMs{0}, maxGpuMs{0};
+    };
+    PathTraceRuntime _traceRuntime;
     AllocatedBuffer _traceLightBuffer{}, _traceEmitterBuffer{};
     AllocatedImage _traceDirect{}, _traceIndirect{};
     std::vector<uint32_t> _traceEmitters;

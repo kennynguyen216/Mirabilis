@@ -541,7 +541,7 @@ void VulkanEngine::draw(float deltaTime)
     if (_rendererMode == RendererMode::SoftwarePathTrace && _traceSupported) {
         draw_path_trace(cmd);
     } else {
-    _traceWasActive=false;
+    _traceRuntime.wasActive=false;
 	// Render the sunlight depth map first: every later pass, main camera and
 	// portal cameras alike, samples it while shading.
 	draw_shadow_map(cmd);
@@ -920,7 +920,7 @@ void VulkanEngine::run(){
                 }
             }
             if(testFrame==9) renderScale=0.5f;
-            if(testFrame==10) _traceWasActive=false;
+            if(testFrame==10) _traceRuntime.wasActive=false;
             if(testFrame==11) _traceSettings.lighting.sunRadiance.x+=1;
             if(testFrame==12) _traceSettings.lighting.environment.x+=0.25f;
             if(testFrame==13) _traceSettings.materialModel=1-_traceSettings.materialModel;
@@ -943,8 +943,8 @@ void VulkanEngine::run(){
         }
         if(testInvalidation&&testFrame>=2&&testFrame<=17) {
             const uint32_t expected=testFrame==2?3:1;
-            fmt::print("GI invalidation frame {}: samples={} expected={}\n",testFrame,_traceSamples,expected);
-            if(_traceSamples!=expected) std::abort();
+            fmt::print("GI invalidation frame {}: samples={} expected={}\n",testFrame,_traceRuntime.samples,expected);
+            if(_traceRuntime.samples!=expected) std::abort();
         }
         if (frameLimit && _frameNumber >= frameLimit) {
             if (benchmarkFrames > 0) {
