@@ -1759,16 +1759,16 @@ void VulkanEngine::draw_play_overlay(float horizontalSpeed)
             ImGuiWindowFlags_NoSavedSettings)) {
         if (ImGui::Button("Respawn (F1)")) respawn_player();
         ImGui::SameLine();
-        if (ImGui::Button(_noClipMode
+        if (ImGui::Button(_noClip.enabled
                 ? "Disable No Clip (F2)"
                 : "Enable No Clip (F2)")) {
-            _noClipMode = !_noClipMode;
-            _noClipUp = false;
-            _noClipDown = false;
+            _noClip.enabled = !_noClip.enabled;
+            _noClip.up = false;
+            _noClip.down = false;
             _playerMovement.velocity = glm::vec3(0.0f);
         }
-        if (_noClipMode) {
-            ImGui::SliderFloat("No Clip Speed", &_noClipSpeed, 2.0f, 40.0f);
+        if (_noClip.enabled) {
+            ImGui::SliderFloat("No Clip Speed", &_noClip.speed, 2.0f, 40.0f);
             ImGui::TextDisabled("WASD move, Space up, Ctrl down");
         }
     }

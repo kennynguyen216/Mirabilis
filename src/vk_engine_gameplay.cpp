@@ -81,7 +81,7 @@ void VulkanEngine::update_physics(float deltaTime)
     // because integrate() owns the fall-reset check.
     apply_scene_spawn_point();
 
-    if (_noClipMode) {
+    if (_noClip.enabled) {
         _playerMovement.previousPosition = _playerMovement.position;
         const glm::mat4 rotation = mainCamera.getRotationMatrix();
         const glm::vec3 forward = glm::normalize(glm::vec3(
@@ -94,9 +94,9 @@ void VulkanEngine::update_physics(float deltaTime)
             right * ((_playerInput.right ? 1.0f : 0.0f) -
                      (_playerInput.left ? 1.0f : 0.0f)) +
             glm::vec3(0.0f, 1.0f, 0.0f) *
-                ((_noClipUp ? 1.0f : 0.0f) - (_noClipDown ? 1.0f : 0.0f));
+                ((_noClip.up ? 1.0f : 0.0f) - (_noClip.down ? 1.0f : 0.0f));
         if (glm::length(direction) > 0.001f) direction = glm::normalize(direction);
-        _playerMovement.velocity = direction * _noClipSpeed;
+        _playerMovement.velocity = direction * _noClip.speed;
         _playerMovement.position += _playerMovement.velocity * deltaTime;
         _playerMovement.grounded = false;
         _playerInput.jumpPressed = false;

@@ -211,9 +211,9 @@ void VulkanEngine::set_editor_mode(bool enabled)
 
     _editorMode = enabled;
     if (enabled) {
-        _noClipMode = false;
-        _noClipUp = false;
-        _noClipDown = false;
+        _noClip.enabled = false;
+        _noClip.up = false;
+        _noClip.down = false;
     }
     _editorCameraLooking = false;
     _physicsAccumulator = 0.0f;

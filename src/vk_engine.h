@@ -718,10 +718,13 @@ class VulkanEngine{
         PlayerMovement _playerMovement{};
         bool _mouseCaptured{true};
         bool _editorMode{false};
-        bool _noClipMode{false};
-        bool _noClipUp{false};
-        bool _noClipDown{false};
-        float _noClipSpeed{12.0f};
+        struct NoClipState {
+            bool enabled{false};
+            bool up{false};
+            bool down{false};
+            float speed{12.0f};
+        };
+        NoClipState _noClip;
         bool _editorCameraLooking{false};
         bool _showDebugPanels{false};
         bool _resetEditorLayoutRequested{false};

@@ -63,9 +63,9 @@ bool VulkanEngine::process_event(const SDL_Event& e)
         if (e.key.keysym.sym == SDLK_F1) {
             respawn_player();
         } else if (e.key.keysym.sym == SDLK_F2) {
-            _noClipMode = !_noClipMode;
-            _noClipUp = false;
-            _noClipDown = false;
+            _noClip.enabled = !_noClip.enabled;
+            _noClip.up = false;
+            _noClip.down = false;
             _playerMovement.velocity = glm::vec3(0.0f);
         }
     }
@@ -139,12 +139,12 @@ bool VulkanEngine::process_event(const SDL_Event& e)
             if (e.key.keysym.sym == SDLK_a) _playerInput.left = true;
             if (e.key.keysym.sym == SDLK_d) _playerInput.right = true;
             if (e.key.keysym.sym == SDLK_SPACE) {
-                if (_noClipMode) _noClipUp = true;
+                if (_noClip.enabled) _noClip.up = true;
                 else if (e.key.repeat == 0) _playerInput.jumpPressed = true;
             }
-            if (_noClipMode && (e.key.keysym.sym == SDLK_LCTRL ||
+            if (_noClip.enabled && (e.key.keysym.sym == SDLK_LCTRL ||
                                 e.key.keysym.sym == SDLK_RCTRL)) {
-                _noClipDown = true;
+                _noClip.down = true;
             }
         }
 
@@ -171,9 +171,9 @@ bool VulkanEngine::process_event(const SDL_Event& e)
             if (e.key.keysym.sym == SDLK_s) _playerInput.backward = false;
             if (e.key.keysym.sym == SDLK_a) _playerInput.left = false;
             if (e.key.keysym.sym == SDLK_d) _playerInput.right = false;
-            if (e.key.keysym.sym == SDLK_SPACE) _noClipUp = false;
+            if (e.key.keysym.sym == SDLK_SPACE) _noClip.up = false;
             if (e.key.keysym.sym == SDLK_LCTRL ||
-                e.key.keysym.sym == SDLK_RCTRL) _noClipDown = false;
+                e.key.keysym.sym == SDLK_RCTRL) _noClip.down = false;
         }
     }
 
