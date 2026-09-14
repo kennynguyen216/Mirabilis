@@ -37,7 +37,14 @@ void VulkanEngine::init_default_images_and_samplers()
         {16, 16, 1},
         VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_SAMPLED_BIT);
-    
+    // Materials fall back to these as base colour, so the path tracer keeps
+    // seeing them.  Each is at most 16x16.
+    _whiteImage.traceSource = make_trace_texture(&white, {1, 1, 1});
+    _greyImage.traceSource = make_trace_texture(&grey, {1, 1, 1});
+    _blackImage.traceSource = make_trace_texture(&black, {1, 1, 1});
+    _errorCheckerboardImage.traceSource =
+        make_trace_texture(checkerboard.data(), {16, 16, 1});
+
     VkSamplerCreateInfo samplerInfo{.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     samplerInfo.magFilter = VK_FILTER_NEAREST;
     samplerInfo.minFilter = VK_FILTER_NEAREST;
@@ -929,13 +936,19 @@ AllocatedImage VulkanEngine::create_image(
     });
 
     destroy_buffer(uploadBuffer);
-    if(format==VK_FORMAT_R8G8B8A8_UNORM||format==VK_FORMAT_R8G8B8A8_SRGB) {
-        image.traceSource=std::make_shared<TraceTextureSource>();
-        image.traceSource->width=size.width; image.traceSource->height=size.height;
-        image.traceSource->rgba.resize(size_t(size.width)*size.height);
-        std::memcpy(image.traceSource->rgba.data(),data,image.traceSource->rgba.size()*sizeof(uint32_t));
-    }
     return image;
+}
+
+std::shared_ptr<TraceTextureSource> VulkanEngine::make_trace_texture(
+    const void* rgba, VkExtent3D size)
+{
+    auto source = std::make_shared<TraceTextureSource>();
+    source->width = size.width;
+    source->height = size.height;
+    source->rgba.resize(size_t(size.width) * size.height);
+    std::memcpy(source->rgba.data(), rgba,
+        source->rgba.size() * sizeof(uint32_t));
+    return source;
 }
 
 void VulkanEngine::destroy_image(const AllocatedImage& image)

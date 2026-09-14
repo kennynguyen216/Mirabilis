@@ -12,14 +12,29 @@ layout(push_constant) uniform constants {
     ivec4 control;
     // x = radius, y = depth falloff, z = normal exponent, w = enabled.
     vec4 settings;
+    // xy = live draw extent.
+    ivec4 frame;
 } PushConstants;
 
-vec2 allocation_uv(vec2 screenUV, sampler2D source)
+// Every source is allocated at the full window size and only partly written:
+// depth and normals over the draw extent, the indirect input over the SSGI
+// extent, which is half of it on the half-resolution presets.
+vec2 live_uv(vec2 screenUV, sampler2D source, vec2 liveExtent)
 {
     vec2 allocation = vec2(textureSize(source, 0));
-    vec2 liveFraction = vec2(PushConstants.control.xy) / allocation;
+    vec2 liveFraction = liveExtent / allocation;
     return clamp(screenUV * liveFraction, vec2(0.5) / allocation,
         liveFraction - vec2(0.5) / allocation);
+}
+
+vec2 frame_uv(vec2 screenUV, sampler2D source)
+{
+    return live_uv(screenUV, source, vec2(PushConstants.frame.xy));
+}
+
+vec2 ssgi_uv(vec2 screenUV, sampler2D source)
+{
+    return live_uv(screenUV, source, vec2(PushConstants.control.xy));
 }
 
 void main()
@@ -32,14 +47,14 @@ void main()
 
     vec2 uv = (vec2(pixel) + 0.5) / vec2(extent);
     float centerDepth = texture(
-        prepassDepth, allocation_uv(uv, prepassDepth)).r;
+        prepassDepth, frame_uv(uv, prepassDepth)).r;
     if (centerDepth <= 1e-6 || PushConstants.settings.w < 0.5) {
         imageStore(outputIndirect, pixel,
-            texture(inputIndirect, allocation_uv(uv, inputIndirect)));
+            texture(inputIndirect, ssgi_uv(uv, inputIndirect)));
         return;
     }
     vec3 centerNormal = normalize(texture(
-        prepassNormal, allocation_uv(uv, prepassNormal)).xyz);
+        prepassNormal, frame_uv(uv, prepassNormal)).xyz);
 
     int radius = clamp(int(PushConstants.settings.x + 0.5), 1, 8);
     ivec2 direction = PushConstants.control.zw;
@@ -53,9 +68,9 @@ void main()
             ivec2(0), extent - ivec2(1));
         vec2 sampleUV = (vec2(samplePixel) + 0.5) / vec2(extent);
         float sampleDepth = texture(
-            prepassDepth, allocation_uv(sampleUV, prepassDepth)).r;
+            prepassDepth, frame_uv(sampleUV, prepassDepth)).r;
         vec3 sampleNormal = normalize(texture(
-            prepassNormal, allocation_uv(sampleUV, prepassNormal)).xyz);
+            prepassNormal, frame_uv(sampleUV, prepassNormal)).xyz);
         float spatial = exp(-0.5 * float(tap * tap) /
             max(float(radius * radius) * 0.35, 0.001));
         float depthWeight = exp(-abs(sampleDepth - centerDepth) *
@@ -64,7 +79,7 @@ void main()
             PushConstants.settings.z);
         float weight = spatial * depthWeight * normalWeight;
         sum += texture(inputIndirect,
-            allocation_uv(sampleUV, inputIndirect)).rgb * weight;
+            ssgi_uv(sampleUV, inputIndirect)).rgb * weight;
         totalWeight += weight;
     }
     imageStore(outputIndirect, pixel,

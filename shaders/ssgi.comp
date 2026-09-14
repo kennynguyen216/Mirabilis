@@ -36,7 +36,7 @@ layout(push_constant) uniform constants {
     // x = history weight, y = depth rejection threshold,
     // z = normal dot threshold, w = velocity rejection threshold.
     vec4 temporal;
-    // x = rays per pixel.
+    // x = rays per pixel, yz = live draw extent.
     uvec4 quality;
 } PushConstants;
 
@@ -56,10 +56,13 @@ float randomFloat(inout uint state)
     return float(word) * (1.0 / 4294967296.0);
 }
 
-vec2 allocation_uv(vec2 screenUV, sampler2D source)
+// Every input here is allocated at the full window size and written only over
+// the live draw extent.  That is not the extent this pass runs at on the
+// half-resolution presets, so the draw extent comes in separately.
+vec2 frame_uv(vec2 screenUV, sampler2D source)
 {
     vec2 allocation = vec2(textureSize(source, 0));
-    vec2 liveFraction = vec2(PushConstants.control.xy) / allocation;
+    vec2 liveFraction = vec2(PushConstants.quality.yz) / allocation;
     return clamp(
         screenUV * liveFraction,
         vec2(0.5) / allocation,
@@ -116,7 +119,7 @@ void main()
     }
 
     vec2 screenUV = (vec2(pixel) + 0.5) / vec2(extent);
-    vec2 depthUV = allocation_uv(screenUV, prepassDepth);
+    vec2 depthUV = frame_uv(screenUV, prepassDepth);
     float depth = texture(prepassDepth, depthUV).r;
     if (depth <= BackgroundDepth) {
         imageStore(rawIndirectImage, pixel, vec4(0.0));
@@ -127,7 +130,7 @@ void main()
 
     vec3 position = view_position(screenUV, depth);
     vec3 normal = normalize(texture(prepassNormal,
-        allocation_uv(screenUV, prepassNormal)).xyz);
+        frame_uv(screenUV, prepassNormal)).xyz);
     uint state = uint(pixel.x) * 1973u ^ uint(pixel.y) * 9277u ^
         PushConstants.control.w * 26699u ^ 0x68bc21ebu;
     vec3 origin = position + normal * PushConstants.settings.z;
@@ -155,12 +158,12 @@ void main()
             if (any(lessThan(rayUV, vec2(0.0))) ||
                 any(greaterThanEqual(rayUV, vec2(1.0))) ||
                 ndc.z < 0.0 || ndc.z > 1.0) break;
-            if (texture(portalMask, allocation_uv(rayUV, portalMask)).r > 0.5) {
+            if (texture(portalMask, frame_uv(rayUV, portalMask)).r > 0.5) {
                 portalTermination = true;
                 break;
             }
             float surfaceDepth = texture(
-                prepassDepth, allocation_uv(rayUV, prepassDepth)).r;
+                prepassDepth, frame_uv(rayUV, prepassDepth)).r;
             if (surfaceDepth <= BackgroundDepth) continue;
             vec3 surfacePosition = view_position(rayUV, surfaceDepth);
             float separation = (-rayPoint.z) - (-surfacePosition.z);
@@ -176,12 +179,12 @@ void main()
         vec3 incident = vec3(0.0);
         if (hit && PushConstants.control.z != 0u) {
             vec2 hitVelocity = texture(
-                gbufferVelocity, allocation_uv(hitUV, gbufferVelocity)).xy;
+                gbufferVelocity, frame_uv(hitUV, gbufferVelocity)).xy;
             vec2 previousHitUV = hitUV + hitVelocity;
             if (all(greaterThanEqual(previousHitUV, vec2(0.0))) &&
                 all(lessThan(previousHitUV, vec2(1.0)))) {
                 incident = texture(previousDirectLighting,
-                    allocation_uv(previousHitUV, previousDirectLighting)).rgb;
+                    frame_uv(previousHitUV, previousDirectLighting)).rgb;
             } else {
                 hit = false;
             }

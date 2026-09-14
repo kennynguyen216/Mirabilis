@@ -775,6 +775,20 @@ void VulkanEngine::draw_geometry(
     for (uint32_t drawIndex : opaqueDraws) {
         draw(drawContext.OpaqueSurfaces[drawIndex]);
     }
+    // The transparent pipeline is built for the draw image alone, so it must
+    // not blend into the G-buffer targets this pass carries.  Restart with
+    // just the draw image, loading the colour and depth the opaque draws
+    // stored.  An override pipeline already matches this pass as it is.
+    if (writeGBuffer && overridePipeline == nullptr &&
+        !drawContext.TransparentSurfaces.empty()) {
+        vkCmdEndRendering(cmd);
+        renderInfo.colorAttachmentCount = 1;
+        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        stencilAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        vkCmdBeginRendering(cmd, &renderInfo);
+        lastPipeline = nullptr;
+        lastMaterial = nullptr;
+    }
     for (const RenderObject& renderObject : drawContext.TransparentSurfaces) {
         draw(renderObject);
     }
@@ -2483,7 +2497,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             _ssgiVelocityRejection);
         pushConstants.quality = glm::uvec4(
             static_cast<uint32_t>(std::clamp(_ssgiRaysPerPixel, 1, 8)),
-            0u, 0u, 0u);
+            _drawExtent.width, _drawExtent.height, 0u);
         vkCmdPushConstants(
             cmd, _ssgiPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
             0, sizeof(pushConstants), &pushConstants);
@@ -2550,6 +2564,9 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             filterPush.control = glm::ivec4(
                 static_cast<int>(ssgiExtent.width),
                 static_cast<int>(ssgiExtent.height), 1, 0);
+            filterPush.frame = glm::ivec4(
+                static_cast<int>(_drawExtent.width),
+                static_cast<int>(_drawExtent.height), 0, 0);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                 _ssgiFilterPipelineLayout, 0, 1,
                 &_ssgiFilterDescriptors[writeIndex], 0, nullptr);

@@ -135,10 +135,13 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     maskPipeline.pipeline = builder.build_pipeline(engine->_device);
     builder.set_shaders(vertexShader, fragmentShader);
 
-    // Transparent surfaces share the MRT blend state because Vulkan devices
-    // without independentBlend require every attachment state to match. The
-    // SSGI contract still ignores them through the opaque-only depth prepass.
+    // Transparent surfaces blend into the lit image and nothing else.  With
+    // the G-buffer attached, additive blending would sum a pane's albedo,
+    // motion and direct light into the surface behind it, and SSGI reads all
+    // three.  Masking those targets off needs independentBlend, so instead
+    // draw_geometry gives transparents a pass with the draw image alone.
     builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_color_attachment_format(engine->_drawImage.imageFormat);
     builder.enable_blending_additive();
     builder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
     transparentPipeline.pipeline = builder.build_pipeline(engine->_device);
