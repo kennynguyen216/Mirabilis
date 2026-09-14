@@ -375,13 +375,13 @@ bool VulkanEngine::save_editor_scene()
     // depends on the scale this level was authored at.  The sample count and
     // the resolution are absent for the same reason the shadow map size is -
     // they describe a machine, not a level.
-    if (_ssaoSceneOverride) {
+    if (_ssao.sceneOverride) {
         file << ",\n  \"ssao\": {\"enabled\": "
-             << (_ssaoSettings.enabled ? "true" : "false")
-             << ", \"radius\": " << _ssaoSettings.radius
-             << ", \"bias\": " << _ssaoSettings.bias
-             << ", \"intensity\": " << _ssaoSettings.intensity
-             << ", \"power\": " << _ssaoSettings.power << '}';
+             << (_ssao.settings.enabled ? "true" : "false")
+             << ", \"radius\": " << _ssao.settings.radius
+             << ", \"bias\": " << _ssao.settings.bias
+             << ", \"intensity\": " << _ssao.settings.intensity
+             << ", \"power\": " << _ssao.settings.power << '}';
     }
     file << "\n}\n";
     if (!file) {
@@ -441,10 +441,10 @@ void VulkanEngine::load_ao_preferences()
         quality < 0 || quality >= static_cast<int>(SSAOKernelSizes.size()) ||
         !std::isfinite(depth) || depth < 5.0f || depth > 120.0f ||
         !std::isfinite(normal) || normal < 1.0f || normal > 48.0f) return;
-    _ssaoGlobalEnabled = enabled != 0;
-    _ssaoQuality = quality;
-    _ssaoDepthFalloff = depth;
-    _ssaoNormalFalloff = normal;
+    _ssao.globalEnabled = enabled != 0;
+    _ssao.quality = quality;
+    _ssao.depthFalloff = depth;
+    _ssao.normalFalloff = normal;
 }
 
 void VulkanEngine::save_ao_preferences() const
@@ -453,8 +453,8 @@ void VulkanEngine::save_ao_preferences() const
     if (!directory) return;
     std::ofstream file(std::filesystem::path(directory) / "ambient_occlusion.cfg");
     SDL_free(directory);
-    file << "1 " << (_ssaoGlobalEnabled ? 1 : 0) << ' ' << _ssaoQuality
-         << ' ' << _ssaoDepthFalloff << ' ' << _ssaoNormalFalloff << '\n';
+    file << "1 " << (_ssao.globalEnabled ? 1 : 0) << ' ' << _ssao.quality
+         << ' ' << _ssao.depthFalloff << ' ' << _ssao.normalFalloff << '\n';
     if (!file) fmt::print("Could not save ambient occlusion preferences\n");
 }
 
@@ -938,8 +938,8 @@ bool VulkanEngine::load_editor_scene()
     _selectedSceneObject = InvalidSceneObject;
     _nextCreatedActorNumber = static_cast<uint32_t>(std::max<uint64_t>(nextActor, 1));
     // Past every path that could still have failed.
-    _ssaoSettings = pendingSSAO;
-    _ssaoSceneOverride = pendingSSAOOverride;
+    _ssao.settings = pendingSSAO;
+    _ssao.sceneOverride = pendingSSAOOverride;
     _traceLighting = pendingReference;
     _shadow.sunlightDirection = pendingLighting.sunlightDirection;
     _shadow.enabled = pendingLighting.shadowsEnabled;

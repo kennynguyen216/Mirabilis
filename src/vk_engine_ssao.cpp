@@ -13,7 +13,7 @@
 
 void VulkanEngine::init_ssao_descriptors()
 {
-    if (_ssaoFormat != VK_FORMAT_UNDEFINED) {
+    if (_ssao.format != VK_FORMAT_UNDEFINED) {
         // The sampling pass: the two prepass buffers it reads, the rotation
         // noise, the image it writes, and the kernel it walks.
         DescriptorLayoutBuilder builder;
@@ -22,7 +22,7 @@ void VulkanEngine::init_ssao_descriptors()
         builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         builder.add_binding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-        _ssaoDescriptorLayout = builder.build(
+        _ssao.descriptorLayout = builder.build(
             _device, VK_SHADER_STAGE_COMPUTE_BIT);
 
         // The blur: occlusion in, the two buffers that tell it which
@@ -32,13 +32,13 @@ void VulkanEngine::init_ssao_descriptors()
         builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-        _ssaoBlurDescriptorLayout = builder.build(
+        _ssao.blurDescriptorLayout = builder.build(
             _device, VK_SHADER_STAGE_COMPUTE_BIT);
 
         // None of these images is recreated at runtime, so every set below is
         // written once here and never revisited.
-        _ssaoDescriptor = globalDescriptorAllocator.allocate(
-            _device, _ssaoDescriptorLayout);
+        _ssao.descriptor = globalDescriptorAllocator.allocate(
+            _device, _ssao.descriptorLayout);
         DescriptorWriter ssaoWriter;
         ssaoWriter.write_image(
             0,
@@ -54,23 +54,23 @@ void VulkanEngine::init_ssao_descriptors()
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         ssaoWriter.write_image(
             2,
-            _ssaoNoiseImage.imageView,
-            _ssaoNoiseSampler,
+            _ssao.noiseImage.imageView,
+            _ssao.noiseSampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         ssaoWriter.write_image(
             3,
-            _ssaoRawImage.imageView,
+            _ssao.rawImage.imageView,
             VK_NULL_HANDLE,
             VK_IMAGE_LAYOUT_GENERAL,
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         ssaoWriter.write_buffer(
             4,
-            _ssaoKernelBuffer.buffer,
+            _ssao.kernelBuffer.buffer,
             sizeof(SSAOKernelBlock),
             0,
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-        ssaoWriter.update_set(_device, _ssaoDescriptor);
+        ssaoWriter.update_set(_device, _ssao.descriptor);
 
         // The two blur directions share a layout and a pipeline; only which
         // image they read and which they write differs.
@@ -104,14 +104,14 @@ void VulkanEngine::init_ssao_descriptors()
                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
             blurWriter.update_set(_device, set);
         };
-        _ssaoBlurHorizontalDescriptor = globalDescriptorAllocator.allocate(
-            _device, _ssaoBlurDescriptorLayout);
+        _ssao.blurHorizontalDescriptor = globalDescriptorAllocator.allocate(
+            _device, _ssao.blurDescriptorLayout);
         writeBlurSet(
-            _ssaoBlurHorizontalDescriptor, _ssaoRawImage, _ssaoBlurImage);
-        _ssaoBlurVerticalDescriptor = globalDescriptorAllocator.allocate(
-            _device, _ssaoBlurDescriptorLayout);
+            _ssao.blurHorizontalDescriptor, _ssao.rawImage, _ssao.blurImage);
+        _ssao.blurVerticalDescriptor = globalDescriptorAllocator.allocate(
+            _device, _ssao.blurDescriptorLayout);
         writeBlurSet(
-            _ssaoBlurVerticalDescriptor, _ssaoBlurImage, _ssaoFinalImage);
+            _ssao.blurVerticalDescriptor, _ssao.blurImage, _ssao.finalImage);
 
     }
 
@@ -125,20 +125,20 @@ void VulkanEngine::init_ssao_descriptors()
         builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        _ssaoDebugDescriptorLayout = builder.build(
+        _ssao.debugDescriptorLayout = builder.build(
             _device, VK_SHADER_STAGE_FRAGMENT_BIT);
-        _ssaoDebugDescriptor = globalDescriptorAllocator.allocate(
-            _device, _ssaoDebugDescriptorLayout);
+        _ssao.debugDescriptor = globalDescriptorAllocator.allocate(
+            _device, _ssao.debugDescriptorLayout);
 
         // Nearest, because a debug view should show the stored texel rather
         // than a filtered version of it.
         const std::array<VkImageView, 3> stages{
-            _ssaoRawImage.imageView != VK_NULL_HANDLE
-                ? _ssaoRawImage.imageView : occlusionView,
-            _ssaoBlurImage.imageView != VK_NULL_HANDLE
-                ? _ssaoBlurImage.imageView : occlusionView,
-            _ssaoFinalImage.imageView != VK_NULL_HANDLE
-                ? _ssaoFinalImage.imageView : occlusionView};
+            _ssao.rawImage.imageView != VK_NULL_HANDLE
+                ? _ssao.rawImage.imageView : occlusionView,
+            _ssao.blurImage.imageView != VK_NULL_HANDLE
+                ? _ssao.blurImage.imageView : occlusionView,
+            _ssao.finalImage.imageView != VK_NULL_HANDLE
+                ? _ssao.finalImage.imageView : occlusionView};
         DescriptorWriter debugWriter;
         for (int binding = 0; binding < 3; ++binding) {
             debugWriter.write_image(
@@ -148,7 +148,7 @@ void VulkanEngine::init_ssao_descriptors()
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         }
-        debugWriter.update_set(_device, _ssaoDebugDescriptor);
+        debugWriter.update_set(_device, _ssao.debugDescriptor);
     }
 }
 
@@ -166,9 +166,9 @@ bool VulkanEngine::ssao_active() const
     // Every pipeline has to have been built, and the whole effect reads the
     // prepass, so a device that failed to produce either leaves it off rather
     // than shading against an image nothing wrote.
-    return _ssaoGlobalEnabled && _ssaoSettings.enabled &&
-        _ssaoBlurPipeline != VK_NULL_HANDLE &&
-        _ssaoPipelines[_ssaoQuality] != VK_NULL_HANDLE &&
+    return _ssao.globalEnabled && _ssao.settings.enabled &&
+        _ssao.blurPipeline != VK_NULL_HANDLE &&
+        _ssao.pipelines[_ssao.quality] != VK_NULL_HANDLE &&
         _depthNormalPipeline.pipeline != VK_NULL_HANDLE;
 }
 
@@ -183,33 +183,33 @@ void VulkanEngine::init_ssao_resources()
         VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
         VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
         VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-    _ssaoFormat = pick_format(
+    _ssao.format = pick_format(
         _chosenGPU,
         {VK_FORMAT_R8_UNORM, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16G16_SFLOAT},
         requiredFeatures).format;
-    if (_ssaoFormat == VK_FORMAT_UNDEFINED) {
+    if (_ssao.format == VK_FORMAT_UNDEFINED) {
         // Reported rather than fatal: the rest of the renderer works without
         // ambient occlusion, and the flag in the scene data already makes
         // every material shade as if nothing were occluding it.
         fmt::print("No format supports a storage-plus-sampled occlusion image; "
                    "ambient occlusion disabled\n");
-        _ssaoSettings.enabled = false;
+        _ssao.settings.enabled = false;
         return;
     }
-    _ssaoFormatName = string_VkFormat(_ssaoFormat);
+    _ssao.formatName = string_VkFormat(_ssao.format);
 
     // Half of the allocation rather than of the current render scale, so
     // moving the resolution slider never reallocates any of this.
-    _ssaoExtent = VkExtent2D{
+    _ssao.extent = VkExtent2D{
         std::max(1u, (_drawImage.imageExtent.width + 1) / 2),
         std::max(1u, (_drawImage.imageExtent.height + 1) / 2)};
-    const VkExtent3D ssaoExtent3D{_ssaoExtent.width, _ssaoExtent.height, 1};
+    const VkExtent3D ssaoExtent3D{_ssao.extent.width, _ssao.extent.height, 1};
     constexpr VkImageUsageFlags ssaoUsage =
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
         VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    _ssaoRawImage = create_image(ssaoExtent3D, _ssaoFormat, ssaoUsage);
-    _ssaoBlurImage = create_image(ssaoExtent3D, _ssaoFormat, ssaoUsage);
-    _ssaoFinalImage = create_image(ssaoExtent3D, _ssaoFormat, ssaoUsage);
+    _ssao.rawImage = create_image(ssaoExtent3D, _ssao.format, ssaoUsage);
+    _ssao.blurImage = create_image(ssaoExtent3D, _ssao.format, ssaoUsage);
+    _ssao.finalImage = create_image(ssaoExtent3D, _ssao.format, ssaoUsage);
 
     // Fully visible is the neutral value, so a frame that never ran the
     // dispatches - the first one, or any frame with the effect off - shades
@@ -223,7 +223,7 @@ void VulkanEngine::init_ssao_resources()
         VkImageSubresourceRange range =
             vkinit::image_subresource_range(VK_IMAGE_ASPECT_COLOR_BIT);
         for (AllocatedImage* image :
-             {&_ssaoRawImage, &_ssaoBlurImage, &_ssaoFinalImage}) {
+             {&_ssao.rawImage, &_ssao.blurImage, &_ssao.finalImage}) {
             vkutil::transition_image(
                 cmd,
                 image->image,
@@ -279,12 +279,12 @@ void VulkanEngine::init_ssao_resources()
     }
     // Raising the sample count therefore refines the estimate rather than
     // replacing it, and every quality covers the same radius.
-    _ssaoKernelBuffer = create_buffer(
+    _ssao.kernelBuffer = create_buffer(
         sizeof(SSAOKernelBlock),
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU);
     std::memcpy(
-        _ssaoKernelBuffer.info.pMappedData, &kernel, sizeof(SSAOKernelBlock));
+        _ssao.kernelBuffer.info.pMappedData, &kernel, sizeof(SSAOKernelBlock));
 
     // Rotation vectors in the tangent plane, stored unsigned and decoded in
     // the shader because the upload helper works in four bytes per pixel.  A
@@ -302,7 +302,7 @@ void VulkanEngine::init_ssao_resources()
         const glm::vec2 encoded = direction * 0.5f + 0.5f;
         pixel = glm::packUnorm4x8(glm::vec4(encoded.x, encoded.y, 0.5f, 1.0f));
     }
-    _ssaoNoiseImage = create_image(
+    _ssao.noiseImage = create_image(
         noisePixels.data(),
         VkExtent3D{NoiseSize, NoiseSize, 1},
         VK_FORMAT_R8G8B8A8_UNORM,
@@ -312,29 +312,29 @@ void VulkanEngine::init_ssao_resources()
     // rotations, and filtering between them would average the noise away.
     VkSamplerCreateInfo noiseSamplerInfo = sampler_info(VK_FILTER_NEAREST);
     VK_CHECK(vkCreateSampler(
-        _device, &noiseSamplerInfo, nullptr, &_ssaoNoiseSampler));
+        _device, &noiseSamplerInfo, nullptr, &_ssao.noiseSampler));
 
     // Linear and clamped, for the half-to-full resolution step in material
     // shading.  The bilateral blur has already preserved the edges, so a plain
     // bilinear lift is enough to start with.
     VkSamplerCreateInfo ssaoSamplerInfo = sampler_info(
         VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
-    VK_CHECK(vkCreateSampler(_device, &ssaoSamplerInfo, nullptr, &_ssaoSampler));
+    VK_CHECK(vkCreateSampler(_device, &ssaoSamplerInfo, nullptr, &_ssao.sampler));
 
     _mainDeletionQueue.push_function([this]() {
-        vkDestroySampler(_device, _ssaoSampler, nullptr);
-        vkDestroySampler(_device, _ssaoNoiseSampler, nullptr);
-        destroy_image(_ssaoNoiseImage);
-        destroy_buffer(_ssaoKernelBuffer);
-        destroy_image(_ssaoFinalImage);
-        destroy_image(_ssaoBlurImage);
-        destroy_image(_ssaoRawImage);
+        vkDestroySampler(_device, _ssao.sampler, nullptr);
+        vkDestroySampler(_device, _ssao.noiseSampler, nullptr);
+        destroy_image(_ssao.noiseImage);
+        destroy_buffer(_ssao.kernelBuffer);
+        destroy_image(_ssao.finalImage);
+        destroy_image(_ssao.blurImage);
+        destroy_image(_ssao.rawImage);
     });
 }
 
 void VulkanEngine::init_ssao_pipelines()
 {
-    if (_ssaoFormat == VK_FORMAT_UNDEFINED) {
+    if (_ssao.format == VK_FORMAT_UNDEFINED) {
         return;
     }
 
@@ -354,7 +354,7 @@ void VulkanEngine::init_ssao_pipelines()
         .size = sizeof(SSAOPushConstants)};
 
     const std::array<VkDescriptorSetLayout, 2> ssaoLayouts{
-        _gpuSceneDataDescriptorLayout, _ssaoDescriptorLayout};
+        _gpuSceneDataDescriptorLayout, _ssao.descriptorLayout};
     VkPipelineLayoutCreateInfo ssaoLayoutInfo =
         vkinit::pipeline_layout_create_info();
     ssaoLayoutInfo.setLayoutCount = static_cast<uint32_t>(ssaoLayouts.size());
@@ -362,10 +362,10 @@ void VulkanEngine::init_ssao_pipelines()
     ssaoLayoutInfo.pushConstantRangeCount = 1;
     ssaoLayoutInfo.pPushConstantRanges = &pushRange;
     VK_CHECK(vkCreatePipelineLayout(
-        _device, &ssaoLayoutInfo, nullptr, &_ssaoPipelineLayout));
+        _device, &ssaoLayoutInfo, nullptr, &_ssao.pipelineLayout));
 
     const std::array<VkDescriptorSetLayout, 2> blurLayouts{
-        _gpuSceneDataDescriptorLayout, _ssaoBlurDescriptorLayout};
+        _gpuSceneDataDescriptorLayout, _ssao.blurDescriptorLayout};
     VkPipelineLayoutCreateInfo blurLayoutInfo =
         vkinit::pipeline_layout_create_info();
     blurLayoutInfo.setLayoutCount = static_cast<uint32_t>(blurLayouts.size());
@@ -373,7 +373,7 @@ void VulkanEngine::init_ssao_pipelines()
     blurLayoutInfo.pushConstantRangeCount = 1;
     blurLayoutInfo.pPushConstantRanges = &pushRange;
     VK_CHECK(vkCreatePipelineLayout(
-        _device, &blurLayoutInfo, nullptr, &_ssaoBlurPipelineLayout));
+        _device, &blurLayoutInfo, nullptr, &_ssao.blurPipelineLayout));
 
     // One pipeline per sample count.  The count is a specialization constant,
     // so the compiler sees a fixed loop bound and a lower quality setting
@@ -397,7 +397,7 @@ void VulkanEngine::init_ssao_pipelines()
 
         VkComputePipelineCreateInfo createInfo{
             .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        createInfo.layout = _ssaoPipelineLayout;
+        createInfo.layout = _ssao.pipelineLayout;
         createInfo.stage = stage;
         VK_CHECK(vkCreateComputePipelines(
             _device,
@@ -405,7 +405,7 @@ void VulkanEngine::init_ssao_pipelines()
             1,
             &createInfo,
             nullptr,
-            &_ssaoPipelines[quality]));
+            &_ssao.pipelines[quality]));
     }
 
     // Both blur directions are the same pipeline; only the tap direction in
@@ -417,7 +417,7 @@ void VulkanEngine::init_ssao_pipelines()
     blurStage.pName = "main";
     VkComputePipelineCreateInfo blurCreateInfo{
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    blurCreateInfo.layout = _ssaoBlurPipelineLayout;
+    blurCreateInfo.layout = _ssao.blurPipelineLayout;
     blurCreateInfo.stage = blurStage;
     VK_CHECK(vkCreateComputePipelines(
         _device,
@@ -425,15 +425,15 @@ void VulkanEngine::init_ssao_pipelines()
         1,
         &blurCreateInfo,
         nullptr,
-        &_ssaoBlurPipeline));
+        &_ssao.blurPipeline));
 
     _mainDeletionQueue.push_function([this]() {
-        vkDestroyPipeline(_device, _ssaoBlurPipeline, nullptr);
-        for (VkPipeline pipeline : _ssaoPipelines) {
+        vkDestroyPipeline(_device, _ssao.blurPipeline, nullptr);
+        for (VkPipeline pipeline : _ssao.pipelines) {
             vkDestroyPipeline(_device, pipeline, nullptr);
         }
-        vkDestroyPipelineLayout(_device, _ssaoBlurPipelineLayout, nullptr);
-        vkDestroyPipelineLayout(_device, _ssaoPipelineLayout, nullptr);
+        vkDestroyPipelineLayout(_device, _ssao.blurPipelineLayout, nullptr);
+        vkDestroyPipelineLayout(_device, _ssao.pipelineLayout, nullptr);
     });
 }
 
@@ -441,8 +441,8 @@ SSAOPushConstants VulkanEngine::build_ssao_push_constants() const
 {
     const VkExtent2D activeExtent = active_ssao_extent();
     const glm::vec2 ssaoAllocation(
-        static_cast<float>(_ssaoExtent.width),
-        static_cast<float>(_ssaoExtent.height));
+        static_cast<float>(_ssao.extent.width),
+        static_cast<float>(_ssao.extent.height));
     const glm::vec2 prepassAllocation(
         static_cast<float>(_drawImage.imageExtent.width),
         static_cast<float>(_drawImage.imageExtent.height));
@@ -483,7 +483,7 @@ void VulkanEngine::draw_ssao(VkCommandBuffer cmd)
 
     stats.ssao_width = static_cast<int>(activeExtent.width);
     stats.ssao_height = static_cast<int>(activeExtent.height);
-    stats.ssao_kernel_samples = SSAOKernelSizes[_ssaoQuality];
+    stats.ssao_kernel_samples = SSAOKernelSizes[_ssao.quality];
 
     // Each image moves through the same two steps: written by one dispatch,
     // then read by the next.  The barrier between them is what makes the
@@ -514,34 +514,34 @@ void VulkanEngine::draw_ssao(VkCommandBuffer cmd)
     }
 
     // Sampling pass: raw, noisy occlusion at half resolution.
-    toStorageWrite(_ssaoRawImage);
+    toStorageWrite(_ssao.rawImage);
     vkCmdBindPipeline(
-        cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssaoPipelines[_ssaoQuality]);
+        cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssao.pipelines[_ssao.quality]);
     const std::array<VkDescriptorSet, 2> ssaoSets{
-        get_current_frame().sceneDescriptor, _ssaoDescriptor};
+        get_current_frame().sceneDescriptor, _ssao.descriptor};
     vkCmdBindDescriptorSets(
         cmd,
         VK_PIPELINE_BIND_POINT_COMPUTE,
-        _ssaoPipelineLayout,
+        _ssao.pipelineLayout,
         0,
         static_cast<uint32_t>(ssaoSets.size()),
         ssaoSets.data(),
         0,
         nullptr);
     push.settings = glm::vec4(
-        _ssaoSettings.radius,
-        _ssaoSettings.bias,
-        _ssaoSettings.power,
-        _ssaoSettings.intensity);
+        _ssao.settings.radius,
+        _ssao.settings.bias,
+        _ssao.settings.power,
+        _ssao.settings.intensity);
     vkCmdPushConstants(
         cmd,
-        _ssaoPipelineLayout,
+        _ssao.pipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT,
         0,
         sizeof(SSAOPushConstants),
         &push);
     vkCmdDispatch(cmd, groupsX, groupsY, 1);
-    toSampledRead(_ssaoRawImage);
+    toSampledRead(_ssao.rawImage);
 
     if (_gpuTimingSupported) {
         vkCmdWriteTimestamp2(
@@ -551,9 +551,9 @@ void VulkanEngine::draw_ssao(VkCommandBuffer cmd)
             timestampBase + 1);
     }
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssaoBlurPipeline);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssao.blurPipeline);
     push.settings =
-        glm::vec4(_ssaoDepthFalloff, _ssaoNormalFalloff, 0.0f, 0.0f);
+        glm::vec4(_ssao.depthFalloff, _ssao.normalFalloff, 0.0f, 0.0f);
 
     const auto runBlur = [&](VkDescriptorSet set,
                              const AllocatedImage& target,
@@ -565,7 +565,7 @@ void VulkanEngine::draw_ssao(VkCommandBuffer cmd)
         vkCmdBindDescriptorSets(
             cmd,
             VK_PIPELINE_BIND_POINT_COMPUTE,
-            _ssaoBlurPipelineLayout,
+            _ssao.blurPipelineLayout,
             0,
             static_cast<uint32_t>(blurSets.size()),
             blurSets.data(),
@@ -575,7 +575,7 @@ void VulkanEngine::draw_ssao(VkCommandBuffer cmd)
         push.extents.w = directionY;
         vkCmdPushConstants(
             cmd,
-            _ssaoBlurPipelineLayout,
+            _ssao.blurPipelineLayout,
             VK_SHADER_STAGE_COMPUTE_BIT,
             0,
             sizeof(SSAOPushConstants),
@@ -584,7 +584,7 @@ void VulkanEngine::draw_ssao(VkCommandBuffer cmd)
         toSampledRead(target);
     };
 
-    runBlur(_ssaoBlurHorizontalDescriptor, _ssaoBlurImage, 1, 0);
+    runBlur(_ssao.blurHorizontalDescriptor, _ssao.blurImage, 1, 0);
     if (_gpuTimingSupported) {
         vkCmdWriteTimestamp2(
             cmd,
@@ -593,7 +593,7 @@ void VulkanEngine::draw_ssao(VkCommandBuffer cmd)
             timestampBase + 2);
     }
 
-    runBlur(_ssaoBlurVerticalDescriptor, _ssaoFinalImage, 0, 1);
+    runBlur(_ssao.blurVerticalDescriptor, _ssao.finalImage, 0, 1);
     if (_gpuTimingSupported) {
         vkCmdWriteTimestamp2(
             cmd,

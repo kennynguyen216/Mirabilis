@@ -70,11 +70,11 @@ void VulkanEngine::apply_max_fidelity_settings()
     // bypassed by the SSGI composite, so enabling it would spend GPU time
     // without changing the final image. Keep its best sampling preset ready
     // for comparison if SSGI is later disabled.
-    _ssaoSettings.enabled = false;
-    _ssaoQuality = static_cast<int>(SSAOKernelSizes.size()) - 1;
-    _ssaoDepthFalloff = 24.0f;
-    _ssaoNormalFalloff = 24.0f;
-    _ssaoAmbientOnly = false;
+    _ssao.settings.enabled = false;
+    _ssao.quality = static_cast<int>(SSAOKernelSizes.size()) - 1;
+    _ssao.depthFalloff = 24.0f;
+    _ssao.normalFalloff = 24.0f;
+    _ssao.ambientOnly = false;
 
     _fxaaEnabled = true;
     _fxaaEdgeThreshold = 0.063f;

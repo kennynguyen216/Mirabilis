@@ -80,14 +80,14 @@ void VulkanEngine::draw_background(VkCommandBuffer cmd)
 
 VkImageView VulkanEngine::ssao_occlusion_view() const
 {
-    return _ssaoFinalImage.imageView != VK_NULL_HANDLE
-        ? _ssaoFinalImage.imageView
+    return _ssao.finalImage.imageView != VK_NULL_HANDLE
+        ? _ssao.finalImage.imageView
         : _shadow.mapImage.imageView;
 }
 
 VkSampler VulkanEngine::ssao_occlusion_sampler() const
 {
-    return _ssaoSampler != VK_NULL_HANDLE ? _ssaoSampler : _prepassSampler;
+    return _ssao.sampler != VK_NULL_HANDLE ? _ssao.sampler : _prepassSampler;
 }
 
 void VulkanEngine::init_descriptor_pools()
@@ -247,9 +247,9 @@ void VulkanEngine::init_descriptor_cleanup()
         vkDestroyDescriptorSetLayout(_device, _singleImageDescriptorLayout, nullptr);
         vkDestroyDescriptorSetLayout(_device, _gpuSceneDataDescriptorLayout, nullptr);
         vkDestroyDescriptorSetLayout(_device, _prepassImageDescriptorLayout, nullptr);
-        vkDestroyDescriptorSetLayout(_device, _ssaoDescriptorLayout, nullptr);
-        vkDestroyDescriptorSetLayout(_device, _ssaoBlurDescriptorLayout, nullptr);
-        vkDestroyDescriptorSetLayout(_device, _ssaoDebugDescriptorLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _ssao.descriptorLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _ssao.blurDescriptorLayout, nullptr);
+        vkDestroyDescriptorSetLayout(_device, _ssao.debugDescriptorLayout, nullptr);
         vkDestroyDescriptorSetLayout(_device, _ssgiDescriptorLayout, nullptr);
         vkDestroyDescriptorSetLayout(_device, _ssgiDebugDescriptorLayout, nullptr);
         vkDestroyDescriptorSetLayout(_device, _ssgiFilterDescriptorLayout, nullptr);
@@ -501,7 +501,7 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
     // describes what is in front of the player, not what is through a portal.
     data.screenSpaceSettings = glm::vec4(
         ssao_active() ? 1.0f : 0.0f,
-        _ssaoAmbientOnly ? 1.0f : 0.0f,
+        _ssao.ambientOnly ? 1.0f : 0.0f,
         _ssgiEnabled ? 1.0f : 0.0f,
         _ssgiHalfResolution ? 1.0f : 0.0f);
     // One multiply takes a fragment coordinate to its occlusion texel.  It
@@ -510,8 +510,8 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
     // shader can work out for itself.
     const VkExtent2D activeOcclusion = active_ssao_extent();
     const glm::vec2 occlusionAllocation(
-        static_cast<float>(std::max(1u, _ssaoExtent.width)),
-        static_cast<float>(std::max(1u, _ssaoExtent.height)));
+        static_cast<float>(std::max(1u, _ssao.extent.width)),
+        static_cast<float>(std::max(1u, _ssao.extent.height)));
     const glm::vec2 occlusionFraction(
         static_cast<float>(activeOcclusion.width) / occlusionAllocation.x,
         static_cast<float>(activeOcclusion.height) / occlusionAllocation.y);

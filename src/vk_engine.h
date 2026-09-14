@@ -911,49 +911,53 @@ class VulkanEngine{
         bool _ssgiHalfResolution{false};
         int _ssgiQualityPreset{0};
         bool _depthNormalPrepassEnabled{true};
-        // Ambient occlusion, at half resolution.  Three images rather than
-        // one because a compute pass cannot read and write the same storage
-        // image, and because each stage is then separately inspectable.
-        AllocatedImage _ssaoRawImage;
-        AllocatedImage _ssaoBlurImage;
-        AllocatedImage _ssaoFinalImage;
-        // 16x16 tiled rotation vectors.  Turning the kernel differently at
-        // neighbouring pixels converts a visible banding pattern into noise,
-        // which the bilateral blur can then remove.
-        AllocatedImage _ssaoNoiseImage;
-        AllocatedBuffer _ssaoKernelBuffer;
-        // Linear and clamped: material shading samples the half-resolution
-        // result at full resolution, so the taps land between texels.
-        VkSampler _ssaoSampler{};
-        VkSampler _ssaoNoiseSampler{};
-        VkDescriptorSetLayout _ssaoDescriptorLayout{};
-        VkDescriptorSetLayout _ssaoBlurDescriptorLayout{};
-        VkDescriptorSetLayout _ssaoDebugDescriptorLayout{};
-        VkDescriptorSet _ssaoDescriptor{};
-        VkDescriptorSet _ssaoBlurHorizontalDescriptor{};
-        VkDescriptorSet _ssaoBlurVerticalDescriptor{};
-        VkDescriptorSet _ssaoDebugDescriptor{};
-        VkPipelineLayout _ssaoPipelineLayout{};
-        VkPipelineLayout _ssaoBlurPipelineLayout{};
-        // One per entry in SSAOKernelSizes.
-        std::array<VkPipeline, SSAOKernelSizes.size()> _ssaoPipelines{};
-        VkPipeline _ssaoBlurPipeline{};
-        VkExtent2D _ssaoExtent{0, 0};
-        VkFormat _ssaoFormat{VK_FORMAT_UNDEFINED};
-        const char* _ssaoFormatName{"none"};
-        SSAOSettings _ssaoSettings{};
-        bool _ssaoSceneOverride{false};
-        bool _ssaoGlobalEnabled{true};
-        // A machine setting, not a scene one: it buys quality with GPU time
-        // and says nothing about how the level is lit.
-        int _ssaoQuality{1};
-        // Drops the sunlight term so occlusion can be judged on its own.  With
-        // ambient light at zero as well, a correct implementation produces no
-        // visible difference at all.
-        bool _ssaoAmbientOnly{false};
-        // How sharply the blur rejects a neighbour on a different surface.
-        float _ssaoDepthFalloff{12.0f};
-        float _ssaoNormalFalloff{16.0f};
+        struct SSAOState {
+            // Ambient occlusion, at half resolution.  Three images rather than
+            // one because a compute pass cannot read and write the same
+            // storage image, and because each stage is then separately
+            // inspectable.
+            AllocatedImage rawImage;
+            AllocatedImage blurImage;
+            AllocatedImage finalImage;
+            // 16x16 tiled rotation vectors.  Turning the kernel differently at
+            // neighbouring pixels converts a visible banding pattern into
+            // noise, which the bilateral blur can then remove.
+            AllocatedImage noiseImage;
+            AllocatedBuffer kernelBuffer;
+            // Linear and clamped: material shading samples the half-resolution
+            // result at full resolution, so the taps land between texels.
+            VkSampler sampler{};
+            VkSampler noiseSampler{};
+            VkDescriptorSetLayout descriptorLayout{};
+            VkDescriptorSetLayout blurDescriptorLayout{};
+            VkDescriptorSetLayout debugDescriptorLayout{};
+            VkDescriptorSet descriptor{};
+            VkDescriptorSet blurHorizontalDescriptor{};
+            VkDescriptorSet blurVerticalDescriptor{};
+            VkDescriptorSet debugDescriptor{};
+            VkPipelineLayout pipelineLayout{};
+            VkPipelineLayout blurPipelineLayout{};
+            // One per entry in SSAOKernelSizes.
+            std::array<VkPipeline, SSAOKernelSizes.size()> pipelines{};
+            VkPipeline blurPipeline{};
+            VkExtent2D extent{0, 0};
+            VkFormat format{VK_FORMAT_UNDEFINED};
+            const char* formatName{"none"};
+            SSAOSettings settings{};
+            bool sceneOverride{false};
+            bool globalEnabled{true};
+            // A machine setting, not a scene one: it buys quality with GPU
+            // time and says nothing about how the level is lit.
+            int quality{1};
+            // Drops the sunlight term so occlusion can be judged on its own.
+            // With ambient light at zero as well, a correct implementation
+            // produces no visible difference at all.
+            bool ambientOnly{false};
+            // How sharply the blur rejects a neighbour on a different surface.
+            float depthFalloff{12.0f};
+            float normalFalloff{16.0f};
+        };
+        SSAOState _ssao;
         // Four marks per frame - before the sampling pass and after each of
         // the three dispatches - read back once the frame's fence has passed.
         static constexpr uint32_t TimestampsPerFrame = 4;

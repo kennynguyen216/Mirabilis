@@ -1398,7 +1398,7 @@ void VulkanEngine::draw_sun_shadow_settings()
 void VulkanEngine::draw_ambient_occlusion_settings()
 {
     if (ImGui::CollapsingHeader("Ambient Occlusion")) {
-        if (_ssaoFormat == VK_FORMAT_UNDEFINED) {
+        if (_ssao.format == VK_FORMAT_UNDEFINED) {
             ImGui::TextDisabled(
                 "Unavailable: no storage-capable occlusion format.");
         } else {
@@ -1406,50 +1406,50 @@ void VulkanEngine::draw_ambient_occlusion_settings()
             // and travel with the scene.  Quality describes what the machine
             // can afford and does not.
             bool preferencesEdited =
-                ImGui::Checkbox("Globally Enabled", &_ssaoGlobalEnabled);
-            if (ImGui::Checkbox("Override For This Scene", &_ssaoSceneOverride)) {
-                if (!_ssaoSceneOverride) _ssaoSettings = SSAOSettings{};
+                ImGui::Checkbox("Globally Enabled", &_ssao.globalEnabled);
+            if (ImGui::Checkbox("Override For This Scene", &_ssao.sceneOverride)) {
+                if (!_ssao.sceneOverride) _ssao.settings = SSAOSettings{};
                 _sceneDirty = true;
             }
-            ImGui::BeginDisabled(!_ssaoSceneOverride);
+            ImGui::BeginDisabled(!_ssao.sceneOverride);
             bool occlusionEdited = false;
             occlusionEdited |=
-                ImGui::Checkbox("Scene Enabled", &_ssaoSettings.enabled);
+                ImGui::Checkbox("Scene Enabled", &_ssao.settings.enabled);
             occlusionEdited |= ImGui::SliderFloat(
-                "Radius", &_ssaoSettings.radius, 0.05f, 5.0f, "%.3f");
+                "Radius", &_ssao.settings.radius, 0.05f, 5.0f, "%.3f");
             occlusionEdited |= ImGui::SliderFloat(
-                "Bias", &_ssaoSettings.bias, 0.0f, 0.1f, "%.4f");
+                "Bias", &_ssao.settings.bias, 0.0f, 0.1f, "%.4f");
             occlusionEdited |= ImGui::SliderFloat(
-                "Intensity", &_ssaoSettings.intensity, 0.0f, 2.0f);
+                "Intensity", &_ssao.settings.intensity, 0.0f, 2.0f);
             occlusionEdited |= ImGui::SliderFloat(
-                "Power", &_ssaoSettings.power, 0.25f, 4.0f);
+                "Power", &_ssao.settings.power, 0.25f, 4.0f);
             if (occlusionEdited) {
                 _sceneDirty = true;
             }
             ImGui::EndDisabled();
             if (ImGui::Button("Reset to Project Defaults")) {
-                _ssaoSettings = SSAOSettings{};
-                _ssaoSceneOverride = false;
+                _ssao.settings = SSAOSettings{};
+                _ssao.sceneOverride = false;
                 _sceneDirty = true;
             }
 
             const char* qualityNames[] = {"Low", "Medium", "High"};
             if (ImGui::Combo(
                     "Quality",
-                    &_ssaoQuality,
+                    &_ssao.quality,
                     qualityNames,
                     IM_ARRAYSIZE(qualityNames))) {
                 preferencesEdited = true;
             }
-            ImGui::TextDisabled("%d samples", SSAOKernelSizes[_ssaoQuality]);
+            ImGui::TextDisabled("%d samples", SSAOKernelSizes[_ssao.quality]);
 
             // How readily the blur accepts a neighbour as being on the same
             // surface.  Both depend on world scale, but they are filter tuning
             // rather than lighting.
             preferencesEdited |= ImGui::SliderFloat(
-                "Blur Depth Falloff", &_ssaoDepthFalloff, 5.0f, 120.0f);
+                "Blur Depth Falloff", &_ssao.depthFalloff, 5.0f, 120.0f);
             preferencesEdited |= ImGui::SliderFloat(
-                "Blur Normal Falloff", &_ssaoNormalFalloff, 1.0f, 48.0f);
+                "Blur Normal Falloff", &_ssao.normalFalloff, 1.0f, 48.0f);
             if (preferencesEdited) save_ao_preferences();
 
             // With the sun off, occlusion is the only thing shaping the image.
@@ -1457,7 +1457,7 @@ void VulkanEngine::draw_ambient_occlusion_settings()
             // difference at all, which is the check that it touches nothing
             // else.
             ImGui::Checkbox(
-                "Ambient Only (occlusion check)", &_ssaoAmbientOnly);
+                "Ambient Only (occlusion check)", &_ssao.ambientOnly);
         }
     }
 }
@@ -1722,7 +1722,7 @@ void VulkanEngine::draw_statistics_panel(float horizontalSpeed)
                 "AO %dx%d %s, %d samples",
                 stats.ssao_width,
                 stats.ssao_height,
-                _ssaoFormatName,
+                _ssao.formatName,
                 stats.ssao_kernel_samples);
             // Three dispatches take microseconds to record and milliseconds to
             // run, so a CPU number here would be actively misleading.  It is
