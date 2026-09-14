@@ -3,10 +3,46 @@
 #include "vk_engine.h"
 
 #include <array>
+#include <initializer_list>
 
 #include <glm/geometric.hpp>
 
 bool is_visible(const RenderObject& object, const glm::mat4& viewProjection);
+
+struct PickedFormat {
+    VkFormat format{VK_FORMAT_UNDEFINED};
+    VkFormatFeatureFlags2 features{0};
+};
+
+inline PickedFormat pick_format(
+    VkPhysicalDevice gpu,
+    std::initializer_list<VkFormat> candidates,
+    VkFormatFeatureFlags2 requiredFeatures,
+    VkFormatFeatureFlags2 preferredFeatures = 0)
+{
+    PickedFormat fallback{};
+    for (VkFormat candidate : candidates) {
+        VkFormatProperties3 properties3{
+            .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3};
+        VkFormatProperties2 properties2{
+            .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+            .pNext = &properties3};
+        vkGetPhysicalDeviceFormatProperties2(gpu, candidate, &properties2);
+        const VkFormatFeatureFlags2 features =
+            properties3.optimalTilingFeatures;
+        if ((features & requiredFeatures) != requiredFeatures) {
+            continue;
+        }
+        if (fallback.format == VK_FORMAT_UNDEFINED) {
+            fallback = PickedFormat{candidate, features};
+        }
+        if (preferredFeatures == 0 ||
+            (features & preferredFeatures) == preferredFeatures) {
+            return PickedFormat{candidate, features};
+        }
+    }
+    return fallback;
+}
 
 inline constexpr std::array<const char*, 21> RenderDebugViewNames{
     "Final lighting",

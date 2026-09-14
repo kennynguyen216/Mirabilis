@@ -1,4 +1,5 @@
 #include "vk_engine.h"
+#include "vk_engine_render_helpers.h"
 
 #include <array>
 #include <cmath>
@@ -178,28 +179,14 @@ void VulkanEngine::init_ssao_resources()
     // guaranteed for a given format.  R8 is the cheapest that can hold a
     // visibility fraction; the wider candidates exist for devices that do not
     // advertise storage support for it.
-    static constexpr std::array<VkFormat, 3> candidates{
-        VK_FORMAT_R8_UNORM,
-        VK_FORMAT_R16_SFLOAT,
-        VK_FORMAT_R16G16_SFLOAT};
     constexpr VkFormatFeatureFlags2 requiredFeatures =
         VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
         VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
         VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-    for (VkFormat candidate : candidates) {
-        VkFormatProperties3 properties3{
-            .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3};
-        VkFormatProperties2 properties2{
-            .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
-            .pNext = &properties3};
-        vkGetPhysicalDeviceFormatProperties2(
-            _chosenGPU, candidate, &properties2);
-        if ((properties3.optimalTilingFeatures & requiredFeatures) ==
-            requiredFeatures) {
-            _ssaoFormat = candidate;
-            break;
-        }
-    }
+    _ssaoFormat = pick_format(
+        _chosenGPU,
+        {VK_FORMAT_R8_UNORM, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16G16_SFLOAT},
+        requiredFeatures).format;
     if (_ssaoFormat == VK_FORMAT_UNDEFINED) {
         // Reported rather than fatal: the rest of the renderer works without
         // ambient occlusion, and the flag in the scene data already makes

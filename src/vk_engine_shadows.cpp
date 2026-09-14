@@ -15,42 +15,22 @@ void VulkanEngine::init_shadow_resources()
     // Comparison sampling is a format capability, not a guarantee of every
     // depth format. Prefer D32 with bilinear comparison filtering, then fall
     // back through other depth-only formats and nearest filtering if needed.
-    const std::array<VkFormat, 3> candidates{
-        VK_FORMAT_D32_SFLOAT,
-        VK_FORMAT_D16_UNORM,
-        VK_FORMAT_X8_D24_UNORM_PACK32};
     constexpr VkFormatFeatureFlags2 requiredFeatures =
         VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT |
         VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
         VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT;
-    VkFormat shadowFormat = VK_FORMAT_UNDEFINED;
-    VkFilter shadowFilter = VK_FILTER_NEAREST;
-    VkFormat nearestFallback = VK_FORMAT_UNDEFINED;
-    for (VkFormat candidate : candidates) {
-        VkFormatProperties3 properties3{
-            .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3};
-        VkFormatProperties2 properties2{
-            .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
-            .pNext = &properties3};
-        vkGetPhysicalDeviceFormatProperties2(
-            _chosenGPU, candidate, &properties2);
-        if ((properties3.optimalTilingFeatures & requiredFeatures) !=
-            requiredFeatures) {
-            continue;
-        }
-        if (nearestFallback == VK_FORMAT_UNDEFINED) {
-            nearestFallback = candidate;
-        }
-        if ((properties3.optimalTilingFeatures &
-             VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0) {
-            shadowFormat = candidate;
-            shadowFilter = VK_FILTER_LINEAR;
-            break;
-        }
-    }
-    if (shadowFormat == VK_FORMAT_UNDEFINED) {
-        shadowFormat = nearestFallback;
-    }
+    const PickedFormat shadowPick = pick_format(
+        _chosenGPU,
+        {VK_FORMAT_D32_SFLOAT,
+         VK_FORMAT_D16_UNORM,
+         VK_FORMAT_X8_D24_UNORM_PACK32},
+        requiredFeatures,
+        VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+    const VkFormat shadowFormat = shadowPick.format;
+    const VkFilter shadowFilter =
+        (shadowPick.features & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT)
+            ? VK_FILTER_LINEAR
+            : VK_FILTER_NEAREST;
     if (shadowFormat == VK_FORMAT_UNDEFINED) {
         fmt::print("No depth format supports sampled shadow comparison\n");
         abort();
