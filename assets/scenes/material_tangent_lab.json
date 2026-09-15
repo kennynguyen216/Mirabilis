@@ -1,0 +1,334 @@
+{
+  "version": 1,
+  "nextActor": 6,
+  "lighting": {
+    "shadowsEnabled": true,
+    "sunDirection": [
+      -0.5,
+      0.8,
+      0.6
+    ]
+  },
+  "ssao": {
+    "enabled": false,
+    "radius": 0.75,
+    "bias": 0.025,
+    "intensity": 1,
+    "power": 1.5
+  },
+  "authoredPortals": [],
+  "objects": [
+    {
+      "id": 0,
+      "parent": -1,
+      "name": "Sandbox",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": false,
+      "baseColorTexture": "",
+      "materialTint": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "materialMetallic": 0,
+      "materialRoughness": 0.8,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "empty",
+      "modelPath": ""
+    },
+    {
+      "id": 1,
+      "parent": 0,
+      "name": "Textured floor",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        16,
+        1,
+        16
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": true,
+      "baseColorTexture": "../../assets/textures/gi_color_test.ppm",
+      "materialTint": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "materialMetallic": 0,
+      "materialRoughness": 0.6,
+      "uvScale": [
+        4,
+        4
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 1,
+      "timeTrialRole": "none",
+      "asset": "floor",
+      "modelPath": ""
+    },
+    {
+      "id": 2,
+      "parent": 0,
+      "name": "Cube (ordinary scale)",
+      "position": [
+        -2.2,
+        0.8,
+        1.5
+      ],
+      "rotation": [
+        0,
+        0.6,
+        0
+      ],
+      "scale": [
+        1.6,
+        1.6,
+        1.6
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": true,
+      "baseColorTexture": "../../assets/textures/gi_color_test.ppm",
+      "materialTint": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "materialMetallic": 0,
+      "materialRoughness": 0.35,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "cube",
+      "modelPath": ""
+    },
+    {
+      "id": 3,
+      "parent": 0,
+      "name": "Cube (mirrored, negative x scale)",
+      "position": [
+        2.2,
+        0.8,
+        1.5
+      ],
+      "rotation": [
+        0,
+        -0.6,
+        0
+      ],
+      "scale": [
+        -1.6,
+        1.6,
+        1.6
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": true,
+      "baseColorTexture": "../../assets/textures/gi_color_test.ppm",
+      "materialTint": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "materialMetallic": 0,
+      "materialRoughness": 0.35,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "cube",
+      "modelPath": ""
+    },
+    {
+      "id": 4,
+      "parent": 0,
+      "name": "structure.glb (generated tangents)",
+      "position": [
+        0,
+        0,
+        -3
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        4,
+        4,
+        4
+      ],
+      "materialEnabled": false,
+      "baseColorTexture": "",
+      "materialTint": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "materialMetallic": 0,
+      "materialRoughness": 0.8,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "gltf",
+      "modelPath": "../../assets/structure.glb"
+    },
+    {
+      "id": 5,
+      "parent": 0,
+      "name": "Gameplay Spawn",
+      "position": [
+        0,
+        0,
+        7
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        0.6,
+        0.1,
+        0.6
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": false,
+      "baseColorTexture": "",
+      "materialTint": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "materialMetallic": 0,
+      "materialRoughness": 0.8,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "spawn",
+      "asset": "empty",
+      "modelPath": ""
+    }
+  ]
+}
