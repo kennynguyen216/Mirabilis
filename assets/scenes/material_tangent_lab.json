@@ -152,15 +152,15 @@
         0.5
       ],
       "materialEnabled": true,
-      "baseColorTexture": "../../assets/textures/gi_color_test.ppm",
+      "baseColorTexture": "../../assets/sponza_optimized/textures/brickwall_02_BaseColor.png",
       "materialTint": [
         1,
         1,
         1,
         1
       ],
-      "materialMetallic": 0,
-      "materialRoughness": 0.35,
+      "materialMetallic": 1.0,
+      "materialRoughness": 1.0,
       "uvScale": [
         1,
         1
@@ -172,7 +172,9 @@
       "collisionShape": 0,
       "timeTrialRole": "none",
       "asset": "cube",
-      "modelPath": ""
+      "modelPath": "",
+      "normalTexture": "../../assets/sponza_optimized/textures/brickwall_02_Normal.png",
+      "metallicRoughnessTexture": "../../assets/sponza_optimized/textures/brickwall_02_Roughnessbrickwall_02_Metalness.png"
     },
     {
       "id": 3,
@@ -204,15 +206,15 @@
         0.5
       ],
       "materialEnabled": true,
-      "baseColorTexture": "../../assets/textures/gi_color_test.ppm",
+      "baseColorTexture": "../../assets/sponza_optimized/textures/brickwall_02_BaseColor.png",
       "materialTint": [
         1,
         1,
         1,
         1
       ],
-      "materialMetallic": 0,
-      "materialRoughness": 0.35,
+      "materialMetallic": 1.0,
+      "materialRoughness": 1.0,
       "uvScale": [
         1,
         1
@@ -224,7 +226,9 @@
       "collisionShape": 0,
       "timeTrialRole": "none",
       "asset": "cube",
-      "modelPath": ""
+      "modelPath": "",
+      "normalTexture": "../../assets/sponza_optimized/textures/brickwall_02_Normal.png",
+      "metallicRoughnessTexture": "../../assets/sponza_optimized/textures/brickwall_02_Roughnessbrickwall_02_Metalness.png"
     },
     {
       "id": 4,
