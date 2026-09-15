@@ -931,7 +931,7 @@ class VulkanEngine{
             bool specular{true};
             // Replaces the flat ambient colour with the skybox's irradiance
             // and prefiltered reflections.
-            bool imageBasedLighting{false};
+            bool imageBasedLighting{true};
         };
         MaterialShadingSettings _materialShading;
         // One directional shadow map covers a box centred on the active

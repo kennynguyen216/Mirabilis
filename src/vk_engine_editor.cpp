@@ -1442,6 +1442,11 @@ void VulkanEngine::draw_material_shading_settings()
         ImGui::Checkbox(
             "Specular anti-aliasing", &_materialShading.specularAntiAliasing);
         ImGui::Checkbox("Specular", &_materialShading.specular);
+        ImGui::Checkbox(
+            "Image-based lighting", &_materialShading.imageBasedLighting);
+        if (!_materialShading.imageBasedLighting) {
+            ImGui::TextDisabled("Flat ambient colour instead of the skybox.");
+        }
         if (!_materialShading.specular) {
             ImGui::TextDisabled("Lambert only, as before the GGX model.");
         }

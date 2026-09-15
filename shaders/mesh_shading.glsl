@@ -69,7 +69,12 @@ void main()
     // ambient term is never counted twice.
     vec3 ambientDiffuse;
     vec3 ambientSpecular;
-    material_ambient(surface, ambientLight, ambientDiffuse, ambientSpecular);
+    if (sceneData.iblSettings.x > 0.5) {
+        material_ambient_ibl(
+            surface, occlusion, ambientScale, ambientDiffuse, ambientSpecular);
+    } else {
+        material_ambient(surface, ambientLight, ambientDiffuse, ambientSpecular);
+    }
     vec3 emission = material_emission();
 
     outFragColor = vec4(

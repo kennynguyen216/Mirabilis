@@ -173,6 +173,11 @@ void VulkanEngine::init()
         _materialShading.metalRoughTextures = false;
         _materialShading.specularAntiAliasing = false;
     }
+    // Restores the flat ambient colour, for comparisons with captures taken
+    // before image-based lighting.
+    if (SDL_getenv("MIRABILIS_IBL_DISABLE")) {
+        _materialShading.imageBasedLighting = false;
+    }
 
     apply_scene_spawn_point();
 

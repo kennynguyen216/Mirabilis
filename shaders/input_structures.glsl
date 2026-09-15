@@ -17,6 +17,11 @@ layout(set = 0, binding = 2) uniform sampler2D ambientOcclusionTex;
 // name environment.glsl expects.
 layout(set = 0, binding = 3) uniform sampler2D environmentTexture;
 
+// Image-based lighting: the panorama prefiltered for GGX, level k for
+// roughness k / iblSettings.y, and the split-sum (scale, bias) table.
+layout(set = 0, binding = 4) uniform sampler2D prefilteredEnvironment;
+layout(set = 0, binding = 5) uniform sampler2D brdfLut;
+
 // How much of the surrounding hemisphere reaches this surface: 1 fully open,
 // 0 fully enclosed.  Only the ambient term should be scaled by it.  Direct
 // sunlight already has its own visibility test in the shadow map, and

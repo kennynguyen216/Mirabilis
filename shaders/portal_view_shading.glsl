@@ -72,7 +72,15 @@ void main()
     material_sun(surface, visibility, directDiffuse, directSpecular);
     vec3 ambientDiffuse;
     vec3 ambientSpecular;
-    material_ambient(surface, ambientLight, ambientDiffuse, ambientSpecular);
+    if (sceneData.iblSettings.x > 0.5) {
+        // The SSGI stand-in is the same irradiance, so it folds into the
+        // diffuse scale and both cameras keep dividing the work alike.
+        material_ambient_ibl(
+            surface, occlusion, ambientScale + substitute,
+            ambientDiffuse, ambientSpecular);
+    } else {
+        material_ambient(surface, ambientLight, ambientDiffuse, ambientSpecular);
+    }
 
     vec3 emission = material_emission();
 

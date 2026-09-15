@@ -9,6 +9,8 @@
 //
 // Include after input_structures.glsl.
 
+#include "environment.glsl"
+
 const float MaterialPi = 3.14159265359;
 // Roughness 0.045 squares to alpha 0.002025, the path tracer's floor.
 const float MaterialMinimumRoughness = 0.045;
@@ -211,6 +213,78 @@ void material_ambient(
         mix(vec3(0.04), surface.baseColor, surface.metallic),
         surface.roughness,
         surface.noV);
+}
+
+// Image-based lighting (docs/image_based_lighting_design.md).  Both lights
+// below are radiance, the unit the flat ambient colour is in: a uniform
+// surround of radiance L lights a white Lambert surface to L, so irradiance
+// enters as E / pi.
+
+// The environment policy's intensity and black override.  The sun ceiling was
+// already applied when the harmonics and the prefiltered chain were built.
+vec3 material_environment_scale(vec3 radiance)
+{
+    return sceneData.ssgiFallbackSettings.y > 0.5
+        ? vec3(0.0)
+        : sceneData.ssgiFallbackSettings.x * radiance;
+}
+
+vec3 material_ibl_diffuse_light(vec3 n)
+{
+    // The analytic gradient keeps its closed form, so SSGI misses, portal
+    // substitutes and this term all see one sky.
+    if (sceneData.indirectSettings.y < 0.5) {
+        return environment_irradiance(n);
+    }
+    // The same basis, in the same order, as sh_basis() in vk_engine_ibl.cpp.
+    vec3 irradiance =
+        sceneData.environmentSH[0].rgb * 0.282095 +
+        sceneData.environmentSH[1].rgb * (0.488603 * n.y) +
+        sceneData.environmentSH[2].rgb * (0.488603 * n.z) +
+        sceneData.environmentSH[3].rgb * (0.488603 * n.x) +
+        sceneData.environmentSH[4].rgb * (1.092548 * n.x * n.y) +
+        sceneData.environmentSH[5].rgb * (1.092548 * n.y * n.z) +
+        sceneData.environmentSH[6].rgb * (0.315392 * (3.0 * n.z * n.z - 1.0)) +
+        sceneData.environmentSH[7].rgb * (1.092548 * n.x * n.z) +
+        sceneData.environmentSH[8].rgb * (0.546274 * (n.x * n.x - n.y * n.y));
+    // Band-2 ringing can dip below zero opposite a very bright region.
+    return material_environment_scale(max(irradiance, vec3(0.0)) / MaterialPi);
+}
+
+vec3 material_ibl_specular_light(vec3 direction, float roughness)
+{
+    if (sceneData.indirectSettings.y < 0.5) {
+        return environment_radiance(direction);
+    }
+    return material_environment_scale(textureLod(
+        prefilteredEnvironment,
+        equirectangular_uv(direction),
+        roughness * sceneData.iblSettings.y).rgb);
+}
+
+// Ambient light from the skybox.  diffuseScale carries the SSGI retention
+// policy, which applies to diffuse only: SSGI supplies no specular, so the
+// reflection is never scaled by it.
+void material_ambient_ibl(
+    MaterialSurface surface,
+    float occlusion,
+    float diffuseScale,
+    out vec3 diffuse,
+    out vec3 specular)
+{
+    vec3 diffuseLight =
+        material_ibl_diffuse_light(surface.normal) * occlusion * diffuseScale;
+    if (!material_specular_enabled()) {
+        diffuse = diffuseLight * surface.baseColor;
+        specular = vec3(0.0);
+        return;
+    }
+    diffuse = diffuseLight * surface.baseColor * (1.0 - surface.metallic);
+    vec3 reflected = reflect(-surface.view, surface.normal);
+    vec2 scaleBias = texture(brdfLut, vec2(surface.noV, surface.roughness)).rg;
+    vec3 f0 = mix(vec3(0.04), surface.baseColor, surface.metallic);
+    specular = material_ibl_specular_light(reflected, surface.roughness) *
+        (f0 * scaleBias.x + scaleBias.y) * occlusion;
 }
 
 // What diffuse indirect light is multiplied by.  A metal has no diffuse lobe,

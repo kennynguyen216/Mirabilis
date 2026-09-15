@@ -1,3 +1,6 @@
+#ifndef MIRABILIS_ENVIRONMENT_GLSL
+#define MIRABILIS_ENVIRONMENT_GLSL
+
 // The one environment convention, shared by every camera that has to invent
 // light for a direction no geometry occupies.  SSGI fills its ray misses from
 // it; a portal camera, which has no screen-space buffers of its own to trace,
@@ -96,3 +99,5 @@ vec3 environment_irradiance(vec3 worldNormal)
             clamp(worldNormal.y / 3.0 + 0.5, 0.0, 1.0));
     return apply_environment_policy(radiance);
 }
+
+#endif
