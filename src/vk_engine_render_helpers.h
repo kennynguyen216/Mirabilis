@@ -136,7 +136,7 @@ inline PickedFormat pick_format(
     return fallback;
 }
 
-inline constexpr std::array<const char*, 21> RenderDebugViewNames{
+inline constexpr std::array<const char*, 26> RenderDebugViewNames{
     "Final lighting",
     "Camera depth",
     "View normals",
@@ -157,7 +157,19 @@ inline constexpr std::array<const char*, 21> RenderDebugViewNames{
     "SSGI reprojection",
     "SSGI (filtered)",
     "SSGI fallback only",
-    "SSGI vs loaded reference (difference)"};
+    "SSGI vs loaded reference (difference)",
+    "Material roughness",
+    "Material metallic",
+    "Direct diffuse only",
+    "Direct specular only",
+    "Emission"};
+
+// The views the forward pass writes itself rather than the debug-view pass.
+inline bool is_forward_material_debug_view(RenderDebugView view)
+{
+    return view >= RenderDebugView::MaterialRoughness &&
+        view <= RenderDebugView::Emission;
+}
 
 inline const char* render_debug_view_name(RenderDebugView view)
 {

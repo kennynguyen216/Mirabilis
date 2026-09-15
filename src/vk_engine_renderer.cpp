@@ -551,6 +551,9 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
         _materialShading.metalRoughTextures ? 1.0f : 0.0f,
         _materialShading.specularAntiAliasing ? 1.0f : 0.0f,
         _materialShading.specular ? 1.0f : 0.0f);
+    data.materialDebug.x = is_forward_material_debug_view(_debugViews.view)
+        ? static_cast<float>(static_cast<int>(_debugViews.view))
+        : 0.0f;
     return data;
 }
 

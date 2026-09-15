@@ -72,8 +72,15 @@ void main()
     vec3 ambientSpecular;
     material_ambient(surface, ambientLight, ambientDiffuse, ambientSpecular);
 
+    vec3 emission = material_emission();
+
     outFragColor = vec4(
         directDiffuse + directSpecular + ambientDiffuse + ambientSpecular +
-            material_emission(),
+            emission,
         1.0);
+    vec3 debugColor;
+    if (material_debug_color(
+            surface, directDiffuse, directSpecular, emission, debugColor)) {
+        outFragColor = vec4(debugColor, 1.0);
+    }
 }

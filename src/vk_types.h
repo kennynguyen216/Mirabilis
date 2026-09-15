@@ -189,6 +189,9 @@ struct GPUSceneData {
     // textures, z specular anti-aliasing, w specular.  With x, y and z off the
     // raster direct term is directly comparable with the path tracer's.
     glm::vec4 materialSettings{1.0f};
+    // x = the RenderDebugView the forward pass should write itself (roughness,
+    // metallic, direct diffuse, direct specular, emission), or 0.
+    glm::vec4 materialDebug{0.0f};
 };
 
 // Sixteen visible surfaces (the player pair plus seven authored links), with

@@ -146,7 +146,10 @@ void VulkanEngine::draw_collider_debug_bounds(VkCommandBuffer cmd)
 
 void VulkanEngine::draw_render_debug(VkCommandBuffer cmd)
 {
-    if (_debugViews.renderPipeline.pipeline == VK_NULL_HANDLE) {
+    // The material views were written by the forward pass, which is the only
+    // stage that has those values; drawing over them would erase them.
+    if (_debugViews.renderPipeline.pipeline == VK_NULL_HANDLE ||
+        is_forward_material_debug_view(_debugViews.view)) {
         return;
     }
 

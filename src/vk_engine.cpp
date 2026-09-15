@@ -150,7 +150,7 @@ void VulkanEngine::init()
     if (const char* debugView = SDL_getenv("MIRABILIS_RENDER_DEBUG_VIEW")) {
         const int value = std::clamp(std::atoi(debugView),
             static_cast<int>(RenderDebugView::None),
-            static_cast<int>(RenderDebugView::SSGIReferenceDifference));
+            static_cast<int>(RenderDebugView::Emission));
         _debugViews.view = static_cast<RenderDebugView>(value);
     }
     if (const char* preset = SDL_getenv("MIRABILIS_SSGI_PRESET")) {
@@ -163,6 +163,13 @@ void VulkanEngine::init()
     // without screen-space GI whatever else it asked for.
     if (SDL_getenv("MIRABILIS_SSGI_DISABLE")) {
         _ssgi.enabled = false;
+    }
+    // The Render Settings "Match reference renderer" state, for parity
+    // captures against the path tracer.
+    if (SDL_getenv("MIRABILIS_MATCH_REFERENCE")) {
+        _materialShading.normalMaps = false;
+        _materialShading.metalRoughTextures = false;
+        _materialShading.specularAntiAliasing = false;
     }
 
     apply_scene_spawn_point();

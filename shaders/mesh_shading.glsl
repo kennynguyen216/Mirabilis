@@ -74,6 +74,11 @@ void main()
         directDiffuse + directSpecular + ambientDiffuse + ambientSpecular +
             emission,
         1.0);
+    vec3 debugColor;
+    if (material_debug_color(
+            surface, directDiffuse, directSpecular, emission, debugColor)) {
+        outFragColor = vec4(debugColor, 1.0);
+    }
     // The SSGI composite multiplies filtered incident light by this.
     outAlbedo = vec4(material_diffuse_albedo(surface), 1.0);
     vec2 currentUV = inCurrentClip.xy / max(inCurrentClip.w, 0.00001) * 0.5 + 0.5;

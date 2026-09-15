@@ -249,6 +249,13 @@ enum class RenderDebugView : int {
     SSGIFiltered = 18,
     SSGIFallback = 19,
     SSGIReferenceDifference = 20,
+    // Written by the forward and portal passes themselves, from values only
+    // the material shader has.  The debug-view pass leaves the image alone.
+    MaterialRoughness = 21,
+    MaterialMetallic = 22,
+    DirectDiffuse = 23,
+    DirectSpecular = 24,
+    Emission = 25,
 };
 
 struct SceneMaterialRuntime {
@@ -559,6 +566,7 @@ class VulkanEngine{
         bool process_event(const SDL_Event& event);
         void draw_frame_ui(float deltaTime);
         void draw_sun_shadow_settings();
+        void draw_material_shading_settings();
         void draw_ambient_occlusion_settings();
         void draw_tonemap_settings();
         void draw_antialiasing_settings();

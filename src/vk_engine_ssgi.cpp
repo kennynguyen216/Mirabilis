@@ -793,7 +793,10 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
 
 void VulkanEngine::draw_ssgi_composite(VkCommandBuffer cmd)
 {
-    if (!_ssgi.enabled || _ssgi.compositePipeline.pipeline == VK_NULL_HANDLE) {
+    // A forward-written material debug view is already the finished image;
+    // adding indirect light to it would corrupt the value it shows.
+    if (!_ssgi.enabled || _ssgi.compositePipeline.pipeline == VK_NULL_HANDLE ||
+        is_forward_material_debug_view(_debugViews.view)) {
         return;
     }
 

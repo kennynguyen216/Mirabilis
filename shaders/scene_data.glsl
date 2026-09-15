@@ -56,4 +56,6 @@ layout(set = 0, binding = 0) uniform SceneData {
     // 1 = on: x normal maps, y metallic/roughness textures, z specular
     // anti-aliasing, w specular.
     vec4 materialSettings;
+    // x = the forward-written RenderDebugView, or 0.
+    vec4 materialDebug;
 } sceneData;

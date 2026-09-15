@@ -1408,6 +1408,30 @@ void VulkanEngine::draw_sun_shadow_settings()
     }
 }
 
+void VulkanEngine::draw_material_shading_settings()
+{
+    if (ImGui::CollapsingHeader("Material Shading")) {
+        // Session preferences, so none of this marks the level dirty.
+        ImGui::Checkbox("Normal maps", &_materialShading.normalMaps);
+        ImGui::Checkbox(
+            "Metallic/roughness textures", &_materialShading.metalRoughTextures);
+        ImGui::Checkbox(
+            "Specular anti-aliasing", &_materialShading.specularAntiAliasing);
+        ImGui::Checkbox("Specular", &_materialShading.specular);
+        if (!_materialShading.specular) {
+            ImGui::TextDisabled("Lambert only, as before the GGX model.");
+        }
+        // The path tracer has no normal maps, texture roughness, or specular
+        // anti-aliasing, so only with all three off should its direct image
+        // and the raster one agree.
+        if (ImGui::Button("Match reference renderer")) {
+            _materialShading.normalMaps = false;
+            _materialShading.metalRoughTextures = false;
+            _materialShading.specularAntiAliasing = false;
+        }
+    }
+}
+
 void VulkanEngine::draw_ambient_occlusion_settings()
 {
     if (ImGui::CollapsingHeader("Ambient Occlusion")) {
@@ -1885,6 +1909,7 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                 ImGui::TextDisabled(
                     "4K shadows, full-res 8-ray SSGI, high SSAO sampling, quality FXAA");
                 draw_sun_shadow_settings();
+                draw_material_shading_settings();
                 draw_ambient_occlusion_settings();
                 draw_tonemap_settings();
                 draw_antialiasing_settings();

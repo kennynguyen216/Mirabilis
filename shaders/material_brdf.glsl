@@ -171,3 +171,38 @@ vec3 material_emission()
 {
     return materialData.emission.rgb;
 }
+
+// The forward-written debug views.  Values match RenderDebugView.
+const int MaterialDebugRoughness = 21;
+const int MaterialDebugMetallic = 22;
+const int MaterialDebugDirectDiffuse = 23;
+const int MaterialDebugDirectSpecular = 24;
+const int MaterialDebugEmission = 25;
+
+// True while one of those views is selected, with the colour it shows.  The
+// lighting views stay in linear radiance, so a capture of "direct diffuse"
+// plus "direct specular" is comparable with the path tracer's direct image.
+bool material_debug_color(
+    MaterialSurface surface,
+    vec3 directDiffuse,
+    vec3 directSpecular,
+    vec3 emission,
+    out vec3 color)
+{
+    int mode = int(sceneData.materialDebug.x + 0.5);
+    color = vec3(0.0);
+    if (mode == MaterialDebugRoughness) {
+        color = vec3(surface.roughness);
+    } else if (mode == MaterialDebugMetallic) {
+        color = vec3(surface.metallic);
+    } else if (mode == MaterialDebugDirectDiffuse) {
+        color = directDiffuse;
+    } else if (mode == MaterialDebugDirectSpecular) {
+        color = directSpecular;
+    } else if (mode == MaterialDebugEmission) {
+        color = emission;
+    } else {
+        return false;
+    }
+    return true;
+}
