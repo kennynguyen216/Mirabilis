@@ -51,4 +51,9 @@ layout(set = 0, binding = 0) uniform SceneData {
     //     to divide the work between flat ambient and indirect light the same
     //     way, or the destination room changes colour as the player crosses.
     vec4 portalIndirectSettings;
+    // xyz = world-space camera position; a portal camera's virtual position.
+    vec4 cameraPosition;
+    // 1 = on: x normal maps, y metallic/roughness textures, z specular
+    // anti-aliasing, w specular.
+    vec4 materialSettings;
 } sceneData;

@@ -181,6 +181,14 @@ struct GPUSceneData {
     //     light the same way; when they do not, the destination room visibly
     //     changes colour at the moment the player crosses the portal.
     glm::vec4 portalIndirectSettings{0.0f};
+    // xyz = this camera's world-space position, w unused.  A portal camera
+    // carries its virtual camera's position, which is where its view vectors
+    // start.
+    glm::vec4 cameraPosition{0.0f};
+    // Material shading toggles, 1 = on: x normal maps, y metallic/roughness
+    // textures, z specular anti-aliasing, w specular.  With x, y and z off the
+    // raster direct term is directly comparable with the path tracer's.
+    glm::vec4 materialSettings{1.0f};
 };
 
 // Sixteen visible surfaces (the player pair plus seven authored links), with

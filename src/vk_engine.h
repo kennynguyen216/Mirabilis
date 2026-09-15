@@ -864,6 +864,17 @@ class VulkanEngine{
             float depthRange{60.0f};
         };
         DebugViewState _debugViews;
+
+        // Render Settings toggles for the material model, sent to every camera
+        // in GPUSceneData::materialSettings.  A session preference, not saved
+        // with the scene.
+        struct MaterialShadingSettings {
+            bool normalMaps{true};
+            bool metalRoughTextures{true};
+            bool specularAntiAliasing{true};
+            bool specular{true};
+        };
+        MaterialShadingSettings _materialShading;
         // One directional shadow map covers a box centred on the active
         // camera.  Every camera in the frame - main and portal - samples it,
         // because the lookup is done from world-space positions.

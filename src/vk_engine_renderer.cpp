@@ -542,6 +542,15 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
         _ssgi.traceEnvironmentMap ? 1.0f : 0.0f,
         _skyboxEnvironmentLod,
         _skyboxIndirectClamp);
+    // The inverse view's translation.  For a portal's virtual view that is the
+    // virtual camera, so build_portal_scene_data() inherits the right answer.
+    // Done once per camera here rather than as a 4x4 inverse per fragment.
+    data.cameraPosition = glm::vec4(glm::vec3(glm::inverse(view)[3]), 1.0f);
+    data.materialSettings = glm::vec4(
+        _materialShading.normalMaps ? 1.0f : 0.0f,
+        _materialShading.metalRoughTextures ? 1.0f : 0.0f,
+        _materialShading.specularAntiAliasing ? 1.0f : 0.0f,
+        _materialShading.specular ? 1.0f : 0.0f);
     return data;
 }
 
