@@ -15,6 +15,7 @@
 #include <stb_image.h>
 #include <unordered_set>
 
+#include "tangents.h"
 #include "vk_engine.h"
 #include "vk_engine_render_helpers.h"
 
@@ -228,11 +229,22 @@ void build_gltf_nodes(
     }
 }
 
+// Reported once per file, so the memory the vertex layout costs is measured
+// rather than estimated.
+struct GltfMeshStats {
+    size_t vertices = 0;
+    size_t indices = 0;
+    size_t suppliedTangentPrimitives = 0;
+    size_t generatedTangentPrimitives = 0;
+    size_t untangentedPrimitives = 0;
+};
+
 template <typename UploadMesh>
 std::vector<std::shared_ptr<MeshAsset>> build_gltf_meshes(
     LoadedGLTF& scene,
     const fastgltf::Asset& gltf,
     const std::vector<std::shared_ptr<GLTFMaterial>>& materials,
+    GltfMeshStats& stats,
     UploadMesh&& uploadMesh)
 {
     std::vector<std::shared_ptr<MeshAsset>> meshes;
@@ -269,6 +281,7 @@ std::vector<std::shared_ptr<MeshAsset>> build_gltf_meshes(
             for (size_t i = firstVertex; i < vertices.size(); ++i) {
                 vertices[i].normal = glm::vec3(0.0f, 0.0f, 1.0f);
                 vertices[i].color = glm::vec4(1.0f);
+                vertices[i].tangent = glm::vec4(0.0f);
             }
 
             fastgltf::iterateAccessorWithIndex<glm::vec3>(
@@ -312,6 +325,29 @@ std::vector<std::shared_ptr<MeshAsset>> build_gltf_meshes(
                         vertices[firstVertex + index].color = color;
                     });
             }
+            // A supplied tangent wins.  Without one, a primitive that has UVs
+            // gets tangents from their gradients; one without UVs keeps w = 0,
+            // which tells the shaders there is no tangent frame to use.
+            if (const auto tangents = primitive.findAttribute("TANGENT");
+                tangents != primitive.attributes.end()) {
+                fastgltf::iterateAccessorWithIndex<glm::vec4>(
+                    gltf,
+                    gltf.accessors[tangents->second],
+                    [&](glm::vec4 tangent, size_t index) {
+                        vertices[firstVertex + index].tangent = tangent;
+                    });
+                ++stats.suppliedTangentPrimitives;
+            } else if (primitive.findAttribute("TEXCOORD_0") !=
+                       primitive.attributes.end()) {
+                generate_tangents(
+                    vertices,
+                    std::span<const uint32_t>(indices).subspan(
+                        surface.startIndex,
+                        indices.size() - surface.startIndex));
+                ++stats.generatedTangentPrimitives;
+            } else {
+                ++stats.untangentedPrimitives;
+            }
 
             if (positionAccessor.count > 0) {
                 glm::vec3 minPosition = vertices[firstVertex].position;
@@ -336,6 +372,8 @@ std::vector<std::shared_ptr<MeshAsset>> build_gltf_meshes(
 
         if (!vertices.empty() && !indices.empty()) {
             newMesh->meshBuffers = uploadMesh(indices, vertices);
+            stats.vertices += vertices.size();
+            stats.indices += indices.size();
         }
     }
 
@@ -773,8 +811,25 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
                           std::vector<Vertex>& vertices) {
         return engine->uploadMesh(indices, vertices);
     };
+    GltfMeshStats meshStats;
     std::vector<std::shared_ptr<MeshAsset>> meshes =
-        build_gltf_meshes(*scene, gltf, materials, uploadMesh);
+        build_gltf_meshes(*scene, gltf, materials, meshStats, uploadMesh);
+    // The GPU vertex buffers and the path tracer's CPU copy each hold every
+    // vertex once, so each figure below is paid twice.
+    const double megabyte = 1024.0 * 1024.0;
+    fmt::print(
+        "GLTF meshes: {} vertices, ~{:.1f} MB at {} bytes each ({:.1f} MB of it "
+        "tangents), {} indices; tangents {} supplied / {} generated / {} none "
+        "primitives ({})\n",
+        meshStats.vertices,
+        double(meshStats.vertices * sizeof(Vertex)) / megabyte,
+        sizeof(Vertex),
+        double(meshStats.vertices * sizeof(glm::vec4)) / megabyte,
+        meshStats.indices,
+        meshStats.suppliedTangentPrimitives,
+        meshStats.generatedTangentPrimitives,
+        meshStats.untangentedPrimitives,
+        filePath.filename().string());
 
     build_gltf_nodes(*scene, gltf, meshes);
 

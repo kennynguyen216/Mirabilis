@@ -1,3 +1,4 @@
+#include "tangents.h"
 #include "vk_engine.h"
 #include "vk_engine_render_helpers.h"
 
@@ -377,6 +378,8 @@ void VulkanEngine::init_default_meshes()
     indices[4] = 3;
     indices[5] = 2;
     
+    // Every built-in mesh is flat per face, so generated tangents are exact.
+    generate_tangents(corners, indices);
     _floorMesh = uploadMesh(indices, corners);
     
     _floorBounds.origin = glm::vec3(0.0f);
@@ -426,6 +429,7 @@ void VulkanEngine::init_default_meshes()
     addWallFace({-half, -half, half}, {-half, -half, -half},
                 {half, -half, -half}, {half, -half, half}, {0.0f, -1.0f, 0.0f});
     
+    generate_tangents(wallVertices, wallIndices);
     _wallMesh = uploadMesh(wallIndices, wallVertices);
     _wallBounds.origin = glm::vec3(0.0f);
     _wallBounds.extents = glm::vec3(0.5f);
@@ -475,6 +479,7 @@ void VulkanEngine::init_default_meshes()
     addRampFace(rampBackLeft, rampBackRight, rampHighRight, rampHighLeft,
                 glm::vec3(0.0f, 0.0f, 1.0f));
     
+    generate_tangents(rampVertices, rampIndices);
     _rampMesh = uploadMesh(rampIndices, rampVertices);
     _rampBounds.origin = glm::vec3(0.0f, 0.5f, 0.0f);
     _rampBounds.extents = glm::vec3(0.5f);
@@ -494,6 +499,7 @@ void VulkanEngine::init_default_meshes()
         .position = {-0.5f, 0.5f, 0.0f}, .uv_x = 0.0f,
         .normal = {0.0f, 0.0f, 1.0f}, .uv_y = 1.0f, .color = glm::vec4(1.0f)};
     std::array<uint32_t, 6> portalIndices{0, 1, 2, 0, 2, 3};
+    generate_tangents(portalVertices, portalIndices);
     _portalMesh = uploadMesh(portalIndices, portalVertices);
     _portalBounds.origin = glm::vec3(0.0f);
     _portalBounds.extents = glm::vec3(0.5f, 0.5f, 0.0f);

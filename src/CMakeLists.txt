@@ -35,6 +35,8 @@ add_executable (engine
   vk_engine_ui.cpp
   vk_loader.h
   vk_loader.cpp
+  tangents.h
+  tangents.cpp
   camera.h
   camera.cpp
   world.h

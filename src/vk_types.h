@@ -51,13 +51,20 @@ struct AllocatedBuffer {
     VmaAllocationInfo info{};
 };
 
+// Mirrored field for field by shaders/vertex.glsl, which reads it as std430.
 struct Vertex {
     glm::vec3 position;
     float uv_x;
     glm::vec3 normal;
     float uv_y;
     glm::vec4 color;
+    // xyz = object-space tangent, w = bitangent sign (+1 or -1).  w = 0 means
+    // the mesh has no usable tangent, and shaders fall back to the geometric
+    // normal.
+    glm::vec4 tangent;
 };
+static_assert(sizeof(Vertex) == 64);
+static_assert(offsetof(Vertex, tangent) == 48);
 
 struct TraceMeshSource {
     std::vector<Vertex> vertices;
