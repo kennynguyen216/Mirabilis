@@ -88,6 +88,10 @@ struct SceneMaterial {
     bool enabled{false};
     bool debugChecker{false};
     std::string baseColorTexturePath;
+    // Linear data, not colour.  Empty binds the engine's flat normal and a
+    // white metallic/roughness texture, which leaves the factors unchanged.
+    std::string normalTexturePath;
+    std::string metalRoughTexturePath;
     glm::vec4 colorTint{1.0f};
     glm::vec2 uvScale{1.0f};
     float metallic{0.0f};

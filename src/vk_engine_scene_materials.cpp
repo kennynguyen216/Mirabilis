@@ -25,13 +25,16 @@ bool nearly_equal(const glm::vec4& lhs, const glm::vec4& rhs)
 } // namespace
 
 const AllocatedImage& VulkanEngine::load_scene_texture(
-    std::string_view texturePath)
+    std::string_view texturePath, bool srgb)
 {
     if (texturePath.empty()) {
         return _whiteImage;
     }
 
-    const std::string key{texturePath};
+    // The colour space is part of the key: one file used both as colour and
+    // as data needs two GPU images, and sharing one would decode the data.
+    const std::string path{texturePath};
+    const std::string key = srgb ? path : path + "#linear";
     if (const auto existing = _sceneTextureCache.find(key);
         existing != _sceneTextureCache.end()) {
         return existing->second;
@@ -44,7 +47,7 @@ const AllocatedImage& VulkanEngine::load_scene_texture(
     int height = 0;
     int channels = 0;
     stbi_uc* pixels = stbi_load(
-        key.c_str(), &width, &height, &channels, STBI_rgb_alpha);
+        path.c_str(), &width, &height, &channels, STBI_rgb_alpha);
     if (pixels == nullptr || width <= 0 || height <= 0) {
         fmt::print("Failed to load scene texture {}: {}\n",
             key, stbi_failure_reason());
@@ -61,11 +64,14 @@ const AllocatedImage& VulkanEngine::load_scene_texture(
             static_cast<uint32_t>(width),
             static_cast<uint32_t>(height),
             1},
-        VK_FORMAT_R8G8B8A8_SRGB,
+        srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_SAMPLED_BIT,
         true);
-    // Scene textures are only ever bound as base colour.
-    image.traceSource = make_trace_texture(pixels, image.imageExtent);
+    // The path tracer samples base colour only, so only colour textures keep
+    // a CPU copy for it.
+    if (srgb) {
+        image.traceSource = make_trace_texture(pixels, image.imageExtent);
+    }
     stbi_image_free(pixels);
 
     auto [inserted, unused] = _sceneTextureCache.emplace(key, image);
@@ -84,6 +90,8 @@ MaterialInstance* VulkanEngine::resolve_scene_material(const SceneObject& object
     const bool changed = !runtime.initialized ||
         !nearly_equal(runtime.emission, emission) ||
         runtime.texturePath != source.baseColorTexturePath ||
+        runtime.normalTexturePath != source.normalTexturePath ||
+        runtime.metalRoughTexturePath != source.metalRoughTexturePath ||
         !nearly_equal(runtime.colorTint, source.colorTint) ||
         !nearly_equal(runtime.uvScale, source.uvScale) ||
         !nearly_equal(runtime.metallic, source.metallic) ||
@@ -111,8 +119,14 @@ MaterialInstance* VulkanEngine::resolve_scene_material(const SceneObject& object
     constants->colorFactors = source.colorTint;
     constants->metal_rough_factors = glm::vec4(
         source.metallic, source.roughness, 0.0f, 0.0f);
+    // x = normal-map scale: glTF's default of 1 with a map, and 0 without one.
+    // The flat fallback texel is 128/255, not exactly 0.5, so scaling it by 1
+    // would tilt every normal slightly; 0 keeps the geometric normal exact.
     constants->materialFlags = glm::vec4(
-        0.0f, source.debugChecker ? 1.0f : 0.0f, 0.0f, 0.0f);
+        source.normalTexturePath.empty() ? 0.0f : 1.0f,
+        source.debugChecker ? 1.0f : 0.0f,
+        0.0f,
+        0.0f);
     constants->uvTransform = glm::vec4(source.uvScale, 0.0f, 0.0f);
     constants->emission = emission;
 
@@ -121,9 +135,15 @@ MaterialInstance* VulkanEngine::resolve_scene_material(const SceneObject& object
     GLTFMetallic_Roughness::MaterialResources resources{};
     resources.colorImage = colorImage;
     resources.colorSampler = _defaultSamplerLinear;
-    resources.metalRoughImage = _whiteImage;
+    // Both are data, so they load linear.  White metallic/roughness leaves the
+    // factors as they are; the flat normal leaves the geometric normal.
+    resources.metalRoughImage = source.metalRoughTexturePath.empty()
+        ? _whiteImage
+        : load_scene_texture(source.metalRoughTexturePath, false);
     resources.metalRoughSampler = _defaultSamplerLinear;
-    resources.normalImage = _flatNormalImage;
+    resources.normalImage = source.normalTexturePath.empty()
+        ? _flatNormalImage
+        : load_scene_texture(source.normalTexturePath, false);
     resources.normalSampler = _defaultSamplerLinear;
     resources.dataBuffer = runtime.constantsBuffer.buffer;
     resources.dataBufferOffset = 0;
@@ -147,6 +167,8 @@ MaterialInstance* VulkanEngine::resolve_scene_material(const SceneObject& object
     runtime.material.traceTexture=colorImage.traceSource;
     runtime.material.traceUVScale=source.uvScale;
     runtime.texturePath = source.baseColorTexturePath;
+    runtime.normalTexturePath = source.normalTexturePath;
+    runtime.metalRoughTexturePath = source.metalRoughTexturePath;
     runtime.colorTint = source.colorTint;
     runtime.uvScale = source.uvScale;
     runtime.metallic = source.metallic;

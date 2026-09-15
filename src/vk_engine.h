@@ -266,6 +266,8 @@ struct SceneMaterialRuntime {
     AllocatedBuffer constantsBuffer{};
     MaterialInstance material{};
     std::string texturePath;
+    std::string normalTexturePath;
+    std::string metalRoughTexturePath;
     glm::vec4 colorTint{1.0f};
     glm::vec2 uvScale{1.0f};
     float metallic{0.0f};
@@ -740,7 +742,9 @@ class VulkanEngine{
         void sync_scene_driven_objects();
         void emit_scene_render_objects(RenderLayer layer, DrawContext& drawContext);
         MaterialInstance* resolve_scene_material(const SceneObject& object);
-        const AllocatedImage& load_scene_texture(std::string_view texturePath);
+        // srgb = false for textures that store data rather than colour.
+        const AllocatedImage& load_scene_texture(
+            std::string_view texturePath, bool srgb = true);
         void clear_scene_material_resources();
         void rebuild_collision_from_scene();
         void draw_hierarchy_panel();

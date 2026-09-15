@@ -308,6 +308,10 @@ bool VulkanEngine::save_editor_scene()
              << (object.material.enabled ? "true" : "false")
              << ", \"baseColorTexture\": \""
              << json_escape(object.material.baseColorTexturePath) << "\""
+             << ", \"normalTexture\": \""
+             << json_escape(object.material.normalTexturePath) << "\""
+             << ", \"metallicRoughnessTexture\": \""
+             << json_escape(object.material.metalRoughTexturePath) << "\""
              << ", \"materialTint\": ";
         writeVec4(object.material.colorTint);
         file << ", \"emissionColor\": "; writeVec3(object.material.emissionColor);
@@ -499,6 +503,17 @@ bool read_saved_material(
 
     saved.material.enabled = materialEnabled;
     saved.material.baseColorTexturePath = baseColorTexture;
+    // Optional, so scenes saved before these existed load unchanged.
+    std::string_view normalTexture;
+    if (jsonObject["normalTexture"].get_string().get(normalTexture) ==
+        simdjson::SUCCESS) {
+        saved.material.normalTexturePath = normalTexture;
+    }
+    std::string_view metalRoughTexture;
+    if (jsonObject["metallicRoughnessTexture"].get_string().get(metalRoughTexture) ==
+        simdjson::SUCCESS) {
+        saved.material.metalRoughTexturePath = metalRoughTexture;
+    }
     saved.material.metallic = static_cast<float>(metallic);
     saved.material.roughness = static_cast<float>(roughness);
     double transmission = 0.0;

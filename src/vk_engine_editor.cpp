@@ -241,33 +241,49 @@ void VulkanEngine::draw_inspector_panel()
                         object->material.uvScale, glm::vec2(0.01f));
                     changed = true;
                 }
-                ImGui::TextWrapped(
-                    "Texture: %s",
-                    object->material.baseColorTexturePath.empty()
-                        ? "(white)"
-                        : object->material.baseColorTexturePath.c_str());
-                if (ImGui::Button("Choose Base Color Texture...")) {
-                    _materialEditor.object = object->id;
-                    std::fill(
-                        _materialEditor.texturePathInput.begin(),
-                        _materialEditor.texturePathInput.end(),
-                        '\0');
-                    const std::string& path = object->material.baseColorTexturePath;
-                    std::copy_n(
-                        path.data(),
-                        std::min(
-                            path.size(),
-                            _materialEditor.texturePathInput.size() - 1),
-                        _materialEditor.texturePathInput.data());
-                    ImGui::OpenPopup("Base Color Texture");
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("Clear Texture")) {
-                    object->material.baseColorTexturePath.clear();
-                    changed = true;
-                }
+                // One row per texture role.  The popup is opened outside the
+                // pushed ID so its name matches the modal drawn below.
+                const auto texturePicker = [&](const char* label,
+                                               const char* popupName,
+                                               std::string& path,
+                                               const char* fallback) {
+                    ImGui::TextWrapped(
+                        "%s: %s", label, path.empty() ? fallback : path.c_str());
+                    ImGui::PushID(popupName);
+                    const bool choose = ImGui::Button("Choose...");
+                    ImGui::SameLine();
+                    if (ImGui::Button("Clear")) {
+                        path.clear();
+                        changed = true;
+                    }
+                    ImGui::PopID();
+                    if (choose) {
+                        _materialEditor.object = object->id;
+                        std::fill(
+                            _materialEditor.texturePathInput.begin(),
+                            _materialEditor.texturePathInput.end(),
+                            '\0');
+                        std::copy_n(
+                            path.data(),
+                            std::min(
+                                path.size(),
+                                _materialEditor.texturePathInput.size() - 1),
+                            _materialEditor.texturePathInput.data());
+                        ImGui::OpenPopup(popupName);
+                    }
+                };
+                texturePicker("Base color", "Base Color Texture",
+                    object->material.baseColorTexturePath, "(white)");
+                texturePicker("Normal map", "Normal Map Texture",
+                    object->material.normalTexturePath, "(flat)");
+                texturePicker("Metallic/roughness", "Metallic Roughness Texture",
+                    object->material.metalRoughTexturePath, "(factors only)");
                 ImGui::TextDisabled(
                     "Project example: ../../assets/textures/portal_concrete.png");
+                ImGui::TextDisabled(
+                    "Normal and metallic/roughness maps are linear data;");
+                ImGui::TextDisabled(
+                    "glTF packing: G roughness, B metallic.");
                 ImGui::EndDisabled();
             } else if (object->assetKind == SceneAssetKind::ImportedGLTF) {
                 ImGui::SeparatorText("Material");
@@ -275,9 +291,17 @@ void VulkanEngine::draw_inspector_panel()
                     "Imported glTF materials come from the model file.");
             }
 
-            if (ImGui::BeginPopupModal(
-                    "Base Color Texture", nullptr,
-                    ImGuiWindowFlags_AlwaysAutoResize)) {
+            const std::array<std::pair<const char*, std::string SceneMaterial::*>, 3>
+                texturePopups{{
+                    {"Base Color Texture", &SceneMaterial::baseColorTexturePath},
+                    {"Normal Map Texture", &SceneMaterial::normalTexturePath},
+                    {"Metallic Roughness Texture",
+                        &SceneMaterial::metalRoughTexturePath}}};
+            for (const auto& [popupName, texturePath] : texturePopups) {
+                if (!ImGui::BeginPopupModal(
+                        popupName, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                    continue;
+                }
                 ImGui::TextUnformatted(
                     "Enter a PNG/JPG path relative to bin/Debug.");
                 ImGui::InputText(
@@ -289,7 +313,7 @@ void VulkanEngine::draw_inspector_panel()
                 ImGui::BeginDisabled(materialObject == nullptr);
                 if (ImGui::Button("Apply")) {
                     materialObject->material.enabled = true;
-                    materialObject->material.baseColorTexturePath =
+                    materialObject->material.*texturePath =
                         _materialEditor.texturePathInput.data();
                     _sceneDocument.dirty = true;
                     ImGui::CloseCurrentPopup();
