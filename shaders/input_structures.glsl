@@ -41,8 +41,10 @@ float ambient_occlusion(vec2 fragCoord)
     return texture(ambientOcclusionTex, uv).r;
 }
 
+// The same slots as GLTFMetallic_Roughness::MaterialConstants in vk_engine.h.
 layout(set = 1, binding = 0) uniform GLTFMaterialData {
     vec4 colorFactors;
+    // x metallic, y roughness, z debug checkerboard flag.
     vec4 metal_rough_factors;
     // xy = UV tiling, zw = UV offset. Legacy materials leave this zero and
     // the vertex shaders interpret that as a 1x1 scale.
@@ -51,6 +53,10 @@ layout(set = 1, binding = 0) uniform GLTFMaterialData {
     // alpha-masked, which makes the test a no-op there instead of something
     // the shared shader body has to branch around.
     vec4 alphaMask;
+    // rgb = emissive factor times strength, w reserved.
+    vec4 emission;
+    // x = normal-map scale, yzw reserved.
+    vec4 materialFlags;
 } materialData;
 
 layout(set = 1, binding = 1) uniform sampler2D colorTex;

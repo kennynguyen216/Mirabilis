@@ -707,12 +707,11 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         GLTFMetallic_Roughness::MaterialConstants constants{};
         constants.colorFactors = color;
         constants.metal_rough_factors = glm::vec4(metallic, roughness, 0.0f, 0.0f);
-        // extra[0] is the UV transform the scene materials write; extra[1].x
-        // is the alpha cutoff.  It stays zero for every pass but Mask, which
-        // makes the test in the mask shaders a no-op if one is ever bound to
-        // an opaque pipeline by mistake.
+        // The alpha cutoff stays zero for every pass but Mask, which makes the
+        // test in the mask shaders a no-op if one is ever bound to an opaque
+        // pipeline by mistake.
         if (pass == MaterialPass::Mask && source != nullptr) {
-            constants.extra[1].x = source->alphaCutoff;
+            constants.alphaMask.x = source->alphaCutoff;
         }
         materialConstants[index] = constants;
 

@@ -290,11 +290,23 @@ struct GLTFMetallic_Roughness {
     MaterialPipeline portalCompositePipeline;
     VkDescriptorSetLayout materialLayout{};
 
+    // The per-material uniform block, and the stride of every buffer material
+    // sets point into.  shaders/input_structures.glsl names the same slots.
     struct MaterialConstants {
         glm::vec4 colorFactors;
+        // x metallic, y roughness, z debug checkerboard flag.
         glm::vec4 metal_rough_factors;
-        glm::vec4 extra[14];
+        // xy = UV tiling, zw = UV offset.  Zero tiling means 1x1.
+        glm::vec4 uvTransform;
+        // x = glTF alphaCutoff, left at zero on materials that are not masked.
+        glm::vec4 alphaMask;
+        // rgb = emissive factor times strength, w reserved.
+        glm::vec4 emission;
+        // x = normal-map scale, yzw reserved.
+        glm::vec4 materialFlags;
+        glm::vec4 extra[10];
     };
+    static_assert(sizeof(MaterialConstants) == 256);
 
     struct MaterialResources {
         AllocatedImage colorImage;
