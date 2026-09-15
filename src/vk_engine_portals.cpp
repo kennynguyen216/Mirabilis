@@ -640,6 +640,8 @@ void VulkanEngine::init_portal_camera_targets()
         resources.colorSampler = _defaultSamplerLinear;
         resources.metalRoughImage = _whiteImage;
         resources.metalRoughSampler = _defaultSamplerLinear;
+        resources.normalImage = _flatNormalImage;
+        resources.normalSampler = _defaultSamplerLinear;
         resources.dataBuffer = _portalCameras.materialBuffers[index].buffer;
         _portalCameras.materials[index] = metalRoughMaterial.write_material(
             _device,

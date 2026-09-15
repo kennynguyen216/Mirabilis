@@ -315,6 +315,9 @@ struct GLTFMetallic_Roughness {
         VkSampler colorSampler{};
         AllocatedImage metalRoughImage;
         VkSampler metalRoughSampler{};
+        // Tangent-space normal map; the engine's flat normal when there is none.
+        AllocatedImage normalImage;
+        VkSampler normalSampler{};
         VkBuffer dataBuffer{};
         uint32_t dataBufferOffset{};
     };
@@ -327,6 +330,12 @@ struct GLTFMetallic_Roughness {
         MaterialPass pass,
         const MaterialResources& resources,
         DescriptorAllocatorGrowable& descriptorAllocator);
+    // Writes every binding of an existing material set.  write_material() and
+    // the editor's in-place material update both go through here.
+    void write_material_set(
+        VkDevice device,
+        const MaterialResources& resources,
+        VkDescriptorSet materialSet);
 };
 
 struct MeshNode : public Node {
@@ -429,6 +438,8 @@ class VulkanEngine{
     AllocatedImage _whiteImage;
     AllocatedImage _blackImage;
     AllocatedImage _greyImage;
+    // 1x1 tangent-space (0, 0, 1), bound wherever a material has no normal map.
+    AllocatedImage _flatNormalImage;
     AllocatedImage _errorCheckerboardImage;
     // Only the selected equirectangular panorama is resident.  Keeping the two
     // 4K HDR choices out of memory until selected saves roughly 64 MiB each.

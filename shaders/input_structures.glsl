@@ -61,6 +61,9 @@ layout(set = 1, binding = 0) uniform GLTFMaterialData {
 
 layout(set = 1, binding = 1) uniform sampler2D colorTex;
 layout(set = 1, binding = 2) uniform sampler2D metalRoughTex;
+// Tangent-space normal map, stored linear.  Materials without one are bound a
+// 1x1 flat normal, (0.5, 0.5, 1).
+layout(set = 1, binding = 3) uniform sampler2D normalTex;
 
 // Returns how much of the sunlight reaches this surface: 1 fully lit, 0 fully
 // blocked.  Only the sunlight term should be scaled by it; ambient light is

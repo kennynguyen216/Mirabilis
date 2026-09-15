@@ -46,6 +46,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     layoutBuilder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
     layoutBuilder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     layoutBuilder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    layoutBuilder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     materialLayout = layoutBuilder.build(
         engine->_device,
         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -286,6 +287,15 @@ MaterialInstance GLTFMetallic_Roughness::write_material(
         break;
     }
     material.materialSet = descriptorAllocator.allocate(device, materialLayout);
+    write_material_set(device, resources, material.materialSet);
+    return material;
+}
+
+void GLTFMetallic_Roughness::write_material_set(
+    VkDevice device,
+    const MaterialResources& resources,
+    VkDescriptorSet materialSet)
+{
     writer.clear();
     writer.write_buffer(
         0,
@@ -305,6 +315,11 @@ MaterialInstance GLTFMetallic_Roughness::write_material(
         resources.metalRoughSampler,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-    writer.update_set(device, material.materialSet);
-    return material;
+    writer.write_image(
+        3,
+        resources.normalImage.imageView,
+        resources.normalSampler,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    writer.update_set(device, materialSet);
 }

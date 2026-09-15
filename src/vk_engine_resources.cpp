@@ -26,6 +26,11 @@ void VulkanEngine::init_default_images_and_samplers()
         &grey, {1, 1, 1}, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT);
     _blackImage = create_image(
         &black, {1, 1, 1}, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT);
+    // The tangent-space normal (0, 0, 1) for materials without a normal map.
+    // UNORM, because a normal map stores a direction rather than a colour.
+    uint32_t flatNormal = glm::packUnorm4x8(glm::vec4(0.5f, 0.5f, 1.0f, 1.0f));
+    _flatNormalImage = create_image(
+        &flatNormal, {1, 1, 1}, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT);
 
     std::array<uint32_t, 16 * 16> checkerboard{};
     uint32_t magenta = glm::packUnorm4x8(glm::vec4(1, 0, 1, 1));
@@ -528,6 +533,8 @@ void VulkanEngine::init_default_materials()
     floorResources.colorSampler = _defaultSamplerLinear;
     floorResources.metalRoughImage = _whiteImage;
     floorResources.metalRoughSampler = _defaultSamplerLinear;
+    floorResources.normalImage = _flatNormalImage;
+    floorResources.normalSampler = _defaultSamplerLinear;
     floorResources.dataBuffer = _floorMaterialBuffer.buffer;
     floorResources.dataBufferOffset = 0;
     
@@ -691,6 +698,7 @@ void VulkanEngine::init_default_data()
         destroy_image(_skyboxImage);
         destroy_image(_whiteImage);
         destroy_image(_greyImage);
+        destroy_image(_flatNormalImage);
         destroy_image(_blackImage);
         destroy_image(_errorCheckerboardImage);
     });

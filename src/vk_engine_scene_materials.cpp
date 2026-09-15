@@ -120,6 +120,8 @@ MaterialInstance* VulkanEngine::resolve_scene_material(const SceneObject& object
     resources.colorSampler = _defaultSamplerLinear;
     resources.metalRoughImage = _whiteImage;
     resources.metalRoughSampler = _defaultSamplerLinear;
+    resources.normalImage = _flatNormalImage;
+    resources.normalSampler = _defaultSamplerLinear;
     resources.dataBuffer = runtime.constantsBuffer.buffer;
     resources.dataBufferOffset = 0;
 
@@ -130,27 +132,10 @@ MaterialInstance* VulkanEngine::resolve_scene_material(const SceneObject& object
             resources,
             globalDescriptorAllocator);
     } else {
-        metalRoughMaterial.writer.clear();
-        metalRoughMaterial.writer.write_buffer(
-            0,
-            resources.dataBuffer,
-            sizeof(GLTFMetallic_Roughness::MaterialConstants),
-            0,
-            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-        metalRoughMaterial.writer.write_image(
-            1,
-            resources.colorImage.imageView,
-            resources.colorSampler,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        metalRoughMaterial.writer.write_image(
-            2,
-            resources.metalRoughImage.imageView,
-            resources.metalRoughSampler,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-        metalRoughMaterial.writer.update_set(
-            _device, runtime.material.materialSet);
+        // The same writes write_material() makes, so a binding added there
+        // cannot be forgotten here.
+        metalRoughMaterial.write_material_set(
+            _device, resources, runtime.material.materialSet);
     }
 
     runtime.material.traceBaseColor = source.colorTint;

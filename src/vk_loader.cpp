@@ -130,6 +130,7 @@ void print_gltf_texture_summary(
     VulkanEngine* engine,
     size_t boundBaseColorCount,
     size_t boundMetalRoughCount,
+    size_t boundNormalCount,
     size_t materialCount,
     const std::filesystem::path& filePath)
 {
@@ -148,13 +149,16 @@ void print_gltf_texture_summary(
     }
     fmt::print(
         "GLTF textures: {} sRGB + {} linear, ~{:.1f} MB with mips; "
-        "{}/{} materials bound base colour, {}/{} metallic-roughness ({})\n",
+        "{}/{} materials bound base colour, {}/{} metallic-roughness, "
+        "{}/{} normal ({})\n",
         srgbCount,
         linearCount,
         double(estimatedBytes) / (1024.0 * 1024.0),
         boundBaseColorCount,
         materialCount,
         boundMetalRoughCount,
+        materialCount,
+        boundNormalCount,
         materialCount,
         filePath.filename().string());
 }
@@ -413,7 +417,8 @@ void LoadedGLTF::clearAll()
             image.image == creator->_errorCheckerboardImage.image ||
             image.image == creator->_whiteImage.image ||
             image.image == creator->_blackImage.image ||
-            image.image == creator->_greyImage.image) {
+            image.image == creator->_greyImage.image ||
+            image.image == creator->_flatNormalImage.image) {
             continue;
         }
         if (destroyedImages.insert(image.image).second) {
@@ -610,6 +615,8 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
 
     const uint32_t materialCount = static_cast<uint32_t>(
         std::max<size_t>(1, gltf.materials.size()));
+    // Three image samplers per material set: base colour, metallic/roughness,
+    // and normal (bindings 1-3).
     std::vector<DescriptorAllocatorGrowable::PoolSizeRatio> descriptorRatios = {
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3.0f},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3.0f},
@@ -694,6 +701,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
     // the BRDF actually consumes the map.
     size_t boundBaseColorCount = 0;
     size_t boundMetalRoughCount = 0;
+    size_t boundNormalCount = 0;
 
     auto createMaterial = [&](size_t index,
                               glm::vec4 color,
@@ -713,6 +721,12 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         if (pass == MaterialPass::Mask && source != nullptr) {
             constants.alphaMask.x = source->alphaCutoff;
         }
+        // glTF's normalTexture.scale multiplies the sampled tangent-space x
+        // and y.  1 is its default, and has no effect on the flat fallback.
+        constants.materialFlags.x =
+            source != nullptr && source->normalTexture.has_value()
+            ? static_cast<float>(source->normalTexture.value().scale)
+            : 1.0f;
         materialConstants[index] = constants;
 
         GLTFMetallic_Roughness::MaterialResources resources{};
@@ -720,6 +734,8 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         resources.colorSampler = engine->_defaultSamplerLinear;
         resources.metalRoughImage = engine->_whiteImage;
         resources.metalRoughSampler = engine->_defaultSamplerLinear;
+        resources.normalImage = engine->_flatNormalImage;
+        resources.normalSampler = engine->_defaultSamplerLinear;
         resources.dataBuffer = scene->materialDataBuffer.buffer;
         resources.dataBufferOffset = static_cast<uint32_t>(
             index * sizeof(GLTFMetallic_Roughness::MaterialConstants));
@@ -742,6 +758,14 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
                     resources.metalRoughImage,
                     resources.metalRoughSampler);
                 ++boundMetalRoughCount;
+            }
+            if (source->normalTexture.has_value()) {
+                resolveTexture(
+                    source->normalTexture.value(),
+                    false,
+                    resources.normalImage,
+                    resources.normalSampler);
+                ++boundNormalCount;
             }
         }
 
@@ -803,6 +827,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         engine,
         boundBaseColorCount,
         boundMetalRoughCount,
+        boundNormalCount,
         materialCount,
         filePath);
 
