@@ -519,6 +519,27 @@ changes it, never both.
 **Acceptance:** artifacts are stored under `tmp/material-baseline/`, every
 capture matches a repeat run, and the paths are written into this document.
 
+**Recorded 2026-09-14 at `material-model` 4f1deb9.** Run
+`scripts/capture_material_baseline.ps1 -Label m0 -HarnessArtifacts <harness dir>`
+to reproduce; later milestones pass `-Label mN -Baseline m0` and read
+`compare-m0.txt`. All paths are relative to `tmp/material-baseline/m0/`.
+
+| Artifact | Path | Notes |
+|---|---|---|
+| Harness (Debug, 21 cases) | `harness/` | copy of `tmp/gi-checkpoints/validation-20260914-201909` |
+| Raster, SSGI on/off | `raster-sponza-ssgi-{on,off}.pfm` | Release, 64 frames, 960x540, camera `0 4.2 0 -0.05 1.5708` (down the atrium) |
+| | `raster-material-lab-ssgi-{on,off}.pfm` | camera `0 2.5 7 -0.08 0` |
+| | `raster-shadow-ssgi-{on,off}.pfm` | camera `0 6 32 -0.2 0` |
+| Path trace, built-in floor | `trace-sandbox{,.direct,.indirect}.pfm` | Debug, 32 samples, camera `0 5 12 -0.35 0` |
+| Path trace, harness | `harness/{open,cornell,materials}{,.direct,.indirect}.pfm` | |
+| SHA-256 of every PFM above | `hashes.txt` | |
+| Release benchmark | `benchmark.txt` | Sponza 4.239 ms, sandbox 3.660 ms, portal_bhop_course 2.330 ms |
+
+Every raster and sandbox capture was byte-identical to a repeat run. The Debug
+and Release raster captures of `gi_material_lab.json` are also byte-identical.
+The sandbox trace's indirect mean is 0.0077 against a direct mean of 0.63,
+consistent with light passing through the transmissive built-in floor.
+
 ### Milestone 1: separate the floor's trace parameters
 
 - Build `_floorMaterial.traceParameters` explicitly as `(0, 0.8, 0, 1.5)`

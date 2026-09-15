@@ -49,3 +49,4 @@ __pycache__/
 
 # Local software-tracing checkpoints, logs and GPU captures
 /tmp/gi-checkpoints/
+/tmp/material-baseline/
