@@ -366,8 +366,12 @@ class VulkanEngine{
     PathTraceSettings _traceSettings;
     void capture_path_trace(const char* filename);
     void capture_ssgi(const char* filename);
+    void capture_raster(const char* filename);
+    // Reads a half-float colour image.  layout is the one the image was left
+    // in, and it is restored afterwards.
     std::vector<glm::vec4> read_ssgi_image(
-        const AllocatedImage& image, VkExtent2D extent);
+        const AllocatedImage& image, VkExtent2D extent,
+        VkImageLayout layout = VK_IMAGE_LAYOUT_GENERAL);
     struct PathTraceRuntime {
         uint32_t samples{0};
         uint64_t inputHash{0};

@@ -159,6 +159,11 @@ void VulkanEngine::init()
     if (SDL_getenv("MIRABILIS_MAX_FIDELITY")) {
         apply_max_fidelity_settings();
     }
+    // After the presets, so a capture run can compare against the frame
+    // without screen-space GI whatever else it asked for.
+    if (SDL_getenv("MIRABILIS_SSGI_DISABLE")) {
+        _ssgi.enabled = false;
+    }
 
     apply_scene_spawn_point();
 
@@ -958,6 +963,7 @@ void VulkanEngine::run(){
             }
             if (const char* capture=SDL_getenv("MIRABILIS_CAPTURE")) capture_path_trace(capture);
             if (const char* capture=SDL_getenv("MIRABILIS_SSGI_CAPTURE")) capture_ssgi(capture);
+            if (const char* capture=SDL_getenv("MIRABILIS_RASTER_CAPTURE")) capture_raster(capture);
             fmt::print("GI bounded run complete: frames={} renderer={}\n",_frameNumber,
                 _rendererMode==RendererMode::SoftwarePathTrace&&_traceSupported?"software":"raster");
             bQuit = true;

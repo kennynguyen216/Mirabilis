@@ -578,7 +578,7 @@ void VulkanEngine::capture_path_trace(const char* filename) {
 }
 
 std::vector<glm::vec4> VulkanEngine::read_ssgi_image(
-    const AllocatedImage& image, VkExtent2D extent)
+    const AllocatedImage& image, VkExtent2D extent, VkImageLayout layout)
 {
     VK_CHECK(vkDeviceWaitIdle(_device));
     const size_t pixels = size_t(extent.width) * extent.height;
@@ -586,7 +586,7 @@ std::vector<glm::vec4> VulkanEngine::read_ssgi_image(
         pixels * 4 * sizeof(uint16_t), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VMA_MEMORY_USAGE_GPU_TO_CPU);
     immediate_submit([&](VkCommandBuffer cmd) {
-        vkutil::transition_image(cmd, image.image, VK_IMAGE_LAYOUT_GENERAL,
+        vkutil::transition_image(cmd, image.image, layout,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         VkBufferImageCopy copy{};
         copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -594,7 +594,7 @@ std::vector<glm::vec4> VulkanEngine::read_ssgi_image(
         vkCmdCopyImageToBuffer(cmd, image.image,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer.buffer, 1, &copy);
         vkutil::transition_image(cmd, image.image,
-            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, layout);
     });
     void* mapped = nullptr;
     VK_CHECK(vmaMapMemory(_allocator, buffer.allocation, &mapped));
@@ -611,6 +611,66 @@ std::vector<glm::vec4> VulkanEngine::read_ssgi_image(
     vmaUnmapMemory(_allocator, buffer.allocation);
     destroy_buffer(buffer);
     return values;
+}
+
+void VulkanEngine::capture_raster(const char* filename)
+{
+    if (_rendererMode == RendererMode::SoftwarePathTrace && _traceSupported) {
+        fmt::print("Raster capture skipped: the path tracer is active\n");
+        return;
+    }
+    // The linear frame after portal views and the SSGI composite, before the
+    // tonemap.  draw() leaves the draw image in whichever layout its last
+    // reader needed, so this mirrors its tonemap condition.
+    const bool tonemapped = _postProcess.tonemapEnabled &&
+        _debugViews.view == RenderDebugView::None &&
+        _postProcess.tonemapPipeline.pipeline != VK_NULL_HANDLE;
+    const VkImageLayout layout = tonemapped
+        ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+        : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    const VkExtent2D extent = _drawExtent;
+    const size_t pixels = size_t(extent.width) * extent.height;
+    const auto values = read_ssgi_image(_drawImage, extent, layout);
+
+    double sum = 0.0;
+    uint32_t invalid = 0;
+    std::ofstream file(std::string(filename) + ".pfm", std::ios::binary);
+    file << "PF\n" << extent.width << " " << extent.height << "\n-1.0\n";
+    for (int y = int(extent.height) - 1; y >= 0; --y) {
+        for (uint32_t x = 0; x < extent.width; ++x) {
+            const glm::vec4& value = values[size_t(y) * extent.width + x];
+            if (!std::isfinite(value.x) || !std::isfinite(value.y) ||
+                !std::isfinite(value.z)) {
+                ++invalid;
+            } else {
+                sum += (value.x + value.y + value.z) / 3.0;
+            }
+            file.write(reinterpret_cast<const char*>(&value), 3 * sizeof(float));
+        }
+    }
+
+    std::ofstream metadata(std::string(filename) + ".txt");
+    metadata << "Build: "
+#ifdef NDEBUG
+        << "Release"
+#else
+        << "Debug"
+#endif
+        << "\nScene: " << _sceneDocument.activeFilename
+        << "\nDimensions: " << extent.width << " x " << extent.height
+        << "\nRender scale: " << renderScale
+        << "\nSSGI enabled: " << _ssgi.enabled
+        << "\nSSGI preset: " << _ssgi.qualityPreset
+        << "\nDebug view: " << static_cast<int>(_debugViews.view)
+        << "\nFrames: " << _frameNumber
+        << "\nLinear mean: " << sum / pixels
+        << "\nNonfinite pixels: " << invalid << "\nCamera: "
+        << render_camera().position.x << "," << render_camera().position.y
+        << "," << render_camera().position.z << " pitch="
+        << render_camera().pitch << " yaw=" << render_camera().yaw << "\n";
+    fmt::print("Raster capture {}: {}x{}, ssgi={}, linear mean={}, nonfinite={}\n",
+        filename, extent.width, extent.height, _ssgi.enabled, sum / pixels, invalid);
+    if (!file || !metadata) std::abort();
 }
 
 void VulkanEngine::capture_ssgi(const char* filename)
