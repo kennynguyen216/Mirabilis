@@ -2,7 +2,8 @@
 
 ## Document status
 
-**Status:** Draft for review; not implemented
+**Status:** Milestones 0-5 implemented on branch `material-model`; Milestones 6
+(separate design) and 7 (optional) not started
 **Date:** 2026-09-14
 **Measured at:** `main` 6b7a989
 **Refines:** steps 5 and 6 of [Sponza Rendering Quality Design](sponza_rendering_quality_design.md)
@@ -688,6 +689,44 @@ debug views.
 - Masked materials still discard consistently in the forward, portal, prepass,
   and shadow passes.
 - Sponza frame time stays within +1.0 ms of Milestone 0 in total.
+
+**Result (88453ba, b0ce21b).** Landed as two commits: tangent outputs with
+normal-map sampling, then specular anti-aliasing with the remaining debug
+views. Checks are under `tmp/material-baseline/checks-m5/` and
+`tmp/material-baseline/m5/`.
+
+- *Sponza relief:* against the Milestone 4 capture from the same camera, mean
+  luminance changes by a factor of 1.0026 while 12.9% of pixels change by more
+  than 2%, concentrated in brick and stone detail. Geometry is untouched, so
+  silhouettes cannot move.
+- *Handedness:* in `material_tangent_lab.json` (new), the handedness view
+  shows the ordinary cube at +1 and its negatively scaled mirror copy at -1.
+  The built-in floor quad's UV layout is itself left-handed (-1), which is
+  correct for its v axis. Sponza shows mirrored UV islands (-1) on arch
+  soffits and column shafts, from its supplied tangents. Editor materials
+  cannot bind a normal map until Milestone 7, so relief direction under a
+  mirroring transform is confirmed through the handedness view only, not on a
+  lit, normal-mapped mirrored object.
+- *structure.glb:* 425 primitives generate tangents, 36 have no UVs (w = 0),
+  and one material has a normal map. Static captures show no inverted
+  lighting; swimming under camera motion was not tested.
+- *Specular shimmer* under slow camera motion was not tested, because the
+  harness and captures are static. Specular anti-aliasing leaves flat geometry
+  unchanged, which is why the material lab and shadow captures still match
+  Milestone 4 (`m5/compare-m4.txt`: 51 of 53 identical; the two Sponza
+  captures changed).
+- *Masked materials:* Sponza has no MASK materials, so this check has no
+  Sponza coverage. The mask pipelines share the shading includes and pass the
+  harness.
+- *Parity* with the toggles off is unchanged from Milestone 4
+  (`parity-m5/parity.txt`).
+- *Release benchmark:* Sponza 4.357 ms (+0.12 ms on Milestone 0), sandbox
+  3.620 ms, portal_bhop_course 2.262 ms.
+- *Found while testing:* "Match reference renderer" uses factors only, and
+  Sponza leaves `metallicFactor` at the glTF default of 1, so with textures off
+  its stone renders as rough metal. Forward-written debug views also add the
+  values of blended surfaces over opaque ones: Sponza's `dirt_decal` has no
+  metallic/roughness texture and reads as metallic 1 over the floor.
 
 ### Milestone 6 (separate design): image-based lighting
 
