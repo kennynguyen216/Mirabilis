@@ -58,4 +58,9 @@ layout(set = 0, binding = 0) uniform SceneData {
     vec4 materialSettings;
     // x = the forward-written RenderDebugView, or 0.
     vec4 materialDebug;
+    // x = 1 while image-based lighting replaces flat ambient, y = highest
+    // prefiltered environment level.
+    vec4 iblSettings;
+    // Band-2 spherical-harmonic irradiance, convolved and sun-clamped.
+    vec4 environmentSH[9];
 } sceneData;

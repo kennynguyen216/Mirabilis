@@ -486,6 +486,26 @@ class VulkanEngine{
     // Derived per panorama rather than fixed, because how bright the sky is
     // relative to its sun is a property of the capture.
     float _skyboxIndirectClamp{1.0e4f};
+    // Image-based lighting built from the selected panorama whenever it
+    // changes (docs/image_based_lighting_design.md).
+    static constexpr uint32_t IblPrefilterLevels = 6;
+    struct ImageBasedLightingState {
+        // Level k is prefiltered for roughness k / (IblPrefilterLevels - 1).
+        AllocatedImage prefiltered{};
+        std::array<VkImageView, IblPrefilterLevels> levelViews{};
+        std::array<VkDescriptorSet, IblPrefilterLevels> prefilterSets{};
+        VkSampler prefilteredSampler{};
+        // Split-sum (scale, bias) against (N.V, roughness).
+        AllocatedImage brdfLut{};
+        VkSampler brdfLutSampler{};
+        VkDescriptorSetLayout prefilterSetLayout{};
+        VkPipelineLayout prefilterLayout{};
+        VkPipeline prefilterPipeline{};
+        // Irradiance, already convolved with the clamped cosine and sun-clamped.
+        std::array<glm::vec4, 9> environmentSH{};
+        float prefilterMilliseconds{0.0f};
+    };
+    ImageBasedLightingState _ibl;
     // Anisotropic filtering is an optional device feature, so nothing may
     // request it before init_vulkan has both confirmed support and read the
     // device's ceiling.  _textureAnisotropy is the preset's requested level;
@@ -604,6 +624,13 @@ class VulkanEngine{
         void init_default_data();
         bool set_skybox(int selection);
         void update_skybox_descriptors();
+        void init_image_based_lighting();
+        // radiance(x, y) returns the linear, sun-clamped radiance of a texel.
+        void project_environment_sh(
+            int width,
+            int height,
+            const std::function<glm::vec3(int, int)>& radiance);
+        void prefilter_environment();
         void write_ssgi_trace_descriptors();
         void init_default_images_and_samplers();
         void init_default_meshes();
@@ -902,6 +929,9 @@ class VulkanEngine{
             bool metalRoughTextures{true};
             bool specularAntiAliasing{true};
             bool specular{true};
+            // Replaces the flat ambient colour with the skybox's irradiance
+            // and prefiltered reflections.
+            bool imageBasedLighting{false};
         };
         MaterialShadingSettings _materialShading;
         // One directional shadow map covers a box centred on the active

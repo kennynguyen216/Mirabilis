@@ -192,6 +192,12 @@ struct GPUSceneData {
     // x = the RenderDebugView the forward pass should write itself (roughness,
     // metallic, direct diffuse, direct specular, emission), or 0.
     glm::vec4 materialDebug{0.0f};
+    // x = 1 while image-based lighting replaces flat ambient, y = the highest
+    // level of the prefiltered environment chain.
+    glm::vec4 iblSettings{0.0f};
+    // Irradiance from the panorama as band-2 spherical harmonics, already
+    // convolved with the clamped cosine and sun-clamped.
+    glm::vec4 environmentSH[9]{};
 };
 
 // Sixteen visible surfaces (the player pair plus seven authored links), with

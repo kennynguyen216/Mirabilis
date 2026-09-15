@@ -140,6 +140,8 @@ void VulkanEngine::init()
     init_gpu_timestamps();
     init_descriptors();
     init_pipelines();
+    // Before the skybox loads: set_skybox() projects and prefilters into it.
+    init_image_based_lighting();
     init_default_data();
     init_imgui();
     init_path_trace();

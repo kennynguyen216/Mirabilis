@@ -102,6 +102,8 @@ void VulkanEngine::init_default_images_and_samplers()
         _skyboxSelection = 0;
         // set_skybox() does this itself on the paths that succeed; the sets
         // that name the panorama have to be written on this one too.
+        _ibl.environmentSH = {};
+        prefilter_environment();
         update_skybox_descriptors();
     }
     
@@ -207,6 +209,17 @@ bool VulkanEngine::set_skybox(int selection)
             // the ceiling never drops below plain white.
             _skyboxIndirectClamp = std::max(1.0f, luminance[rank]);
         }
+        project_environment_sh(width, height, [&](int x, int y) {
+            const float* source = pixels + (static_cast<size_t>(y) * width + x) * 4;
+            glm::vec3 radiance(
+                finiteHalf(source[0]), finiteHalf(source[1]), finiteHalf(source[2]));
+            // The same sun ceiling as every other environment sample.
+            const float luminance = glm::dot(radiance, glm::vec3(0.2126f, 0.7152f, 0.0722f));
+            if (luminance > _skyboxIndirectClamp) {
+                radiance *= _skyboxIndirectClamp / luminance;
+            }
+            return radiance;
+        });
         stbi_image_free(pixels);
 
         newImage = create_image(
@@ -240,6 +253,14 @@ bool VulkanEngine::set_skybox(int selection)
         // An 8-bit panorama decodes into [0, 1] and has no sun disk to
         // separate from its sky, so nothing here needs clipping.
         _skyboxIndirectClamp = 1.0e4f;
+        project_environment_sh(width, height, [&](int x, int y) {
+            const stbi_uc* source = pixels + (static_cast<size_t>(y) * width + x) * 4;
+            const auto decode = [](stbi_uc encoded) {
+                const float c = static_cast<float>(encoded) / 255.0f;
+                return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+            };
+            return glm::vec3(decode(source[0]), decode(source[1]), decode(source[2]));
+        });
         newImage = create_image(
             pixels,
             {static_cast<uint32_t>(width),
@@ -271,6 +292,7 @@ bool VulkanEngine::set_skybox(int selection)
     AllocatedImage oldImage = _skyboxImage;
     _skyboxImage = std::move(newImage);
     _skyboxSelection = selection;
+    prefilter_environment();
     update_skybox_descriptors();
     _ssgi.historyValid = false;
     destroy_image(oldImage);
@@ -333,6 +355,18 @@ void VulkanEngine::update_skybox_descriptors()
                 3,
                 _skyboxImage.imageView,
                 _skyboxEnvironmentSampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            writer.write_image(
+                4,
+                _ibl.prefiltered.imageView,
+                _ibl.prefilteredSampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            writer.write_image(
+                5,
+                _ibl.brdfLut.imageView,
+                _ibl.brdfLutSampler,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             writer.update_set(_device, descriptor);

@@ -97,7 +97,9 @@ void VulkanEngine::init_descriptor_pools()
         { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 },
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 },
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 }
+        // A scene set holds five: shadow map, occlusion, panorama, and the two
+        // image-based lighting images.
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 6 }
     };
 
     globalDescriptorAllocator.init(_device, 10, sizes);
@@ -151,6 +153,10 @@ void VulkanEngine::init_scene_descriptors()
         // already binds.  update_skybox_descriptors() is what fills it: the
         // panorama is loaded by init_default_data(), after this runs.
         builder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        // Image-based lighting: the prefiltered environment chain and the
+        // split-sum BRDF table, also written by update_skybox_descriptors().
+        builder.add_binding(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         // Compute is here because both occlusion passes bind this same set
         // for the projection and its inverse rather than duplicating them.
         _gpuSceneDataDescriptorLayout = builder.build(
@@ -554,6 +560,14 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
     data.materialDebug.x = is_forward_material_debug_view(_debugViews.view)
         ? static_cast<float>(static_cast<int>(_debugViews.view))
         : 0.0f;
+    data.iblSettings = glm::vec4(
+        _materialShading.imageBasedLighting ? 1.0f : 0.0f,
+        static_cast<float>(IblPrefilterLevels - 1),
+        0.0f,
+        0.0f);
+    for (size_t i = 0; i < _ibl.environmentSH.size(); ++i) {
+        data.environmentSH[i] = _ibl.environmentSH[i];
+    }
     return data;
 }
 

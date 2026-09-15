@@ -1,0 +1,125 @@
+#version 450
+
+// Prefilters the environment panorama for GGX specular reflection at one
+// roughness, writing one level of the prefiltered chain.  Run once per level
+// whenever the skybox changes (image_based_lighting_design.md, section 2).
+//
+// The usual split-sum assumption N = V = R lets each output texel be a single
+// lobe around its own direction.  Samples read the source at a mip chosen from
+// their probability density (filtered importance sampling), so 64 samples stay
+// smooth instead of aliasing the sun or a bright cloud edge.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D sourceEnvironment;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D target;
+
+layout(push_constant) uniform constants {
+    // x = roughness for this level, y = source panorama width in texels,
+    // z = the sun ceiling luminance, w = the source's highest mip level.
+    vec4 settings;
+} PushConstants;
+
+const float Pi = 3.14159265359;
+const uint SampleCount = 64u;
+// The path tracer's alpha floor.
+const float MinimumAlpha = 0.002025;
+
+// The inverse of equirectangular_uv in environment.glsl.
+vec3 direction_from_uv(vec2 uv)
+{
+    float longitude = (uv.x - 0.5) * 2.0 * Pi;
+    float latitude = uv.y * Pi;
+    float ringRadius = sin(latitude);
+    return vec3(
+        ringRadius * cos(longitude),
+        cos(latitude),
+        ringRadius * sin(longitude));
+}
+
+vec2 equirectangular_uv(vec3 direction)
+{
+    float longitude = atan(direction.z, direction.x) / (2.0 * Pi) + 0.5;
+    float latitude = acos(clamp(direction.y, -1.0, 1.0)) / Pi;
+    return vec2(longitude, latitude);
+}
+
+float radical_inverse(uint bits)
+{
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return float(bits) * 2.3283064365386963e-10;
+}
+
+// The same clip as apply_environment_policy: the shadow-mapped direct term
+// already delivers the sun disk.
+vec3 clamp_sun(vec3 radiance)
+{
+    float luminance = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+    if (luminance > PushConstants.settings.z) {
+        radiance *= PushConstants.settings.z / luminance;
+    }
+    return radiance;
+}
+
+void main()
+{
+    ivec2 size = imageSize(target);
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, size))) {
+        return;
+    }
+    vec3 n = direction_from_uv((vec2(pixel) + 0.5) / vec2(size));
+
+    float sourceWidth = PushConstants.settings.y;
+    float maxLod = PushConstants.settings.w;
+    float roughness = PushConstants.settings.x;
+    if (roughness < 0.001) {
+        // A mirror: the panorama itself, read at the mip that matches this
+        // level's resolution.
+        float lod = clamp(log2(sourceWidth / float(size.x)), 0.0, maxLod);
+        imageStore(target, pixel, vec4(
+            clamp_sun(textureLod(sourceEnvironment, equirectangular_uv(n), lod).rgb),
+            1.0));
+        return;
+    }
+
+    float alpha = max(roughness * roughness, MinimumAlpha);
+    float a2 = alpha * alpha;
+    vec3 up = abs(n.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, n));
+    vec3 bitangent = cross(n, tangent);
+    // A panorama of W x W/2 texels covers 4 pi steradians.
+    float texelSolidAngle = 4.0 * Pi / (sourceWidth * sourceWidth * 0.5);
+
+    vec3 sum = vec3(0.0);
+    float weight = 0.0;
+    for (uint i = 0u; i < SampleCount; ++i) {
+        vec2 xi = vec2(float(i) / float(SampleCount), radical_inverse(i));
+        float phi = 2.0 * Pi * xi.x;
+        float cosTheta = sqrt((1.0 - xi.y) / (1.0 + (a2 - 1.0) * xi.y));
+        float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+        vec3 h = tangent * (sinTheta * cos(phi)) +
+            bitangent * (sinTheta * sin(phi)) + n * cosTheta;
+        vec3 l = 2.0 * dot(n, h) * h - n;
+        float noL = dot(n, l);
+        if (noL <= 0.0) {
+            continue;
+        }
+        // With V = N, the reflected-direction PDF is D(h) / 4.
+        float noH = max(dot(n, h), 0.0);
+        float denominator = noH * noH * (a2 - 1.0) + 1.0;
+        float distribution = a2 / (Pi * denominator * denominator);
+        float sampleSolidAngle =
+            1.0 / (float(SampleCount) * max(distribution * 0.25, 1e-6));
+        float lod = clamp(
+            0.5 * log2(sampleSolidAngle / texelSolidAngle) + 1.0, 0.0, maxLod);
+        sum += clamp_sun(
+            textureLod(sourceEnvironment, equirectangular_uv(l), lod).rgb) * noL;
+        weight += noL;
+    }
+    imageStore(target, pixel, vec4(sum / max(weight, 1e-6), 1.0));
+}
