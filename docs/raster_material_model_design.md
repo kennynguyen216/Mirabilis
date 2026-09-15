@@ -632,6 +632,42 @@ Normal maps stay disabled.
   are recorded, because this milestone intentionally changes the image.
 - Sponza frame time stays within +0.6 ms of Milestone 0.
 
+**Result (ccc3712, 4ec7cd9, 9a398fa, ee76aac).** The steps landed as three
+commits rather than five: the BRDF, ambient split, emission, outputs and
+metallic/roughness sampling together (splitting the outputs off would have
+meant a temporary duplicate Lambert term); the portal switch; then toggles and
+debug views.
+
+- *Reference parity* uses a new scene, `material_reference_lab.json`, instead
+  of `gi_material_lab.json`, whose path-tracer sun radiance is 0. The new
+  scene has a black environment, sun radiance pi (the raster light-unit
+  convention), no raster shadows, and a roughness sweep at metallic 0 and 1.
+  Run `scripts/compare_material_parity.py` on the raster "Direct diffuse only"
+  and "Direct specular only" captures (`MIRABILIS_MATCH_REFERENCE=1`,
+  `MIRABILIS_SSGI_DISABLE=1`) and the tracer's `.direct.pfm`, all at camera
+  `0 3.2 8.5 -0.3 0`. Pixels are compared where both are lit and every
+  neighbour is within 15%, which excludes silhouettes and the tracer's
+  shadows. Measured (`tmp/material-baseline/parity-m4/`): median relative
+  luminance error 0.0006 over 150,098 pixels; metal-only pixels median 0.0004,
+  energy ratio 1.0025; dielectric pixels energy ratio 1.0023.
+  **Tolerance, fixed from this measurement:** median relative error at most
+  0.005, and raster/trace energy ratio within 1.00 ± 0.02, overall and on
+  metal pixels.
+- *Roughness sweep:* front-row dielectrics keep their diffuse colour; the
+  metallic back row is lit only through its specular lobe and the ambient
+  environment term, and is not black on shadowed faces.
+- *Portal:* both passes include `material_brdf.glsl` and differ only in
+  outputs and ambient policy. A capture from the harness's
+  `gi_portal_pair.json` camera shows no aperture, so the main-versus-portal
+  comparison is established by construction, not yet by image.
+- `tmp/material-baseline/m4/compare-m3.txt`: 45 of 53 identical. The eight
+  differences are the six raster captures and the harness's
+  `raster-ssgi{,-repeat}.indirect.pfm`, which now see metal-free albedo and
+  diffuse-only direct light; no path-trace capture changed. All 21 harness
+  cases pass.
+- Release benchmark: Sponza 4.357 ms (+0.12 ms on Milestone 0), sandbox
+  3.859 ms, portal_bhop_course 2.273 ms.
+
 ### Milestone 5: normal mapping
 
 1. Add the tangent-frame outputs in `mesh.vert` and `portal_view.vert`.
