@@ -24,7 +24,7 @@ void main()
     // lighting evaluation, and must not reach the G-buffer writes below.
     apply_alpha_mask(baseColor.a);
 #endif
-    if (materialData.metal_rough_factors.z > 0.5) {
+    if (materialData.materialFlags.y > 0.5) {
         const float cellsAcross = 25.0;
         float checker = mod(
             floor(inUV.x * cellsAcross) + floor(inUV.y * cellsAcross),

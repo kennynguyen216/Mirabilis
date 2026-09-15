@@ -108,8 +108,9 @@ MaterialInstance* VulkanEngine::resolve_scene_material(const SceneObject& object
     *constants = {};
     constants->colorFactors = source.colorTint;
     constants->metal_rough_factors = glm::vec4(
-        source.metallic, source.roughness,
-        source.debugChecker ? 1.0f : 0.0f, 0.0f);
+        source.metallic, source.roughness, 0.0f, 0.0f);
+    constants->materialFlags = glm::vec4(
+        0.0f, source.debugChecker ? 1.0f : 0.0f, 0.0f, 0.0f);
     constants->uvTransform = glm::vec4(source.uvScale, 0.0f, 0.0f);
 
     const AllocatedImage& colorImage =

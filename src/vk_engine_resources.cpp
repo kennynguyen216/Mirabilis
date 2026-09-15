@@ -519,7 +519,9 @@ void VulkanEngine::init_default_materials()
     
     *floorConstants = {};
     floorConstants->colorFactors = glm::vec4(1.0f);
-    floorConstants->metal_rough_factors = glm::vec4(0.0f, 0.8f, 1.0f, 0.0f);
+    floorConstants->metal_rough_factors = glm::vec4(0.0f, 0.8f, 0.0f, 0.0f);
+    // y = the debug checkerboard that makes the floor's scale readable.
+    floorConstants->materialFlags = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
     
     GLTFMetallic_Roughness::MaterialResources floorResources{};
     floorResources.colorImage = _whiteImage;

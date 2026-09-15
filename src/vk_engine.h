@@ -294,7 +294,9 @@ struct GLTFMetallic_Roughness {
     // sets point into.  shaders/input_structures.glsl names the same slots.
     struct MaterialConstants {
         glm::vec4 colorFactors;
-        // x metallic, y roughness, z debug checkerboard flag.
+        // x metallic, y roughness.  z and w must stay 0: this vector was once
+        // copied into the path tracer's parameters, which read z as
+        // transmission.
         glm::vec4 metal_rough_factors;
         // xy = UV tiling, zw = UV offset.  Zero tiling means 1x1.
         glm::vec4 uvTransform;
@@ -302,7 +304,7 @@ struct GLTFMetallic_Roughness {
         glm::vec4 alphaMask;
         // rgb = emissive factor times strength, w reserved.
         glm::vec4 emission;
-        // x = normal-map scale, yzw reserved.
+        // x = normal-map scale, y = debug checkerboard, zw reserved.
         glm::vec4 materialFlags;
         glm::vec4 extra[10];
     };

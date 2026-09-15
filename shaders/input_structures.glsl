@@ -44,7 +44,7 @@ float ambient_occlusion(vec2 fragCoord)
 // The same slots as GLTFMetallic_Roughness::MaterialConstants in vk_engine.h.
 layout(set = 1, binding = 0) uniform GLTFMaterialData {
     vec4 colorFactors;
-    // x metallic, y roughness, z debug checkerboard flag.
+    // x metallic, y roughness.  z and w are always 0.
     vec4 metal_rough_factors;
     // xy = UV tiling, zw = UV offset. Legacy materials leave this zero and
     // the vertex shaders interpret that as a 1x1 scale.
@@ -55,7 +55,7 @@ layout(set = 1, binding = 0) uniform GLTFMaterialData {
     vec4 alphaMask;
     // rgb = emissive factor times strength, w reserved.
     vec4 emission;
-    // x = normal-map scale, yzw reserved.
+    // x = normal-map scale, y = debug checkerboard, zw reserved.
     vec4 materialFlags;
 } materialData;
 
