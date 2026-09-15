@@ -2,8 +2,8 @@
 
 ## Document status
 
-**Status:** Milestones 0-5 implemented on branch `material-model`; Milestones 6
-(separate design) and 7 (optional) not started
+**Status:** Milestones 0-7 implemented on branch `material-model`; Milestone 6
+follows [Image-Based Lighting](image_based_lighting_design.md)
 **Date:** 2026-09-14
 **Measured at:** `main` 6b7a989
 **Refines:** steps 5 and 6 of [Sponza Rendering Quality Design](sponza_rendering_quality_design.md)
@@ -736,10 +736,29 @@ prefiltered specular mip chain, and a BRDF lookup table. It replaces
 portal substitute the same data. It needs its own document because it touches
 skybox loading, startup time, and the SSGI environment-miss convention.
 
+**Result.** Designed in [Image-Based Lighting](image_based_lighting_design.md)
+(5693f2f) and implemented in 8cd5e96 (data) and a6c5fa3 (shading). That
+document records the measurements.
+
 ### Milestone 7 (optional): editor material textures
 
 Add normal and metallic/roughness texture paths to `SceneMaterial`, the
 inspector, and scene JSON. Scenes that omit them keep loading unchanged.
+
+**Result (56951dc, b7a5b88, 918a987).** Scene JSON gains optional
+`normalTexture` and `metallicRoughnessTexture`. Both load as linear UNORM,
+under a cache key that includes the colour space, and keep no path-tracer copy.
+Scenes that omit them are unchanged: `m7/compare-m5.txt`, 53 of 53 identical.
+`material_tangent_lab.json` now textures both cubes with Sponza's brick set,
+and the negatively scaled copy lights from the same side as the ordinary one
+(`checks-m7`), completing the Milestone 5 handedness check with a real
+normal map.
+
+Found while testing: the 1x1 flat normal texel is 128/255, which decodes to
+0.0039 rather than 0, so a normal scale of 1 on a material without a map
+tilted every normal slightly. Materials without a normal map now use scale 0,
+both editor and glTF; the glTF fix changed only the Sponza captures
+(`m7-loader/compare-m7.txt`).
 
 ## Verification summary
 

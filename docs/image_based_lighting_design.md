@@ -2,7 +2,7 @@
 
 ## Document status
 
-**Status:** Draft; implementation in progress on branch `material-model`
+**Status:** Implemented on branch `material-model` (results below)
 **Date:** 2026-09-14
 **Refines:** Milestone 6 of [Raster Material Model](raster_material_model_design.md),
 which deferred image-based lighting to its own design because it touches
@@ -178,3 +178,38 @@ cameras still divide indirect light the same way.
 | Irradiance entered without 1/pi | Ambient 3x too bright | Units section; compare a uniform-white panorama with flat ambient |
 | Equirectangular seam or pole in prefilter | Visible line in reflections | Wrap U, clamp V, sample by direction |
 | Skybox switch leaves a stale chain | Reflections of the previous sky | Build inside `set_skybox` before descriptors are rewritten |
+
+## Results
+
+**Milestone 1 (8cd5e96).** `tmp/material-baseline/m6-data/compare-m7-loader.txt`:
+all 53 captures identical, with IBL built but off. Every start-up loads more
+than one panorama, so the rebuild path runs on each switch. Prefiltering takes
+0.4 ms for the 8192 x 4096 legacy panorama and 1.5 ms for the 4K HDR skies.
+The irradiance L0 coefficient is (2.91, 3.26, 3.31) for the legacy sky, about
+0.27 radiance after the basis constant and 1/pi, close to the old flat 0.28.
+
+**Milestone 2 (a6c5fa3).** `tmp/material-baseline/m6/compare-m6-data.txt`:
+47 of 53 identical. The six differences are the raster captures; no
+path-trace or harness capture changed, and all 21 harness cases pass. Parity
+(`parity-m6`) is unchanged: median error 0.0006, energy ratio 0.999.
+
+| Capture (mean luminance) | Flat ambient | IBL | Ratio |
+|---|---:|---:|---:|
+| Sponza, SSGI on | 0.0623 | 0.0562 | 0.90 |
+| Sponza, SSGI off | 0.0792 | 0.0518 | 0.65 |
+| Material lab, SSGI off | 0.2209 | 0.2266 | 1.03 |
+| Shadow showcase, SSGI off | 0.4724 | 0.4906 | 1.04 |
+
+- The interior risk went the other way from the one predicted: Sponza
+  darkens, because the noon HDR sky's irradiance is below the old flat
+  ambient. With SSGI on, the default, the change is 10%.
+- Metals now reflect the sky: the gold GGX cube in `gi_material_lab.json`
+  (roughness 0.22) goes from (0.225, 0.163, 0.076) to (0.266, 0.216, 0.098)
+  on its front face, taking on the sky's bluer tint.
+- IBL shares the environment policy, so a scene with a black environment gets
+  black image-based lighting. `material_reference_lab.json` sets one for the
+  path tracer, and its smooth metals now render black away from the sun.
+- Release benchmark: Sponza 4.031 ms (below the material model's Milestone 0
+  4.239 ms), sandbox 3.774 ms, portal_bhop_course 2.353 ms.
+- Not tested: equirectangular seams and poles in reflections under camera
+  motion, and interactive skybox switching in the editor.
