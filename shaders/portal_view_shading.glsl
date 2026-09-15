@@ -1,9 +1,12 @@
 // The shared body of the portal camera's forward pass, split for the same
 // reason as mesh_shading.glsl: portal_view.frag and portal_view_mask.frag
-// differ only by MIRABILIS_ALPHA_MASK.
+// differ only by MIRABILIS_ALPHA_MASK.  Its material response comes from the
+// same material_brdf.glsl as the main camera's, so the two views differ only
+// in their outputs and ambient policy, never in the BRDF.
 #include "input_structures.glsl"
 #include "alpha_mask.glsl"
 #include "environment.glsl"
+#include "material_brdf.glsl"
 
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec4 inColor;
@@ -31,8 +34,8 @@ void main()
         baseColor.rgb *= mix(checkerColor, vec3(0.04, 0.10, 0.16), gridLine);
     }
     vec3 normal = normalize(inNormal);
-    vec3 lightDirection = normalize(sceneData.sunlightDirection.xyz);
-    float diffuse = max(dot(normal, lightDirection), 0.0);
+    MaterialSurface surface = material_surface(
+        baseColor.rgb, inUV, normal, inWorldPosition);
     // Ambient light is deliberately left unshadowed; without it an occluded
     // surface would be pure black rather than merely out of the sun.  What it
     // does get is ambient occlusion, which asks the different question of how
@@ -57,15 +60,20 @@ void main()
     float substitute = sceneData.portalIndirectSettings.x;
     float ambientScale = mix(
         1.0, clamp(sceneData.indirectSettings.x, 0.0, 1.0), substitute);
-    vec3 ambient = sceneData.ambientColor.rgb * occlusion * ambientScale +
+    vec3 ambientLight = sceneData.ambientColor.rgb * occlusion * ambientScale +
         substitute * environment_irradiance(normal) * occlusion;
-    // The sun term is left alone: it already has its own visibility test, and
-    // scaling it here would darken contact points standing in full sunlight.
-    vec3 direct = visibility * diffuse * sceneData.sunlightColor.rgb;
-    if (sceneData.screenSpaceSettings.y > 0.5) {
-        direct = vec3(0.0);
-    }
-    vec3 lighting = ambient + direct;
 
-    outFragColor = vec4(baseColor.rgb * lighting, 1.0);
+    // The sun term is left out of occlusion: it already has its own visibility
+    // test, and scaling it here would darken contact points in full sunlight.
+    vec3 directDiffuse;
+    vec3 directSpecular;
+    material_sun(surface, visibility, directDiffuse, directSpecular);
+    vec3 ambientDiffuse;
+    vec3 ambientSpecular;
+    material_ambient(surface, ambientLight, ambientDiffuse, ambientSpecular);
+
+    outFragColor = vec4(
+        directDiffuse + directSpecular + ambientDiffuse + ambientSpecular +
+            material_emission(),
+        1.0);
 }
