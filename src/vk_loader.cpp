@@ -722,11 +722,12 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
             constants.alphaMask.x = source->alphaCutoff;
         }
         // glTF's normalTexture.scale multiplies the sampled tangent-space x
-        // and y.  1 is its default, and has no effect on the flat fallback.
+        // and y.  Without a normal map it is 0: the flat fallback texel is
+        // 128/255, not exactly 0.5, and any other scale would tilt the normal.
         constants.materialFlags.x =
             source != nullptr && source->normalTexture.has_value()
             ? static_cast<float>(source->normalTexture.value().scale)
-            : 1.0f;
+            : 0.0f;
         // The same radiance the path tracer's traceEmission carries below.
         if (source != nullptr) {
             constants.emission = glm::vec4(
