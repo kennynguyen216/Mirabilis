@@ -716,9 +716,11 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         material->data.traceBaseColor = constants.colorFactors;
         if(source) material->data.traceEmission=glm::vec4(
             source->emissiveFactor[0],source->emissiveFactor[1],source->emissiveFactor[2],0)*source->emissiveStrength.value_or(1.f);
-        material->data.traceParameters = constants.metal_rough_factors;
-        material->data.traceParameters.z=source&&source->transmission?source->transmission->transmissionFactor:0.f;
-        material->data.traceParameters.w=source?source->ior.value_or(1.5f):1.5f;
+        material->data.traceParameters = glm::vec4(
+            metallic,
+            roughness,
+            source && source->transmission ? source->transmission->transmissionFactor : 0.0f,
+            source ? source->ior.value_or(1.5f) : 1.5f);
         return material;
     };
 

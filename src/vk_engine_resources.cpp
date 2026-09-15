@@ -529,7 +529,10 @@ void VulkanEngine::init_default_materials()
         floorResources,
         globalDescriptorAllocator);
     _floorMaterial.traceBaseColor = floorConstants->colorFactors;
-    _floorMaterial.traceParameters = floorConstants->metal_rough_factors;
+    // metallic, roughness, transmission, IOR.  Built explicitly: the raster
+    // constants carry the debug checkerboard flag in z, which the path tracer
+    // would read as full transmission.
+    _floorMaterial.traceParameters = glm::vec4(0.0f, 0.8f, 0.0f, 1.5f);
     
     _wallMaterialBuffer = create_buffer(
         sizeof(GLTFMetallic_Roughness::MaterialConstants),
@@ -549,7 +552,7 @@ void VulkanEngine::init_default_materials()
         wallResources,
         globalDescriptorAllocator);
     _wallMaterial.traceBaseColor = wallConstants->colorFactors;
-    _wallMaterial.traceParameters = wallConstants->metal_rough_factors;
+    _wallMaterial.traceParameters = glm::vec4(0.0f, 0.8f, 0.0f, 1.5f);
     
     // There is no character asset in assets/ yet, so start with a visible
     // collision-sized proxy.  It is rendered only by portal cameras; the
@@ -573,7 +576,7 @@ void VulkanEngine::init_default_materials()
         playerResources,
         globalDescriptorAllocator);
     _playerMaterial.traceBaseColor = playerConstants->colorFactors;
-    _playerMaterial.traceParameters = playerConstants->metal_rough_factors;
+    _playerMaterial.traceParameters = glm::vec4(0.0f, 0.9f, 0.0f, 1.5f);
     
     _bluePortalMaterialBuffer = create_buffer(
         sizeof(GLTFMetallic_Roughness::MaterialConstants),
@@ -595,7 +598,7 @@ void VulkanEngine::init_default_materials()
         bluePortalResources,
         globalDescriptorAllocator);
     _bluePortalMaterial.traceBaseColor = bluePortalConstants->colorFactors;
-    _bluePortalMaterial.traceParameters = bluePortalConstants->metal_rough_factors;
+    _bluePortalMaterial.traceParameters = glm::vec4(0.0f, 0.0f, 0.0f, 1.5f);
     
     _orangePortalMaterialBuffer = create_buffer(
         sizeof(GLTFMetallic_Roughness::MaterialConstants),
@@ -615,7 +618,7 @@ void VulkanEngine::init_default_materials()
         orangePortalResources,
         globalDescriptorAllocator);
     _orangePortalMaterial.traceBaseColor = orangePortalConstants->colorFactors;
-    _orangePortalMaterial.traceParameters = orangePortalConstants->metal_rough_factors;
+    _orangePortalMaterial.traceParameters = glm::vec4(0.0f, 0.0f, 0.0f, 1.5f);
     
     init_portal_camera_targets();
 }
