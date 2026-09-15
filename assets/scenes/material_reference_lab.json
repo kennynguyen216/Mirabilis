@@ -1,0 +1,707 @@
+{
+  "version": 1,
+  "nextActor": 13,
+  "lighting": {
+    "shadowsEnabled": false,
+    "sunDirection": [
+      0.35,
+      1.0,
+      0.8
+    ]
+  },
+  "referenceLighting": {
+    "sunRadiance": [
+      3.141592653589793,
+      3.141592653589793,
+      3.141592653589793
+    ],
+    "environmentIntensity": 0,
+    "blackEnvironment": true
+  },
+  "ssao": {
+    "enabled": false,
+    "radius": 0.75,
+    "bias": 0.025,
+    "intensity": 1,
+    "power": 1.5
+  },
+  "authoredPortals": [],
+  "objects": [
+    {
+      "id": 0,
+      "parent": -1,
+      "name": "Sandbox",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": false,
+      "baseColorTexture": "",
+      "materialTint": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "materialMetallic": 0,
+      "materialRoughness": 0.8,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "empty",
+      "modelPath": ""
+    },
+    {
+      "id": 1,
+      "parent": 0,
+      "name": "Neutral floor",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        14,
+        1,
+        10
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": true,
+      "baseColorTexture": "",
+      "materialTint": [
+        0.5,
+        0.5,
+        0.5,
+        1
+      ],
+      "materialMetallic": 0,
+      "materialRoughness": 0.9,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 1,
+      "timeTrialRole": "none",
+      "asset": "floor",
+      "modelPath": ""
+    },
+    {
+      "id": 2,
+      "parent": 0,
+      "name": "Sweep m0 r0.05",
+      "position": [
+        -4.4,
+        0.6,
+        1.2
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1.2,
+        1.2,
+        1.2
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": true,
+      "baseColorTexture": "",
+      "materialTint": [
+        0.8,
+        0.2,
+        0.15,
+        1
+      ],
+      "materialMetallic": 0,
+      "materialRoughness": 0.05,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "cube",
+      "modelPath": ""
+    },
+    {
+      "id": 3,
+      "parent": 0,
+      "name": "Sweep m0 r0.25",
+      "position": [
+        -2.2,
+        0.6,
+        1.2
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1.2,
+        1.2,
+        1.2
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": true,
+      "baseColorTexture": "",
+      "materialTint": [
+        0.8,
+        0.2,
+        0.15,
+        1
+      ],
+      "materialMetallic": 0,
+      "materialRoughness": 0.25,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "cube",
+      "modelPath": ""
+    },
+    {
+      "id": 4,
+      "parent": 0,
+      "name": "Sweep m0 r0.50",
+      "position": [
+        0.0,
+        0.6,
+        1.2
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1.2,
+        1.2,
+        1.2
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": true,
+      "baseColorTexture": "",
+      "materialTint": [
+        0.8,
+        0.2,
+        0.15,
+        1
+      ],
+      "materialMetallic": 0,
+      "materialRoughness": 0.5,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "cube",
+      "modelPath": ""
+    },
+    {
+      "id": 5,
+      "parent": 0,
+      "name": "Sweep m0 r0.75",
+      "position": [
+        2.2,
+        0.6,
+        1.2
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1.2,
+        1.2,
+        1.2
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": true,
+      "baseColorTexture": "",
+      "materialTint": [
+        0.8,
+        0.2,
+        0.15,
+        1
+      ],
+      "materialMetallic": 0,
+      "materialRoughness": 0.75,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "cube",
+      "modelPath": ""
+    },
+    {
+      "id": 6,
+      "parent": 0,
+      "name": "Sweep m0 r1.00",
+      "position": [
+        4.4,
+        0.6,
+        1.2
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1.2,
+        1.2,
+        1.2
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": true,
+      "baseColorTexture": "",
+      "materialTint": [
+        0.8,
+        0.2,
+        0.15,
+        1
+      ],
+      "materialMetallic": 0,
+      "materialRoughness": 1.0,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "cube",
+      "modelPath": ""
+    },
+    {
+      "id": 7,
+      "parent": 0,
+      "name": "Sweep m1 r0.05",
+      "position": [
+        -4.4,
+        0.6,
+        -1.2
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1.2,
+        1.2,
+        1.2
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": true,
+      "baseColorTexture": "",
+      "materialTint": [
+        0.95,
+        0.75,
+        0.4,
+        1
+      ],
+      "materialMetallic": 1,
+      "materialRoughness": 0.05,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "cube",
+      "modelPath": ""
+    },
+    {
+      "id": 8,
+      "parent": 0,
+      "name": "Sweep m1 r0.25",
+      "position": [
+        -2.2,
+        0.6,
+        -1.2
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1.2,
+        1.2,
+        1.2
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": true,
+      "baseColorTexture": "",
+      "materialTint": [
+        0.95,
+        0.75,
+        0.4,
+        1
+      ],
+      "materialMetallic": 1,
+      "materialRoughness": 0.25,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "cube",
+      "modelPath": ""
+    },
+    {
+      "id": 9,
+      "parent": 0,
+      "name": "Sweep m1 r0.50",
+      "position": [
+        0.0,
+        0.6,
+        -1.2
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1.2,
+        1.2,
+        1.2
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": true,
+      "baseColorTexture": "",
+      "materialTint": [
+        0.95,
+        0.75,
+        0.4,
+        1
+      ],
+      "materialMetallic": 1,
+      "materialRoughness": 0.5,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "cube",
+      "modelPath": ""
+    },
+    {
+      "id": 10,
+      "parent": 0,
+      "name": "Sweep m1 r0.75",
+      "position": [
+        2.2,
+        0.6,
+        -1.2
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1.2,
+        1.2,
+        1.2
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": true,
+      "baseColorTexture": "",
+      "materialTint": [
+        0.95,
+        0.75,
+        0.4,
+        1
+      ],
+      "materialMetallic": 1,
+      "materialRoughness": 0.75,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "cube",
+      "modelPath": ""
+    },
+    {
+      "id": 11,
+      "parent": 0,
+      "name": "Sweep m1 r1.00",
+      "position": [
+        4.4,
+        0.6,
+        -1.2
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        1.2,
+        1.2,
+        1.2
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": true,
+      "baseColorTexture": "",
+      "materialTint": [
+        0.95,
+        0.75,
+        0.4,
+        1
+      ],
+      "materialMetallic": 1,
+      "materialRoughness": 1.0,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "cube",
+      "modelPath": ""
+    },
+    {
+      "id": 12,
+      "parent": 0,
+      "name": "Gameplay Spawn",
+      "position": [
+        0,
+        0,
+        6
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        0.6,
+        0.1,
+        0.6
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": false,
+      "baseColorTexture": "",
+      "materialTint": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "materialMetallic": 0,
+      "materialRoughness": 0.8,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": false,
+      "portalPlaceable": false,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "spawn",
+      "asset": "empty",
+      "modelPath": ""
+    }
+  ]
+}
