@@ -551,6 +551,12 @@ floor stops being transmissive. The `open`, `cornell`, and `materials` hashes
 do not change, because their floors use editor materials. Raster captures are
 bit-identical.
 
+**Result (701ac7d).** `tmp/material-baseline/m1/compare-m0.txt`: 50 of 53
+captures identical; the three differences are `trace-sandbox{,.direct,.indirect}.pfm`.
+The sandbox floor now renders as an opaque, shadow-receiving surface in the
+path tracer instead of showing the environment through it. The loader's glTF
+trace parameters are also built explicitly now, with unchanged values.
+
 ### Milestone 2: vertex layout
 
 1. Delete `colored_triangle_mesh.vert`.
@@ -567,6 +573,16 @@ bit-identical.
 - All 21 harness cases pass.
 - The vertex-count log line reports Sponza's added memory.
 
+**Result (37b8cdd, 393d557, 998333a, f476c11).** `struct Vertex` appears in
+`shaders/` only in `vertex.glsl`. `tmp/material-baseline/m2-move` and
+`tmp/material-baseline/m2` each match `m1` in all 53 captures. Sponza logs
+2,049,137 vertices, ~125.1 MB at 64 bytes each, of which 31.3 MB is tangents,
+paid once in GPU buffers and once in the path tracer's CPU copy. All 405 of
+its primitives supply `TANGENT`; `tung_tung_tung_sahur.glb` generates its one.
+Release benchmark: Sponza 4.152 ms, sandbox 3.676 ms, portal_bhop_course
+2.375 ms. Rather than extending the texture line, the loader prints a separate
+`GLTF meshes:` line, because meshes are built after textures.
+
 ### Milestone 3: material data plumbing
 
 1. Name the `MaterialConstants` slots in C++ and GLSL.
@@ -580,6 +596,16 @@ bit-identical.
 - The loader log reports 24 normal maps bound for Sponza.
 - No validation errors across harness, resize, scene reload, and portal
   placement.
+
+**Result (53b1245, 25d14fb, 2940dd1, 7ce801f).** Every step matched `m2` in
+all 53 captures (`tmp/material-baseline/m3*`). Sponza logs `24/28 normal`.
+Binding those maps makes them resident: Sponza's texture estimate rises from
+~1045 MB to ~1536 MB with mips, a cost this document did not previously
+state. The harness covers resize, minimize, renderer switching, and scene
+reload without validation errors; interactive portal placement was not
+exercised. `cameraPosition` is taken from `inverse(view)` once per camera in
+`build_scene_data`, so portal cameras get their virtual position without a
+change to `build_portal_scene_data`.
 
 ### Milestone 4: BRDF, emission, and outputs
 
