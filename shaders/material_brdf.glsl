@@ -44,6 +44,29 @@ void material_factors(vec2 uv, out float metallic, out float roughness)
         1.0);
 }
 
+// Geometric specular anti-aliasing (Tokuyoshi and Kaplanyan): the lobe is
+// widened by how fast the geometric normal turns across the pixel, so a
+// highlight on curved or distant geometry cannot alias into shimmer.  It
+// changes alpha in raster only, which is why "Match reference renderer" turns
+// it off.
+float material_antialiased_roughness(float roughness, vec3 geometricNormal)
+{
+    // Taken before the toggle is read, so derivatives stay well defined.
+    vec3 dndu = dFdx(geometricNormal);
+    vec3 dndv = dFdy(geometricNormal);
+    if (sceneData.materialSettings.z < 0.5) {
+        return roughness;
+    }
+    float variance = 0.25 * (dot(dndu, dndu) + dot(dndv, dndv));
+    float kernel = min(2.0 * variance, 0.18);
+    float alphaSquared = clamp(
+        roughness * roughness * roughness * roughness + kernel,
+        MaterialMinimumAlpha * MaterialMinimumAlpha,
+        1.0);
+    // alpha = roughness squared, so roughness is the fourth root of alpha^2.
+    return sqrt(sqrt(alphaSquared));
+}
+
 // The normal a surface is lit with.  tangent.xyz is the interpolated
 // world-space tangent and tangent.w its bitangent sign; w = 0 means the mesh
 // has none.  Shadow lookups must keep using the geometric normal: a
@@ -72,11 +95,17 @@ vec3 material_shading_normal(vec3 geometricNormal, vec4 tangent, vec2 uv)
 }
 
 MaterialSurface material_surface(
-    vec3 baseColor, vec2 uv, vec3 normal, vec3 worldPosition)
+    vec3 baseColor,
+    vec2 uv,
+    vec3 geometricNormal,
+    vec3 normal,
+    vec3 worldPosition)
 {
     MaterialSurface surface;
     surface.baseColor = baseColor;
     material_factors(uv, surface.metallic, surface.roughness);
+    surface.roughness = material_antialiased_roughness(
+        surface.roughness, geometricNormal);
     surface.normal = normal;
     surface.view = normalize(sceneData.cameraPosition.xyz - worldPosition);
     // Clamped rather than rejected: a shading normal can face away from the
@@ -205,12 +234,18 @@ const int MaterialDebugMetallic = 22;
 const int MaterialDebugDirectDiffuse = 23;
 const int MaterialDebugDirectSpecular = 24;
 const int MaterialDebugEmission = 25;
+const int MaterialDebugShadingNormal = 26;
+const int MaterialDebugGeometricNormal = 27;
+const int MaterialDebugTangent = 28;
+const int MaterialDebugTangentHandedness = 29;
 
 // True while one of those views is selected, with the colour it shows.  The
 // lighting views stay in linear radiance, so a capture of "direct diffuse"
 // plus "direct specular" is comparable with the path tracer's direct image.
 bool material_debug_color(
     MaterialSurface surface,
+    vec3 geometricNormal,
+    vec4 tangent,
     vec3 directDiffuse,
     vec3 directSpecular,
     vec3 emission,
@@ -228,6 +263,20 @@ bool material_debug_color(
         color = directSpecular;
     } else if (mode == MaterialDebugEmission) {
         color = emission;
+    } else if (mode == MaterialDebugShadingNormal) {
+        color = surface.normal * 0.5 + 0.5;
+    } else if (mode == MaterialDebugGeometricNormal) {
+        color = geometricNormal * 0.5 + 0.5;
+    } else if (mode == MaterialDebugTangent) {
+        color = dot(tangent.xyz, tangent.xyz) > 1e-12
+            ? normalize(tangent.xyz) * 0.5 + 0.5
+            : vec3(0.0);
+    } else if (mode == MaterialDebugTangentHandedness) {
+        // Green +1, red -1, grey where the mesh has no tangent.  A mirrored UV
+        // island or a negatively scaled object should read red.
+        color = abs(tangent.w) < 0.001
+            ? vec3(0.25)
+            : (tangent.w > 0.0 ? vec3(0.1, 0.9, 0.1) : vec3(0.9, 0.1, 0.1));
     } else {
         return false;
     }

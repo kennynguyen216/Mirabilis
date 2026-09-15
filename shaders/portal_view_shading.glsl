@@ -37,7 +37,7 @@ void main()
     vec3 geometricNormal = normalize(inNormal);
     vec3 normal = material_shading_normal(geometricNormal, inTangent, inUV);
     MaterialSurface surface = material_surface(
-        baseColor.rgb, inUV, normal, inWorldPosition);
+        baseColor.rgb, inUV, geometricNormal, normal, inWorldPosition);
     // Ambient light is deliberately left unshadowed; without it an occluded
     // surface would be pure black rather than merely out of the sun.  What it
     // does get is ambient occlusion, which asks the different question of how
@@ -82,7 +82,8 @@ void main()
         1.0);
     vec3 debugColor;
     if (material_debug_color(
-            surface, directDiffuse, directSpecular, emission, debugColor)) {
+            surface, geometricNormal, inTangent,
+            directDiffuse, directSpecular, emission, debugColor)) {
         outFragColor = vec4(debugColor, 1.0);
     }
 }

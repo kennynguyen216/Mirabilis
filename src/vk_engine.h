@@ -256,6 +256,10 @@ enum class RenderDebugView : int {
     DirectDiffuse = 23,
     DirectSpecular = 24,
     Emission = 25,
+    ShadingNormal = 26,
+    GeometricNormal = 27,
+    Tangent = 28,
+    TangentHandedness = 29,
 };
 
 struct SceneMaterialRuntime {

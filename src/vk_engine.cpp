@@ -150,7 +150,7 @@ void VulkanEngine::init()
     if (const char* debugView = SDL_getenv("MIRABILIS_RENDER_DEBUG_VIEW")) {
         const int value = std::clamp(std::atoi(debugView),
             static_cast<int>(RenderDebugView::None),
-            static_cast<int>(RenderDebugView::Emission));
+            static_cast<int>(RenderDebugView::TangentHandedness));
         _debugViews.view = static_cast<RenderDebugView>(value);
     }
     if (const char* preset = SDL_getenv("MIRABILIS_SSGI_PRESET")) {
