@@ -8,6 +8,8 @@ layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec4 outColor;
 layout(location = 2) out vec2 outUV;
 layout(location = 3) out vec3 outWorldPosition;
+// xyz = world-space tangent, w = bitangent sign; w = 0 means no tangent.
+layout(location = 4) out vec4 outTangent;
 
 #include "vertex.glsl"
 
@@ -29,8 +31,14 @@ void main()
         ? dot(worldPosition, sceneData.portalClipPlane)
         : 1.0;
     // Keep lighting and shadow bias correct under non-uniform object scale.
-    mat3 normalMatrix = transpose(inverse(mat3(PushConstants.render_matrix)));
+    mat3 model = mat3(PushConstants.render_matrix);
+    mat3 normalMatrix = transpose(inverse(model));
     outNormal = normalize(normalMatrix * vertex.normal);
+    // Same tangent frame as mesh.vert: model matrix, handedness flipped by a
+    // mirroring transform.
+    outTangent = vec4(
+        model * vertex.tangent.xyz,
+        vertex.tangent.w * (determinant(model) < 0.0 ? -1.0 : 1.0));
     outColor = vertex.color * materialData.colorFactors;
     vec2 uvScale = materialData.uvTransform.xy;
     if (all(lessThan(abs(uvScale), vec2(0.0001)))) {

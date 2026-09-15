@@ -44,6 +44,33 @@ void material_factors(vec2 uv, out float metallic, out float roughness)
         1.0);
 }
 
+// The normal a surface is lit with.  tangent.xyz is the interpolated
+// world-space tangent and tangent.w its bitangent sign; w = 0 means the mesh
+// has none.  Shadow lookups must keep using the geometric normal: a
+// normal-mapped offset pushes samples inside the receiver and brings shadow
+// acne back.
+vec3 material_shading_normal(vec3 geometricNormal, vec4 tangent, vec2 uv)
+{
+    // Sampled unconditionally, like the metallic/roughness texture.
+    vec3 texel = texture(normalTex, uv).xyz * 2.0 - 1.0;
+    if (abs(tangent.w) < 0.001 || sceneData.materialSettings.x < 0.5) {
+        return geometricNormal;
+    }
+    // Interpolation shortens the tangent and pulls it off the plane of the
+    // interpolated normal, so it is rebuilt against that normal here.
+    vec3 t = tangent.xyz - geometricNormal * dot(geometricNormal, tangent.xyz);
+    if (dot(t, t) < 1e-12) {
+        return geometricNormal;
+    }
+    t = normalize(t);
+    // Sign rather than the raw w: interpolating across a mirrored UV seam
+    // blends +1 and -1 toward 0.
+    vec3 b = cross(geometricNormal, t) * (tangent.w < 0.0 ? -1.0 : 1.0);
+    texel.xy *= materialData.materialFlags.x;
+    vec3 mapped = mat3(t, b, geometricNormal) * texel;
+    return dot(mapped, mapped) > 1e-12 ? normalize(mapped) : geometricNormal;
+}
+
 MaterialSurface material_surface(
     vec3 baseColor, vec2 uv, vec3 normal, vec3 worldPosition)
 {

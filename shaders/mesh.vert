@@ -10,6 +10,9 @@ layout(location = 2) out vec2 outUV;
 layout(location = 3) out vec3 outWorldPosition;
 layout(location = 4) out vec4 outCurrentClip;
 layout(location = 5) out vec4 outPreviousClip;
+// xyz = world-space tangent, w = bitangent sign after the model transform;
+// w = 0 when the mesh has no tangent.
+layout(location = 6) out vec4 outTangent;
 
 #include "vertex.glsl"
 
@@ -40,8 +43,16 @@ void main()
     outWorldPosition = worldPosition.xyz;
     // Normals use the inverse transpose so editor-authored non-uniform scale
     // does not skew either diffuse lighting or the shadow normal offset.
-    mat3 normalMatrix = transpose(inverse(mat3(PushConstants.render_matrix)));
+    mat3 model = mat3(PushConstants.render_matrix);
+    mat3 normalMatrix = transpose(inverse(model));
     outNormal = normalize(normalMatrix * vertex.normal);
+    // A tangent is a direction along the surface, so it transforms with the
+    // model matrix, not the inverse transpose.  The fragment shader
+    // re-orthogonalizes it against the interpolated normal.  A mirroring
+    // transform flips the frame's handedness.
+    outTangent = vec4(
+        model * vertex.tangent.xyz,
+        vertex.tangent.w * (determinant(model) < 0.0 ? -1.0 : 1.0));
     outColor = vertex.color * materialData.colorFactors;
     vec2 uvScale = materialData.uvTransform.xy;
     if (all(lessThan(abs(uvScale), vec2(0.0001)))) {

@@ -12,6 +12,7 @@ layout(location = 2) in vec2 inUV;
 layout(location = 3) in vec3 inWorldPosition;
 layout(location = 4) in vec4 inCurrentClip;
 layout(location = 5) in vec4 inPreviousClip;
+layout(location = 6) in vec4 inTangent;
 layout(location = 0) out vec4 outFragColor;
 layout(location = 1) out vec4 outAlbedo;
 layout(location = 2) out vec4 outVelocity;
@@ -36,14 +37,15 @@ void main()
         float gridLine = step(0.46, max(cell.x, cell.y));
         baseColor.rgb *= mix(checkerColor, vec3(0.04, 0.10, 0.16), gridLine);
     }
-    vec3 normal = normalize(inNormal);
+    vec3 geometricNormal = normalize(inNormal);
+    vec3 normal = material_shading_normal(geometricNormal, inTangent, inUV);
     MaterialSurface surface = material_surface(
         baseColor.rgb, inUV, normal, inWorldPosition);
     // Ambient light is deliberately left unshadowed; without it an occluded
     // surface would be pure black rather than merely out of the sun.  What it
     // does get is ambient occlusion, which asks the different question of how
     // much of the surrounding hemisphere nearby geometry blocks.
-    float visibility = sunlight_visibility(inWorldPosition, normal);
+    float visibility = sunlight_visibility(inWorldPosition, geometricNormal);
     float occlusion = ambient_occlusion(gl_FragCoord.xy);
     // Once SSGI is composited, the flat ambient stand-in risks counting the
     // same indirect light a second time, because a ray that leaves the depth
