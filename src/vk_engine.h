@@ -524,8 +524,6 @@ class VulkanEngine{
     void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
 
     private:
-        friend std::optional<std::vector<std::shared_ptr<MeshAsset>>> loadGltfMeshes(
-            VulkanEngine*, std::filesystem::path);
         friend std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
             VulkanEngine*, std::filesystem::path);
         friend struct LoadedGLTF;
