@@ -4,6 +4,7 @@
 // cannot drift away from the opaque one as the shading model grows.
 #include "input_structures.glsl"
 #include "alpha_mask.glsl"
+#include "material_brdf.glsl"
 
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec4 inColor;
@@ -36,8 +37,8 @@ void main()
         baseColor.rgb *= mix(checkerColor, vec3(0.04, 0.10, 0.16), gridLine);
     }
     vec3 normal = normalize(inNormal);
-    vec3 lightDirection = normalize(sceneData.sunlightDirection.xyz);
-    float diffuse = max(dot(normal, lightDirection), 0.0);
+    MaterialSurface surface = material_surface(
+        baseColor.rgb, inUV, normal, inWorldPosition);
     // Ambient light is deliberately left unshadowed; without it an occluded
     // surface would be pure black rather than merely out of the sun.  What it
     // does get is ambient occlusion, which asks the different question of how
@@ -55,21 +56,34 @@ void main()
     float ambientScale = sceneData.screenSpaceSettings.z > 0.5
         ? clamp(sceneData.indirectSettings.x, 0.0, 1.0)
         : 1.0;
-    vec3 ambient = sceneData.ambientColor.rgb * occlusion * ambientScale;
-    // The sun term is left alone: it already has its own visibility test, and
-    // scaling it here would darken contact points standing in full sunlight.
-    vec3 direct = visibility * diffuse * sceneData.sunlightColor.rgb;
-    if (sceneData.screenSpaceSettings.y > 0.5) {
-        direct = vec3(0.0);
-    }
-    vec3 lighting = ambient + direct;
+    vec3 ambientLight = sceneData.ambientColor.rgb * occlusion * ambientScale;
 
-    outFragColor = vec4(baseColor.rgb * lighting, 1.0);
-    outAlbedo = vec4(baseColor.rgb, 1.0);
+    // The sun term is left out of occlusion: it already has its own visibility
+    // test, and scaling it here would darken contact points in full sunlight.
+    vec3 directDiffuse;
+    vec3 directSpecular;
+    material_sun(surface, visibility, directDiffuse, directSpecular);
+    // SSGI supplies diffuse indirect light only, so the specular half of the
+    // ambient term is never counted twice.
+    vec3 ambientDiffuse;
+    vec3 ambientSpecular;
+    material_ambient(surface, ambientLight, ambientDiffuse, ambientSpecular);
+    vec3 emission = material_emission();
+
+    outFragColor = vec4(
+        directDiffuse + directSpecular + ambientDiffuse + ambientSpecular +
+            emission,
+        1.0);
+    // The SSGI composite multiplies filtered incident light by this.
+    outAlbedo = vec4(material_diffuse_albedo(surface), 1.0);
     vec2 currentUV = inCurrentClip.xy / max(inCurrentClip.w, 0.00001) * 0.5 + 0.5;
     vec2 previousUV = inPreviousClip.xy / max(inPreviousClip.w, 0.00001) * 0.5 + 0.5;
     // Add this displacement to a current UV to find the same point in the
     // previous frame.
     outVelocity = vec4(previousUV - currentUV, 0.0, 1.0);
-    outDirectLighting = vec4(baseColor.rgb * direct, 1.0);
+    // SSGI reads this as the radiance leaving a surface towards other
+    // surfaces.  Specular depends on the direction it leaves in, and only the
+    // camera's was evaluated, so it stays out; emission leaves in every
+    // direction and belongs here.
+    outDirectLighting = vec4(directDiffuse + emission, 1.0);
 }

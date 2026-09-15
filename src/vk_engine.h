@@ -259,6 +259,8 @@ struct SceneMaterialRuntime {
     glm::vec2 uvScale{1.0f};
     float metallic{0.0f};
     float roughness{0.8f};
+    // Emission colour times strength, as written to the material constants.
+    glm::vec4 emission{0.0f};
     bool debugChecker{false};
     bool initialized{false};
 };

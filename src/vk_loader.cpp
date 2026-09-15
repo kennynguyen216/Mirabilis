@@ -727,6 +727,14 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
             source != nullptr && source->normalTexture.has_value()
             ? static_cast<float>(source->normalTexture.value().scale)
             : 1.0f;
+        // The same radiance the path tracer's traceEmission carries below.
+        if (source != nullptr) {
+            constants.emission = glm::vec4(
+                source->emissiveFactor[0],
+                source->emissiveFactor[1],
+                source->emissiveFactor[2],
+                0.0f) * source->emissiveStrength.value_or(1.0f);
+        }
         materialConstants[index] = constants;
 
         GLTFMetallic_Roughness::MaterialResources resources{};

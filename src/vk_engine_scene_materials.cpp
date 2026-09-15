@@ -80,7 +80,9 @@ MaterialInstance* VulkanEngine::resolve_scene_material(const SceneObject& object
     runtime.material.traceEmission=glm::vec4(source.emissionColor*source.emissionStrength,0);
     runtime.material.traceParameters=glm::vec4(source.metallic,source.roughness,source.transmission,source.ior);
     runtime.material.traceUVScale=source.uvScale;
+    const glm::vec4 emission(source.emissionColor * source.emissionStrength, 0.0f);
     const bool changed = !runtime.initialized ||
+        !nearly_equal(runtime.emission, emission) ||
         runtime.texturePath != source.baseColorTexturePath ||
         !nearly_equal(runtime.colorTint, source.colorTint) ||
         !nearly_equal(runtime.uvScale, source.uvScale) ||
@@ -112,6 +114,7 @@ MaterialInstance* VulkanEngine::resolve_scene_material(const SceneObject& object
     constants->materialFlags = glm::vec4(
         0.0f, source.debugChecker ? 1.0f : 0.0f, 0.0f, 0.0f);
     constants->uvTransform = glm::vec4(source.uvScale, 0.0f, 0.0f);
+    constants->emission = emission;
 
     const AllocatedImage& colorImage =
         load_scene_texture(source.baseColorTexturePath);
@@ -148,6 +151,7 @@ MaterialInstance* VulkanEngine::resolve_scene_material(const SceneObject& object
     runtime.uvScale = source.uvScale;
     runtime.metallic = source.metallic;
     runtime.roughness = source.roughness;
+    runtime.emission = emission;
     runtime.debugChecker = source.debugChecker;
     runtime.initialized = true;
     return &runtime.material;
