@@ -1,0 +1,180 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Lumen-lite surface cache, checkpoint 6: bounce light for one card's texels.
+//
+// Each texel updated traces a few cosine-weighted rays through the scene
+// distance field.  A ray that hits reads the cache at the hit -- the radiance
+// leaving that surface, albedo * (direct + indirect) + emissive -- and a ray
+// that leaves the field reads the sky with the same policy SSGI misses use.
+// The mean is blended into this page, which holds incident radiance without
+// albedo, in the same convention as the direct page.
+//
+// Because the radiance read at a hit includes that surface's own indirect
+// term from earlier updates, every update carries light one bounce further:
+// multiple bounces without recursive tracing.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "scene_data.glsl"
+// Set 0 is the frame's scene set; the panorama is its binding 3.
+layout(set = 0, binding = 3) uniform sampler2D environmentTexture;
+#include "environment.glsl"
+
+layout(rgba16f, set = 1, binding = 0) uniform image2D indirectPage;
+layout(set = 1, binding = 1) uniform sampler2D cacheNormal;
+layout(set = 1, binding = 2) uniform sampler2D cacheDepth;
+layout(set = 1, binding = 3) uniform sampler2D cacheAlbedo;
+layout(set = 1, binding = 4) uniform sampler2D cacheEmissive;
+layout(set = 1, binding = 5) uniform sampler2D cacheDirect;
+layout(set = 1, binding = 6) uniform sampler3D sceneField;
+
+#define SURFACE_CACHE_SET 1
+#define SURFACE_CACHE_BINDING_CARDS 7
+#define SURFACE_CACHE_BINDING_GRID 8
+#define SURFACE_CACHE_BINDING_INDICES 9
+// Read from the page being written.  Other texels may or may not have been
+// updated yet this dispatch; either value is a valid previous estimate, and
+// the iteration converges from any order.
+#define SURFACE_CACHE_READ_INDIRECT(texel) imageLoad(indirectPage, texel).rgb
+#include "surface_cache_lookup.glsl"
+
+layout(push_constant) uniform constants {
+    // Rows of card -> world, as in surface_cache_direct.comp.
+    vec4 cardToWorld0;
+    vec4 cardToWorld1;
+    vec4 cardToWorld2;
+    // x, y, width, height of the card in atlas texels.
+    uvec4 rect;
+    // x = update index (seeds the rays), y = rays per texel, z = 1 to read
+    // only emitted and direct light at hits (a single bounce, for testing
+    // whether bounces compound).
+    uvec4 control;
+    // x = weight of the new estimate, y = maximum trace distance.
+    vec4 settings;
+} PushConstants;
+
+const float Pi = 3.14159265359;
+
+uint hash_uint(uint x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+float random01(inout uint state)
+{
+    state = hash_uint(state);
+    return float(state) / 4294967296.0;
+}
+
+vec3 cosine_direction(vec3 normal, inout uint state)
+{
+    float u1 = random01(state);
+    float u2 = random01(state);
+    float radius = sqrt(u1);
+    float angle = 2.0 * Pi * u2;
+    vec3 local = vec3(radius * cos(angle), radius * sin(angle), sqrt(1.0 - u1));
+    vec3 helper = abs(normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(helper, normal));
+    vec3 bitangent = cross(normal, tangent);
+    return normalize(tangent * local.x + bitangent * local.y + normal * local.z);
+}
+
+float field_distance(vec3 world)
+{
+    return textureLod(sceneField,
+        (world - fieldMin.xyz) / (fieldMax.xyz - fieldMin.xyz), 0.0).r;
+}
+
+vec3 field_normal(vec3 p)
+{
+    float h = fieldMin.w;
+    vec3 gradient = vec3(
+        field_distance(p + vec3(h, 0, 0)) - field_distance(p - vec3(h, 0, 0)),
+        field_distance(p + vec3(0, h, 0)) - field_distance(p - vec3(0, h, 0)),
+        field_distance(p + vec3(0, 0, h)) - field_distance(p - vec3(0, 0, h)));
+    return normalize(gradient + vec3(1e-8));
+}
+
+void main()
+{
+    uvec2 local = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(local, PushConstants.rect.zw))) {
+        return;
+    }
+    ivec2 texel = ivec2(PushConstants.rect.xy + local);
+    float depth = texelFetch(cacheDepth, texel, 0).r;
+    if (depth >= 1.0) {
+        return;
+    }
+
+    vec4 card = vec4((vec2(local) + 0.5) / vec2(PushConstants.rect.zw), depth, 1.0);
+    vec3 world = vec3(dot(PushConstants.cardToWorld0, card),
+                      dot(PushConstants.cardToWorld1, card),
+                      dot(PushConstants.cardToWorld2, card));
+    vec3 normal = normalize(texelFetch(cacheNormal, texel, 0).xyz * 2.0 - 1.0);
+
+    uint state = hash_uint(uint(texel.x) * 1973u ^ uint(texel.y) * 9277u ^
+                           PushConstants.control.x * 26699u);
+    float voxel = fieldMin.w;
+    float maxDistance = PushConstants.settings.y;
+    uint rays = max(PushConstants.control.y, 1u);
+    vec3 sum = vec3(0.0);
+    uint counted = 0u;
+    for (uint r = 0u; r < rays; ++r) {
+        vec3 direction = cosine_direction(normal, state);
+        vec3 origin = world + normal * (2.5 * voxel);
+
+        vec3 inverse = 1.0 / direction;
+        vec3 t0 = (fieldMin.xyz - origin) * inverse;
+        vec3 t1 = (fieldMax.xyz - origin) * inverse;
+        float tExit = min(min(min(max(t0.x, t1.x), max(t0.y, t1.y)),
+                              max(t0.z, t1.z)), maxDistance);
+        bool hit = false;
+        float t = 0.0;
+        for (int step = 0; step < 128 && t < tExit; ++step) {
+            float d = field_distance(origin + direction * t);
+            if (d < 0.25 * voxel) {
+                hit = true;
+                break;
+            }
+            t += max(d, 0.5 * voxel);
+        }
+
+        if (!hit) {
+            // Only a ray that actually left the field (or reached the trace
+            // distance) saw the sky.  One that ran out of steps is still
+            // inside -- the field's distances are truncated, so a long or
+            // grazing ray needs many -- and counting it as sky let daylight
+            // into a sealed room.
+            if (t >= tExit) {
+                sum += environment_radiance(direction);
+                ++counted;
+            }
+            continue;
+        }
+        vec3 p = origin + direction * t;
+        SurfaceCacheSample surface = surface_cache_lookup(p, field_normal(p));
+        if (surface.weight > 0.0) {
+            vec3 arriving = PushConstants.control.z != 0u
+                ? surface.direct : surface.direct + surface.indirect;
+            sum += surface.albedo * arriving + surface.emissive;
+            ++counted;
+        }
+        // A hit no card saw adds no sample rather than a black one: the
+        // surface is there, its light is just unknown, and counting it as
+        // zero would darken everything near the cache's coverage gaps.
+    }
+    if (counted == 0u) {
+        return;
+    }
+    vec3 estimate = sum / float(counted);
+    vec3 previous = imageLoad(indirectPage, texel).rgb;
+    imageStore(indirectPage, texel,
+        vec4(mix(previous, estimate, PushConstants.settings.x), 1.0));
+}
