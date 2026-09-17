@@ -9,6 +9,6 @@
   ],
   "authoredPortals": [],
   "referenceLighting": {"sunRadiance": [1, 1, 1], "environmentIntensity": 1, "blackEnvironment": false},
-  "lighting": {"skybox": "qwantani_noon", "sunDirection": [-0.449999988, 0.75, 0.349999994], "shadowsEnabled": true, "shadowRadius": 87.2730026, "shadowDepthBias": 0.00120000006, "shadowNormalBias": 0.150000006},
+  "lighting": {"skybox": "qwantani_noon", "sunDirection": [-0.449999988, 0.75, 0.349999994], "shadowsEnabled": true, "shadowRadius": 25.0, "shadowDepthBias": 0.00120000006, "shadowNormalBias": 0.150000006},
   "ssao": {"enabled": false, "radius": 0.75, "bias": 0.075000003, "intensity": 1, "power": 1.5}
 }
