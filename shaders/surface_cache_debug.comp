@@ -1,0 +1,66 @@
+#version 450
+
+// Shows one surface cache atlas page, fitted to the draw image.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rgba16f, set = 0, binding = 0) uniform image2D image;
+layout(set = 0, binding = 1) uniform sampler2D albedoPage;
+layout(set = 0, binding = 2) uniform sampler2D normalPage;
+layout(set = 0, binding = 3) uniform sampler2D emissivePage;
+layout(set = 0, binding = 4) uniform sampler2D depthPage;
+layout(set = 0, binding = 5) uniform sampler2D directPage;
+layout(set = 0, binding = 6) uniform sampler2D indirectPage;
+
+layout(push_constant) uniform constants {
+    // xy = draw extent, z = page (0 albedo, 1 normal, 2 emissive, 3 depth,
+    // 4 direct light, 5 lit direct only, 11 indirect light, 12 lit with
+    // indirect).
+    vec4 settings;
+} PushConstants;
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ivec2(PushConstants.settings.xy);
+    if (any(greaterThanEqual(pixel, size))) {
+        return;
+    }
+    ivec2 atlasSize = textureSize(albedoPage, 0);
+    // Fit the atlas inside the view, preserving its aspect ratio.
+    float scale = min(float(size.x) / float(atlasSize.x),
+                      float(size.y) / float(atlasSize.y));
+    vec2 offset = (vec2(size) - vec2(atlasSize) * scale) * 0.5;
+    ivec2 texel = ivec2(floor((vec2(pixel) + 0.5 - offset) / scale));
+    vec3 color = vec3(0.08, 0.02, 0.08);
+    if (all(greaterThanEqual(texel, ivec2(0))) && all(lessThan(texel, atlasSize))) {
+        float depth = texelFetch(depthPage, texel, 0).r;
+        bool captured = depth < 1.0;
+        int page = int(PushConstants.settings.z + 0.5);
+        if (!captured) {
+            color = vec3(0.0, 0.0, 0.12);
+        } else if (page == 0) {
+            color = texelFetch(albedoPage, texel, 0).rgb;
+        } else if (page == 1) {
+            color = texelFetch(normalPage, texel, 0).rgb;
+        } else if (page == 2) {
+            color = texelFetch(emissivePage, texel, 0).rgb;
+        } else if (page == 3) {
+            color = vec3(1.0 - depth);
+        } else if (page == 4) {
+            color = texelFetch(directPage, texel, 0).rgb;
+        } else if (page == 11) {
+            color = texelFetch(indirectPage, texel, 0).rgb;
+        } else if (page == 12) {
+            color = texelFetch(albedoPage, texel, 0).rgb *
+                (texelFetch(directPage, texel, 0).rgb +
+                 texelFetch(indirectPage, texel, 0).rgb) +
+                texelFetch(emissivePage, texel, 0).rgb;
+        } else {
+            color = texelFetch(albedoPage, texel, 0).rgb *
+                texelFetch(directPage, texel, 0).rgb +
+                texelFetch(emissivePage, texel, 0).rgb;
+        }
+    }
+    imageStore(image, pixel, vec4(color, 1.0));
+}

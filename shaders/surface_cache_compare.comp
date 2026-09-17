@@ -1,0 +1,168 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Lumen-lite checkpoint 5 check: looks the surface cache up at every visible
+// G-buffer position and compares its lighting with the raster pass's own
+// direct term.  The raster light arriving at a pixel is recovered as
+// directLighting / albedo, which is exact for the Lambert term both share.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rgba16f, set = 0, binding = 0) uniform image2D image;
+layout(set = 0, binding = 1) uniform sampler2D prepassDepth;
+layout(set = 0, binding = 2) uniform sampler2D prepassNormal;
+layout(set = 0, binding = 3) uniform sampler2D gbufferAlbedo;
+layout(set = 0, binding = 4) uniform sampler2D directLighting;
+layout(set = 0, binding = 5) uniform sampler2D cacheAlbedo;
+layout(set = 0, binding = 6) uniform sampler2D cacheEmissive;
+layout(set = 0, binding = 7) uniform sampler2D cacheDepth;
+layout(set = 0, binding = 8) uniform sampler2D cacheDirect;
+
+#define SURFACE_CACHE_SET 0
+#define SURFACE_CACHE_BINDING_CARDS 9
+#define SURFACE_CACHE_BINDING_GRID 10
+#define SURFACE_CACHE_BINDING_INDICES 11
+layout(set = 0, binding = 13) uniform sampler2D cacheIndirect;
+#define SURFACE_CACHE_READ_INDIRECT(texel) texelFetch(cacheIndirect, texel, 0).rgb
+#include "surface_cache_lookup.glsl"
+
+layout(set = 0, binding = 12) uniform sampler3D sceneField;
+
+float field_distance(vec3 world)
+{
+    return textureLod(sceneField, (world - fieldMin.xyz) / (fieldMax.xyz - fieldMin.xyz), 0.0).r;
+}
+
+// The same soft shadow march as surface_cache_direct.comp.
+float sun_visibility(vec3 origin, vec3 direction)
+{
+    vec3 inverse = 1.0 / direction;
+    vec3 t0 = (fieldMin.xyz - origin) * inverse;
+    vec3 t1 = (fieldMax.xyz - origin) * inverse;
+    float tExit = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
+    float voxel = fieldMin.w;
+    const float Softness = 8.0;
+    float visibility = 1.0;
+    float t = 0.0;
+    for (int step = 0; step < 96 && t < tExit; ++step) {
+        float d = field_distance(origin + direction * t);
+        if (d < 0.25 * voxel) {
+            return 0.0;
+        }
+        visibility = min(visibility, Softness * d / max(t, voxel));
+        t += max(d, 0.5 * voxel);
+    }
+    return clamp(visibility, 0.0, 1.0);
+}
+
+layout(push_constant) uniform constants {
+    mat4 inverseViewProjection;
+    // Rows of the view-to-world rotation, for the prepass's view-space normals.
+    vec4 viewToWorld0;
+    vec4 viewToWorld1;
+    vec4 viewToWorld2;
+    // xy = draw extent, z = mode (0 cache lit colour, 1 agreement colour,
+    // 2 data, 3 albedo data, 4 blocked sun ray hit positions), w = unused.
+    vec4 settings;
+} PushConstants;
+
+float luminance(vec3 c)
+{
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ivec2(PushConstants.settings.xy);
+    if (any(greaterThanEqual(pixel, size))) {
+        return;
+    }
+    int mode = int(PushConstants.settings.z + 0.5);
+    float depth = texelFetch(prepassDepth, pixel, 0).r;
+    if (depth <= 0.0) {
+        imageStore(image, pixel, mode == 2 ? vec4(-1.0, 0.0, 0.0, 1.0)
+                                           : vec4(0.02, 0.02, 0.03, 1.0));
+        return;
+    }
+    vec2 ndc = (vec2(pixel) + 0.5) / vec2(size) * 2.0 - 1.0;
+    vec4 world = PushConstants.inverseViewProjection * vec4(ndc, depth, 1.0);
+    world.xyz /= world.w;
+    vec3 viewNormal = normalize(texelFetch(prepassNormal, pixel, 0).xyz);
+    vec3 normal = normalize(vec3(
+        dot(PushConstants.viewToWorld0.xyz, viewNormal),
+        dot(PushConstants.viewToWorld1.xyz, viewNormal),
+        dot(PushConstants.viewToWorld2.xyz, viewNormal)));
+
+    SurfaceCacheSample cache = surface_cache_lookup(world.xyz, normal);
+    vec3 albedo = texelFetch(gbufferAlbedo, pixel, 0).rgb;
+    float albedoLuminance = luminance(albedo);
+    float rasterLight = albedoLuminance > 0.05
+        ? luminance(texelFetch(directLighting, pixel, 0).rgb) / albedoLuminance
+        : -1.0;
+    float cacheLight = luminance(cache.direct);
+
+    if (mode == 4) {
+        // For pixels the raster pass lights but whose sun ray the field
+        // blocks: the world position of that blocking hit.  Every other
+        // pixel stores -9999.  Marching from the true surface position
+        // separates a field that occludes wrongly from cache texels with
+        // wrong positions, and the hit positions locate the occluder.
+        vec3 sun = normalize(sunDirection.xyz);
+        vec3 blocked = vec3(-9999.0);
+        if (rasterLight > 0.1) {
+            vec3 origin = world.xyz + normal * (2.5 * fieldMin.w);
+            vec3 inverse = 1.0 / sun;
+            vec3 t0 = (fieldMin.xyz - origin) * inverse;
+            vec3 t1 = (fieldMax.xyz - origin) * inverse;
+            float tExit = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
+            float t = 0.0;
+            for (int step = 0; step < 96 && t < tExit; ++step) {
+                float d = field_distance(origin + sun * t);
+                if (d < 0.25 * fieldMin.w) {
+                    blocked = origin + sun * t;
+                    break;
+                }
+                t += max(d, 0.5 * fieldMin.w);
+            }
+        }
+        imageStore(image, pixel, vec4(blocked, 1.0));
+        return;
+    }
+    if (mode == 3) {
+        // r = found, g = cache albedo, b = G-buffer albedo (luminance): a
+        // lookup that lands on the right surface reads the same material.
+        imageStore(image, pixel, vec4(cache.weight > 0.0 ? 1.0 : 0.0,
+                                      luminance(cache.albedo), albedoLuminance, 1.0));
+        return;
+    }
+    if (mode == 2) {
+        // r = lookup found (1) or not (0), g = cache light, b = raster light
+        // (negative where albedo is too dark to recover it).
+        imageStore(image, pixel, vec4(cache.weight > 0.0 ? 1.0 : 0.0,
+                                      cacheLight, rasterLight, 1.0));
+        return;
+    }
+    if (mode == 0) {
+        vec3 lit = cache.weight > 0.0
+            ? cache.albedo * (cache.direct + cache.indirect) + cache.emissive
+            : vec3(1.0, 0.0, 1.0);
+        imageStore(image, pixel, vec4(lit, 1.0));
+        return;
+    }
+    // Agreement: magenta no card, grey albedo too dark to judge, green both
+    // lit or both shadowed, red cache lit where raster is shadowed, blue the
+    // reverse.
+    vec3 color;
+    if (cache.weight <= 0.0) {
+        color = vec3(1.0, 0.0, 1.0);
+    } else if (rasterLight < 0.0) {
+        color = vec3(0.3);
+    } else {
+        bool cacheLit = cacheLight > 0.1;
+        bool rasterLit = rasterLight > 0.1;
+        color = cacheLit == rasterLit ? vec3(0.1, 0.75, 0.2)
+            : (cacheLit ? vec3(0.9, 0.15, 0.1) : vec3(0.15, 0.3, 1.0));
+    }
+    imageStore(image, pixel, vec4(color, 1.0));
+}

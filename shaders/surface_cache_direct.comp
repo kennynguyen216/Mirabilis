@@ -1,0 +1,101 @@
+#version 450
+
+// Lumen-lite surface cache, checkpoint 5: direct sunlight for one card's
+// texels.  Stores the light arriving at each captured surface point,
+// sunColor * N.L * visibility, without albedo, so the same page serves the
+// Lambert term the forward pass computes (baseColor * that) and later the
+// radiosity that multiplies by albedo once more per bounce.
+//
+// Visibility comes from a soft shadow march through the scene distance field,
+// not the shadow map: the map only covers the region around the camera, and
+// cache texels anywhere in the scene need lighting.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(rgba16f, set = 0, binding = 0) uniform image2D directPage;
+layout(set = 0, binding = 1) uniform sampler2D normalPage;
+layout(set = 0, binding = 2) uniform sampler2D depthPage;
+// Scene distance field, world units, truncated.  See sdf_composite.comp.
+layout(set = 0, binding = 3) uniform sampler3D sceneField;
+
+layout(push_constant) uniform constants {
+    // Rows of card -> world: input (u, v, depth, 1) with u and v across the
+    // card in [0, 1] and depth as stored in the depth page.
+    vec4 cardToWorld0;
+    vec4 cardToWorld1;
+    vec4 cardToWorld2;
+    // x, y, width, height of the card in atlas texels.
+    uvec4 rect;
+    // xyz = direction toward the sun, w = 1 when the field may cast shadows.
+    vec4 sunDirection;
+    // rgb = sun colour, w = unused.
+    vec4 sunColor;
+    // xyz = scene field minimum corner, w = field voxel size.
+    vec4 fieldMin;
+    // xyz = scene field maximum corner, w = unused.
+    vec4 fieldMax;
+} PushConstants;
+
+float field_distance(vec3 world)
+{
+    vec3 uvw = (world - PushConstants.fieldMin.xyz) /
+        (PushConstants.fieldMax.xyz - PushConstants.fieldMin.xyz);
+    return textureLod(sceneField, uvw, 0.0).r;
+}
+
+// Soft shadow: the closest the ray passes to any surface, relative to how far
+// along it is, gives a penumbra without extra rays.
+float sun_visibility(vec3 origin, vec3 direction)
+{
+    vec3 inverse = 1.0 / direction;
+    vec3 t0 = (PushConstants.fieldMin.xyz - origin) * inverse;
+    vec3 t1 = (PushConstants.fieldMax.xyz - origin) * inverse;
+    float tExit = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
+    float voxel = PushConstants.fieldMin.w;
+    const float Softness = 8.0;
+    float visibility = 1.0;
+    float t = 0.0;
+    for (int step = 0; step < 96 && t < tExit; ++step) {
+        float d = field_distance(origin + direction * t);
+        if (d < 0.25 * voxel) {
+            return 0.0;
+        }
+        visibility = min(visibility, Softness * d / max(t, voxel));
+        t += max(d, 0.5 * voxel);
+    }
+    return clamp(visibility, 0.0, 1.0);
+}
+
+void main()
+{
+    uvec2 local = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(local, PushConstants.rect.zw))) {
+        return;
+    }
+    ivec2 texel = ivec2(PushConstants.rect.xy + local);
+    float depth = texelFetch(depthPage, texel, 0).r;
+    if (depth >= 1.0) {
+        imageStore(directPage, texel, vec4(0.0));
+        return;
+    }
+
+    vec4 card = vec4((vec2(local) + 0.5) / vec2(PushConstants.rect.zw), depth, 1.0);
+    vec3 world = vec3(dot(PushConstants.cardToWorld0, card),
+                      dot(PushConstants.cardToWorld1, card),
+                      dot(PushConstants.cardToWorld2, card));
+    vec3 normal = normalize(texelFetch(normalPage, texel, 0).xyz * 2.0 - 1.0);
+    vec3 lightDirection = normalize(PushConstants.sunDirection.xyz);
+    float noL = dot(normal, lightDirection);
+    vec3 light = vec3(0.0);
+    if (noL > 0.0) {
+        float visibility = 1.0;
+        if (PushConstants.sunDirection.w > 0.5) {
+            // Start clear of the surface's own shell, which sits up to half a
+            // bake voxel in front of it, and of the field's own voxel.
+            vec3 origin = world + normal * (2.5 * PushConstants.fieldMin.w);
+            visibility = sun_visibility(origin, lightDirection);
+        }
+        light = PushConstants.sunColor.rgb * noL * visibility;
+    }
+    imageStore(directPage, texel, vec4(light, 1.0));
+}
