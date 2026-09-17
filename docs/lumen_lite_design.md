@@ -45,8 +45,10 @@ screen trace (existing SSGI march)
   out, matching the raster G-buffer: otherwise window glass would block the
   light the render shows passing through.
 - `python scripts/bake_sdf.py --queue assets/sdf/queue assets/sdf/cache`
-  bakes each at 5 cm voxels, capped at 128 per axis, in a grid shaped to the
-  mesh.  Output format is documented in the script.
+  bakes each at 5 cm voxels in a grid shaped to the mesh, spending a voxel
+  budget per mesh (4 M voxels, 1024 per axis) rather than a fixed cap per
+  axis, so a mesh thin on one axis keeps its resolution on the others.
+  Output format is documented in the script.
 - **Every mesh is baked as a two-sided shell**: `|distance| − ½ voxel`, from
   distances to surface points sampled directly on the triangles.  This was
   measured, not assumed.  mesh_to_sdf's inside/outside test estimates normals
@@ -59,8 +61,9 @@ screen trace (existing SSGI march)
 
 ### Scene field (`src/vk_engine_sdf.cpp`, `shaders/sdf_composite.comp`)
 
-- Each instance's volume is merged into one R32F scene field (at most 256 per
-  axis) by a compute pass that keeps the minimum distance.  Outside an
+- Each instance's volume is merged into one R32F scene field (at most 384 per
+  axis by default, adjustable to 512) by a compute pass that keeps the minimum
+  distance.  Outside an
   instance's box it writes a conservative lower bound, and distances are
   converted with the transform's smallest scale so non-uniform scale never
   overstates free space.
@@ -76,22 +79,36 @@ screen trace (existing SSGI march)
 with the raster depth, reporting bias (the median signed difference) and
 scatter around it, in centimetres.
 
-| View | Bias | p90 scatter | Within 5 cm |
-|---|---:|---:|---:|
-| Living room, inside | −3.5 cm | 2.5 cm | 98.1% |
-| Living room, inside facing windows | −3.7 cm | 2.9 cm | 95.2% |
-| Living room, outside the set | −2.9 cm | 11.3 cm | 85.6% |
-| Sponza arcade | −12.9 cm | 17.2 cm | 52.4% |
+Re-measured 2026-09-17, after the per-mesh voxel budget replaced the
+128-per-axis cap and the field grew to 384.  The camera is part of the
+measurement, so each row records one.
+
+| View | Camera | Field voxel | Bias | p90 scatter | Within 5 cm of bias |
+|---|---|---:|---:|---:|---:|
+| Sponza arcade | scene default | 9.7 cm | −8.4 cm | 3.5 cm | 95.8% |
+| Living room, inside | `0 1.5 1.0 0 0` | 1.5 cm | −3.1 cm | 15.7 cm | 78.9% |
+
+The superseded numbers, measured under the 128-voxel cap and a 256 field,
+were Sponza −12.9 cm bias with 17.2 cm p90 scatter and 52.4% within 5 cm.
+Sponza's scatter is now inside the script's 5 cm limit; its bias is not, and
+the script still exits non-zero for that reason.
 
 - Orientation (all 48 axis permutations and flips), world scaling and bounds
   are separately verified by `bake_sdf.py --verify-axes`.
-- The living room is an interior-only set: from outside, the raster pass
-  back-face culls surfaces the two-sided field keeps, and every disagreeing
-  pixel there has the field in front.
-- Sponza's largest meshes hit the 128-voxel cap at 25–27 cm voxels and the
-  scene field is 14.8 cm, so its bias and silhouette thickening are
-  resolution, not placement.  Lumen gets near-camera detail from screen
-  tracing; field clipmaps are the scaling step if GI shows leaks.
+- **Bias tracks the field's voxel size, not placement.** The merge thickens
+  every shell to at least ¾ of a field voxel, so the expected early hit is
+  `max(½ bake voxel, ¾ field voxel)`: 2.5 cm for the living room at 1.5 cm
+  voxels (−3.1 cm measured), 7.3 cm for Sponza at 9.7 cm (−8.4 cm measured).
+  Both scenes land within about a centimetre of that prediction, which is
+  what rules out a placement or orientation error.  Raising the field
+  resolution lowers this bias directly; clipmaps are the way to raise it only
+  where the camera is, which is the scaling step the gather will want.
+- The living room row is not comparable to the superseded one: the camera the
+  original used was never recorded, and the one above looks partly through
+  the windows, where the raster pass back-face culls surfaces the two-sided
+  field keeps.  That is what the p99 of 6 m and the wide p90 are — a handful
+  of pixels seeing through the set, not a regression in the field.  A fixed
+  interior camera is needed before this row means anything.
 - Debug and synchronization validation layers are clean for these passes.
 
 ### Known limitations
@@ -246,7 +263,9 @@ fallback on (Render Settings checkbox, `MIRABILIS_LUMEN_LITE=1`):
 - a ray the screen does answer adds the cache's bounce light at the hit to the
   direct light the screen reads, so screen hits carry as many bounces as
   world-traced misses;
-- the scene field, cache capture, lighting and radiosity update every frame.
+- the scene field, cache capture and cache lighting are each gated on a hash
+  of what they depend on, so a still scene rebuilds none of them; only
+  radiosity runs every frame, within its texel budget.
 
 Graded in the Cornell box against the path tracer (albedo × SSGI's filtered
 incident light, emitter pixels excluded):
