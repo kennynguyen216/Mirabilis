@@ -50,3 +50,9 @@ __pycache__/
 # Local software-tracing checkpoints, logs and GPU captures
 /tmp/gi-checkpoints/
 /tmp/material-baseline/
+
+# Baked distance fields: regenerate with scripts/bake_sdf.py
+assets/sdf/
+
+# Scratch output from GI comparison runs
+tmp/

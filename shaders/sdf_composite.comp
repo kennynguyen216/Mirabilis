@@ -1,0 +1,72 @@
+#version 450
+
+// Lumen-lite scene distance field: merges one mesh instance's baked volume
+// into the scene-wide field.  Run once per instance over just the voxels its
+// volume can affect; every voxel keeps the smallest distance any instance
+// gives it, which is the union of all the meshes.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+// Distance to the nearest surface in world units, negative inside, clamped
+// to at most the stored maximum.  Cleared to that maximum before the first
+// instance is merged.
+layout(r32f, set = 0, binding = 0) uniform image3D sceneField;
+// The instance's mesh volume, in the mesh's own local units.
+layout(set = 0, binding = 1) uniform sampler3D meshVolume;
+
+layout(push_constant) uniform constants {
+    // Rows of the instance's world-to-local transform.
+    vec4 worldToLocal0;
+    vec4 worldToLocal1;
+    vec4 worldToLocal2;
+    // xyz = mesh volume bounds in local space,
+    // w = world units per local unit, the smallest the transform gives.
+    vec4 volumeMin;
+    // xyz = mesh volume bounds in local space, w = maximum stored distance.
+    vec4 volumeMax;
+    // xyz = world position of the scene field's minimum corner,
+    // w = scene field voxel size.
+    vec4 fieldOrigin;
+    // First voxel of the region this dispatch covers.
+    ivec3 regionOffset;
+    // World distance by which this instance's shell is thickened; see
+    // update_scene_sdf.
+    float shellPad;
+    // xyz = voxel count of that region.
+    ivec4 regionSize;
+} PushConstants;
+
+void main()
+{
+    ivec3 local = ivec3(gl_GlobalInvocationID);
+    if (any(greaterThanEqual(local, PushConstants.regionSize.xyz))) {
+        return;
+    }
+    ivec3 voxel = PushConstants.regionOffset + local;
+
+    vec4 world = vec4(PushConstants.fieldOrigin.xyz +
+        (vec3(voxel) + 0.5) * PushConstants.fieldOrigin.w, 1.0);
+    vec3 p = vec3(dot(PushConstants.worldToLocal0, world),
+                  dot(PushConstants.worldToLocal1, world),
+                  dot(PushConstants.worldToLocal2, world));
+
+    // Inside the baked box the volume answers directly.  Outside it, two
+    // lower bounds on the true distance both hold: the distance to the box
+    // (the mesh is inside it), and the distance stored at the nearest box
+    // point minus how far away that point is.  The larger is kept, so the
+    // field never claims more empty space than there is.
+    vec3 lo = PushConstants.volumeMin.xyz;
+    vec3 hi = PushConstants.volumeMax.xyz;
+    vec3 clamped = clamp(p, lo, hi);
+    float outside = length(p - clamped);
+    float stored = textureLod(meshVolume, (clamped - lo) / (hi - lo), 0.0).r;
+    float distanceLocal = outside > 0.0 ? max(outside, stored - outside) : stored;
+
+    // Converting with the transform's smallest scale keeps a non-uniformly
+    // scaled mesh's distance a lower bound; for uniform scale it is exact.
+    float distanceWorld = distanceLocal * PushConstants.volumeMin.w - PushConstants.shellPad;
+    distanceWorld = min(distanceWorld, PushConstants.volumeMax.w);
+
+    float existing = imageLoad(sceneField, voxel).r;
+    imageStore(sceneField, voxel, vec4(min(existing, distanceWorld), 0.0, 0.0, 1.0));
+}
