@@ -3,13 +3,119 @@
 ## Document status
 
 **Status:** Checkpoints 1–7 implemented and measured against exact
-references: Lumen-lite diffuse GI runs end to end.
+references: Lumen-lite diffuse GI runs end to end.  **Interiors currently
+render about 3.8× brighter than a path-traced reference** — see *Start here*
+below before building anything new.
 **Date:** 2026-09-17
 **Supersedes:** the 3D fallback tier of
 [hybrid_ray_traced_gi_design.md](hybrid_ray_traced_gi_design.md), which
 traced triangles through a BVH or ray queries.  This project follows Unreal's
 Lumen instead: screen tracing first, then mesh distance fields, with surface
 colour and lighting read from a surface cache.
+
+## Start here
+
+Read this section before changing anything. It records what the last session
+established, what it ruled out, and what to work on next. Everything in it is
+measured; where something is a guess it says so.
+
+### The next job: interiors are ~3.8× too bright
+
+Measured in the living room, at the camera below, against a 400-sample path
+trace of the same view (interior pixels only, windows excluded):
+
+| Render | Interior vs reference |
+|---|---:|
+| Peak preset (8 rays, full res) | 3.84× |
+| Balanced preset (2 rays, half res) | 3.71× |
+| SSGI off entirely | floor region 6.4× |
+
+This is a scale error, not a sampling error. It is present **with GI switched
+off**, so it does not originate in the gather, the cache or the field. The
+leading suspect is the forward pass's IBL ambient being applied without any
+occlusion term: every surface receives full sky irradiance whether or not it
+can see sky, and the living room scene has SSAO disabled. `ambientRetention`
+(default 0.5) is a slider that exists to fudge exactly this.
+
+The cache's new sky pass already computes the missing quantity per texel — how
+much sky a point can see, by a march through the scene field. The same idea
+applied to the raster ambient term is the obvious fix to try first.
+
+**Before trusting 3.8× precisely:** the software path tracer lights its misses
+from the analytic gradient rather than the HDR panorama, so the two are not in
+environment parity. `traceEnvironmentMap` exists to match them. A gap this
+large is not explained by that, but the comparison should be re-run matched
+before the number is quoted as exact.
+
+### Settled, do not re-investigate
+
+- **The dark ceiling in the living room is correct.** It measures 1.08× a
+  400-sample path trace. The room is genuinely dark: the floor is wood with
+  albedo 0.27/0.15/0.09, reflecting about 17%, and the ceiling is lit almost
+  entirely by bounce from it. A whole session was spent hunting a bug here
+  that does not exist.
+- **The dotted lines along mouldings and window bars are geometric aliasing,
+  not GI.** They appear identically with SSGI disabled (4606 edge pixels off,
+  4844 on) and full resolution does not remove them. Those lips are about a
+  pixel wide, so FXAA cannot recover them. Fixing them means temporal
+  anti-aliasing or supersampling, in the raster path, not here. Toggling GI
+  changes the brightness around them, which is why they look GI-related.
+- **Ray count is not the current bottleneck.** Peak does 16× Balanced's work
+  (8 rays at full resolution against 2 at half) for 3.84× vs 3.71× against the
+  reference and 7.0% vs 7.3% speckle. Until the brightness error is resolved,
+  spending rays — including building screen probes — is premature.
+
+### Tried and reverted; the measurement is in the commit history
+
+Each of these was implemented, measured and reverted. Do not retry without a
+new reason:
+
+- Widening the temporal history clamp: no measurable change.
+- Firefly suppression by `1/(1 + luminance)`: no change. The raw samples max
+  out at 0.383 with a median of 0.0023 — there are no bright outliers to
+  suppress. The speckle is large *relative* variation in a very dim signal.
+- The same weighting made relative to each pixel's mean: removed 43% of the
+  indirect light, left speckle identical, made outliers worse.
+- Reading full cache radiance on screen hits instead of the screen's direct
+  buffer plus cache indirect: lost light (indirect 0.0110 → 0.0085). The
+  cache's card-resolution direct light is dimmer than the screen's
+  shadow-mapped direct buffer.
+- Averaging the bilateral upsample's fallback neighbourhood rather than taking
+  the nearest sample: no change; that branch almost never fires.
+- Dropping the SSGI start offset from 8 cm to 5 mm: indirect +3.6%, speckle
+  unchanged. Arguably more correct, not a fix for anything.
+
+### How to measure anything here
+
+Guessing from the code failed repeatedly last session; measuring first
+succeeded every time. The tools:
+
+- **Press F9 in the running engine** to print the current camera as a
+  `MIRABILIS_TEST_CAMERA` string. An artifact visible from one viewpoint
+  cannot be measured from a guessed one.
+- Cameras that are actually useful (scene defaults are not — Sponza's faces a
+  wall):
+
+  | View | Camera |
+  |---|---|
+  | Living room, interior | `'0 1.6 -3 0 3.14'` |
+  | Living room, window corner | `'2.217 1.587 -0.677 0.216 -4.115'` |
+  | Sponza arcade | `'0 10 0 -0.5 0'` |
+  | Cornell box | `'0 2 3.5 0 0'` |
+
+- A headless capture: `MIRABILIS_TEST_SCENE`, `MIRABILIS_TEST_FRAMES`,
+  `MIRABILIS_TEST_CAMERA`, `MIRABILIS_RASTER_CAPTURE` (which appends `.pfm`).
+  `MIRABILIS_TEST_TRACE=1` with `MIRABILIS_CAPTURE` gives the path-traced
+  reference; 400 frames accumulate 400 samples.
+- **PFM rows run bottom to top.** Flip before indexing regions, and confirm
+  each region against the albedo debug view (`MIRABILIS_RENDER_DEBUG_VIEW=8`)
+  before trusting a number. An unflipped array produced a confident, entirely
+  wrong account of which surfaces had gained light.
+- Debug views that answered real questions: 8 albedo (is it dark paint or
+  missing light), 12 SSGI raw (is it noise or a denoiser problem), 18 filtered,
+  31 surface cache atlas with `MIRABILIS_SURFACE_CACHE_PAGE`.
+- Compare against a reference, not against the previous build. The reference
+  settled in one run what five hypotheses could not.
 
 ## Why a distance field and a surface cache
 
@@ -284,7 +390,28 @@ clean in the Cornell box and the living room.
 
 ## Next
 
-- Close the remaining gap to the path tracer (cache ~12%, gather ~11% more):
-  glossy energy, false screen hits, filter bias.
-- Coverage: depth-peeled card layers for concave meshes (Sponza ~89%).
-- Reflections, HZB screen tracing, field clipmaps, VRAM (Sponza atlas ~1 GB).
+In order. The first item blocks meaningful judgement of everything below it,
+because a 3.8× scale error swamps every other difference.
+
+1. **Resolve the interior brightness error** (see *Start here*). Re-run the
+   comparison with environment policies matched, then occlude the raster
+   ambient term. Expect `ambientRetention` to fall toward zero once the bounce
+   chain is carrying the light the fudge was standing in for.
+2. **Re-grade every scene against a reference afterwards.** The Cornell box
+   numbers below were measured before the sky entered the cache and before
+   this error was known.
+3. **Anti-aliasing**, if the moulding stipple matters for how the renderer
+   looks. It is a raster-path job — the velocity buffer and temporal
+   reprojection TAA needs already exist, built for SSGI.
+4. **Then** the architectural work, in this order: screen probes (importance
+   sampling, per-probe accumulation), HZB screen tracing, field clipmaps,
+   world radiance cache, reflections. Each needs a written acceptance
+   measurement before it starts, as checkpoints 1–7 had.
+5. Coverage: depth-peeled card layers for concave meshes (Sponza ~89%). Do it
+   when missing coverage visibly limits results.
+6. VRAM: the Sponza atlas is ~1 GB, on a 6 GB laptop card. Measure before
+   optimising.
+
+Checkpoint 8 is not written yet. Whatever it turns out to be, it needs the
+same thing the earlier checkpoints had and this document lost for a while: a
+reference measurement decided in advance, and a camera recorded beside it.
