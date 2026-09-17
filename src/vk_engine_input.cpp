@@ -39,6 +39,19 @@ bool VulkanEngine::process_event(const SDL_Event& e)
         set_editor_mode(!_editorMode);
     }
 
+    // F9 prints the current view as a MIRABILIS_TEST_CAMERA string.  A bug
+    // that only appears from one viewpoint cannot be measured until a
+    // headless capture can stand exactly where the eye that found it stood,
+    // and reading five numbers back off the screen is how they get there.
+    if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F9 &&
+        e.key.repeat == 0) {
+        const Camera& view = _editorMode ? _editorCamera : mainCamera;
+        fmt::print(
+            "MIRABILIS_TEST_CAMERA='{:.3f} {:.3f} {:.3f} {:.3f} {:.3f}'\n",
+            view.position.x, view.position.y, view.position.z,
+            view.pitch, view.yaw);
+    }
+
     // Handle this before the gameplay WASD code below.  Without
     // consuming the event, the S in Ctrl+S also starts backward
     // movement for one frame (or while the key is held).
