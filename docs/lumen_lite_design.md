@@ -113,7 +113,7 @@ succeeded every time. The tools:
   wrong account of which surfaces had gained light.
 - Debug views that answered real questions: 8 albedo (is it dark paint or
   missing light), 12 SSGI raw (is it noise or a denoiser problem), 18 filtered,
-  31 surface cache atlas with `MIRABILIS_SURFACE_CACHE_PAGE`.
+  29 surface cache atlas with `MIRABILIS_SURFACE_CACHE_PAGE`.
 - Compare against a reference, not against the previous build. The reference
   settled in one run what five hypotheses could not.
 

@@ -836,6 +836,7 @@ class VulkanEngine{
         // Rebuilds and recaptures the surface cache when the opaque instances
         // change.
         void update_surface_cache();
+        void measure_surface_cache_shadows();
         void draw_surface_cache_debug(VkCommandBuffer cmd);
         void draw_surface_cache_settings();
         // Reads back the card depth page and reports what fraction of each
@@ -845,6 +846,7 @@ class VulkanEngine{
         void light_surface_cache();
         // Card and card-grid storage buffers for looking the cache up at an
         // arbitrary world position.
+        void measure_surface_cache_coverage();
         void build_surface_cache_lookup();
         // One budgeted radiosity update: the next cards in round-robin order
         // trace bounce rays and blend the result into the indirect page.
@@ -1382,6 +1384,8 @@ class VulkanEngine{
             // 5 lit (albedo x direct + emissive); looked up at the G-buffer:
             // 6 cache lit, 7 lit/shadow agreement with raster, 8 data.
             int debugPage{0};
+            bool measureCoverage{false};
+            bool measureShadows{false};
             bool radiosityEnabled{true};
             uint32_t radiosityCursor{0};
             // Per card: how many radiosity updates it has had since the last

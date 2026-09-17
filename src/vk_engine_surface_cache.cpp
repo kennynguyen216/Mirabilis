@@ -6,8 +6,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <random>
 
 #include <glm/gtc/matrix_access.hpp>
+#include <glm/gtc/packing.hpp>
 
 #include "imgui.h"
 
@@ -348,9 +350,15 @@ void VulkanEngine::init_surface_cache_resources()
     if (const char* page = SDL_getenv("MIRABILIS_SURFACE_CACHE_PAGE")) {
         _surfaceCache.debugPage = std::clamp(std::atoi(page), 0, 12);
     }
+    if (SDL_getenv("MIRABILIS_SURFACE_CACHE_COVERAGE")) {
+        _surfaceCache.measureCoverage = true;
+    }
     if (const char* radiosity = SDL_getenv("MIRABILIS_SURFACE_CACHE_RADIOSITY")) {
         _surfaceCache.radiosityEnabled = std::atoi(radiosity) != 0;
         _surfaceCache.singleBounce = std::atoi(radiosity) == 2;
+    }
+    if (SDL_getenv("MIRABILIS_SURFACE_CACHE_SHADOW_CHECK")) {
+        _surfaceCache.measureShadows = true;
     }
 }
 
@@ -642,6 +650,13 @@ void VulkanEngine::update_surface_cache()
     _surfaceCache.cardUpdates.assign(_surfaceCache.cards.size(), 0);
     build_surface_cache_lookup();
     light_surface_cache();
+
+    if (_surfaceCache.measureCoverage) {
+        measure_surface_cache_coverage();
+    }
+    if (_surfaceCache.measureShadows) {
+        measure_surface_cache_shadows();
+    }
 }
 
 void VulkanEngine::light_surface_cache()
@@ -767,6 +782,161 @@ void VulkanEngine::light_surface_cache()
         std::chrono::steady_clock::now() - started).count();
     fmt::print("Surface cache lit: {} cards in {:.0f} ms\n",
         cards.size(), _surfaceCache.lightingMilliseconds);
+}
+
+void VulkanEngine::measure_surface_cache_coverage()
+{
+    if (!_surfaceCache.valid) {
+        return;
+    }
+    const glm::uvec2 size = _surfaceCache.atlasSize;
+    const size_t texels = size_t(size.x) * size.y;
+
+    VK_CHECK(vkDeviceWaitIdle(_device));
+    AllocatedBuffer readback = create_buffer(texels * sizeof(uint16_t),
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
+    immediate_submit([&](VkCommandBuffer cmd) {
+        vkutil::transition_image(cmd, _surfaceCache.depth.image,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {size.x, size.y, 1};
+        vkCmdCopyImageToBuffer(cmd, _surfaceCache.depth.image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1, &copy);
+        vkutil::transition_image(cmd, _surfaceCache.depth.image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+    void* mapped = nullptr;
+    VK_CHECK(vmaMapMemory(_allocator, readback.allocation, &mapped));
+    vmaInvalidateAllocation(_allocator, readback.allocation, 0, VK_WHOLE_SIZE);
+    const auto* packed = static_cast<const uint16_t*>(mapped);
+    const auto depthAt = [&](uint32_t x, uint32_t y) {
+        return glm::unpackHalf1x16(packed[size_t(y) * size.x + x]);
+    };
+
+    // Sample points uniformly over each instance's opaque surface area and
+    // ask whether any card facing that point recorded a surface at its depth.
+    std::mt19937 generator(0xCA4D5EEDu);
+    std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+    struct InstanceCoverage {
+        size_t instance;
+        double area;
+        double covered;
+    };
+    std::vector<InstanceCoverage> results;
+    double totalArea = 0.0;
+    double totalCovered = 0.0;
+    std::vector<std::vector<size_t>> cardsByInstance(_surfaceCache.instances.size());
+    for (size_t i = 0; i < _surfaceCache.cards.size(); ++i) {
+        cardsByInstance[_surfaceCache.cards[i].instance].push_back(i);
+    }
+    constexpr int SamplesPerTriangleCap = 64;
+    for (size_t instanceIndex = 0; instanceIndex < _surfaceCache.instances.size(); ++instanceIndex) {
+        const SceneOpaqueInstance& instance = _surfaceCache.instances[instanceIndex];
+        auto sourceIt = _traceMeshSources.find(instance.address);
+        auto source = sourceIt == _traceMeshSources.end() ? nullptr : sourceIt->second.lock();
+        if (!source) {
+            continue;
+        }
+        const glm::mat3 linear(instance.transform);
+        double instanceArea = 0.0;
+        double instanceCovered = 0.0;
+        for (const RenderObject& draw : instance.draws) {
+            const size_t end = std::min(
+                source->indices.size(), size_t(draw.firstIndex) + draw.indexCount);
+            for (size_t t = draw.firstIndex; t + 2 < end; t += 3) {
+                const uint32_t ia = source->indices[t];
+                const uint32_t ib = source->indices[t + 1];
+                const uint32_t ic = source->indices[t + 2];
+                if (std::max({ia, ib, ic}) >= source->vertices.size()) {
+                    continue;
+                }
+                const glm::vec3 a = source->vertices[ia].position;
+                const glm::vec3 b = source->vertices[ib].position;
+                const glm::vec3 c = source->vertices[ic].position;
+                const glm::vec3 localCross = glm::cross(b - a, c - a);
+                const float worldArea = 0.5f * glm::length(
+                    glm::cross(linear * (b - a), linear * (c - a)));
+                if (worldArea <= 0.0f || glm::dot(localCross, localCross) <= 0.0f) {
+                    continue;
+                }
+                // Vertex normals decide which cards may see the point, the
+                // same test the capture shader applies.
+                const glm::vec3 normal =
+                    source->vertices[ia].normal + source->vertices[ib].normal +
+                    source->vertices[ic].normal;
+                // One sample per texel's worth of area, at least one.
+                const float texelArea = _surfaceCache.texelSize * _surfaceCache.texelSize;
+                const int samples = std::clamp(
+                    int(std::ceil(worldArea / texelArea)), 1, SamplesPerTriangleCap);
+                const double perSample = double(worldArea) / samples;
+                for (int s = 0; s < samples; ++s) {
+                    float r1 = unit(generator);
+                    float r2 = unit(generator);
+                    if (r1 + r2 > 1.0f) {
+                        r1 = 1.0f - r1;
+                        r2 = 1.0f - r2;
+                    }
+                    const glm::vec3 p = a + (b - a) * r1 + (c - a) * r2;
+                    bool covered = false;
+                    for (size_t cardIndex : cardsByInstance[instanceIndex]) {
+                        const SurfaceCard& card = _surfaceCache.cards[cardIndex];
+                        glm::vec3 facingAxis(0.0f);
+                        facingAxis[card.axis] = card.sign;
+                        const float facing = glm::dot(normal, facingAxis);
+                        if (facing <= 0.0f &&
+                            !(_surfaceCache.instanceTwoSided[instanceIndex] && facing < 0.0f)) {
+                            continue;
+                        }
+                        const glm::vec3 clip = apply_rows(card, p);
+                        const float fx = (clip.x * 0.5f + 0.5f) * card.rect.z;
+                        const float fy = (clip.y * 0.5f + 0.5f) * card.rect.w;
+                        const uint32_t tx = card.rect.x + std::min(
+                            uint32_t(std::max(fx, 0.0f)), card.rect.z - 1);
+                        const uint32_t ty = card.rect.y + std::min(
+                            uint32_t(std::max(fy, 0.0f)), card.rect.w - 1);
+                        const float stored = depthAt(tx, ty);
+                        // Two texels of world depth, in the card's 0..1 units.
+                        const float tolerance = std::max(
+                            2.0f * _surfaceCache.texelSize / std::max(card.worldDepth, 1e-4f),
+                            0.002f);
+                        if (stored < 1.0f && std::abs(stored - clip.z) <= tolerance) {
+                            covered = true;
+                            break;
+                        }
+                    }
+                    instanceArea += perSample;
+                    if (covered) {
+                        instanceCovered += perSample;
+                    }
+                }
+            }
+        }
+        results.push_back({instanceIndex, instanceArea, instanceCovered});
+        totalArea += instanceArea;
+        totalCovered += instanceCovered;
+    }
+    vmaUnmapMemory(_allocator, readback.allocation);
+    destroy_buffer(readback);
+
+    std::sort(results.begin(), results.end(), [](const auto& l, const auto& r) {
+        // Largest uncovered area first: that is where the lighting will be
+        // missing the most.
+        return (l.area - l.covered) > (r.area - r.covered);
+    });
+    fmt::print("Surface cache coverage: {:.1f}% of {:.1f} m^2 opaque surface\n",
+        totalArea > 0.0 ? totalCovered / totalArea * 100.0 : 0.0, totalArea);
+    for (size_t i = 0; i < std::min<size_t>(results.size(), 8); ++i) {
+        const auto& r = results[i];
+        const SceneOpaqueInstance& instance = _surfaceCache.instances[r.instance];
+        size_t triangles = 0;
+        for (const RenderObject& draw : instance.draws) {
+            triangles += draw.indexCount / 3;
+        }
+        fmt::print("  instance {:3d}: {:6.1f}% of {:7.2f} m^2 covered, {:.2f} m^2 missing, {} triangles\n",
+            r.instance, r.area > 0.0 ? r.covered / r.area * 100.0 : 0.0, r.area,
+            r.area - r.covered, triangles);
+    }
 }
 
 void VulkanEngine::build_surface_cache_lookup()
@@ -988,6 +1158,129 @@ void VulkanEngine::update_surface_cache_radiosity()
         std::chrono::steady_clock::now() - started).count();
 }
 
+void VulkanEngine::measure_surface_cache_shadows()
+{
+    if (!_surfaceCache.lightingValid) {
+        fmt::print("Surface cache shadow check skipped: the cache is not lit\n");
+        return;
+    }
+    update_trace_scene();
+    if (_traceTriangles.empty() || _traceNodes.empty()) {
+        fmt::print("Surface cache shadow check skipped: no CPU trace scene\n");
+        return;
+    }
+    const glm::uvec2 size = _surfaceCache.atlasSize;
+    const size_t texels = size_t(size.x) * size.y;
+    VK_CHECK(vkDeviceWaitIdle(_device));
+    const auto readPage = [&](const AllocatedImage& page, size_t bytesPerTexel) {
+        AllocatedBuffer buffer = create_buffer(texels * bytesPerTexel,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
+        immediate_submit([&](VkCommandBuffer cmd) {
+            vkutil::transition_image(cmd, page.image,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            copy.imageExtent = {size.x, size.y, 1};
+            vkCmdCopyImageToBuffer(cmd, page.image,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer.buffer, 1, &copy);
+            vkutil::transition_image(cmd, page.image,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        });
+        std::vector<uint8_t> bytes(texels * bytesPerTexel);
+        void* mapped = nullptr;
+        VK_CHECK(vmaMapMemory(_allocator, buffer.allocation, &mapped));
+        vmaInvalidateAllocation(_allocator, buffer.allocation, 0, VK_WHOLE_SIZE);
+        std::memcpy(bytes.data(), mapped, bytes.size());
+        vmaUnmapMemory(_allocator, buffer.allocation);
+        destroy_buffer(buffer);
+        return bytes;
+    };
+    const std::vector<uint8_t> depthBytes = readPage(_surfaceCache.depth, 2);
+    const std::vector<uint8_t> normalBytes = readPage(_surfaceCache.normal, 4);
+    const std::vector<uint8_t> directBytes = readPage(_surfaceCache.direct, 8);
+    const auto half = [](const std::vector<uint8_t>& bytes, size_t offset) {
+        uint16_t value = 0;
+        std::memcpy(&value, bytes.data() + offset, sizeof(value));
+        return glm::unpackHalf1x16(value);
+    };
+
+    size_t validTexels = 0;
+    for (size_t i = 0; i < texels; ++i) {
+        if (half(depthBytes, i * 2) < 1.0f) {
+            ++validTexels;
+        }
+    }
+    constexpr size_t TargetSamples = 40000;
+    const uint32_t stride = std::max<uint32_t>(1, uint32_t(std::sqrt(
+        double(validTexels) / double(TargetSamples))));
+    const glm::vec3 sun = normalized_sun_direction(_shadow.sunlightDirection);
+
+    size_t facing = 0;
+    size_t exactLit = 0;
+    size_t cacheLit = 0;
+    size_t bothLit = 0;
+    size_t cacheOnly = 0;
+    size_t exactOnly = 0;
+    std::vector<glm::vec3> exactOnlyPositions;
+    for (const SurfaceCard& card : _surfaceCache.cards) {
+        for (uint32_t y = 0; y < card.rect.w; y += stride) {
+            for (uint32_t x = 0; x < card.rect.z; x += stride) {
+                const size_t index = size_t(card.rect.y + y) * size.x + (card.rect.x + x);
+                const float depth = half(depthBytes, index * 2);
+                if (depth >= 1.0f) {
+                    continue;
+                }
+                glm::vec3 normal(
+                    normalBytes[index * 4] / 255.0f, normalBytes[index * 4 + 1] / 255.0f,
+                    normalBytes[index * 4 + 2] / 255.0f);
+                normal = glm::normalize(normal * 2.0f - 1.0f);
+                const float noL = glm::dot(normal, sun);
+                if (noL <= 0.1f) {
+                    continue;
+                }
+                const glm::vec4 cardPoint(
+                    (float(x) + 0.5f) / float(card.rect.z),
+                    (float(y) + 0.5f) / float(card.rect.w), depth, 1.0f);
+                const glm::vec3 world = glm::vec3(card.cardToWorld * cardPoint);
+                const TraceCPUHit hit = trace_cpu_intersect(
+                    _traceTriangles, _traceNodes, world + normal * 0.02f, sun, false);
+                const bool lit = hit.triangle < 0;
+                const glm::vec3 direct(
+                    half(directBytes, index * 8), half(directBytes, index * 8 + 2),
+                    half(directBytes, index * 8 + 4));
+                const float visibility =
+                    glm::dot(direct, glm::vec3(0.2126f, 0.7152f, 0.0722f)) / noL;
+                const bool cached = visibility > 0.5f;
+                ++facing;
+                exactLit += lit;
+                cacheLit += cached;
+                bothLit += lit && cached;
+                cacheOnly += cached && !lit;
+                exactOnly += lit && !cached;
+                if (lit && !cached && exactOnlyPositions.size() < 20000) {
+                    exactOnlyPositions.push_back(world);
+                }
+            }
+        }
+    }
+    const auto percent = [&](size_t n) { return facing ? double(n) / double(facing) * 100.0 : 0.0; };
+    fmt::print("Surface cache shadow check: {} sun-facing texels sampled (stride {})\n", facing, stride);
+    fmt::print("  exact rays lit {:.1f}%, cache lit {:.1f}%, agree {:.1f}%\n",
+        percent(exactLit), percent(cacheLit), percent(facing - cacheOnly - exactOnly));
+    fmt::print("  cache shadowed but exactly lit {:.1f}%, cache lit but exactly shadowed {:.1f}%\n",
+        percent(exactOnly), percent(cacheOnly));
+    if (!exactOnlyPositions.empty()) {
+        glm::vec3 lo(std::numeric_limits<float>::max());
+        glm::vec3 hi(std::numeric_limits<float>::lowest());
+        for (const glm::vec3& p : exactOnlyPositions) {
+            lo = glm::min(lo, p);
+            hi = glm::max(hi, p);
+        }
+        fmt::print("  wrongly shadowed texels span ({:.1f},{:.1f},{:.1f})..({:.1f},{:.1f},{:.1f})\n",
+            lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
+    }
+}
+
 void VulkanEngine::draw_surface_cache_debug(VkCommandBuffer cmd)
 {
     if (!_surfaceCache.valid || _surfaceCache.debugPipeline == VK_NULL_HANDLE) {
@@ -1107,5 +1400,13 @@ void VulkanEngine::draw_surface_cache_settings()
         _surfaceCache.radiosityMilliseconds);
     if (ImGui::Button("Recapture")) {
         _surfaceCache.rebuildRequested = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Measure Coverage")) {
+        measure_surface_cache_coverage();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Check Shadows")) {
+        measure_surface_cache_shadows();
     }
 }
