@@ -1,10 +1,16 @@
 #version 450
 
-// Lumen-lite surface cache, checkpoint 5: direct sunlight for one card's
-// texels.  Stores the light arriving at each captured surface point,
-// sunColor * N.L * visibility, without albedo, so the same page serves the
-// Lambert term the forward pass computes (baseColor * that) and later the
-// radiosity that multiplies by albedo once more per bounce.
+// Lumen-lite surface cache, checkpoint 5: direct light for one card's texels.
+// Stores the light arriving at each captured surface point, without albedo,
+// so the same page serves the Lambert term the forward pass computes
+// (baseColor * that) and later the radiosity that multiplies by albedo once
+// more per bounce.
+//
+// Two sources, because indoors they are not interchangeable.  The sun:
+// sunColor * N.L * visibility.  And the sky, which is what actually lights a
+// room whose windows face daylight -- with sunlight alone a cache texel
+// indoors is black, radiosity bounces that black around the room faithfully,
+// and the ceiling never receives anything.
 //
 // Visibility comes from a soft shadow march through the scene distance field,
 // not the shadow map: the map only covers the region around the camera, and
@@ -17,6 +23,11 @@ layout(set = 0, binding = 1) uniform sampler2D normalPage;
 layout(set = 0, binding = 2) uniform sampler2D depthPage;
 // Scene distance field, world units, truncated.  See sdf_composite.comp.
 layout(set = 0, binding = 3) uniform sampler3D sceneField;
+// The same band-2 irradiance the forward pass's ambient term uses, so a cache
+// texel under open sky and a rastered surface under open sky agree.
+layout(set = 0, binding = 4) uniform SkyIrradiance {
+    vec4 sh[9];
+} sky;
 
 layout(push_constant) uniform constants {
     // Rows of card -> world: input (u, v, depth, 1) with u and v across the
@@ -28,7 +39,8 @@ layout(push_constant) uniform constants {
     uvec4 rect;
     // xyz = direction toward the sun, w = 1 when the field may cast shadows.
     vec4 sunDirection;
-    // rgb = sun colour, w = unused.
+    // rgb = sun colour, w = the environment intensity the forward pass scales
+    // its ambient by, so both read the same sky.
     vec4 sunColor;
     // xyz = scene field minimum corner, w = field voxel size.
     vec4 fieldMin;
@@ -66,6 +78,37 @@ float sun_visibility(vec3 origin, vec3 direction)
     return clamp(visibility, 0.0, 1.0);
 }
 
+const float Pi = 3.14159265359;
+
+// The same basis, in the same order, as sh_basis() in vk_engine_ibl.cpp and
+// material_ibl_diffuse_light() in material_brdf.glsl.  A cache texel and a
+// rastered surface under the same sky have to agree, or the bounce light
+// disagrees with the direct light it is meant to continue.
+vec3 sky_irradiance(vec3 n)
+{
+    vec3 irradiance =
+        sky.sh[0].rgb * 0.282095 +
+        sky.sh[1].rgb * (0.488603 * n.y) +
+        sky.sh[2].rgb * (0.488603 * n.z) +
+        sky.sh[3].rgb * (0.488603 * n.x) +
+        sky.sh[4].rgb * (1.092548 * n.x * n.y) +
+        sky.sh[5].rgb * (1.092548 * n.y * n.z) +
+        sky.sh[6].rgb * (0.315392 * (3.0 * n.z * n.z - 1.0)) +
+        sky.sh[7].rgb * (1.092548 * n.x * n.z) +
+        sky.sh[8].rgb * (0.546274 * (n.x * n.x - n.y * n.y));
+    // Band-2 ringing can dip below zero opposite a very bright region.
+    return max(irradiance, vec3(0.0)) / Pi;
+}
+
+// How much of the sky this texel can see, as one cone along the normal.  A
+// texel deep inside a room is largely closed off and should receive little;
+// one on a sill facing a window sees most of it.  The march reuses the sun's
+// softness so an opening's edge fades rather than stepping.
+float sky_visibility(vec3 origin, vec3 normal)
+{
+    return sun_visibility(origin, normal);
+}
+
 void main()
 {
     uvec2 local = gl_GlobalInvocationID.xy;
@@ -97,5 +140,12 @@ void main()
         }
         light = PushConstants.sunColor.rgb * noL * visibility;
     }
+    // The sky, along the normal, attenuated by how much of it this texel can
+    // actually see.  Outdoors this is most of the hemisphere; indoors it is
+    // whatever reaches through the windows, which is the light the room is
+    // lit by and the light radiosity needs something to bounce.
+    vec3 skyOrigin = world + normal * (2.5 * PushConstants.fieldMin.w);
+    light += sky_irradiance(normal) * PushConstants.sunColor.w *
+        sky_visibility(skyOrigin, normal);
     imageStore(directPage, texel, vec4(light, 1.0));
 }

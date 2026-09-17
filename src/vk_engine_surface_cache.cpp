@@ -202,6 +202,7 @@ void VulkanEngine::init_surface_cache_resources()
         builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         _surfaceCache.directLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
         VkPushConstantRange directRange{
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -670,6 +671,12 @@ void VulkanEngine::light_surface_cache()
     }
     const glm::vec3 sunDirection = normalized_sun_direction(_shadow.sunlightDirection);
     const glm::vec3 sunColor = glm::vec3(sceneData.sunlightColor);
+    // The forward pass's own ambient scale: zero when the environment is
+    // being suppressed, so the cache goes dark with it rather than lighting
+    // a room the raster pass is deliberately keeping black.
+    const float skyIntensity = sceneData.ssgiFallbackSettings.y > 0.5f
+        ? 0.0f
+        : sceneData.ssgiFallbackSettings.x;
     uint64_t hash = 1469598103934665603ull;
     const auto mix = [&](const void* data, size_t bytes) {
         const auto* p = static_cast<const unsigned char*>(data);
@@ -680,6 +687,10 @@ void VulkanEngine::light_surface_cache()
     };
     mix(&sunDirection, sizeof(sunDirection));
     mix(&sunColor, sizeof(sunColor));
+    // A changed sky relights the cache: swapping the skybox otherwise leaves
+    // every card carrying the previous one's light.
+    mix(&skyIntensity, sizeof(skyIntensity));
+    mix(_ibl.environmentSH.data(), sizeof(glm::vec4) * 9);
     mix(&_shadow.enabled, sizeof(_shadow.enabled));
     mix(&_sceneSdf.drawHash, sizeof(_sceneSdf.drawHash));
     mix(&_sceneSdf.fieldMin, sizeof(_sceneSdf.fieldMin));
@@ -690,12 +701,22 @@ void VulkanEngine::light_surface_cache()
     }
     const auto started = std::chrono::steady_clock::now();
 
-    std::array<DescriptorAllocatorGrowable::PoolSizeRatio, 2> ratios{{
+    std::array<DescriptorAllocatorGrowable::PoolSizeRatio, 3> ratios{{
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1.0f},
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3.0f}}};
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3.0f},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1.0f}}};
     DescriptorAllocatorGrowable pool;
     pool.init(_device, 1, ratios);
     VkDescriptorSet set = pool.allocate(_device, _surfaceCache.directLayout);
+    // The sky the cards are lit by, as the same band-2 irradiance the forward
+    // pass reads.  Lighting is hash-gated, so this buffer is built only when
+    // the cache is actually re-lit.
+    AllocatedBuffer skyBuffer = create_buffer(
+        sizeof(glm::vec4) * 9,
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        VMA_MEMORY_USAGE_CPU_TO_GPU);
+    std::memcpy(skyBuffer.info.pMappedData, _ibl.environmentSH.data(),
+        sizeof(glm::vec4) * 9);
     DescriptorWriter writer;
     writer.write_image(0, _surfaceCache.direct.imageView, VK_NULL_HANDLE,
         VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
@@ -705,6 +726,8 @@ void VulkanEngine::light_surface_cache()
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     writer.write_image(3, _sceneSdf.field.imageView, _sdf.sampler,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    writer.write_buffer(4, skyBuffer.buffer, sizeof(glm::vec4) * 9, 0,
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
     writer.update_set(_device, set);
 
     VK_CHECK(vkDeviceWaitIdle(_device));
@@ -737,7 +760,7 @@ void VulkanEngine::light_surface_cache()
                 push.cardToWorld2 = glm::row(card.cardToWorld, 2);
                 push.rect = card.rect;
                 push.sunDirection = glm::vec4(sunDirection, _shadow.enabled ? 1.0f : 0.0f);
-                push.sunColor = glm::vec4(sunColor, 0.0f);
+                push.sunColor = glm::vec4(sunColor, skyIntensity);
                 push.fieldMin = glm::vec4(_sceneSdf.fieldMin, _sceneSdf.voxelSize);
                 push.fieldMax = glm::vec4(_sceneSdf.fieldMax, 0.0f);
                 vkCmdPushConstants(cmd, _surfaceCache.directPipelineLayout,
@@ -751,6 +774,7 @@ void VulkanEngine::light_surface_cache()
             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     });
     pool.destroy_pools(_device);
+    destroy_buffer(skyBuffer);
 
     _surfaceCache.lightingHash = hash;
     _surfaceCache.lightingValid = true;
