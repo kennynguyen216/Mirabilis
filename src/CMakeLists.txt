@@ -29,6 +29,8 @@ add_executable (engine
   vk_engine_shadows.cpp
   vk_engine_ssgi.cpp
   vk_engine_ssao.cpp
+  vk_engine_sdf.cpp
+  vk_engine_surface_cache.cpp
   vk_engine_resources.cpp
   vk_engine_scene.cpp
   vk_engine_scene_materials.cpp

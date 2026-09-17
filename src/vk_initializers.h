@@ -44,7 +44,8 @@ namespace vkinit
     VkImageViewCreateInfo imageview_create_info(
         VkFormat format,
         VkImage image,
-        VkImageAspectFlags aspectFlags);
+        VkImageAspectFlags aspectFlags,
+        VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D);
 
     VkRenderingAttachmentInfo attachment_info(
         VkImageView view,

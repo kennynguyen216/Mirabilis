@@ -1607,6 +1607,12 @@ void VulkanEngine::draw_screen_buffer_settings()
                 static_cast<int>(RenderDebugViewNames.size()))) {
             _debugViews.view = static_cast<RenderDebugView>(debugView);
         }
+        if (_debugViews.view == RenderDebugView::SDFTrace) {
+            draw_sdf_settings();
+        }
+        if (_debugViews.view == RenderDebugView::SurfaceCache) {
+            draw_surface_cache_settings();
+        }
         // Easy to misread otherwise: these buffers hold the light arriving at
         // a surface, not the colour it reflects.  A white wall and a red one
         // under the same bounce now look identical here, and differ only after
@@ -1623,6 +1629,11 @@ void VulkanEngine::draw_screen_buffer_settings()
         }
         ImGui::SeparatorText("SSGI Milestone 5");
         ImGui::Checkbox("Run SSGI", &_ssgi.enabled);
+        ImGui::Checkbox("Lumen-lite World Fallback", &_ssgi.lumenEnabled);
+        if (_ssgi.lumenEnabled && !lumen_lite_ready()) {
+            ImGui::TextDisabled("Waiting for the scene field and surface cache;");
+            ImGui::TextDisabled("bake assets/sdf/queue if meshes are missing.");
+        }
         const char* ssgiPresets[] = {
             "Validation (full resolution)",
             "High (half resolution)",
@@ -1754,7 +1765,10 @@ void VulkanEngine::draw_statistics_panel(float horizontalSpeed)
 {
     if (ImGui::Begin("Statistics")) {
         ImGui::Text("Speed %.2f", horizontalSpeed);
-        ImGui::Text("Frame time %.3f ms", stats.frametime);
+        ImGui::Text(
+            "FPS %.1f (%.3f ms)",
+            stats.frametime > 0.0f ? 1000.0f / stats.frametime : 0.0f,
+            stats.frametime);
         ImGui::Text("Scene update %.3f ms", stats.scene_update_time);
         ImGui::Text("Mesh draw %.3f ms", stats.mesh_draw_time);
         ImGui::Text("Triangles %d", stats.triangle_count);
@@ -1836,6 +1850,7 @@ void VulkanEngine::draw_play_overlay(float horizontalSpeed)
         if (_noClip.enabled) {
             ImGui::SliderFloat("No Clip Speed", &_noClip.speed, 2.0f, 40.0f);
             ImGui::TextDisabled("WASD move, Space up, Ctrl down");
+            ImGui::TextDisabled("Hold Alt to free the cursor and drag this.");
         }
     }
     ImGui::End();
@@ -1862,10 +1877,18 @@ void VulkanEngine::draw_play_overlay(float horizontalSpeed)
         ImVec2(18.0f, ImGui::GetIO().DisplaySize.y - 34.0f),
         IM_COL32(220, 230, 245, 255),
         speedLabel.c_str());
+    const std::string fpsLabel = fmt::format(
+        "{:.0f} FPS",
+        stats.frametime > 0.0f ? 1000.0f / stats.frametime : 0.0f);
+    crosshair->AddText(
+        ImVec2(18.0f, 18.0f),
+        IM_COL32(220, 230, 245, 255),
+        fpsLabel.c_str());
     crosshair->AddText(
         ImVec2(18.0f, ImGui::GetIO().DisplaySize.y - 56.0f),
         IM_COL32(150, 165, 185, 210),
-        "LMB Blue | RMB Orange | R Retract | F1 Respawn | F2 No Clip");
+        "LMB Blue | RMB Orange | R Retract | F1 Respawn | "
+        "F2 No Clip | Hold Alt: Menus");
 
     const char* timerState = _timeTrial.running
         ? "RUNNING"
@@ -1937,6 +1960,63 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                 ImGui::SameLine();
                 ImGui::TextDisabled(
                     "4K shadows, full-res 8-ray SSGI, high SSAO sampling, quality FXAA");
+                if (ImGui::Button("Apply Performance (60 FPS Target)")) {
+                    apply_performance_settings();
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled(
+                    "No shadows, half-res SSGI, no SSAO, frame rate capped");
+                ImGui::SeparatorText("Frame Rate");
+                ImGui::Checkbox("Cap Frame Rate", &_frameRateCapEnabled);
+                if (_frameRateCapEnabled) {
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(120.0f);
+                    ImGui::SliderFloat(
+                        "Target FPS", &_targetFrameRate, 30.0f, 240.0f, "%.0f");
+                }
+                ImGui::Text(
+                    "%.1f FPS (%.3f ms)",
+                    stats.frametime > 0.0f ? 1000.0f / stats.frametime : 0.0f,
+                    stats.frametime);
+                ImGui::SeparatorText("Cinematic Capture");
+                if (_cinematic.recording) {
+                    ImGui::ProgressBar(
+                        float(_cinematic.frameIndex) /
+                            float(std::max(1, _cinematic.totalFrames - 1)),
+                        ImVec2(-1, 0));
+                    ImGui::TextDisabled(
+                        "Recording frame %d / %d to '%s'",
+                        _cinematic.frameIndex, _cinematic.totalFrames,
+                        _cinematic.outputDirectory.c_str());
+                } else {
+                    if (ImGui::Button("Record Cinematic Shot (6s)")) {
+                        begin_cinematic_recording(180, "cinematic");
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled(
+                        "Yaw sweep + push-in from the current camera pose");
+                    if (!_cinematic.lastCompletedDirectory.empty()) {
+                        std::error_code errorCode;
+                        const auto absolutePath = std::filesystem::absolute(
+                            _cinematic.lastCompletedDirectory, errorCode);
+                        ImGui::TextColored(
+                            ImVec4(0.55f, 0.95f, 0.6f, 1.0f),
+                            "Saved %d frames to %s",
+                            _cinematic.lastCompletedFrames,
+                            errorCode
+                                ? _cinematic.lastCompletedDirectory.c_str()
+                                : absolutePath.string().c_str());
+                        ImGui::TextDisabled(
+                            "Encode: ffmpeg -framerate 30 -i "
+                            "frame_%%04d.ppm -c:v libx264 -pix_fmt yuv420p "
+                            "out.mp4");
+                    } else {
+                        ImGui::TextDisabled(
+                            "Writes cinematic/frame_%%04d.ppm; encode with");
+                        ImGui::TextDisabled(
+                            "ffmpeg once it finishes (path shown here then).");
+                    }
+                }
                 draw_sun_shadow_settings();
                 draw_material_shading_settings();
                 draw_ambient_occlusion_settings();

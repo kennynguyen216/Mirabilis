@@ -843,8 +843,8 @@ AllocatedImage VulkanEngine::create_image(
 
     VkImageCreateInfo imageInfo = vkinit::image_create_info(format, usage, size);
     if (mipmapped) {
-        imageInfo.mipLevels = static_cast<uint32_t>(
-            std::floor(std::log2(std::max(size.width, size.height)))) + 1;
+        imageInfo.mipLevels = static_cast<uint32_t>(std::floor(std::log2(
+            std::max({size.width, size.height, size.depth})))) + 1;
     }
 
     VmaAllocationCreateInfo allocationInfo{};
@@ -866,7 +866,9 @@ AllocatedImage VulkanEngine::create_image(
     } else if (format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
         aspect = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
     }
-    VkImageViewCreateInfo viewInfo = vkinit::imageview_create_info(format, image.image, aspect);
+    VkImageViewCreateInfo viewInfo = vkinit::imageview_create_info(
+        format, image.image, aspect,
+        size.depth > 1 ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D);
     viewInfo.subresourceRange.levelCount = imageInfo.mipLevels;
     VK_CHECK(vkCreateImageView(_device, &viewInfo, nullptr, &image.imageView));
     return image;

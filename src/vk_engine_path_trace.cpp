@@ -5,10 +5,12 @@
 #include "imgui.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/packing.hpp>
+#include <glm/gtx/quaternion.hpp>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 
 namespace {
@@ -671,6 +673,107 @@ void VulkanEngine::capture_raster(const char* filename)
     fmt::print("Raster capture {}: {}x{}, ssgi={}, linear mean={}, nonfinite={}\n",
         filename, extent.width, extent.height, _ssgi.enabled, sum / pixels, invalid);
     if (!file || !metadata) std::abort();
+}
+
+void VulkanEngine::begin_cinematic_recording(
+    int totalFrames, const std::string& outputDirectory, bool quitWhenDone)
+{
+    if (_rendererMode == RendererMode::SoftwarePathTrace) {
+        fmt::print("Cinematic recording skipped: the path tracer is active\n");
+        return;
+    }
+    std::error_code errorCode;
+    std::filesystem::create_directories(outputDirectory, errorCode);
+    if (errorCode) {
+        fmt::print(
+            "Cinematic recording failed: could not create '{}': {}\n",
+            outputDirectory, errorCode.message());
+        return;
+    }
+    _cinematic.recording = true;
+    _cinematic.frameIndex = 0;
+    _cinematic.totalFrames = std::max(2, totalFrames);
+    _cinematic.outputDirectory = outputDirectory;
+    _cinematic.quitWhenDone = quitWhenDone;
+    _cinematic.savedPosition = _editorCamera.position;
+    _cinematic.savedPitch = _editorCamera.pitch;
+    _cinematic.savedYaw = _editorCamera.yaw;
+    _cinematic.basePosition = _editorCamera.position;
+    _cinematic.baseYaw = _editorCamera.yaw;
+    _cinematic.basePitch = _editorCamera.pitch;
+    fmt::print(
+        "Cinematic recording started: {} frames to '{}'\n",
+        _cinematic.totalFrames, outputDirectory);
+}
+
+// Ease-in/ease-out so the sweep starts and ends at rest rather than
+// snapping into motion, which is what would otherwise give away that this is
+// a formula and not a hand-animated shot.
+namespace {
+float smooth_step(float t) { return t * t * (3.0f - 2.0f * t); }
+}
+
+void VulkanEngine::apply_cinematic_camera_pose()
+{
+    const float t = _cinematic.totalFrames > 1
+        ? float(_cinematic.frameIndex) / float(_cinematic.totalFrames - 1)
+        : 0.0f;
+    const float eased = smooth_step(t);
+    // Sweep centred on the base yaw rather than starting there, so both
+    // sides of the arcade come into frame instead of only ever panning one
+    // direction from the initial look.
+    const float sweep = (eased - 0.5f) * 2.0f * _cinematic.yawSweepRadians;
+    _editorCamera.yaw = _cinematic.baseYaw + sweep;
+    _editorCamera.pitch = _cinematic.basePitch;
+    const glm::vec3 forward = glm::normalize(glm::vec3(
+        glm::toMat4(glm::angleAxis(_editorCamera.yaw, glm::vec3(0, -1, 0))) *
+        glm::vec4(0, 0, -1, 0)));
+    _editorCamera.position =
+        _cinematic.basePosition + forward * (eased * _cinematic.pushInDistance);
+    _editorCamera.velocity = glm::vec3(0.0f);
+}
+
+void VulkanEngine::capture_cinematic_frame()
+{
+    const bool tonemapped = _postProcess.tonemapEnabled &&
+        _debugViews.view == RenderDebugView::None &&
+        _postProcess.tonemapPipeline.pipeline != VK_NULL_HANDLE;
+    const VkImageLayout layout = tonemapped
+        ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+        : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    const VkExtent2D extent = _drawExtent;
+    const auto values = read_ssgi_image(_drawImage, extent, layout);
+
+    // A fixed Reinhard-and-sRGB tonemap independent of the engine's own
+    // configurable tonemap pass: the goal here is a consistently viewable
+    // sequence, not matching whatever tonemap settings happen to be active.
+    std::vector<unsigned char> pixels(size_t(extent.width) * extent.height * 3);
+    for (size_t i = 0; i < size_t(extent.width) * extent.height; ++i) {
+        glm::vec3 linear = glm::vec3(values[i]);
+        if (!std::isfinite(linear.x) || !std::isfinite(linear.y) ||
+            !std::isfinite(linear.z)) {
+            linear = glm::vec3(0.0f);
+        }
+        const glm::vec3 mapped = linear / (linear + glm::vec3(1.0f));
+        for (int c = 0; c < 3; ++c) {
+            const float channel = mapped[c];
+            const float srgb = channel <= 0.0031308f
+                ? channel * 12.92f
+                : 1.055f * std::pow(channel, 1.0f / 2.4f) - 0.055f;
+            pixels[i * 3 + c] = static_cast<unsigned char>(
+                std::clamp(srgb * 255.0f + 0.5f, 0.0f, 255.0f));
+        }
+    }
+
+    const std::string path = fmt::format(
+        "{}/frame_{:04}.ppm", _cinematic.outputDirectory, _cinematic.frameIndex);
+    std::ofstream file(path, std::ios::binary);
+    file << "P6\n" << extent.width << " " << extent.height << "\n255\n";
+    file.write(reinterpret_cast<const char*>(pixels.data()), pixels.size());
+    if (!file) {
+        fmt::print("Cinematic frame write failed: {}\n", path);
+        std::abort();
+    }
 }
 
 void VulkanEngine::capture_ssgi(const char* filename)

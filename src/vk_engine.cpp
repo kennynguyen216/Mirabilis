@@ -88,7 +88,32 @@ void VulkanEngine::apply_max_fidelity_settings()
     _debugViews.view = RenderDebugView::None;
 }
 
-void VulkanEngine::init() 
+// The low end of the same dial: trims exactly what maximum fidelity spends
+// the most on, so the two presets read as opposite ends of one slider rather
+// than unrelated configurations.
+void VulkanEngine::apply_performance_settings()
+{
+    renderScale = 0.75f;
+    _shadow.enabled = false;
+
+    _ssao.settings.enabled = false;
+
+    _postProcess.fxaaEnabled = true;
+    _postProcess.fxaaEdgeThreshold = 0.10f;
+    _postProcess.fxaaSubpixelStrength = 0.30f;
+    _postProcess.fxaaShowEdges = false;
+
+    _prepass.enabled = true;
+    _ssgi.enabled = true;
+    apply_ssgi_quality_preset(3);
+    _ssgi.intensity = 0.35f;
+    _debugViews.view = RenderDebugView::None;
+
+    _frameRateCapEnabled = true;
+    _targetFrameRate = 60.0f;
+}
+
+void VulkanEngine::init()
 {
     //only one engine init is allowed with the application
     assert(loadedEngine == nullptr);
@@ -145,6 +170,8 @@ void VulkanEngine::init()
     init_default_data();
     init_imgui();
     init_path_trace();
+    init_sdf_resources();
+    init_surface_cache_resources();
 
     // Automation and capture runs can open directly on one intermediate
     // buffer without synthesizing editor UI input. Values match
@@ -152,7 +179,7 @@ void VulkanEngine::init()
     if (const char* debugView = SDL_getenv("MIRABILIS_RENDER_DEBUG_VIEW")) {
         const int value = std::clamp(std::atoi(debugView),
             static_cast<int>(RenderDebugView::None),
-            static_cast<int>(RenderDebugView::TangentHandedness));
+            static_cast<int>(RenderDebugView::SurfaceCache));
         _debugViews.view = static_cast<RenderDebugView>(value);
     }
     if (const char* preset = SDL_getenv("MIRABILIS_SSGI_PRESET")) {
@@ -161,8 +188,21 @@ void VulkanEngine::init()
     if (SDL_getenv("MIRABILIS_MAX_FIDELITY")) {
         apply_max_fidelity_settings();
     }
+    if (const char* sdfPath = SDL_getenv("MIRABILIS_VALIDATE_SDF")) {
+        validate_sdf_bake(sdfPath);
+    }
+    if (SDL_getenv("MIRABILIS_PERFORMANCE")) {
+        apply_performance_settings();
+        // A capture run should hold every frame to its full cost instead of
+        // sleeping the difference away, so the low-quality pass still stays
+        // fast for comparison purposes rather than reading as "capped at 60".
+        _frameRateCapEnabled = false;
+    }
     // After the presets, so a capture run can compare against the frame
     // without screen-space GI whatever else it asked for.
+    if (SDL_getenv("MIRABILIS_LUMEN_LITE")) {
+        _ssgi.lumenEnabled = true;
+    }
     if (SDL_getenv("MIRABILIS_SSGI_DISABLE")) {
         _ssgi.enabled = false;
     }
@@ -529,6 +569,18 @@ void VulkanEngine::draw(float deltaTime)
             std::min(_swapchainExtent.height, _drawImage.imageExtent.height) * renderScale));
 
     update_scene(deltaTime);
+    // Before recording starts: a rebuild waits for the GPU and runs its own
+    // submissions, which must not happen in the middle of this frame's.
+    if ((_debugViews.view == RenderDebugView::SDFTrace && _sdf.source == 1) ||
+        _debugViews.view == RenderDebugView::SurfaceCache ||
+        (_ssgi.lumenEnabled && _ssgi.enabled)) {
+        update_scene_sdf();
+    }
+    if (_debugViews.view == RenderDebugView::SurfaceCache ||
+        (_ssgi.lumenEnabled && _ssgi.enabled)) {
+        update_surface_cache();
+        update_surface_cache_radiosity();
+    }
 
     VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
 
@@ -659,7 +711,11 @@ void VulkanEngine::draw(float deltaTime)
     // Replaces the shaded image with one of the buffers behind it.  Editor
     // overlays are still drawn on top, so shadow and collider bounds can be
     // read against the depth or normals they were built from.
-    if (showRenderDebugView) {
+    if (_debugViews.view == RenderDebugView::SDFTrace) {
+        draw_sdf_debug(cmd);
+    } else if (_debugViews.view == RenderDebugView::SurfaceCache) {
+        draw_surface_cache_debug(cmd);
+    } else if (showRenderDebugView) {
         draw_render_debug(cmd);
     }
 
@@ -845,6 +901,30 @@ void VulkanEngine::run(){
             fmt::print("GI test: ssao=active\n");
         }
     }
+    // Independent of MIRABILIS_TEST_FRAMES: a cinematic capture is
+    // self-terminating once its own frame count is reached, so it does not
+    // need a separate frame-limit safety net to close the window.
+    if (const char* cinematicFramesText = SDL_getenv("MIRABILIS_CINEMATIC")) {
+        // Converted immediately: SDL_getenv is not guaranteed to return a
+        // pointer that survives a later SDL_getenv call, so this cannot be
+        // held across the MIRABILIS_TEST_CAMERA/MIRABILIS_CINEMATIC_OUTPUT
+        // reads below the way a std::string or int could be.
+        const int cinematicFrames = std::atoi(cinematicFramesText);
+        set_editor_mode(true);
+        set_mouse_capture(false);
+        ImGui::GetIO().IniFilename = nullptr;
+        if (const char* camera = SDL_getenv("MIRABILIS_TEST_CAMERA")) {
+            std::sscanf(camera, "%f %f %f %f %f",
+                &_editorCamera.position.x, &_editorCamera.position.y,
+                &_editorCamera.position.z, &_editorCamera.pitch,
+                &_editorCamera.yaw);
+        }
+        const char* outputDirectoryText = SDL_getenv("MIRABILIS_CINEMATIC_OUTPUT");
+        const std::string outputDirectory =
+            outputDirectoryText ? outputDirectoryText : "cinematic";
+        begin_cinematic_recording(
+            cinematicFrames, outputDirectory, /*quitWhenDone=*/true);
+    }
     auto previousTime = std::chrono::steady_clock::now();
 
     //main loop
@@ -877,7 +957,15 @@ void VulkanEngine::run(){
         }
 
         if (_editorMode) {
-            _editorCamera.update(deltaTime);
+            if (_cinematic.recording) {
+                // Live mouse-look input is ignored while recording: the pose
+                // this frame is entirely a function of frameIndex, which is
+                // what makes the output reproducible frame-for-frame.
+                apply_cinematic_camera_pose();
+                deltaTime = _cinematic.frameDt;
+            } else {
+                _editorCamera.update(deltaTime);
+            }
             _physicsStep.accumulator = 0.0f;
             // Leaving the editor should not make the first tick back in play
             // sweep through however far the editor camera was turned.
@@ -954,6 +1042,35 @@ void VulkanEngine::run(){
             if(testFrame==17&&!_authoredPortals.pairs.empty()) _authoredPortals.pairs[0].first.position.x+=0.125f;
         }
         draw(deltaTime);
+        if (_cinematic.recording) {
+            capture_cinematic_frame();
+            ++_cinematic.frameIndex;
+            if (_cinematic.frameIndex >= _cinematic.totalFrames) {
+                _cinematic.recording = false;
+                _cinematic.lastCompletedDirectory = _cinematic.outputDirectory;
+                _cinematic.lastCompletedFrames = _cinematic.totalFrames;
+                _editorCamera.position = _cinematic.savedPosition;
+                _editorCamera.pitch = _cinematic.savedPitch;
+                _editorCamera.yaw = _cinematic.savedYaw;
+                fmt::print(
+                    "Cinematic recording complete: {} frames in '{}'\n"
+                    "  ffmpeg -framerate {} -i \"{}/frame_%04d.ppm\" "
+                    "-c:v libx264 -pix_fmt yuv420p \"{}/cinematic.mp4\"\n",
+                    _cinematic.totalFrames, _cinematic.outputDirectory,
+                    int(1.0f / _cinematic.frameDt + 0.5f),
+                    _cinematic.outputDirectory, _cinematic.outputDirectory);
+                if (_cinematic.quitWhenDone) bQuit = true;
+            }
+        }
+        if (_frameRateCapEnabled && _targetFrameRate > 0.0f) {
+            const auto frameEnd = std::chrono::steady_clock::now();
+            const auto targetDuration = std::chrono::duration<double>(
+                1.0 / static_cast<double>(_targetFrameRate));
+            const auto elapsed = frameEnd - currentTime;
+            if (elapsed < targetDuration) {
+                std::this_thread::sleep_for(targetDuration - elapsed);
+            }
+        }
         if (frameLimit && SDL_getenv("MIRABILIS_SSGI_BENCHMARK") &&
             _frameNumber > 5) {
             benchmarkMilliseconds += static_cast<double>(deltaTime) * 1000.0;

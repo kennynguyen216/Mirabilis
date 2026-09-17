@@ -69,6 +69,19 @@ bool VulkanEngine::process_event(const SDL_Event& e)
             _playerMovement.velocity = glm::vec3(0.0f);
         }
     }
+    // Relative mouse mode hides and locks the cursor, so the Play Controls
+    // panel (No Clip Speed among its sliders) is otherwise undraggable while
+    // playing. Holding Alt frees the cursor for it without leaving play mode
+    // or, unlike Tab, disabling no clip. Movement input is already gated on
+    // _mouseCaptured elsewhere, so it naturally pauses while this is held.
+    if (!_editorMode && e.type == SDL_KEYDOWN &&
+        e.key.keysym.sym == SDLK_LALT && e.key.repeat == 0) {
+        set_mouse_capture(false);
+    }
+    if (!_editorMode && e.type == SDL_KEYUP &&
+        e.key.keysym.sym == SDLK_LALT) {
+        set_mouse_capture(true);
+    }
 
     if (_editorMode) {
         // Match the conventional ImGuizmo/Unity-style transform

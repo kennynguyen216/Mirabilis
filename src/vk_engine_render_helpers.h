@@ -136,7 +136,7 @@ inline PickedFormat pick_format(
     return fallback;
 }
 
-inline constexpr std::array<const char*, 30> RenderDebugViewNames{
+inline constexpr std::array<const char*, 32> RenderDebugViewNames{
     "Final lighting",
     "Camera depth",
     "View normals",
@@ -166,7 +166,9 @@ inline constexpr std::array<const char*, 30> RenderDebugViewNames{
     "Shading normal (world)",
     "Geometric normal (world)",
     "Tangent (world)",
-    "Tangent handedness"};
+    "Tangent handedness",
+    "SDF sphere trace (Lumen-lite)",
+    "Surface cache atlas (Lumen-lite)"};
 
 // The views the forward pass writes itself rather than the debug-view pass.
 inline bool is_forward_material_debug_view(RenderDebugView view)

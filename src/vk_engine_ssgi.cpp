@@ -481,6 +481,44 @@ void VulkanEngine::init_ssgi_pipelines()
     VK_CHECK(vkCreatePipelineLayout(
         _device, &computeLayoutInfo, nullptr, &_ssgi.pipelineLayout));
 
+    {
+        DescriptorLayoutBuilder builder;
+        builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        for (uint32_t binding = 1; binding <= 5; ++binding) {
+            builder.add_binding(binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        }
+        for (uint32_t binding = 6; binding <= 8; ++binding) {
+            builder.add_binding(binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        }
+        _ssgi.lumenLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
+        const std::array<VkDescriptorSetLayout, 3> lumenLayouts{
+            _gpuSceneDataDescriptorLayout, _ssgi.descriptorLayout, _ssgi.lumenLayout};
+        VkPipelineLayoutCreateInfo lumenInfo = vkinit::pipeline_layout_create_info();
+        lumenInfo.setLayoutCount = static_cast<uint32_t>(lumenLayouts.size());
+        lumenInfo.pSetLayouts = lumenLayouts.data();
+        lumenInfo.pushConstantRangeCount = 1;
+        lumenInfo.pPushConstantRanges = &computeRange;
+        VK_CHECK(vkCreatePipelineLayout(
+            _device, &lumenInfo, nullptr, &_ssgi.lumenPipelineLayout));
+        ScopedShaderModule lumenShader(_device);
+        if (lumenShader.load("../../shaders/ssgi_lumen.comp.spv")) {
+            VkComputePipelineCreateInfo lumenCreate{
+                .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+            lumenCreate.layout = _ssgi.lumenPipelineLayout;
+            lumenCreate.stage = vkinit::pipeline_shader_stage_create_info(
+                VK_SHADER_STAGE_COMPUTE_BIT, lumenShader.get());
+            VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1,
+                &lumenCreate, nullptr, &_ssgi.lumenPipeline));
+        } else {
+            fmt::print("Error loading ssgi_lumen.comp.spv; Lumen-lite fallback unavailable\n");
+        }
+        _mainDeletionQueue.push_function([this]() {
+            vkDestroyPipeline(_device, _ssgi.lumenPipeline, nullptr);
+            vkDestroyPipelineLayout(_device, _ssgi.lumenPipelineLayout, nullptr);
+            vkDestroyDescriptorSetLayout(_device, _ssgi.lumenLayout, nullptr);
+        });
+    }
+
     VkComputePipelineCreateInfo computeInfo{
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     computeInfo.layout = _ssgi.pipelineLayout;
@@ -661,14 +699,45 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             cmd, _ssgi.temporalDiagnosticImage.image,
             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
 
-        vkCmdBindPipeline(
-            cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.pipeline);
         const std::array<VkDescriptorSet, 2> sets{
             get_current_frame().sceneDescriptor,
             _ssgi.descriptors[writeIndex]};
-        vkCmdBindDescriptorSets(
-            cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.pipelineLayout,
-            0, static_cast<uint32_t>(sets.size()), sets.data(), 0, nullptr);
+        const bool lumen = _ssgi.lumenEnabled && lumen_lite_ready();
+        VkPipelineLayout traceLayout = _ssgi.pipelineLayout;
+        if (lumen) {
+            VkDescriptorSet lumenSet = get_current_frame()._frameDescriptors.allocate(
+                _device, _ssgi.lumenLayout);
+            DescriptorWriter writer;
+            writer.write_image(0, _sceneSdf.field.imageView, _sdf.sampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            const std::array<VkImageView, 5> pages{
+                _surfaceCache.albedo.imageView, _surfaceCache.emissive.imageView,
+                _surfaceCache.depth.imageView, _surfaceCache.direct.imageView,
+                _surfaceCache.indirect.imageView};
+            for (uint32_t i = 0; i < pages.size(); ++i) {
+                writer.write_image(i + 1, pages[i], _prepass.sampler,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            }
+            writer.write_buffer(6, _surfaceCache.cardBuffer.buffer, VK_WHOLE_SIZE, 0,
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+            writer.write_buffer(7, _surfaceCache.gridBuffer.buffer, VK_WHOLE_SIZE, 0,
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+            writer.write_buffer(8, _surfaceCache.indexBuffer.buffer, VK_WHOLE_SIZE, 0,
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+            writer.update_set(_device, lumenSet);
+            traceLayout = _ssgi.lumenPipelineLayout;
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.lumenPipeline);
+            const std::array<VkDescriptorSet, 3> lumenSets{sets[0], sets[1], lumenSet};
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, traceLayout,
+                0, static_cast<uint32_t>(lumenSets.size()), lumenSets.data(), 0, nullptr);
+        } else {
+            vkCmdBindPipeline(
+                cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.pipeline);
+            vkCmdBindDescriptorSets(
+                cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.pipelineLayout,
+                0, static_cast<uint32_t>(sets.size()), sets.data(), 0, nullptr);
+        }
         SSGIPushConstants pushConstants{};
         pushConstants.control = glm::uvec4(
             ssgiExtent.width,
@@ -689,7 +758,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             static_cast<uint32_t>(std::clamp(_ssgi.raysPerPixel, 1, 8)),
             _drawExtent.width, _drawExtent.height, 0u);
         vkCmdPushConstants(
-            cmd, _ssgi.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+            cmd, traceLayout, VK_SHADER_STAGE_COMPUTE_BIT,
             0, sizeof(pushConstants), &pushConstants);
         vkCmdDispatch(
             cmd,

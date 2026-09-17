@@ -148,6 +148,31 @@ struct SSGICompositePushConstants {
     glm::vec4 settings{0.0f};
 };
 
+// Field meanings are documented in shaders/sdf_debug.comp.  128 bytes, the
+// push constant size every Vulkan device guarantees.
+struct SdfDebugPushConstants {
+    glm::mat4 inverseViewProjection{1.0f};
+    glm::vec4 cameraPosition{0.0f};
+    glm::vec4 boundsMin{0.0f};
+    glm::vec4 boundsMax{0.0f};
+    glm::vec4 extent{0.0f};
+};
+
+// Field meanings are documented in shaders/sdf_composite.comp.  Also 128
+// bytes, which is why the transform travels as three rows rather than a mat4.
+struct SdfCompositePushConstants {
+    glm::vec4 worldToLocal0{1.0f, 0.0f, 0.0f, 0.0f};
+    glm::vec4 worldToLocal1{0.0f, 1.0f, 0.0f, 0.0f};
+    glm::vec4 worldToLocal2{0.0f, 0.0f, 1.0f, 0.0f};
+    glm::vec4 volumeMin{0.0f};
+    glm::vec4 volumeMax{0.0f};
+    glm::vec4 fieldOrigin{0.0f};
+    glm::ivec3 regionOffset{0};
+    float shellPad{0.0f};
+    glm::ivec4 regionSize{0};
+};
+static_assert(sizeof(SdfCompositePushConstants) == 128);
+
 // The occlusion kernel is a fixed set of points in the +Z hemisphere, sent to
 // the GPU once.  vec4 rather than vec3 because std140 pads an array element
 // out to sixteen bytes either way.
@@ -260,6 +285,98 @@ enum class RenderDebugView : int {
     GeometricNormal = 27,
     Tangent = 28,
     TangentHandedness = 29,
+    // Lumen-lite: one baked mesh distance field, sphere-traced from the
+    // camera.  Replaces the whole frame, like the buffer views above.
+    SDFTrace = 30,
+    // Lumen-lite surface cache atlas pages, fitted to the screen.
+    SurfaceCache = 31,
+};
+
+// One drawn object as Lumen-lite sees it: a mesh buffer at a transform, with
+// the opaque draws (one per material surface) that make it up.
+struct SceneOpaqueInstance {
+    VkDeviceAddress address{};
+    glm::mat4 transform{1.0f};
+    std::vector<RenderObject> draws;
+};
+
+// One orthographic view of an instance's local bounds, looking back along
+// one axis, and where in the surface cache atlas it was captured.
+struct SurfaceCard {
+    uint32_t instance{0};
+    // 0, 1, 2 for x, y, z.
+    int axis{0};
+    // +1: the card sits on the +axis face and captures surfaces facing +axis.
+    float sign{1.0f};
+    glm::vec3 localMin{0.0f};
+    glm::vec3 localMax{0.0f};
+    // x, y, width, height in atlas texels.
+    glm::uvec4 rect{0};
+    // Local position -> card clip space; see shaders/surface_card_capture.vert.
+    glm::vec4 row0{0.0f};
+    glm::vec4 row1{0.0f};
+    glm::vec4 row2{0.0f};
+    // World extent of the card along its viewing axis, for depth tolerances.
+    float worldDepth{0.0f};
+    // (u, v, depth, 1) in card space -> world position; u and v span the
+    // card in [0, 1] and depth is as stored in the depth page.
+    glm::mat4 cardToWorld{1.0f};
+};
+
+// std430 layout of SurfaceCacheCard in shaders/surface_cache_lookup.glsl.
+struct SurfaceCacheGpuCard {
+    glm::vec4 worldToCard0{0.0f};
+    glm::vec4 worldToCard1{0.0f};
+    glm::vec4 worldToCard2{0.0f};
+    glm::vec4 direction{0.0f};
+    glm::uvec4 rect{0};
+};
+static_assert(sizeof(SurfaceCacheGpuCard) == 80);
+
+// The fixed header of SurfaceCacheGrid in shaders/surface_cache_lookup.glsl;
+// the per-cell (first index, count) entries follow it in the same buffer.
+struct SurfaceCacheGridHeader {
+    glm::vec4 gridMin{0.0f};
+    glm::uvec4 gridDimensions{0};
+    glm::vec4 lookupParameters{0.0f};
+    // The scene distance field the cache traces through: xyz = minimum
+    // corner, w = voxel size; and xyz = maximum corner.
+    glm::vec4 fieldMin{0.0f};
+    glm::vec4 fieldMax{0.0f};
+    // xyz = direction toward the sun, for diagnostics that march toward it.
+    glm::vec4 sunDirection{0.0f};
+};
+static_assert(sizeof(SurfaceCacheGridHeader) == 96);
+
+// Field meanings are documented in shaders/surface_cache_compare.comp.
+struct SurfaceCacheComparePushConstants {
+    glm::mat4 inverseViewProjection{1.0f};
+    glm::vec4 viewToWorld0{0.0f};
+    glm::vec4 viewToWorld1{0.0f};
+    glm::vec4 viewToWorld2{0.0f};
+    glm::vec4 settings{0.0f};
+};
+
+// Field meanings are documented in shaders/surface_cache_radiosity.comp.
+struct SurfaceCacheRadiosityPushConstants {
+    glm::vec4 cardToWorld0{0.0f};
+    glm::vec4 cardToWorld1{0.0f};
+    glm::vec4 cardToWorld2{0.0f};
+    glm::uvec4 rect{0};
+    glm::uvec4 control{0};
+    glm::vec4 settings{0.0f};
+};
+
+// Field meanings are documented in shaders/surface_cache_direct.comp.
+struct SurfaceCacheDirectPushConstants {
+    glm::vec4 cardToWorld0{0.0f};
+    glm::vec4 cardToWorld1{0.0f};
+    glm::vec4 cardToWorld2{0.0f};
+    glm::uvec4 rect{0};
+    glm::vec4 sunDirection{0.0f};
+    glm::vec4 sunColor{0.0f};
+    glm::vec4 fieldMin{0.0f};
+    glm::vec4 fieldMax{0.0f};
 };
 
 struct SceneMaterialRuntime {
@@ -368,6 +485,12 @@ class VulkanEngine{
     // remains 1280x720, while the expensive prepass/SSGI work starts at 75%
     // resolution and is upscaled for presentation.
     float renderScale {0.75f};
+    // A cap is independent of present mode: MAILBOX still renders as many
+    // frames as it can, this just throttles how often the loop asks it to.
+    // Useful on a laptop, where an uncapped frame rate spends battery/thermal
+    // headroom on frames the display cannot show anyway.
+    bool _frameRateCapEnabled{false};
+    float _targetFrameRate{60.0f};
     enum class RendererMode { Raster, SoftwarePathTrace };
     RendererMode _rendererMode{RendererMode::Raster};
     bool _traceSupported{false};
@@ -384,6 +507,14 @@ class VulkanEngine{
     void draw_path_trace(VkCommandBuffer cmd);
     void draw_path_trace_ui();
     void validate_path_trace();
+    // Lumen-lite checkpoint 1: proves the CPU-baked-SDF -> GPU-3D-texture
+    // round trip is correct, independent of any sphere-tracing or debug-view
+    // work still to come. Reads a scripts/bake_sdf.py ".sdf" file, uploads it
+    // as a 3D image, reads it back, and reports the max error against the
+    // original bytes. See docs/hybrid_ray_traced_gi_design.md and the
+    // Lumen-lite memory note for why this is SDF-based rather than the
+    // BVH/ray-query fallback that document otherwise describes.
+    void validate_sdf_bake(const char* path);
     std::unordered_map<VkDeviceAddress,std::weak_ptr<TraceMeshSource>> _traceMeshSources;
     std::vector<TraceTriangle> _traceTriangles;
     std::vector<TraceMaterial> _traceMaterials;
@@ -405,6 +536,45 @@ class VulkanEngine{
     void capture_path_trace(const char* filename);
     void capture_ssgi(const char* filename);
     void capture_raster(const char* filename);
+    // A slow yaw sweep and push-in from one known-clear vantage, not a
+    // multi-point path: finding even one camera position inside Sponza that
+    // does not clip through a wall took several tries, so a scripted path
+    // through several unscouted points would carry that risk at every
+    // waypoint. Orbiting in place needs only the one spot already confirmed
+    // clear.
+    struct CinematicState {
+        bool recording{false};
+        int frameIndex{0};
+        int totalFrames{180};
+        // The simulated time step between recorded frames. Deliberately not
+        // the real per-frame deltaTime: a fixed step means the exported video
+        // plays back at the same speed regardless of how fast this machine
+        // could actually render each frame.
+        float frameDt{1.0f / 30.0f};
+        glm::vec3 basePosition{0.0f, 3.0f, 0.0f};
+        float baseYaw{0.0f};
+        float basePitch{0.0f};
+        float yawSweepRadians{glm::radians(35.0f)};
+        float pushInDistance{2.5f};
+        std::string outputDirectory{"cinematic"};
+        glm::vec3 savedPosition{0.0f};
+        float savedPitch{0.0f};
+        float savedYaw{0.0f};
+        bool quitWhenDone{false};
+        // Set once a recording finishes, so the panel can say where it went
+        // without relying on a console the interactive app may not have.
+        std::string lastCompletedDirectory;
+        int lastCompletedFrames{0};
+    };
+    CinematicState _cinematic;
+    void begin_cinematic_recording(
+        int totalFrames, const std::string& outputDirectory,
+        bool quitWhenDone = false);
+    // Advances the recording by one frame: sets the procedural camera pose,
+    // and, once called after that frame's draw(), captures it. Returns false
+    // once recording has finished.
+    void apply_cinematic_camera_pose();
+    void capture_cinematic_frame();
     // Reads a half-float colour image.  layout is the one the image was left
     // in, and it is restored afterwards.
     std::vector<glm::vec4> read_ssgi_image(
@@ -650,6 +820,50 @@ class VulkanEngine{
         void init_tonemap_pipeline();
         void init_fxaa_pipeline();
         void init_ssao_resources();
+        void init_sdf_resources();
+        // Reads a scripts/bake_sdf.py ".sdf" file into _sdf.volume, replacing
+        // any volume already loaded.  Reports and returns false on failure.
+        bool load_sdf_volume(const std::string& path);
+        void draw_sdf_debug(VkCommandBuffer cmd);
+        void draw_sdf_settings();
+        // Rebuilds the scene distance field when the set of drawn meshes or
+        // their transforms changed since the last build.  Meshes without a
+        // baked volume are written to the bake queue and left out.
+        void update_scene_sdf();
+        // Every opaque world draw grouped into instances.  Returns a hash of
+        // the grouping and transforms, so callers can skip unchanged scenes.
+        uint64_t collect_opaque_instances(
+            std::vector<SceneOpaqueInstance>& instances) const;
+        void init_surface_cache_resources();
+        // Rebuilds and recaptures the surface cache when the opaque instances
+        // change.
+        void update_surface_cache();
+        void draw_surface_cache_debug(VkCommandBuffer cmd);
+        void draw_surface_cache_settings();
+        // Reads back the card depth page and reports what fraction of each
+        // instance's surface area some card captured.
+        void measure_surface_cache_coverage();
+        // Direct sunlight into the cache's direct page, shadowed through the
+        // scene distance field.
+        void light_surface_cache();
+        // Card and card-grid storage buffers for looking the cache up at an
+        // arbitrary world position.
+        void build_surface_cache_lookup();
+        // One budgeted radiosity update: the next cards in round-robin order
+        // trace bounce rays and blend the result into the indirect page.
+        void update_surface_cache_radiosity();
+        // True when the scene field and a lit surface cache are ready for
+        // the SSGI world fallback.
+        bool lumen_lite_ready() const;
+        // Grades the cache's distance-field sun shadows against exact rays
+        // cast through the path tracer's CPU BVH of the real triangles.
+        void measure_surface_cache_shadows();
+        // Uploads signed distances (texel x + y*dimX + z*dimX*dimY) as a
+        // filterable 3D image, choosing R32F or R16F by what the device can
+        // linearly filter.  False when neither is available.
+        bool upload_sdf_voxels(
+            const std::vector<float>& voxels, glm::uvec3 dimensions,
+            AllocatedImage& image, VkFormat& format);
         void init_ssao_pipelines();
         void init_ssgi_pipelines();
         void init_gpu_timestamps();
@@ -662,6 +876,7 @@ class VulkanEngine{
         VkExtent2D active_ssgi_extent() const;
         void apply_ssgi_quality_preset(int preset);
         void apply_max_fidelity_settings();
+        void apply_performance_settings();
         SSAOPushConstants build_ssao_push_constants() const;
         // Half the rendered region, rounded up, which is what the dispatches
         // cover.  The images themselves stay allocated at half the window.
@@ -1037,6 +1252,12 @@ class VulkanEngine{
             float normalRejection{0.85f};
             float velocityRejection{0.10f};
             bool spatialFilterEnabled{true};
+            // Lumen-lite: screen misses trace the scene distance field and
+            // read the surface cache instead of the environment.
+            bool lumenEnabled{false};
+            VkDescriptorSetLayout lumenLayout{};
+            VkPipelineLayout lumenPipelineLayout{};
+            VkPipeline lumenPipeline{};
             int filterRadius{3};
             float filterDepthFalloff{800.0f};
             float filterNormalPower{32.0f};
@@ -1063,6 +1284,153 @@ class VulkanEngine{
             std::array<bool, FRAME_OVERLAP> timingWritten{};
         };
         SSGIState _ssgi;
+        struct SdfVolumeState {
+            AllocatedImage volume{};
+            // Chosen at load: the 32-bit float is exact, but linear filtering
+            // of it is optional in Vulkan, so a device without it gets the
+            // half-float instead rather than no volume at all.
+            VkFormat format{VK_FORMAT_UNDEFINED};
+            VkSampler sampler{};
+            VkDescriptorSetLayout descriptorLayout{};
+            VkPipelineLayout pipelineLayout{};
+            VkPipeline pipeline{};
+            bool loaded{false};
+            std::string path{"../../assets/sdf/suzanne.sdf"};
+            std::string status{"No volume loaded"};
+            glm::uvec3 dimensions{0};
+            // As baked.  The volume is drawn at these plus offset.
+            glm::vec3 boundsMin{0.0f};
+            glm::vec3 boundsMax{0.0f};
+            glm::vec3 offset{0.0f};
+            int maxSteps{128};
+            // 0 = shaded, 1 = normals, 2 = march step count.
+            int viewMode{0};
+            float hitThresholdTexels{0.25f};
+            // 0 = the single volume above, 1 = the scene distance field.
+            int source{0};
+        };
+        SdfVolumeState _sdf;
+        // The scene-wide field Lumen-lite traces: every drawn mesh's baked
+        // volume, placed at its instance transform and merged on the GPU.
+        struct SceneSdfState {
+            struct MeshVolume {
+                AllocatedImage image{};
+                glm::vec3 boundsMin{0.0f};
+                glm::vec3 boundsMax{0.0f};
+                // The bake's voxel size in the mesh's local units.  Every
+                // mesh is baked as a shell half this thick.
+                float bakeVoxel{0.0f};
+            };
+            // Keyed by a hash of the mesh's local geometry, so the cache
+            // follows the geometry rather than an asset name or load order.
+            std::unordered_map<uint64_t, MeshVolume> volumes;
+            std::unordered_set<uint64_t> missing;
+            // Keyed by mesh buffer plus the index ranges drawn opaque.
+            std::unordered_map<uint64_t, uint64_t> meshHashes;
+            std::string cacheDirectory{"../../assets/sdf/cache"};
+            std::string queueDirectory{"../../assets/sdf/queue"};
+
+            // AllocatedImage has no member initialisers, so these value
+            // initialisers are what make the null-handle checks meaningful.
+            AllocatedImage field{};
+            bool fieldValid{false};
+            glm::vec3 fieldMin{0.0f};
+            glm::vec3 fieldMax{0.0f};
+            glm::uvec3 fieldDimensions{0};
+            float voxelSize{0.0f};
+            // Distances are stored up to this many field voxels.  Lumen's
+            // global field is truncated the same way: a march only needs to
+            // know the space ahead is clear, not how far past that it stays
+            // clear.
+            float maxDistanceVoxels{8.0f};
+            int maxDimension{384};
+
+            uint64_t drawHash{0};
+            bool rebuildRequested{false};
+            int instanceCount{0};
+            int placedCount{0};
+            float buildMilliseconds{0.0f};
+            std::string status{"Not built"};
+
+            VkDescriptorSetLayout compositeLayout{};
+            VkPipelineLayout compositePipelineLayout{};
+            VkPipeline compositePipeline{};
+        };
+        SceneSdfState _sceneSdf;
+        struct SurfaceCacheState {
+            AllocatedImage albedo{};
+            AllocatedImage normal{};
+            AllocatedImage emissive{};
+            // Card depth as a colour page, so compute passes can read it.
+            AllocatedImage depth{};
+            // The depth buffer the capture tests against.
+            AllocatedImage captureDepth{};
+            // Light arriving at each captured texel, without albedo.
+            AllocatedImage direct{};
+            // Bounce light arriving at each texel, in the same convention.
+            AllocatedImage indirect{};
+            glm::uvec2 atlasSize{0};
+            // Target world size of one atlas texel; the build coarsens it when
+            // the scene does not fit the largest atlas.
+            float targetTexelSize{0.05f};
+            float texelSize{0.0f};
+            int maxAtlasSize{4096};
+            std::vector<SceneOpaqueInstance> instances;
+            // Per instance: captured from both sides.  Thin instances -- a
+            // plane, a leaf card, a panel -- have no inside that could hide
+            // other surfaces, and a single-sided capture would miss the side
+            // a ray actually reaches (the underside of a ceiling light).
+            std::vector<bool> instanceTwoSided;
+            std::vector<SurfaceCard> cards;
+            uint64_t drawHash{0};
+            bool valid{false};
+            bool rebuildRequested{false};
+            bool measureCoverage{false};
+            bool measureShadows{false};
+            // 0 albedo, 1 normal, 2 emissive, 3 depth, 4 direct light,
+            // 5 lit (albedo x direct + emissive); looked up at the G-buffer:
+            // 6 cache lit, 7 lit/shadow agreement with raster, 8 data.
+            int debugPage{0};
+            bool radiosityEnabled{true};
+            uint32_t radiosityCursor{0};
+            // Per card: how many radiosity updates it has had since the last
+            // capture.  The first updates average progressively (1/n) so a
+            // static scene keeps converging; radiosityBlend is the floor that
+            // keeps a changing one responsive.
+            std::vector<uint32_t> cardUpdates;
+            uint32_t radiosityUpdate{0};
+            // Texels traced per update; each traces raysPerTexel rays.
+            uint32_t radiosityTexelBudget{300000};
+            uint32_t raysPerTexel{2};
+            bool singleBounce{false};
+            float radiosityBlend{0.02f};
+            float radiosityMaxDistance{40.0f};
+            float radiosityMilliseconds{0.0f};
+            VkDescriptorSetLayout radiosityLayout{};
+            VkPipelineLayout radiosityPipelineLayout{};
+            VkPipeline radiosityPipeline{};
+            AllocatedBuffer cardBuffer{};
+            AllocatedBuffer gridBuffer{};
+            AllocatedBuffer indexBuffer{};
+            bool lookupValid{false};
+            VkDescriptorSetLayout compareLayout{};
+            VkPipelineLayout comparePipelineLayout{};
+            VkPipeline comparePipeline{};
+            bool lightingValid{false};
+            // Sun and field state the direct page was lit with.
+            uint64_t lightingHash{0};
+            float lightingMilliseconds{0.0f};
+            VkDescriptorSetLayout directLayout{};
+            VkPipelineLayout directPipelineLayout{};
+            VkPipeline directPipeline{};
+            float captureMilliseconds{0.0f};
+            std::string status{"Not built"};
+            VkPipeline capturePipeline{};
+            VkDescriptorSetLayout debugLayout{};
+            VkPipelineLayout debugPipelineLayout{};
+            VkPipeline debugPipeline{};
+        };
+        SurfaceCacheState _surfaceCache;
         struct SSAOState {
             // Ambient occlusion, at half resolution.  Three images rather than
             // one because a compute pass cannot read and write the same
