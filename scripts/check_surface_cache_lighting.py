@@ -3,7 +3,7 @@
 usage: check_surface_cache_lighting.py <capture.pfm>
 
 The capture is a raster capture taken with the "Surface cache atlas" debug
-view on its "Screen: comparison data" page (MIRABILIS_RENDER_DEBUG_VIEW=31,
+view on its "Screen: comparison data" page (MIRABILIS_RENDER_DEBUG_VIEW=29,
 MIRABILIS_SURFACE_CACHE_PAGE=8).  Each pixel holds:
     r   1 when some card saw this G-buffer position, 0 when none did,
         -1 where nothing was drawn

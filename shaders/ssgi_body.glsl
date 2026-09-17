@@ -5,6 +5,7 @@
 // always has.
 
 #include "scene_data.glsl"
+#include "ssgi_common.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -12,23 +13,10 @@ layout(rgba16f, set = 1, binding = 0) uniform image2D rawIndirectImage;
 layout(rgba16f, set = 1, binding = 1) uniform image2D diagnosticImage;
 layout(set = 1, binding = 2) uniform sampler2D prepassDepth;
 layout(set = 1, binding = 3) uniform sampler2D prepassNormal;
-// Bound but no longer read here.  Receiver albedo is applied once, in the
-// composite, at full resolution: the bilateral filter between here and there
-// is far better behaved on radiance than on radiance already tinted by a
-// neighbouring surface's base colour.  The binding stays so the descriptor
-// set layout is shared with the debug views.
-layout(set = 1, binding = 4) uniform sampler2D gbufferAlbedo;
 layout(set = 1, binding = 5) uniform sampler2D previousDirectLighting;
 layout(set = 1, binding = 6) uniform sampler2D portalMask;
 layout(set = 1, binding = 7) uniform sampler2D environmentTexture;
 layout(set = 1, binding = 8) uniform sampler2D gbufferVelocity;
-layout(rgba16f, set = 1, binding = 9) uniform image2D temporalIndirectImage;
-layout(rgba16f, set = 1, binding = 10) uniform image2D temporalDiagnosticImage;
-layout(set = 1, binding = 11) uniform sampler2D previousTemporalIndirect;
-// r = previous depth, gb = octahedral previous view normal, a = portal mask.
-layout(set = 1, binding = 12) uniform sampler2D previousMetadata;
-layout(rgba16f, set = 1, binding = 13) uniform image2D currentMetadata;
-layout(rgba16f, set = 1, binding = 14) uniform image2D fallbackIndirectImage;
 
 layout(push_constant) uniform constants {
     // xy = live extent, z = history valid, w = frame seed.
@@ -125,17 +113,9 @@ float randomFloat(inout uint state)
     return float(word) * (1.0 / 4294967296.0);
 }
 
-// Every input here is allocated at the full window size and written only over
-// the live draw extent.  That is not the extent this pass runs at on the
-// half-resolution presets, so the draw extent comes in separately.
 vec2 frame_uv(vec2 screenUV, sampler2D source)
 {
-    vec2 allocation = vec2(textureSize(source, 0));
-    vec2 liveFraction = vec2(PushConstants.quality.yz) / allocation;
-    return clamp(
-        screenUV * liveFraction,
-        vec2(0.5) / allocation,
-        liveFraction - vec2(0.5) / allocation);
+    return live_uv(screenUV, source, vec2(PushConstants.quality.yz));
 }
 
 vec3 view_position(vec2 screenUV, float depth)
@@ -159,26 +139,6 @@ vec3 cosine_direction(vec3 normal, inout uint state)
     return normalize(tangent * local.x + bitangent * local.y + normal * local.z);
 }
 
-vec2 encode_octahedron(vec3 n)
-{
-    n /= abs(n.x) + abs(n.y) + abs(n.z);
-    vec2 encoded = n.xy;
-    if (n.z < 0.0) {
-        encoded = (1.0 - abs(encoded.yx)) * sign(encoded.xy);
-    }
-    return encoded * 0.5 + 0.5;
-}
-
-vec3 decode_octahedron(vec2 encoded)
-{
-    vec2 f = encoded * 2.0 - 1.0;
-    vec3 n = vec3(f, 1.0 - abs(f.x) - abs(f.y));
-    if (n.z < 0.0) {
-        n.xy = (1.0 - abs(n.yx)) * sign(n.xy);
-    }
-    return normalize(n);
-}
-
 void main()
 {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
@@ -193,7 +153,6 @@ void main()
     if (depth <= BackgroundDepth) {
         imageStore(rawIndirectImage, pixel, vec4(0.0));
         imageStore(diagnosticImage, pixel, vec4(0.0));
-        imageStore(fallbackIndirectImage, pixel, vec4(0.0));
         return;
     }
 
@@ -213,7 +172,6 @@ void main()
     float stride = PushConstants.settings.x / float(stepCount);
     int rayCount = clamp(int(PushConstants.quality.x), 1, 8);
     vec3 indirect = vec3(0.0);
-    vec3 fallbackIndirect = vec3(0.0);
     int hitSamples = 0;
     int portalSamples = 0;
     int totalSteps = 0;
@@ -291,7 +249,6 @@ void main()
 #else
             incident = environment_radiance(worldDirection);
 #endif
-            fallbackIndirect += incident;
         }
         indirect += incident;
         hitSamples += hit ? 1 : 0;
@@ -301,9 +258,7 @@ void main()
     // Incident radiance, not reflected colour: the composite multiplies by
     // the receiver's albedo after the temporal and spatial filters have run.
     indirect /= float(rayCount);
-    fallbackIndirect /= float(rayCount);
     imageStore(rawIndirectImage, pixel, vec4(indirect, 1.0));
-    imageStore(fallbackIndirectImage, pixel, vec4(fallbackIndirect, 1.0));
     float hitFraction = float(hitSamples) / float(rayCount);
     float portalFraction = float(portalSamples) / float(rayCount);
     float classification = hitFraction > 0.0

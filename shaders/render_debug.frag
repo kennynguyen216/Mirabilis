@@ -27,8 +27,6 @@ layout(set = 3, binding = 5) uniform sampler2D ssgiDiagnostic;
 layout(set = 3, binding = 6) uniform sampler2D ssgiTemporal;
 layout(set = 3, binding = 7) uniform sampler2D ssgiTemporalDiagnostic;
 layout(set = 3, binding = 8) uniform sampler2D ssgiFiltered;
-layout(set = 3, binding = 9) uniform sampler2D ssgiReference;
-layout(set = 3, binding = 10) uniform sampler2D ssgiFallback;
 
 layout(push_constant) uniform constants {
     // x = debug mode, yz = rendered extent, w = distance that maps to white
@@ -54,8 +52,6 @@ const int ModeSSGITemporal = 15;
 const int ModeSSGIHistoryRejection = 16;
 const int ModeSSGIReprojection = 17;
 const int ModeSSGIFiltered = 18;
-const int ModeSSGIFallback = 19;
-const int ModeSSGIReferenceDifference = 20;
 
 void main()
 {
@@ -100,24 +96,6 @@ void main()
         } else if (mode == ModeSSGIFiltered) {
             outFragColor = vec4(texelFetch(
                 ssgiFiltered, ssgiPixel, 0).rgb, 1.0);
-        } else if (mode == ModeSSGIFallback) {
-            outFragColor = vec4(
-                texelFetch(ssgiFallback, ssgiPixel, 0).rgb, 1.0);
-        } else if (mode == ModeSSGIReferenceDifference) {
-            // The reference is path-traced reflected radiance, while the SSGI
-            // buffers now hold incident radiance with the receiver's albedo
-            // left for the composite to apply.  Applying it here is what
-            // keeps the two sides of this subtraction the same quantity.
-            vec3 filtered = texelFetch(ssgiFiltered, ssgiPixel, 0).rgb *
-                texelFetch(gbufferAlbedo, pixel, 0).rgb;
-            vec3 reference = texelFetch(ssgiReference, pixel, 0).rgb;
-            vec3 difference = abs(filtered - reference);
-            // Log-like false colour keeps both subtle and large errors visible.
-            float error = 1.0 - exp(-8.0 * max(
-                difference.r, max(difference.g, difference.b)));
-            outFragColor = vec4(
-                clamp(vec3(error * 2.0, 1.0 - abs(error * 2.0 - 1.0),
-                    1.0 - error * 2.0), 0.0, 1.0), 1.0);
         } else {
             vec2 diagnostic = texelFetch(
                 ssgiDiagnostic, ssgiPixel, 0).rg;

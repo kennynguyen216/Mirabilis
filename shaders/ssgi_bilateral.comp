@@ -1,4 +1,7 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "ssgi_common.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -15,17 +18,6 @@ layout(push_constant) uniform constants {
     // xy = live draw extent.
     ivec4 frame;
 } PushConstants;
-
-// Every source is allocated at the full window size and only partly written:
-// depth and normals over the draw extent, the indirect input over the SSGI
-// extent, which is half of it on the half-resolution presets.
-vec2 live_uv(vec2 screenUV, sampler2D source, vec2 liveExtent)
-{
-    vec2 allocation = vec2(textureSize(source, 0));
-    vec2 liveFraction = liveExtent / allocation;
-    return clamp(screenUV * liveFraction, vec2(0.5) / allocation,
-        liveFraction - vec2(0.5) / allocation);
-}
 
 vec2 frame_uv(vec2 screenUV, sampler2D source)
 {

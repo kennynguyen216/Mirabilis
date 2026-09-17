@@ -272,24 +272,22 @@ enum class RenderDebugView : int {
     SSGIHistoryRejection = 16,
     SSGIReprojection = 17,
     SSGIFiltered = 18,
-    SSGIFallback = 19,
-    SSGIReferenceDifference = 20,
     // Written by the forward and portal passes themselves, from values only
     // the material shader has.  The debug-view pass leaves the image alone.
-    MaterialRoughness = 21,
-    MaterialMetallic = 22,
-    DirectDiffuse = 23,
-    DirectSpecular = 24,
-    Emission = 25,
-    ShadingNormal = 26,
-    GeometricNormal = 27,
-    Tangent = 28,
-    TangentHandedness = 29,
+    MaterialRoughness = 19,
+    MaterialMetallic = 20,
+    DirectDiffuse = 21,
+    DirectSpecular = 22,
+    Emission = 23,
+    ShadingNormal = 24,
+    GeometricNormal = 25,
+    Tangent = 26,
+    TangentHandedness = 27,
     // Lumen-lite: one baked mesh distance field, sphere-traced from the
     // camera.  Replaces the whole frame, like the buffer views above.
-    SDFTrace = 30,
+    SDFTrace = 28,
     // Lumen-lite surface cache atlas pages, fitted to the screen.
-    SurfaceCache = 31,
+    SurfaceCache = 29,
 };
 
 // One drawn object as Lumen-lite sees it: a mesh buffer at a transform, with
@@ -842,7 +840,6 @@ class VulkanEngine{
         void draw_surface_cache_settings();
         // Reads back the card depth page and reports what fraction of each
         // instance's surface area some card captured.
-        void measure_surface_cache_coverage();
         // Direct sunlight into the cache's direct page, shadowed through the
         // scene distance field.
         void light_surface_cache();
@@ -857,7 +854,6 @@ class VulkanEngine{
         bool lumen_lite_ready() const;
         // Grades the cache's distance-field sun shadows against exact rays
         // cast through the path tracer's CPU BVH of the real triangles.
-        void measure_surface_cache_shadows();
         // Uploads signed distances (texel x + y*dimX + z*dimX*dimY) as a
         // filterable 3D image, choosing R32F or R16F by what the device can
         // linearly filter.  False when neither is available.
@@ -1215,14 +1211,11 @@ class VulkanEngine{
         struct SSGIState {
             AllocatedImage rawImage;
             AllocatedImage debugImage;
-            AllocatedImage fallbackImage;
             std::array<AllocatedImage, 2> temporalHistory{};
             std::array<AllocatedImage, 2> metadataHistory{};
             AllocatedImage temporalDiagnosticImage;
             AllocatedImage filterScratchImage;
             AllocatedImage filteredImage;
-            AllocatedImage referenceImage;
-            bool referenceLoaded{false};
             VkDescriptorSetLayout descriptorLayout{};
             std::array<VkDescriptorSet, 2> descriptors{};
             VkDescriptorSetLayout debugDescriptorLayout{};
@@ -1385,8 +1378,6 @@ class VulkanEngine{
             uint64_t drawHash{0};
             bool valid{false};
             bool rebuildRequested{false};
-            bool measureCoverage{false};
-            bool measureShadows{false};
             // 0 albedo, 1 normal, 2 emissive, 3 depth, 4 direct light,
             // 5 lit (albedo x direct + emissive); looked up at the G-buffer:
             // 6 cache lit, 7 lit/shadow agreement with raster, 8 data.

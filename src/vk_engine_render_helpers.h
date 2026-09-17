@@ -136,7 +136,7 @@ inline PickedFormat pick_format(
     return fallback;
 }
 
-inline constexpr std::array<const char*, 32> RenderDebugViewNames{
+inline constexpr std::array<const char*, 30> RenderDebugViewNames{
     "Final lighting",
     "Camera depth",
     "View normals",
@@ -156,8 +156,6 @@ inline constexpr std::array<const char*, 32> RenderDebugViewNames{
     "SSGI history rejection",
     "SSGI reprojection",
     "SSGI (filtered)",
-    "SSGI fallback only",
-    "SSGI vs loaded reference (difference)",
     "Material roughness",
     "Material metallic",
     "Direct diffuse only",
@@ -194,17 +192,14 @@ inline bool is_ssgi_debug_view(RenderDebugView view)
         view == RenderDebugView::SSGITemporal ||
         view == RenderDebugView::SSGIHistoryRejection ||
         view == RenderDebugView::SSGIReprojection ||
-        view == RenderDebugView::SSGIFiltered ||
-        view == RenderDebugView::SSGIFallback ||
-        view == RenderDebugView::SSGIReferenceDifference;
+        view == RenderDebugView::SSGIFiltered;
 }
 
 inline bool is_ssgi_indirect_radiance_view(RenderDebugView view)
 {
     return view == RenderDebugView::SSGIRaw ||
         view == RenderDebugView::SSGITemporal ||
-        view == RenderDebugView::SSGIFiltered ||
-        view == RenderDebugView::SSGIFallback;
+        view == RenderDebugView::SSGIFiltered;
 }
 
 inline glm::vec3 normalized_sun_direction(const glm::vec3& direction)

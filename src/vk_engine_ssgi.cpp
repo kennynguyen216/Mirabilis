@@ -5,77 +5,66 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
-#include <fstream>
 
 #include <vk_images.h>
 #include <vk_initializers.h>
 #include <vk_pipelines.h>
 
+namespace {
+struct SSGIPreset {
+    bool halfResolution;
+    int raysPerPixel;
+    int stepCount;
+    float rayLength;
+    float thickness;
+    float startOffset;
+    int filterRadius;
+    float filterDepthFalloff;
+    float filterNormalPower;
+    float historyWeight;
+};
+
+// 0 full-resolution validation baseline, 1 high (half resolution, spending the
+// saved pixels on longer rays), 2 balanced, 3 performance, 4 peak.
+constexpr std::array<SSGIPreset, 5> SSGIPresets{{
+    {false, 4, 32, 12.0f, 0.35f, 0.08f, 3, 800.0f, 32.0f, 0.92f},
+    {true,  4, 48, 16.0f, 0.30f, 0.06f, 4, 700.0f, 28.0f, 0.94f},
+    {true,  2, 32, 12.0f, 0.35f, 0.08f, 3, 800.0f, 32.0f, 0.92f},
+    {true,  1, 16,  8.0f, 0.45f, 0.10f, 2, 900.0f, 36.0f, 0.90f},
+    {false, 8, 96, 20.0f, 0.25f, 0.05f, 5, 800.0f, 32.0f, 0.96f}}};
+
+// Everything the SSGI dispatches touch stays in GENERAL, so what has to be
+// ordered between them is the memory, not a layout.  One memory barrier does
+// for all of them what a same-layout transition per image did one at a time.
+void ssgi_compute_barrier(VkCommandBuffer cmd)
+{
+    VkMemoryBarrier2 barrier{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.dstAccessMask =
+        VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
+    VkDependencyInfo dependency{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dependency.memoryBarrierCount = 1;
+    dependency.pMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(cmd, &dependency);
+}
+}
+
 void VulkanEngine::apply_ssgi_quality_preset(int preset)
 {
-    _ssgi.qualityPreset = std::clamp(preset, 0, 4);
-    switch (_ssgi.qualityPreset) {
-    case 0: // Full-resolution validation baseline.
-        _ssgi.halfResolution = false;
-        _ssgi.raysPerPixel = 4;
-        _ssgi.stepCount = 32;
-        _ssgi.rayLength = 12.0f;
-        _ssgi.thickness = 0.35f;
-        _ssgi.startOffset = 0.08f;
-        _ssgi.filterRadius = 3;
-        _ssgi.filterDepthFalloff = 800.0f;
-        _ssgi.filterNormalPower = 32.0f;
-        _ssgi.historyWeight = 0.92f;
-        break;
-    case 1: // High: spend saved pixels on longer rays.
-        _ssgi.halfResolution = true;
-        _ssgi.raysPerPixel = 4;
-        _ssgi.stepCount = 48;
-        _ssgi.rayLength = 16.0f;
-        _ssgi.thickness = 0.30f;
-        _ssgi.startOffset = 0.06f;
-        _ssgi.filterRadius = 4;
-        _ssgi.filterDepthFalloff = 700.0f;
-        _ssgi.filterNormalPower = 28.0f;
-        _ssgi.historyWeight = 0.94f;
-        break;
-    case 2: // Balanced.
-        _ssgi.halfResolution = true;
-        _ssgi.raysPerPixel = 2;
-        _ssgi.stepCount = 32;
-        _ssgi.rayLength = 12.0f;
-        _ssgi.thickness = 0.35f;
-        _ssgi.startOffset = 0.08f;
-        _ssgi.filterRadius = 3;
-        _ssgi.filterDepthFalloff = 800.0f;
-        _ssgi.filterNormalPower = 32.0f;
-        _ssgi.historyWeight = 0.92f;
-        break;
-    case 3: // Performance.
-        _ssgi.halfResolution = true;
-        _ssgi.raysPerPixel = 1;
-        _ssgi.stepCount = 16;
-        _ssgi.rayLength = 8.0f;
-        _ssgi.thickness = 0.45f;
-        _ssgi.startOffset = 0.10f;
-        _ssgi.filterRadius = 2;
-        _ssgi.filterDepthFalloff = 900.0f;
-        _ssgi.filterNormalPower = 36.0f;
-        _ssgi.historyWeight = 0.90f;
-        break;
-    default: // Peak: maximum samples and march precision at full resolution.
-        _ssgi.halfResolution = false;
-        _ssgi.raysPerPixel = 8;
-        _ssgi.stepCount = 96;
-        _ssgi.rayLength = 20.0f;
-        _ssgi.thickness = 0.25f;
-        _ssgi.startOffset = 0.05f;
-        _ssgi.filterRadius = 5;
-        _ssgi.filterDepthFalloff = 800.0f;
-        _ssgi.filterNormalPower = 32.0f;
-        _ssgi.historyWeight = 0.96f;
-        break;
-    }
+    _ssgi.qualityPreset = std::clamp(preset, 0, int(SSGIPresets.size()) - 1);
+    const SSGIPreset& chosen = SSGIPresets[_ssgi.qualityPreset];
+    _ssgi.halfResolution = chosen.halfResolution;
+    _ssgi.raysPerPixel = chosen.raysPerPixel;
+    _ssgi.stepCount = chosen.stepCount;
+    _ssgi.rayLength = chosen.rayLength;
+    _ssgi.thickness = chosen.thickness;
+    _ssgi.startOffset = chosen.startOffset;
+    _ssgi.filterRadius = chosen.filterRadius;
+    _ssgi.filterDepthFalloff = chosen.filterDepthFalloff;
+    _ssgi.filterNormalPower = chosen.filterNormalPower;
+    _ssgi.historyWeight = chosen.historyWeight;
     _ssgi.spatialFilterEnabled = true;
     _ssgi.historyValid = false;
 }
@@ -94,7 +83,6 @@ void VulkanEngine::init_ssgi_descriptors()
         builder.add_binding(11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(13, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-        builder.add_binding(14, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         _ssgi.descriptorLayout = builder.build(
             _device, VK_SHADER_STAGE_COMPUTE_BIT);
         for (VkDescriptorSet& set : _ssgi.descriptors) {
@@ -102,7 +90,7 @@ void VulkanEngine::init_ssgi_descriptors()
         }
 
         builder.clear();
-        for (uint32_t binding = 0; binding < 11; ++binding) {
+        for (uint32_t binding = 0; binding < 9; ++binding) {
             builder.add_binding(binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         }
         _ssgi.debugDescriptorLayout = builder.build(
@@ -140,12 +128,6 @@ void VulkanEngine::init_ssgi_descriptors()
                 _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             debugWriter.write_image(8, _ssgi.filteredImage.imageView,
-                _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
-                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-            debugWriter.write_image(9, _ssgi.referenceImage.imageView,
-                _prepass.sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-            debugWriter.write_image(10, _ssgi.fallbackImage.imageView,
                 _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             debugWriter.update_set(
@@ -283,9 +265,6 @@ void VulkanEngine::init_ssgi_resources()
     _ssgi.debugImage = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    _ssgi.fallbackImage = create_image(
-        extent, VK_FORMAT_R16G16B16A16_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     for (AllocatedImage& history : _ssgi.temporalHistory) {
         history = create_image(
             extent, VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -306,44 +285,7 @@ void VulkanEngine::init_ssgi_resources()
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-    _ssgi.referenceImage = create_image(
-        extent, VK_FORMAT_R16G16B16A16_SFLOAT,
-        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
 
-    AllocatedBuffer referenceUpload{};
-    if (const char* referencePath = std::getenv("MIRABILIS_SSGI_REFERENCE")) {
-        std::ifstream file(referencePath, std::ios::binary);
-        std::string magic;
-        uint32_t width = 0, height = 0;
-        float scale = 0.0f;
-        file >> magic >> width >> height >> scale;
-        file.get();
-        if (!file || magic != "PF" || width != extent.width ||
-            height != extent.height || scale >= 0.0f) {
-            fmt::print("SSGI reference must be a matching little-endian RGB PFM: {}\n",
-                referencePath);
-            std::abort();
-        }
-        std::vector<uint64_t> packed(size_t(width) * height);
-        for (int y = int(height) - 1; y >= 0; --y) {
-            for (uint32_t x = 0; x < width; ++x) {
-                glm::vec3 rgb{};
-                file.read(reinterpret_cast<char*>(&rgb), 3 * sizeof(float));
-                const uint64_t rg = glm::packHalf2x16(glm::vec2(rgb));
-                const uint64_t ba = glm::packHalf2x16(glm::vec2(rgb.z, 1.0f));
-                packed[size_t(y) * width + x] = rg | (ba << 32u);
-            }
-        }
-        if (!file) std::abort();
-        referenceUpload = create_buffer(
-            packed.size() * sizeof(uint64_t), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU);
-        std::memcpy(referenceUpload.info.pMappedData, packed.data(),
-            packed.size() * sizeof(uint64_t));
-        _ssgi.referenceLoaded = true;
-        fmt::print("Loaded SSGI reference: {} ({}x{})\n",
-            referencePath, width, height);
-    }
     for (AllocatedImage& history : _sceneTargets.directLightingHistory) {
         history = create_image(
             extent, VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -372,9 +314,6 @@ void VulkanEngine::init_ssgi_resources()
         vkutil::transition_image(
             cmd, _ssgi.debugImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_GENERAL);
-        vkutil::transition_image(
-            cmd, _ssgi.fallbackImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_GENERAL);
         for (AllocatedImage& history : _ssgi.temporalHistory) {
             vkutil::transition_image(
                 cmd, history.image, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -394,30 +333,7 @@ void VulkanEngine::init_ssgi_resources()
         vkutil::transition_image(
             cmd, _ssgi.filteredImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_GENERAL);
-        vkutil::transition_image(cmd, _ssgi.referenceImage.image,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        VkImageSubresourceRange referenceRange{
-            VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        if (_ssgi.referenceLoaded) {
-            VkBufferImageCopy copy{};
-            copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            copy.imageExtent = extent;
-            vkCmdCopyBufferToImage(cmd, referenceUpload.buffer,
-                _ssgi.referenceImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                1, &copy);
-        } else {
-            VkClearColorValue clear{};
-            vkCmdClearColorImage(cmd, _ssgi.referenceImage.image,
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1,
-                &referenceRange);
-        }
-        vkutil::transition_image(cmd, _ssgi.referenceImage.image,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     });
-    if (_ssgi.referenceLoaded) {
-        destroy_buffer(referenceUpload);
-    }
 
     _mainDeletionQueue.push_function([this]() {
         destroy_image(_sceneTargets.gbufferAlbedo);
@@ -426,7 +342,6 @@ void VulkanEngine::init_ssgi_resources()
         destroy_image(_sceneTargets.portalMask);
         destroy_image(_ssgi.rawImage);
         destroy_image(_ssgi.debugImage);
-        destroy_image(_ssgi.fallbackImage);
         for (const AllocatedImage& history : _ssgi.temporalHistory) {
             destroy_image(history);
         }
@@ -436,7 +351,6 @@ void VulkanEngine::init_ssgi_resources()
         destroy_image(_ssgi.temporalDiagnosticImage);
         destroy_image(_ssgi.filterScratchImage);
         destroy_image(_ssgi.filteredImage);
-        destroy_image(_ssgi.referenceImage);
         for (const AllocatedImage& history : _sceneTargets.directLightingHistory) {
             destroy_image(history);
         }
@@ -677,27 +591,9 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 _ssgi.timestampPool, timingBase + 0);
         }
-        // Same-layout barriers make the preceding frame's fragment reads and
-        // this dispatch's writes explicit without changing descriptor state.
-        vkutil::transition_image(
-            cmd, _ssgi.rawImage.image, VK_IMAGE_LAYOUT_GENERAL,
-            VK_IMAGE_LAYOUT_GENERAL);
-        vkutil::transition_image(
-            cmd, _ssgi.debugImage.image, VK_IMAGE_LAYOUT_GENERAL,
-            VK_IMAGE_LAYOUT_GENERAL);
-        vkutil::transition_image(
-            cmd, _ssgi.fallbackImage.image, VK_IMAGE_LAYOUT_GENERAL,
-            VK_IMAGE_LAYOUT_GENERAL);
-
-        vkutil::transition_image(
-            cmd, _ssgi.temporalHistory[writeIndex].image,
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
-        vkutil::transition_image(
-            cmd, _ssgi.metadataHistory[writeIndex].image,
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
-        vkutil::transition_image(
-            cmd, _ssgi.temporalDiagnosticImage.image,
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+        // Orders the preceding frame's fragment reads against this
+        // dispatch's writes without changing descriptor state.
+        ssgi_compute_barrier(cmd);
 
         const std::array<VkDescriptorSet, 2> sets{
             get_current_frame().sceneDescriptor,
@@ -769,15 +665,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 _ssgi.timestampPool, timingBase + 1);
         }
-        vkutil::transition_image(
-            cmd, _ssgi.rawImage.image, VK_IMAGE_LAYOUT_GENERAL,
-            VK_IMAGE_LAYOUT_GENERAL);
-        vkutil::transition_image(
-            cmd, _ssgi.debugImage.image, VK_IMAGE_LAYOUT_GENERAL,
-            VK_IMAGE_LAYOUT_GENERAL);
-        vkutil::transition_image(
-            cmd, _ssgi.fallbackImage.image, VK_IMAGE_LAYOUT_GENERAL,
-            VK_IMAGE_LAYOUT_GENERAL);
+        ssgi_compute_barrier(cmd);
 
         // Temporal accumulation is a separate dispatch so every invocation
         // sees the complete current-frame raw image. This makes the 3x3
@@ -799,15 +687,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 _ssgi.timestampPool, timingBase + 2);
         }
-        vkutil::transition_image(
-            cmd, _ssgi.temporalHistory[writeIndex].image,
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
-        vkutil::transition_image(
-            cmd, _ssgi.metadataHistory[writeIndex].image,
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
-        vkutil::transition_image(
-            cmd, _ssgi.temporalDiagnosticImage.image,
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+        ssgi_compute_barrier(cmd);
 
         if (_ssgi.filterPipeline != VK_NULL_HANDLE) {
             vkCmdBindPipeline(
@@ -832,8 +712,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkCmdPushConstants(cmd, _ssgi.filterPipelineLayout,
                 VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(filterPush), &filterPush);
             vkCmdDispatch(cmd, groupX, groupY, 1);
-            vkutil::transition_image(cmd, _ssgi.filterScratchImage.image,
-                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+            ssgi_compute_barrier(cmd);
 
             filterPush.control.z = 0;
             filterPush.control.w = 1;
@@ -843,8 +722,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkCmdPushConstants(cmd, _ssgi.filterPipelineLayout,
                 VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(filterPush), &filterPush);
             vkCmdDispatch(cmd, groupX, groupY, 1);
-            vkutil::transition_image(cmd, _ssgi.filteredImage.image,
-                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+            ssgi_compute_barrier(cmd);
         }
         if (_gpuTiming.supported) {
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -891,7 +769,8 @@ void VulkanEngine::draw_ssgi_composite(VkCommandBuffer cmd)
         static_cast<float>(ssgiExtent.width),
         static_cast<float>(ssgiExtent.height));
     push.settings = glm::vec4(
-        _ssgi.intensity, _ssgi.halfResolution ? 1.0f : 0.0f, 0.0f, 0.0f);
+        _ssgi.intensity, _ssgi.halfResolution ? 1.0f : 0.0f,
+        _ssgi.filterDepthFalloff, _ssgi.filterNormalPower);
     vkCmdPushConstants(cmd, _ssgi.compositePipeline.layout,
         VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
     vkCmdDraw(cmd, 3, 1, 0, 0);
@@ -961,9 +840,6 @@ void VulkanEngine::write_ssgi_trace_descriptors()
             _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         ssgiWriter.write_image(13, _ssgi.metadataHistory[writeIndex].imageView,
-            VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
-            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-        ssgiWriter.write_image(14, _ssgi.fallbackImage.imageView,
             VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         ssgiWriter.update_set(_device, _ssgi.descriptors[writeIndex]);

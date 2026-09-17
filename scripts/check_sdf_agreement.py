@@ -3,7 +3,7 @@
 usage: check_sdf_agreement.py <capture.pfm> [max scatter cm] [max bias cm]
 
 The capture is a raster capture taken with the "SDF sphere trace" debug view
-in its "Raster agreement (data)" mode (MIRABILIS_RENDER_DEBUG_VIEW=30,
+in its "Raster agreement (data)" mode (MIRABILIS_RENDER_DEBUG_VIEW=28,
 MIRABILIS_SDF_VIEW_MODE=4).  Each pixel holds:
     r >= 0   both the field trace and the raster hit something: the distance
              between the two hits, in field voxels

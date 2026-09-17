@@ -1,4 +1,7 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "ssgi_common.glsl"
 
 layout(location = 0) in vec2 inUV;
 layout(location = 0) out vec4 outFragColor;
@@ -17,19 +20,10 @@ layout(set = 0, binding = 4) uniform sampler2D gbufferAlbedo;
 layout(push_constant) uniform constants {
     // xy = full render extent, zw = active SSGI extent.
     vec4 extents;
-    // x = intensity, y = half-resolution flag.
+    // x = intensity, y = half-resolution flag, z = depth falloff,
+    // w = normal exponent (the same two the bilateral filter uses).
     vec4 settings;
 } PushConstants;
-
-vec3 decode_octahedron(vec2 encoded)
-{
-    vec2 f = encoded * 2.0 - 1.0;
-    vec3 n = vec3(f, 1.0 - abs(f.x) - abs(f.y));
-    if (n.z < 0.0) {
-        n.xy = (1.0 - abs(n.yx)) * sign(n.xy);
-    }
-    return normalize(n);
-}
 
 void main()
 {
@@ -51,10 +45,11 @@ void main()
                 vec4 metadata = texelFetch(
                     ssgiMetadata, sourcePixel, 0);
                 vec3 sourceNormal = decode_octahedron(metadata.gb);
-                float depthWeight = exp(
-                    -abs(metadata.r - centerDepth) * 800.0);
+                float depthWeight = exp(-abs(metadata.r - centerDepth) *
+                    PushConstants.settings.z);
                 float normalWeight = pow(
-                    max(dot(centerNormal, sourceNormal), 0.0), 32.0);
+                    max(dot(centerNormal, sourceNormal), 0.0),
+                    PushConstants.settings.w);
                 vec2 sourceCenter = vec2(sourcePixel * 2 + ivec2(1));
                 float spatialWeight = exp(
                     -dot(sourceCenter - vec2(pixel),

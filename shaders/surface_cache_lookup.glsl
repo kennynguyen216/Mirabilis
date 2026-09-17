@@ -64,6 +64,32 @@ struct SurfaceCacheSample {
     vec3 indirect;
 };
 
+// Where a card sees a world point, if it sees it at all: the atlas texel, how
+// far behind the point the captured surface lies along the card's viewing
+// direction (negative in front), and how squarely the surface faces the card.
+bool card_probe(uint cardIndex, vec4 p, vec3 normal, float minimumFacing,
+    out ivec2 texel, out float behind, out float facing)
+{
+    SurfaceCacheCard card = cards[cardIndex];
+    facing = dot(normal, card.direction.xyz);
+    if (facing < minimumFacing) {
+        return false;
+    }
+    vec3 c = vec3(dot(card.worldToCard0, p), dot(card.worldToCard1, p),
+                  dot(card.worldToCard2, p));
+    if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0)))) {
+        return false;
+    }
+    texel = ivec2(card.rect.xy) + min(
+        ivec2(c.xy * vec2(card.rect.zw)), ivec2(card.rect.zw) - 1);
+    float stored = texelFetch(cacheDepth, texel, 0).r;
+    if (stored >= 1.0) {
+        return false;
+    }
+    behind = (stored - c.z) * card.direction.w;
+    return true;
+}
+
 SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal)
 {
     SurfaceCacheSample result;
@@ -93,31 +119,18 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal)
 
     // A distance-field hit lands in front of the surface it found, so the
     // surface meant is the first one behind it.  Blending every card within
-    // the tolerance instead averaged a ceiling light with the dark ceiling
-    // two centimetres above it and halved the light in the room.  The first
-    // pass finds that nearest surface; the second blends only the cards that
+    // the tolerance instead averaged a ceiling light with the dark ceiling two
+    // centimetres above it and halved the light in the room.  The first pass
+    // finds that nearest surface; the second blends only the cards that
     // captured it.
     float nearest = 1e30;
     for (uint i = 0u; i < count; ++i) {
-        SurfaceCacheCard card = cards[cardIndices[range.x + i]];
-        if (dot(normal, card.direction.xyz) < minimumFacing) {
-            continue;
-        }
-        vec3 c = vec3(dot(card.worldToCard0, p), dot(card.worldToCard1, p),
-                      dot(card.worldToCard2, p));
-        if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0)))) {
-            continue;
-        }
-        ivec2 texel = ivec2(card.rect.xy) + min(
-            ivec2(c.xy * vec2(card.rect.zw)), ivec2(card.rect.zw) - 1);
-        float stored = texelFetch(cacheDepth, texel, 0).r;
-        if (stored >= 1.0) {
-            continue;
-        }
-        // Positive when the captured surface lies behind the query point as
-        // seen along the card's viewing direction.
-        float behind = (stored - c.z) * card.direction.w;
-        if (behind < -frontTolerance || behind > depthTolerance) {
+        ivec2 texel;
+        float behind;
+        float facing;
+        if (!card_probe(cardIndices[range.x + i], p, normal, minimumFacing,
+                texel, behind, facing) ||
+            behind < -frontTolerance || behind > depthTolerance) {
             continue;
         }
         nearest = min(nearest, behind);
@@ -127,24 +140,11 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal)
     }
 
     for (uint i = 0u; i < count; ++i) {
-        SurfaceCacheCard card = cards[cardIndices[range.x + i]];
-        float facing = dot(normal, card.direction.xyz);
-        if (facing < minimumFacing) {
-            continue;
-        }
-        vec3 c = vec3(dot(card.worldToCard0, p), dot(card.worldToCard1, p),
-                      dot(card.worldToCard2, p));
-        if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0)))) {
-            continue;
-        }
-        ivec2 texel = ivec2(card.rect.xy) + min(
-            ivec2(c.xy * vec2(card.rect.zw)), ivec2(card.rect.zw) - 1);
-        float stored = texelFetch(cacheDepth, texel, 0).r;
-        if (stored >= 1.0) {
-            continue;
-        }
-        float behind = (stored - c.z) * card.direction.w;
-        if (behind < -frontTolerance) {
+        ivec2 texel;
+        float behind;
+        float facing;
+        if (!card_probe(cardIndices[range.x + i], p, normal, minimumFacing,
+                texel, behind, facing) || behind < -frontTolerance) {
             continue;
         }
         // Full weight for the nearest surface and any other card that
