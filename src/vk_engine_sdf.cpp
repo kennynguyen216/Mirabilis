@@ -218,8 +218,14 @@ void VulkanEngine::init_sdf_resources()
         builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         _sdf.descriptorLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
     }
+    // Written on every field build; zeroed until then, which reads as no
+    // cascades to any tracer that runs early.
+    _sceneSdf.cascadeBuffer = create_buffer(sizeof(SceneFieldCascades),
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    std::memset(_sceneSdf.cascadeBuffer.info.pMappedData, 0, sizeof(SceneFieldCascades));
     {
         DescriptorLayoutBuilder builder;
         builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
@@ -282,6 +288,7 @@ void VulkanEngine::init_sdf_resources()
         if (_sceneSdf.field.image != VK_NULL_HANDLE) {
             destroy_image(_sceneSdf.field);
         }
+        destroy_buffer(_sceneSdf.cascadeBuffer);
         vkDestroyPipeline(_device, _sceneSdf.compositePipeline, nullptr);
         vkDestroyPipelineLayout(_device, _sceneSdf.compositePipelineLayout, nullptr);
         vkDestroyDescriptorSetLayout(_device, _sceneSdf.compositeLayout, nullptr);
@@ -399,7 +406,15 @@ void VulkanEngine::update_scene_sdf()
         }
         instances.push_back(std::move(instance));
     }
-    if (drawHash == _sceneSdf.drawHash && !_sceneSdf.rebuildRequested) {
+    // The camera cascades follow the camera: once it is an eighth of the
+    // finest cascade away from where they were placed, they are placed again.
+    bool recentre = false;
+    if (_sceneSdf.fieldValid && _sceneSdf.cascades.size() > 1) {
+        const SceneSdfState::Cascade& fine = _sceneSdf.cascades.front();
+        recentre = glm::length(render_camera().position - _sceneSdf.cascadeCentre) >
+            0.125f * float(fine.dimensions.x) * fine.voxel;
+    }
+    if (drawHash == _sceneSdf.drawHash && !_sceneSdf.rebuildRequested && !recentre) {
         return;
     }
     const auto started = std::chrono::steady_clock::now();
@@ -483,7 +498,7 @@ void VulkanEngine::update_scene_sdf()
             "queued). {}",
             _sceneSdf.placedCount, _sceneSdf.instanceCount,
             _sceneSdf.missing.size(), queuedNow, detail);
-        fmt::print("Scene SDF: {}\n", _sceneSdf.status);
+        fmt::print("Scene SDF: {} Built in {:.0f} ms.\n", _sceneSdf.status, _sceneSdf.buildMilliseconds);
     };
 
     if (placed.empty()) {
@@ -506,53 +521,90 @@ void VulkanEngine::update_scene_sdf()
             hi = glm::max(hi, world);
         }
     }
+    // The field is a stack of cascades (shaders/scene_field.glsl).  The last
+    // covers every placed volume at up to maxDimension voxels a side, as the
+    // single field did, and never moves.  Before it, cascades of fineVoxel,
+    // twice that, and so on follow the camera, fineDimension voxels a side,
+    // for as long as each is meaningfully finer than the whole-scene one: a
+    // shell sits three quarters of a field voxel in front of its surface, so
+    // a large scene's hits land early by that much unless the field near the
+    // camera is fine.  lumen_lite_design.md has the measurement that sized
+    // these.  A scene small enough to be fine as a whole gets one cascade.
     constexpr int Pad = 2;
     const glm::vec3 extent = hi - lo;
     const int maxDimension = std::max(16, _sceneSdf.maxDimension);
-    const float voxel = std::max(
+    const float baseVoxel = std::max(
         std::max({extent.x, extent.y, extent.z}) / float(maxDimension - 2 * Pad),
         1e-4f);
-    glm::uvec3 dimensions = glm::uvec3(glm::min(
-        glm::ceil(extent / voxel) + glm::vec3(2 * Pad), glm::vec3(maxDimension)));
-    const glm::vec3 centre = (lo + hi) * 0.5f;
-    _sceneSdf.voxelSize = voxel;
-    _sceneSdf.fieldMin = centre - glm::vec3(dimensions) * voxel * 0.5f;
-    _sceneSdf.fieldMax = centre + glm::vec3(dimensions) * voxel * 0.5f;
-    const float maxDistance = _sceneSdf.maxDistanceVoxels * voxel;
+    const glm::vec3 camera = render_camera().position;
+    std::vector<SceneSdfState::Cascade> cascades;
+    for (float fine = _sceneSdf.fineVoxel;
+         cascades.size() + 1 < SceneSdfState::MaxCascades && fine * 1.5f < baseVoxel;
+         fine *= 2.0f) {
+        const float span = float(_sceneSdf.fineDimension) * fine;
+        // On the cascade grid, so a recentred cascade samples the same
+        // points the old one did where the two overlap.
+        const glm::vec3 min = glm::floor((camera - glm::vec3(0.5f * span)) / fine) * fine;
+        cascades.push_back({min, fine, glm::uvec3(_sceneSdf.fineDimension), 0u});
+    }
+    {
+        const glm::uvec3 dimensions = glm::uvec3(glm::min(
+            glm::ceil(extent / baseVoxel) + glm::vec3(2 * Pad), glm::vec3(maxDimension)));
+        const glm::vec3 centre = (lo + hi) * 0.5f;
+        cascades.push_back({centre - glm::vec3(dimensions) * baseVoxel * 0.5f,
+            baseVoxel, dimensions, 0u});
+    }
+    glm::uvec3 stacked(0u);
+    for (SceneSdfState::Cascade& cascade : cascades) {
+        cascade.zOffset = stacked.z;
+        stacked = glm::uvec3(glm::max(stacked.x, cascade.dimensions.x),
+            glm::max(stacked.y, cascade.dimensions.y), stacked.z + cascade.dimensions.z);
+    }
+    const SceneSdfState::Cascade& base = cascades.back();
+    _sceneSdf.voxelSize = baseVoxel;
+    _sceneSdf.fieldMin = base.min;
+    _sceneSdf.fieldMax = base.min + glm::vec3(base.dimensions) * baseVoxel;
+    _sceneSdf.cascades = cascades;
+    _sceneSdf.cascadeCentre = camera;
 
     // The merge reads and writes the field in place, so it needs a storage
-    // format the shader can name; r32f is the one sdf_composite.comp uses.
+    // format the shader can name; r8 is the one sdf_composite.comp uses.
+    // Eight bits of a distance truncated at maxDistanceVoxels resolve 1/32 of
+    // a voxel, and cost a quarter of R32F: the fine cascade is 128 MB.
     const VkFormatFeatureFlags2 fieldFeatures =
         VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
         VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
         VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-    if (pick_format(_chosenGPU, {VK_FORMAT_R32_SFLOAT}, fieldFeatures).format ==
+    if (pick_format(_chosenGPU, {VK_FORMAT_R8_UNORM}, fieldFeatures).format ==
         VK_FORMAT_UNDEFINED) {
         _sceneSdf.fieldValid = false;
-        finishStatus("This device cannot store and filter an R32F volume.");
+        finishStatus("This device cannot store and filter an R8 volume.");
         return;
     }
 
     // Anything submitted earlier may still sample the old field.
     VK_CHECK(vkDeviceWaitIdle(_device));
     if (_sceneSdf.field.image == VK_NULL_HANDLE ||
-        dimensions != _sceneSdf.fieldDimensions) {
+        stacked != _sceneSdf.fieldDimensions) {
         if (_sceneSdf.field.image != VK_NULL_HANDLE) {
             destroy_image(_sceneSdf.field);
         }
         _sceneSdf.field = create_image(
-            VkExtent3D{dimensions.x, dimensions.y, dimensions.z},
-            VK_FORMAT_R32_SFLOAT,
+            VkExtent3D{stacked.x, stacked.y, stacked.z},
+            VK_FORMAT_R8_UNORM,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                 VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-        _sceneSdf.fieldDimensions = dimensions;
+        _sceneSdf.fieldDimensions = stacked;
     }
 
+    // Everything starts as far as a cascade stores: 1.
+    // ponytail: a recentre rebuilds every cascade whole, the static one
+    // included; scroll the fine ones in slabs if recentring ever hitches.
     immediate_submit([&](VkCommandBuffer cmd) {
         vkutil::transition_image(cmd, _sceneSdf.field.image,
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
         VkClearColorValue clear{};
-        clear.float32[0] = maxDistance;
+        clear.float32[0] = 1.0f;
         const VkImageSubresourceRange range =
             vkinit::image_subresource_range(VK_IMAGE_ASPECT_COLOR_BIT);
         vkCmdClearColorImage(
@@ -563,11 +615,16 @@ void VulkanEngine::update_scene_sdf()
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1.0f},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1.0f}}};
     DescriptorAllocatorGrowable pool;
-    pool.init(_device, static_cast<uint32_t>(placed.size()), ratios);
+    pool.init(_device, static_cast<uint32_t>(placed.size() * cascades.size()), ratios);
 
     // Submitted in batches of bounded voxel work, so one long dispatch list
     // cannot run into the driver's GPU timeout on a large scene.
     constexpr uint64_t VoxelBudget = 24'000'000;
+    for (const SceneSdfState::Cascade& cascade : cascades) {
+    const float voxel = cascade.voxel;
+    const glm::uvec3 dimensions = cascade.dimensions;
+    const glm::vec3 fieldMin = cascade.min;
+    const float maxDistance = _sceneSdf.maxDistanceVoxels * voxel;
     size_t next = 0;
     while (next < placed.size()) {
         struct Job {
@@ -594,10 +651,10 @@ void VulkanEngine::update_scene_sdf()
             boxLo -= glm::vec3(maxDistance);
             boxHi += glm::vec3(maxDistance);
             const glm::ivec3 first = glm::clamp(
-                glm::ivec3(glm::floor((boxLo - _sceneSdf.fieldMin) / voxel)),
+                glm::ivec3(glm::floor((boxLo - fieldMin) / voxel)),
                 glm::ivec3(0), glm::ivec3(dimensions));
             const glm::ivec3 last = glm::clamp(
-                glm::ivec3(glm::ceil((boxHi - _sceneSdf.fieldMin) / voxel)),
+                glm::ivec3(glm::ceil((boxHi - fieldMin) / voxel)),
                 glm::ivec3(0), glm::ivec3(dimensions));
             const glm::ivec3 size = last - first;
             if (size.x <= 0 || size.y <= 0 || size.z <= 0) {
@@ -616,7 +673,7 @@ void VulkanEngine::update_scene_sdf()
             job.push.worldToLocal2 = glm::row(worldToLocal, 2);
             job.push.volumeMin = glm::vec4(p.volume->boundsMin, smallestScale);
             job.push.volumeMax = glm::vec4(p.volume->boundsMax, maxDistance);
-            job.push.fieldOrigin = glm::vec4(_sceneSdf.fieldMin, voxel);
+            job.push.fieldOrigin = glm::vec4(fieldMin, voxel);
             job.push.regionOffset = first;
             // A shell thinner than the scene field can resolve is invisible to
             // it: trilinear filtering between voxel centres on either side of
@@ -630,7 +687,7 @@ void VulkanEngine::update_scene_sdf()
             // that much further forward.
             const float shellHalf = 0.5f * p.volume->bakeVoxel * smallestScale;
             job.push.shellPad = std::max(0.0f, 0.75f * voxel - shellHalf);
-            job.push.regionSize = glm::ivec4(size, 0);
+            job.push.regionSize = glm::ivec4(size, int(cascade.zOffset));
 
             job.set = pool.allocate(_device, _sceneSdf.compositeLayout);
             DescriptorWriter writer;
@@ -666,6 +723,17 @@ void VulkanEngine::update_scene_sdf()
             }
         });
     }
+    }
+
+    // The table every tracer reads the cascades from.
+    SceneFieldCascades table{};
+    table.info = glm::vec4(float(cascades.size()), _sceneSdf.maxDistanceVoxels, 0.0f, 0.0f);
+    for (size_t i = 0; i < cascades.size(); ++i) {
+        table.cascade[i].origin = glm::vec4(cascades[i].min, cascades[i].voxel);
+        table.cascade[i].size = glm::vec4(
+            glm::vec3(cascades[i].dimensions), float(cascades[i].zOffset));
+    }
+    std::memcpy(_sceneSdf.cascadeBuffer.info.pMappedData, &table, sizeof(table));
 
     immediate_submit([&](VkCommandBuffer cmd) {
         vkutil::transition_image(cmd, _sceneSdf.field.image,
@@ -674,9 +742,13 @@ void VulkanEngine::update_scene_sdf()
     pool.destroy_pools(_device);
     _sceneSdf.fieldValid = true;
 
-    finishStatus(fmt::format(
-        "Field {}x{}x{} at {:.1f} cm voxels.",
-        dimensions.x, dimensions.y, dimensions.z, voxel * 100.0f));
+    std::string detail = "Field";
+    for (size_t i = 0; i < cascades.size(); ++i) {
+        detail += fmt::format("{} {}x{}x{} at {:.1f} cm{}", i ? "," : "",
+            cascades[i].dimensions.x, cascades[i].dimensions.y, cascades[i].dimensions.z,
+            cascades[i].voxel * 100.0f, i + 1 < cascades.size() ? " round the camera" : "");
+    }
+    finishStatus(detail + ".");
 }
 
 void VulkanEngine::draw_sdf_debug(VkCommandBuffer cmd)
@@ -707,6 +779,8 @@ void VulkanEngine::draw_sdf_debug(VkCommandBuffer cmd)
     writer.write_image(2, _prepass.depthImage.imageView, _prepass.sampler,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    writer.write_buffer(3, _sceneSdf.cascadeBuffer.buffer, sizeof(SceneFieldCascades), 0,
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
     writer.update_set(_device, set);
 
     SdfDebugPushConstants push{};
@@ -718,7 +792,7 @@ void VulkanEngine::draw_sdf_debug(VkCommandBuffer cmd)
         static_cast<float>(_drawExtent.width),
         static_cast<float>(_drawExtent.height),
         _sdf.hitThresholdTexels,
-        0.0f);
+        sceneField ? 1.0f : 0.0f);
 
     vkutil::transition_image(cmd, _drawImage.image,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);

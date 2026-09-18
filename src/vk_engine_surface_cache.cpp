@@ -203,6 +203,7 @@ void VulkanEngine::init_surface_cache_resources()
         builder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        builder.add_binding(5, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         _surfaceCache.directLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
         VkPushConstantRange directRange{
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -242,6 +243,7 @@ void VulkanEngine::init_surface_cache_resources()
         }
         builder.add_binding(12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(14, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         _surfaceCache.compareLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
         VkPushConstantRange compareRange{
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -280,6 +282,7 @@ void VulkanEngine::init_surface_cache_resources()
             builder.add_binding(binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         }
         builder.add_binding(10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(11, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         _surfaceCache.radiosityLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
         VkPushConstantRange range{
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -698,6 +701,9 @@ void VulkanEngine::light_surface_cache()
     mix(&_sceneSdf.drawHash, sizeof(_sceneSdf.drawHash));
     mix(&_sceneSdf.fieldMin, sizeof(_sceneSdf.fieldMin));
     mix(&_sceneSdf.voxelSize, sizeof(_sceneSdf.voxelSize));
+    // The camera cascades move with the camera, and the visibility marches
+    // read them, so a recentred field relights the cache.
+    mix(_sceneSdf.cascadeBuffer.info.pMappedData, sizeof(SceneFieldCascades));
     mix(&_surfaceCache.drawHash, sizeof(_surfaceCache.drawHash));
     if (_surfaceCache.lightingValid && hash == _surfaceCache.lightingHash) {
         return;
@@ -707,7 +713,7 @@ void VulkanEngine::light_surface_cache()
     std::array<DescriptorAllocatorGrowable::PoolSizeRatio, 3> ratios{{
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1.0f},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3.0f},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1.0f}}};
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2.0f}}};
     DescriptorAllocatorGrowable pool;
     pool.init(_device, 1, ratios);
     VkDescriptorSet set = pool.allocate(_device, _surfaceCache.directLayout);
@@ -730,6 +736,8 @@ void VulkanEngine::light_surface_cache()
     writer.write_image(3, _sceneSdf.field.imageView, _sdf.sampler,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     writer.write_buffer(4, skyBuffer.buffer, sizeof(glm::vec4) * 9, 0,
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+    writer.write_buffer(5, _sceneSdf.cascadeBuffer.buffer, sizeof(SceneFieldCascades), 0,
         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
     writer.update_set(_device, set);
 
@@ -1080,10 +1088,11 @@ void VulkanEngine::update_surface_cache_radiosity()
     const auto started = std::chrono::steady_clock::now();
     const auto& cards = _surfaceCache.cards;
 
-    std::array<DescriptorAllocatorGrowable::PoolSizeRatio, 3> ratios{{
+    std::array<DescriptorAllocatorGrowable::PoolSizeRatio, 4> ratios{{
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1.0f},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 7.0f},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3.0f}}};
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3.0f},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1.0f}}};
     DescriptorAllocatorGrowable pool;
     pool.init(_device, 1, ratios);
     VkDescriptorSet set = pool.allocate(_device, _surfaceCache.radiosityLayout);
@@ -1108,6 +1117,8 @@ void VulkanEngine::update_surface_cache_radiosity()
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
     writer.write_image(10, _surfaceCache.indirectPrevious.imageView, _prepass.sampler,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    writer.write_buffer(11, _sceneSdf.cascadeBuffer.buffer, sizeof(SceneFieldCascades), 0,
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
     writer.update_set(_device, set);
 
     // The next cards in round-robin order, up to the texel budget, so a large
@@ -1334,6 +1345,8 @@ void VulkanEngine::draw_surface_cache_debug(VkCommandBuffer cmd)
         writer.write_image(13, _surfaceCache.indirect.imageView, _prepass.sampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.write_buffer(14, _sceneSdf.cascadeBuffer.buffer, sizeof(SceneFieldCascades), 0,
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         writer.update_set(_device, set);
 
         SurfaceCacheComparePushConstants push{};

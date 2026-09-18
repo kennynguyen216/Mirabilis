@@ -441,6 +441,7 @@ void VulkanEngine::init_ssgi_pipelines()
         for (uint32_t binding = 6; binding <= 8; ++binding) {
             builder.add_binding(binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         }
+        builder.add_binding(9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         _ssgi.lumenLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
         const std::array<VkDescriptorSetLayout, 3> lumenLayouts{
             _gpuSceneDataDescriptorLayout, _ssgi.descriptorLayout, _ssgi.lumenLayout};
@@ -717,6 +718,8 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
             writer.write_buffer(8, _surfaceCache.indexBuffer.buffer, VK_WHOLE_SIZE, 0,
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+            writer.write_buffer(9, _sceneSdf.cascadeBuffer.buffer, sizeof(SceneFieldCascades), 0,
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
             writer.update_set(_device, lumenSet);
             traceLayout = _ssgi.lumenPipelineLayout;
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.lumenPipeline);

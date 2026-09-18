@@ -27,11 +27,9 @@ layout(set = 0, binding = 13) uniform sampler2D cacheIndirect;
 #include "surface_cache_lookup.glsl"
 
 layout(set = 0, binding = 12) uniform sampler3D sceneField;
-
-float field_distance(vec3 world)
-{
-    return textureLod(sceneField, (world - fieldMin.xyz) / (fieldMax.xyz - fieldMin.xyz), 0.0).r;
-}
+#define SCENE_FIELD_SET 0
+#define SCENE_FIELD_BINDING_CASCADES 14
+#include "scene_field.glsl"
 
 // The same soft shadow march as surface_cache_direct.comp.
 float sun_visibility(vec3 origin, vec3 direction)
@@ -40,12 +38,12 @@ float sun_visibility(vec3 origin, vec3 direction)
     vec3 t0 = (fieldMin.xyz - origin) * inverse;
     vec3 t1 = (fieldMax.xyz - origin) * inverse;
     float tExit = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
-    float voxel = fieldMin.w;
     const float Softness = 8.0;
     float visibility = 1.0;
     float t = 0.0;
     for (int step = 0; step < 96 && t < tExit; ++step) {
-        float d = field_distance(origin + direction * t);
+        float voxel;
+        float d = scene_field_distance(origin + direction * t, voxel);
         if (d < 0.25 * voxel) {
             return 0.0;
         }
@@ -111,19 +109,20 @@ void main()
         vec3 sun = normalize(sunDirection.xyz);
         vec3 blocked = vec3(-9999.0);
         if (rasterLight > 0.1) {
-            vec3 origin = world.xyz + normal * (2.5 * fieldMin.w);
+            vec3 origin = world.xyz + normal * (2.5 * scene_field_voxel(world.xyz));
             vec3 inverse = 1.0 / sun;
             vec3 t0 = (fieldMin.xyz - origin) * inverse;
             vec3 t1 = (fieldMax.xyz - origin) * inverse;
             float tExit = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
             float t = 0.0;
             for (int step = 0; step < 96 && t < tExit; ++step) {
-                float d = field_distance(origin + sun * t);
-                if (d < 0.25 * fieldMin.w) {
+                float voxel;
+                float d = scene_field_distance(origin + sun * t, voxel);
+                if (d < 0.25 * voxel) {
                     blocked = origin + sun * t;
                     break;
                 }
-                t += max(d, 0.5 * fieldMin.w);
+                t += max(d, 0.5 * voxel);
             }
         }
         imageStore(image, pixel, vec4(blocked, 1.0));

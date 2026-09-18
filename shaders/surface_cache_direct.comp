@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 // Lumen-lite surface cache, checkpoint 5: direct light for one card's texels.
 // Stores the light arriving at each captured surface point, without albedo,
@@ -21,8 +22,11 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(rgba16f, set = 0, binding = 0) uniform image2D directPage;
 layout(set = 0, binding = 1) uniform sampler2D normalPage;
 layout(set = 0, binding = 2) uniform sampler2D depthPage;
-// Scene distance field, world units, truncated.  See sdf_composite.comp.
+// Scene distance field cascades; see scene_field.glsl.
 layout(set = 0, binding = 3) uniform sampler3D sceneField;
+#define SCENE_FIELD_SET 0
+#define SCENE_FIELD_BINDING_CASCADES 5
+#include "scene_field.glsl"
 // The same band-2 irradiance the forward pass's ambient term uses, so a cache
 // texel under open sky and a rastered surface under open sky agree.
 layout(set = 0, binding = 4) uniform SkyIrradiance {
@@ -42,18 +46,11 @@ layout(push_constant) uniform constants {
     // rgb = sun colour, w = the environment intensity the forward pass scales
     // its ambient by, so both read the same sky.
     vec4 sunColor;
-    // xyz = scene field minimum corner, w = field voxel size.
+    // xyz = whole-scene cascade minimum corner, w = its voxel size.
     vec4 fieldMin;
-    // xyz = scene field maximum corner, w = unused.
+    // xyz = whole-scene cascade maximum corner, w = unused.
     vec4 fieldMax;
 } PushConstants;
-
-float field_distance(vec3 world)
-{
-    vec3 uvw = (world - PushConstants.fieldMin.xyz) /
-        (PushConstants.fieldMax.xyz - PushConstants.fieldMin.xyz);
-    return textureLod(sceneField, uvw, 0.0).r;
-}
 
 // Soft shadow: the closest the ray passes to any surface, relative to how far
 // along it is, gives a penumbra without extra rays.
@@ -63,12 +60,12 @@ float sun_visibility(vec3 origin, vec3 direction)
     vec3 t0 = (PushConstants.fieldMin.xyz - origin) * inverse;
     vec3 t1 = (PushConstants.fieldMax.xyz - origin) * inverse;
     float tExit = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
-    float voxel = PushConstants.fieldMin.w;
     const float Softness = 8.0;
     float visibility = 1.0;
     float t = 0.0;
     for (int step = 0; step < 96 && t < tExit; ++step) {
-        float d = field_distance(origin + direction * t);
+        float voxel;
+        float d = scene_field_distance(origin + direction * t, voxel);
         if (d < 0.25 * voxel) {
             return 0.0;
         }
@@ -135,7 +132,7 @@ void main()
         if (PushConstants.sunDirection.w > 0.5) {
             // Start clear of the surface's own shell, which sits up to half a
             // bake voxel in front of it, and of the field's own voxel.
-            vec3 origin = world + normal * (2.5 * PushConstants.fieldMin.w);
+            vec3 origin = world + normal * (2.5 * scene_field_voxel(world));
             visibility = sun_visibility(origin, lightDirection);
         }
         light = PushConstants.sunColor.rgb * noL * visibility;
@@ -144,7 +141,7 @@ void main()
     // actually see.  Outdoors this is most of the hemisphere; indoors it is
     // whatever reaches through the windows, which is the light the room is
     // lit by and the light radiosity needs something to bounce.
-    vec3 skyOrigin = world + normal * (2.5 * PushConstants.fieldMin.w);
+    vec3 skyOrigin = world + normal * (2.5 * scene_field_voxel(world));
     light += sky_irradiance(normal) * PushConstants.sunColor.w *
         sky_visibility(skyOrigin, normal);
     imageStore(directPage, texel, vec4(light, 1.0));

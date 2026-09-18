@@ -52,40 +52,27 @@ layout(set = 2, binding = 5) uniform sampler2D cacheIndirect;
 #define SURFACE_CACHE_BINDING_INDICES 8
 #define SURFACE_CACHE_READ_INDIRECT(texel) texelFetch(cacheIndirect, texel, 0).rgb
 #include "surface_cache_lookup.glsl"
-
-float lumen_field_distance(vec3 world)
-{
-    return textureLod(sceneField,
-        (world - fieldMin.xyz) / (fieldMax.xyz - fieldMin.xyz), 0.0).r;
-}
-
-vec3 lumen_field_normal(vec3 p)
-{
-    float h = fieldMin.w;
-    vec3 gradient = vec3(
-        lumen_field_distance(p + vec3(h, 0, 0)) - lumen_field_distance(p - vec3(h, 0, 0)),
-        lumen_field_distance(p + vec3(0, h, 0)) - lumen_field_distance(p - vec3(0, h, 0)),
-        lumen_field_distance(p + vec3(0, 0, h)) - lumen_field_distance(p - vec3(0, 0, h)));
-    return normalize(gradient + vec3(1e-8));
-}
+#define SCENE_FIELD_SET 2
+#define SCENE_FIELD_BINDING_CASCADES 9
+#include "scene_field.glsl"
 
 // Light arriving along one ray the screen could not answer: the surface the
 // scene field hits, read from the surface cache, or the sky for a ray that
 // leaves the scene.
 vec3 lumen_trace(vec3 worldPosition, vec3 worldNormal, vec3 worldDirection)
 {
-    float voxel = fieldMin.w;
-    vec3 origin = worldPosition + worldNormal * (2.5 * voxel);
+    vec3 origin = worldPosition + worldNormal * (2.5 * scene_field_voxel(worldPosition));
     vec3 inverse = 1.0 / worldDirection;
     vec3 t0 = (fieldMin.xyz - origin) * inverse;
     vec3 t1 = (fieldMax.xyz - origin) * inverse;
     float tExit = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
     float t = 0.0;
     for (int step = 0; step < 192 && t < tExit; ++step) {
-        float d = lumen_field_distance(origin + worldDirection * t);
+        float voxel;
+        float d = scene_field_distance(origin + worldDirection * t, voxel);
         if (d < 0.25 * voxel) {
             vec3 p = origin + worldDirection * t;
-            SurfaceCacheSample surface = surface_cache_lookup(p, lumen_field_normal(p));
+            SurfaceCacheSample surface = surface_cache_lookup(p, scene_field_normal(p));
             if (surface.weight > 0.0) {
                 return surface.albedo * (surface.direct + surface.indirect) +
                     surface.emissive;
