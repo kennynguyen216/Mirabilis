@@ -14,9 +14,16 @@ layout(location = 4) in vec4 inCurrentClip;
 layout(location = 5) in vec4 inPreviousClip;
 layout(location = 6) in vec4 inTangent;
 layout(location = 0) out vec4 outFragColor;
+// The transparent pass draws into the lit image alone -- additive blending
+// must not sum a pane's albedo, motion and direct light into the G-buffer
+// behind it -- so the body that pass compiles declares none of these.  A
+// fragment shader that writes an output its pass has no attachment for is a
+// validation error, not merely a wasted store.
+#ifndef MIRABILIS_COLOR_ONLY
 layout(location = 1) out vec4 outAlbedo;
 layout(location = 2) out vec4 outVelocity;
 layout(location = 3) out vec4 outDirectLighting;
+#endif
 
 void main()
 {
@@ -87,6 +94,7 @@ void main()
             directDiffuse, directSpecular, emission, debugColor)) {
         outFragColor = vec4(debugColor, 1.0);
     }
+#ifndef MIRABILIS_COLOR_ONLY
     // The SSGI composite multiplies filtered incident light by this.
     outAlbedo = vec4(material_diffuse_albedo(surface), 1.0);
     vec2 currentUV = inCurrentClip.xy / max(inCurrentClip.w, 0.00001) * 0.5 + 0.5;
@@ -99,4 +107,5 @@ void main()
     // camera's was evaluated, so it stays out; emission leaves in every
     // direction and belongs here.
     outDirectLighting = vec4(directDiffuse + emission, 1.0);
+#endif
 }

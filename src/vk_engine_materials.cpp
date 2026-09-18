@@ -18,6 +18,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     ScopedShaderModule portalMaskFragmentShader(engine->_device);
     ScopedShaderModule portalSkyVertexShader(engine->_device);
     ScopedShaderModule portalSkyFragmentShader(engine->_device);
+    ScopedShaderModule transparentFragmentShader(engine->_device);
     ScopedShaderModule colliderDebugVertexShader(engine->_device);
     ScopedShaderModule colliderDebugFragmentShader(engine->_device);
     if (!fragmentShader.load("../../shaders/mesh.frag.spv") ||
@@ -25,6 +26,8 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
         !portalMaskVertexShader.load("../../shaders/portal_mask.vert.spv") ||
         !portalViewVertexShader.load("../../shaders/portal_view.vert.spv") ||
         !maskFragmentShader.load("../../shaders/mesh_mask.frag.spv") ||
+        !transparentFragmentShader.load(
+            "../../shaders/mesh_transparent.frag.spv") ||
         !portalViewFragmentShader.load("../../shaders/portal_view.frag.spv") ||
         !portalViewMaskFragmentShader.load(
             "../../shaders/portal_view_mask.frag.spv") ||
@@ -108,7 +111,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     // motion and direct light into the surface behind it, and SSGI reads all
     // three.  Masking those targets off needs independentBlend, so instead
     // draw_geometry gives transparents a pass with the draw image alone.
-    builder.set_shaders(vertexShader, fragmentShader);
+    builder.set_shaders(vertexShader, transparentFragmentShader);
     builder.set_color_attachment_format(engine->_drawImage.imageFormat);
     builder.enable_blending_additive();
     builder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
