@@ -48,21 +48,36 @@ card_title() {
 }
 
 prompt_for() {
+    # The card is fetched here, by the orchestrator, and pasted into the
+    # prompt.  A `claude -p` session has no interactive approval, so any gh
+    # call it makes is denied; making it fetch its own card meant it could not
+    # read its acceptance criterion and correctly refused to do anything.
+    local body
+    body=$(gh issue view "$1" --repo "$REPO" \
+        --json title,body,labels \
+        --jq '"TITLE: \(.title)\nLABELS: \([.labels[].name] | join(", "))\n\n\(.body)"' \
+        2>/dev/null) || body="(could not fetch card #$1)"
+
     cat <<PROMPT
 /ponytail
 
-Work card #$1 in $REPO (project board: Lumen-lite GI).
+Work card #$1 in $REPO (project board: Lumen-lite GI). The card body is below;
+you do not need to fetch it.
 
-Read the issue body, then docs/next_session_handoff.md for current state. Don't
-re-derive either one. Skim docs/lumen_lite_design.md only for its "Settled, do
-not re-investigate" list.
+--- BEGIN CARD #$1 ---
+$body
+--- END CARD #$1 ---
 
-The acceptance criterion is in the card. Meet it, report the number with the
-camera recorded beside it, then commit.
+Read docs/next_session_handoff.md for current state. Don't re-derive it. Skim
+docs/lumen_lite_design.md only for its "Settled, do not re-investigate" list.
 
-If you cannot meet it, commit nothing. Post what you found to the card with
-'gh issue comment $1' and exit. A wrong fix committed unattended costs more
-than a card left open.
+The acceptance criterion is in the card above. Meet it, report the number with
+the camera recorded beside it, then commit.
+
+If you cannot meet it, commit nothing. Say plainly what you found and why you
+stopped, and try to leave it on the card with 'gh issue comment $1'; if that is
+denied, printing it is enough. A wrong fix committed unattended costs more than
+a card left open.
 
 Build the architectural stage, not a scene fix. No per-scene tuning.
 PROMPT
