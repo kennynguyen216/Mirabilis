@@ -130,8 +130,8 @@ struct SSGIPushConstants {
     // z = normal dot threshold, w = velocity rejection threshold.
     glm::vec4 temporal{0.0f};
     // x = rays per pixel, yz = live draw extent (the region of the
-    // full-size G-buffer and prepass images written this frame), w = 1 when
-    // screen probes are on.
+    // full-size G-buffer and prepass images written this frame), w = bit 0
+    // screen probes, bit 1 hierarchical screen trace.
     glm::uvec4 quality{1u, 0u, 0u, 0u};
 };
 
@@ -1259,6 +1259,16 @@ class VulkanEngine{
             bool probesEnabled{false};
             VkPipeline probePipeline{};
             AllocatedImage probeImage{};
+            // Hierarchical screen trace: a nearest-depth pyramid
+            // (shaders/hzb_build.comp), one storage view and set per level.
+            static constexpr uint32_t HzbLevels = 8;
+            bool hzbEnabled{false};
+            AllocatedImage hzbImage{};
+            std::array<VkImageView, HzbLevels> hzbLevelViews{};
+            VkDescriptorSetLayout hzbLayout{};
+            std::array<VkDescriptorSet, HzbLevels> hzbSets{};
+            VkPipelineLayout hzbPipelineLayout{};
+            VkPipeline hzbPipeline{};
             int filterRadius{3};
             float filterDepthFalloff{800.0f};
             float filterNormalPower{32.0f};

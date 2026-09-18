@@ -1,0 +1,44 @@
+#version 460
+
+// One level of the SSGI trace's depth pyramid (see hzb_march() in
+// ssgi_body.glsl).  Each texel keeps the depth range of the 2x2 below it: r
+// the nearest (the largest, as depth is reversed), g the farthest.  A ray in
+// front of r, or far enough behind g, can hit nothing the cell covers and may
+// skip it whole.  Level 0 is a copy of the prepass depth's live region;
+// outside it, and wherever nothing was drawn, r is 0, the far plane nothing
+// can be behind, and g is 1, the near plane, so empty texels never hold a
+// ray back.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D prepassDepth;
+layout(rg32f, set = 0, binding = 1) uniform readonly image2D source;
+layout(rg32f, set = 0, binding = 2) uniform writeonly image2D destination;
+
+layout(push_constant) uniform constants {
+    // x = level being written, yz = live draw extent.
+    ivec4 control;
+} PushConstants;
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, imageSize(destination)))) {
+        return;
+    }
+    vec2 range;
+    if (PushConstants.control.x == 0) {
+        float depth = all(lessThan(pixel, PushConstants.control.yz))
+            ? texelFetch(prepassDepth, pixel, 0).r
+            : 0.0;
+        range = vec2(depth, depth > 1e-6 ? depth : 1.0);
+    } else {
+        ivec2 s = pixel * 2;
+        vec2 a = imageLoad(source, s).rg;
+        vec2 b = imageLoad(source, s + ivec2(1, 0)).rg;
+        vec2 c = imageLoad(source, s + ivec2(0, 1)).rg;
+        vec2 e = imageLoad(source, s + ivec2(1, 1)).rg;
+        range = vec2(max(max(a.x, b.x), max(c.x, e.x)), min(min(a.y, b.y), min(c.y, e.y)));
+    }
+    imageStore(destination, pixel, vec4(range, 0.0, 0.0));
+}

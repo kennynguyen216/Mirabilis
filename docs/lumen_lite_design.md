@@ -435,6 +435,57 @@ Not built: importance sampling, probe-space spatial filtering, adaptive
 placement, per-probe temporal accumulation. Each waits for a measurement that
 shows the simple version falls short.
 
+## Stage: HZB screen tracing — implemented (#7)
+
+Off by default: Render Settings "Hierarchical Screen Trace", or
+`MIRABILIS_SSGI_HZB=1`. It works with or without Lumen-lite and with probes.
+
+- There was no depth pyramid. `shaders/hzb_build.comp` builds one per frame,
+  8 levels, RG32F: nearest and farthest depth of each 2×2, padded to a multiple
+  of 128 px so every level halves exactly. It costs **0.11 ms** at 960×540 and
+  is timed inside the trace pass.
+- `hzb_march()` in `ssgi_body.glsl` walks the ray in screen pixels and NDC
+  depth. A cell is skipped a level up when the ray is in front of its nearest
+  depth, or behind its farthest by more than a hit's thickness. Otherwise the
+  walk drops a level. At level 0 the fixed march's thickness test decides a
+  hit, and a ray behind a thin surface carries on, so a hit means what it did
+  before. The iteration cap is 4 × the preset's step count.
+- Without the farthest channel, rays behind Sponza's columns walked a pixel at
+  a time: 22.4% hits for 14.2 ms.
+- A ray that starts behind the depth buffer is handed straight to the
+  fallback. The Cornell emitter's normal points into the ceiling, so its rays
+  began behind it. They found the panel's own emission and pushed the frame to
+  1.46× the path-traced reference. Rejecting back-facing hits instead also cost
+  real hits (0.895× → 0.858× off the panel).
+- Rays the screen cannot answer go to `lumen_trace` exactly as before.
+
+Acceptance: screen-only SSGI (no world fallback), preset 0, Release, RTX 3060
+laptop, 300 frames. The fixed march's step count is its quality knob, so HZB is
+compared against it at matched hit rate:
+
+| Scene, camera | March | Hit rate | Screen trace |
+|---|---|---:|---:|
+| Sponza `'0 10 0 -0.5 0'` | fixed, 32 steps (shipped) | 17.2% | 1.71 ms |
+| | fixed, 128 steps | 21.0% | 5.55 ms |
+| | fixed, 256 steps | 21.7% | 10.69 ms |
+| | **HZB** | **21.3%** | **3.44 ms** |
+| Living room `'0 1.6 -3 0 3.14'` | fixed, 32 steps (shipped) | 23.2% | 0.96 ms |
+| | fixed, 128 steps | 32.2% | 2.56 ms |
+| | fixed, 256 steps | 34.8% | 4.47 ms |
+| | **HZB** | **34.3%** | **2.03 ms** |
+
+At matched hit rate HZB is 1.6× cheaper in Sponza and 2.2× in the living room.
+The fixed march gets there only by taking far more steps. Against the shipped
+32 steps, HZB costs about 2× the screen time for 24% (Sponza) and 48% (living
+room) more hits. Under Lumen-lite those extra hits are rays the world trace no
+longer takes. The whole trace pass goes 20.46 → 19.37 ms in the living room
+and 34.04 → 34.39 ms in Sponza. The indirect mean moves +2.6% and −1.0%.
+
+Cornell box against its 400-sample reference: frame 1.027× → 0.993×, deep
+0.873× → 0.869×, identical off the emitter panel (0.895× / 0.894×).
+With HZB off, captures are bit-identical to before in the living room and the
+Cornell box.
+
 ## Next
 
 In order. The first item blocks meaningful judgement of everything below it,
@@ -452,7 +503,7 @@ because a 3.8× scale error swamps every other difference.
    reprojection TAA needs already exist, built for SSGI.
 4. **Then** the architectural work, in this order: screen probes (basic
    version done, above; importance sampling and per-probe accumulation when
-   measured to matter), HZB screen tracing, field clipmaps,
+   measured to matter), HZB screen tracing (done, above), field clipmaps,
    world radiance cache, reflections. Each needs a written acceptance
    measurement before it starts, as checkpoints 1–7 had.
 5. Coverage: depth-peeled card layers for concave meshes (Sponza ~89%). Do it

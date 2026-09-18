@@ -206,6 +206,9 @@ void VulkanEngine::init()
     if (SDL_getenv("MIRABILIS_SSGI_PROBES")) {
         _ssgi.probesEnabled = true;
     }
+    if (SDL_getenv("MIRABILIS_SSGI_HZB")) {
+        _ssgi.hzbEnabled = true;
+    }
     if (SDL_getenv("MIRABILIS_SSGI_DISABLE")) {
         _ssgi.enabled = false;
     }
@@ -834,6 +837,7 @@ void VulkanEngine::run(){
     bool testMinimized=false;
     double benchmarkMilliseconds = 0.0;
     double benchmarkSsgiMilliseconds = 0.0;
+    double benchmarkTraceMilliseconds = 0.0;
     uint32_t benchmarkFrames = 0;
     // Opt-in unattended validation; ordinary interactive sessions are unchanged.
     const char* frameLimitText = std::getenv("MIRABILIS_TEST_FRAMES");
@@ -1078,6 +1082,7 @@ void VulkanEngine::run(){
             _frameNumber > 5) {
             benchmarkMilliseconds += static_cast<double>(deltaTime) * 1000.0;
             benchmarkSsgiMilliseconds += stats.ssgi_total_time;
+            benchmarkTraceMilliseconds += stats.ssgi_raw_time;
             ++benchmarkFrames;
         }
         if(testInvalidation&&testFrame>=2&&testFrame<=17) {
@@ -1089,10 +1094,11 @@ void VulkanEngine::run(){
             if (benchmarkFrames > 0) {
                 const VkExtent2D extent = active_ssgi_extent();
                 fmt::print(
-                    "SSGI benchmark: preset={} extent={}x{} average-frame-ms={:.3f} average-ssgi-gpu-ms={:.3f} samples={}\n",
+                    "SSGI benchmark: preset={} extent={}x{} average-frame-ms={:.3f} average-ssgi-gpu-ms={:.3f} average-trace-gpu-ms={:.3f} samples={}\n",
                     _ssgi.qualityPreset, extent.width, extent.height,
                     benchmarkMilliseconds / benchmarkFrames,
                     benchmarkSsgiMilliseconds / benchmarkFrames,
+                    benchmarkTraceMilliseconds / benchmarkFrames,
                     benchmarkFrames);
             }
             if (const char* capture=SDL_getenv("MIRABILIS_CAPTURE")) capture_path_trace(capture);

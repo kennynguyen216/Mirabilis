@@ -1631,6 +1631,7 @@ void VulkanEngine::draw_screen_buffer_settings()
         ImGui::Checkbox("Run SSGI", &_ssgi.enabled);
         ImGui::Checkbox("Lumen-lite World Fallback", &_ssgi.lumenEnabled);
         ImGui::Checkbox("Screen Probes", &_ssgi.probesEnabled);
+        ImGui::Checkbox("Hierarchical Screen Trace", &_ssgi.hzbEnabled);
         if (_ssgi.lumenEnabled && !lumen_lite_ready()) {
             ImGui::TextDisabled("Waiting for the scene field and surface cache;");
             ImGui::TextDisabled("bake assets/sdf/queue if meshes are missing.");

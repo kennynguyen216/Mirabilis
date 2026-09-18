@@ -811,6 +811,24 @@ void VulkanEngine::capture_ssgi(const char* filename)
     };
     writePfm(std::string(filename) + ".indirect.pfm", values);
 
+    // The trace's diagnostic image: g = steps taken / (steps x rays), b = 1 -
+    // screen hit fraction.  Pixels that traced nothing (background, or read
+    // from screen probes) write both as 0 and are left out; a traced pixel
+    // has taken steps, missed, or both.
+    const auto diagnostic = read_ssgi_image(_ssgi.debugImage, extent);
+    double hitSum = 0.0, stepSum = 0.0;
+    size_t traced = 0;
+    for (const glm::vec4& value : diagnostic) {
+        if (value.g <= 0.0f && value.b <= 0.0f) continue;
+        hitSum += 1.0 - value.b;
+        stepSum += value.g * _ssgi.stepCount;
+        ++traced;
+    }
+    const double hitRate = traced ? hitSum / traced : 0.0;
+    const double meanSteps = traced ? stepSum / traced : 0.0;
+    fmt::print("SSGI screen trace: {} pixels traced, hit rate {:.4f}, mean steps {:.2f}\n",
+        traced, hitRate, meanSteps);
+
     std::ofstream metadata(std::string(filename) + ".txt");
     metadata << "Scene: " << _sceneDocument.activeFilename
         << "\nDimensions: " << extent.width << " x " << extent.height
@@ -835,6 +853,8 @@ void VulkanEngine::capture_ssgi(const char* filename)
         << "\nQuantity: incident radiance"
         << " (receiver albedo applied at composite)"
         << "\nLinear indirect mean: " << sum / pixels
+        << "\nScreen hit rate: " << hitRate
+        << "\nMean screen steps: " << meanSteps
         << "\nNonfinite pixels: " << invalid << "\nCamera: "
         << render_camera().position.x << "," << render_camera().position.y
         << "," << render_camera().position.z << " pitch="

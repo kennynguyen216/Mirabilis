@@ -27,7 +27,8 @@ layout(push_constant) uniform constants {
     // x = history weight, y = depth rejection threshold,
     // z = normal dot threshold, w = velocity rejection threshold.
     vec4 temporal;
-    // x = rays per pixel, yz = live draw extent, w = screen probes on.
+    // x = rays per pixel, yz = live draw extent, w = bit 0 screen probes,
+    // bit 1 hierarchical screen trace.
     uvec4 quality;
 } PushConstants;
 
@@ -139,6 +140,131 @@ vec3 cosine_direction(vec3 normal, inout uint state)
     return normalize(tangent * local.x + bitangent * local.y + normal * local.z);
 }
 
+// Hierarchical screen trace (quality.w bit 1) through the depth pyramid
+// hzb_build.comp writes: each level keeps the nearest and farthest depth of
+// the 2x2 below it.  A ray in front of a cell's nearest, or behind its
+// farthest by more than a hit's thickness, cannot hit anything in it, so it
+// skips the whole cell and tries the next a level up; otherwise it drops a
+// level.  At level 0 the same thickness test as the fixed march decides a
+// hit, and a ray behind a thin surface carries on past it, so a hit means
+// what it did before.  Without the farthest depth, those rays had to walk
+// behind every column in Sponza a pixel at a time.
+layout(set = 1, binding = 15) uniform sampler2D hzbDepth;
+const int HzbLevels = 8;
+
+bool hzb_enabled()
+{
+    return (PushConstants.quality.w & 2u) != 0u;
+}
+
+// View-space distance in front of the camera for a reversed NDC depth.
+float linear_depth(float ndcDepth)
+{
+    vec4 view = sceneData.inverseProjection * vec4(0.0, 0.0, ndcDepth, 1.0);
+    return -view.z / view.w;
+}
+
+bool hzb_march(vec3 origin, vec3 direction, out vec2 hitUV, out float hitDepth,
+    out bool portalTermination, out int iterations)
+{
+    hitUV = vec2(0.0);
+    hitDepth = 0.0;
+    portalTermination = false;
+    iterations = 0;
+    // Keep the far end in front of the camera (view space looks down -z).
+    const float CameraClearance = -0.05;
+    if (origin.z > CameraClearance) return false;
+    float rayLength = PushConstants.settings.x;
+    vec3 end = origin + direction * rayLength;
+    if (end.z > CameraClearance) {
+        end = origin + direction * ((CameraClearance - origin.z) / direction.z);
+    }
+    // The ray as a segment in pyramid pixels and reversed NDC depth.  A line
+    // stays a line under projection, so depth varies linearly along it too.
+    vec2 extent = vec2(PushConstants.quality.yz);
+    vec4 c0 = sceneData.proj * vec4(origin, 1.0);
+    vec4 c1 = sceneData.proj * vec4(end, 1.0);
+    vec3 p0 = vec3((c0.xy / c0.w * 0.5 + 0.5) * extent, c0.z / c0.w);
+    vec3 p1 = vec3((c1.xy / c1.w * 0.5 + 0.5) * extent, c1.z / c1.w);
+    vec3 d = p1 - p0;
+    // Clip to the screen: past its edge the screen has no answer.
+    float tEnd = 1.0;
+    for (int axis = 0; axis < 2; ++axis) {
+        if (d[axis] < 0.0) tEnd = min(tEnd, -p0[axis] / d[axis]);
+        else if (d[axis] > 0.0) tEnd = min(tEnd, (extent[axis] - p0[axis]) / d[axis]);
+    }
+    float pixelsPerT = max(abs(d.x), abs(d.y));
+    if (tEnd <= 0.0 || pixelsPerT < 1e-3) return false;
+    float nudge = 0.01 / pixelsPerT;
+    vec2 inverse = vec2(abs(d.x) > 1e-6 ? 1.0 / d.x : 1e30, abs(d.y) > 1e-6 ? 1.0 / d.y : 1e30);
+
+    // Start one pixel out, clear of the surface the ray leaves.  A ray that is
+    // already behind what the screen shows there started inside something --
+    // a surface whose normal points into it, like the Cornell box's emitter,
+    // offsets the origin through itself -- and the screen cannot say what it
+    // sees.  The fixed march never noticed, as its first sample lands a whole
+    // stride out, past the thickness a hit allows.
+    float t = 1.0 / pixelsPerT;
+    vec3 start = p0 + d * t;
+    if (start.z < texelFetch(hzbDepth, ivec2(floor(start.xy)), 0).r) return false;
+    int level = 0;
+    int maxIterations = 4 * max(1, int(PushConstants.settings.w + 0.5));
+    while (iterations < maxIterations && t < tEnd) {
+        ++iterations;
+        vec3 p = p0 + d * t;
+        float cellSize = float(1 << level);
+        vec2 cell = floor(p.xy / cellSize);
+        vec2 boundary = (cell + step(0.0, d.xy)) * cellSize;
+        vec2 tBoundary = (boundary - p0.xy) * inverse;
+        tBoundary = mix(tBoundary, vec2(1e30), lessThan(tBoundary, vec2(t)));
+        float tExit = min(min(tBoundary.x, tBoundary.y), tEnd);
+        vec2 range = texelFetch(hzbDepth, ivec2(cell), level).rg;
+        float nearest = range.r;
+        float zExit = p0.z + d.z * tExit;
+        // Skippable if the ray is in front of everything in this cell for as
+        // long as it is in it, or behind everything by more than the thickness
+        // a hit allows (checked against the farthest surface, whose allowance
+        // is the largest).
+        float farDepth = linear_depth(range.g);
+        float allowedBehind = PushConstants.settings.y * (1.0 + 0.01 * farDepth);
+        bool inFront = p.z > nearest && zExit > nearest;
+        bool behind = linear_depth(p.z) - farDepth > allowedBehind &&
+            linear_depth(zExit) - farDepth > allowedBehind;
+        if (inFront || behind) {
+            t = tExit + nudge;
+            level = min(level + 1, HzbLevels - 1);
+            continue;
+        }
+        // Behind at entry, or crossing behind inside the cell.
+        if (p.z > nearest) t = max(t, (nearest - p0.z) / d.z);
+        if (level > 0) {
+            --level;
+            continue;
+        }
+        vec2 uv = (cell + 0.5) / extent;
+        if (nearest > BackgroundDepth) {
+            vec3 rayPoint = view_position((p0.xy + d.xy * t) / extent, p0.z + d.z * t);
+            vec3 surfacePosition = view_position(uv, nearest);
+            float separation = (-rayPoint.z) - (-surfacePosition.z);
+            float allowedThickness = PushConstants.settings.y *
+                (1.0 + 0.01 * max(-surfacePosition.z, 0.0));
+            if (separation >= 0.0 && separation <= allowedThickness) {
+                // A portal is a surface the screen cannot see through.
+                if (texture(portalMask, frame_uv(uv, portalMask)).r > 0.5) {
+                    portalTermination = true;
+                    return false;
+                }
+                hitUV = uv;
+                hitDepth = nearest;
+                return true;
+            }
+        }
+        // Behind a thin surface: walk on to the next pixel.
+        t = tExit + nudge;
+    }
+    return false;
+}
+
 // A surface point the trace starts from, in the view space the screen march
 // works in and the world space the scene field works in.
 struct TraceOrigin {
@@ -174,7 +300,10 @@ vec3 trace_incident(TraceOrigin o, vec3 direction,
     vec2 hitUV = vec2(0.0);
     float hitDepth = 0.0;
     stepsTaken = 0;
-    for (int stepIndex = 1; stepIndex <= stepCount; ++stepIndex) {
+    if (hzb_enabled()) {
+        hit = hzb_march(origin, direction, hitUV, hitDepth,
+            portalTermination, stepsTaken);
+    } else for (int stepIndex = 1; stepIndex <= stepCount; ++stepIndex) {
         stepsTaken = stepIndex;
         vec3 rayPoint = origin + direction * (stride * float(stepIndex));
         vec4 clip = sceneData.proj * vec4(rayPoint, 1.0);
@@ -261,7 +390,7 @@ layout(rgba16f, set = 1, binding = 14) uniform image2D probeRadiance;
 
 bool probes_enabled()
 {
-    return PushConstants.quality.w != 0u;
+    return (PushConstants.quality.w & 1u) != 0u;
 }
 
 // The pixel a probe sits on this frame.  A hash of the tile and the frame, so

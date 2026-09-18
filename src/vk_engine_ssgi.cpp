@@ -67,10 +67,32 @@ void VulkanEngine::init_ssgi_descriptors()
         builder.add_binding(12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(13, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         builder.add_binding(14, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        builder.add_binding(15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         _ssgi.descriptorLayout = builder.build(
             _device, VK_SHADER_STAGE_COMPUTE_BIT);
         for (VkDescriptorSet& set : _ssgi.descriptors) {
             set = globalDescriptorAllocator.allocate(_device, _ssgi.descriptorLayout);
+        }
+
+        // Depth pyramid: level 0 reads the prepass depth, every level reads
+        // the one below and writes its own.
+        builder.clear();
+        builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        _ssgi.hzbLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
+        for (uint32_t level = 0; level < SSGIState::HzbLevels; ++level) {
+            _ssgi.hzbSets[level] =
+                globalDescriptorAllocator.allocate(_device, _ssgi.hzbLayout);
+            DescriptorWriter hzbWriter;
+            hzbWriter.write_image(0, _prepass.depthImage.imageView, _prepass.sampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            hzbWriter.write_image(1, _ssgi.hzbLevelViews[level == 0 ? 0 : level - 1],
+                VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+            hzbWriter.write_image(2, _ssgi.hzbLevelViews[level],
+                VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+            hzbWriter.update_set(_device, _ssgi.hzbSets[level]);
         }
 
         builder.clear();
@@ -248,7 +270,8 @@ void VulkanEngine::init_ssgi_resources()
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     _ssgi.debugImage = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     for (AllocatedImage& history : _ssgi.temporalHistory) {
         history = create_image(
             extent, VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -269,6 +292,21 @@ void VulkanEngine::init_ssgi_resources()
     _ssgi.probeImage = create_image(
         VkExtent3D{(extent.width + 7u) / 8u * 9u, (extent.height + 7u) / 8u, 1u},
         VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT);
+    // Padded to a multiple of the coarsest cell, so every level is exactly
+    // half the one below and each texel covers a whole 2x2.
+    constexpr uint32_t HzbCell = 1u << (SSGIState::HzbLevels - 1);
+    _ssgi.hzbImage = create_image(
+        VkExtent3D{(extent.width + HzbCell - 1) / HzbCell * HzbCell,
+            (extent.height + HzbCell - 1) / HzbCell * HzbCell, 1u},
+        VK_FORMAT_R32G32_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        true);
+    for (uint32_t level = 0; level < SSGIState::HzbLevels; ++level) {
+        VkImageViewCreateInfo viewInfo = vkinit::imageview_create_info(
+            VK_FORMAT_R32G32_SFLOAT, _ssgi.hzbImage.image, VK_IMAGE_ASPECT_COLOR_BIT,
+            VK_IMAGE_VIEW_TYPE_2D);
+        viewInfo.subresourceRange.baseMipLevel = level;
+        VK_CHECK(vkCreateImageView(_device, &viewInfo, nullptr, &_ssgi.hzbLevelViews[level]));
+    }
     _ssgi.filteredImage = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -324,6 +362,9 @@ void VulkanEngine::init_ssgi_resources()
         vkutil::transition_image(
             cmd, _ssgi.probeImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(
+            cmd, _ssgi.hzbImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL);
     });
 
     _mainDeletionQueue.push_function([this]() {
@@ -343,6 +384,10 @@ void VulkanEngine::init_ssgi_resources()
         destroy_image(_ssgi.filterScratchImage);
         destroy_image(_ssgi.filteredImage);
         destroy_image(_ssgi.probeImage);
+        for (VkImageView view : _ssgi.hzbLevelViews) {
+            vkDestroyImageView(_device, view, nullptr);
+        }
+        destroy_image(_ssgi.hzbImage);
         for (const AllocatedImage& history : _sceneTargets.directLightingHistory) {
             destroy_image(history);
         }
@@ -449,6 +494,33 @@ void VulkanEngine::init_ssgi_pipelines()
         VK_SHADER_STAGE_COMPUTE_BIT, temporalShader.get());
     VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1,
         &computeInfo, nullptr, &_ssgi.temporalPipeline));
+
+    {
+        VkPushConstantRange hzbRange{
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = sizeof(glm::ivec4)};
+        VkPipelineLayoutCreateInfo hzbLayoutInfo = vkinit::pipeline_layout_create_info();
+        hzbLayoutInfo.setLayoutCount = 1;
+        hzbLayoutInfo.pSetLayouts = &_ssgi.hzbLayout;
+        hzbLayoutInfo.pushConstantRangeCount = 1;
+        hzbLayoutInfo.pPushConstantRanges = &hzbRange;
+        VK_CHECK(vkCreatePipelineLayout(_device, &hzbLayoutInfo, nullptr,
+            &_ssgi.hzbPipelineLayout));
+        ScopedShaderModule hzbShader(_device);
+        if (hzbShader.load("../../shaders/hzb_build.comp.spv")) {
+            computeInfo.layout = _ssgi.hzbPipelineLayout;
+            computeInfo.stage = vkinit::pipeline_shader_stage_create_info(
+                VK_SHADER_STAGE_COMPUTE_BIT, hzbShader.get());
+            VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1,
+                &computeInfo, nullptr, &_ssgi.hzbPipeline));
+        } else {
+            fmt::print("Error loading hzb_build.comp.spv; hierarchical screen trace unavailable\n");
+        }
+        _mainDeletionQueue.push_function([this]() {
+            vkDestroyPipeline(_device, _ssgi.hzbPipeline, nullptr);
+            vkDestroyPipelineLayout(_device, _ssgi.hzbPipelineLayout, nullptr);
+            vkDestroyDescriptorSetLayout(_device, _ssgi.hzbLayout, nullptr);
+        });
+    }
 
     VkPushConstantRange filterRange{
         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -600,6 +672,25 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
         // dispatch's writes without changing descriptor state.
         vkutil::memory_barrier(cmd);
 
+        // The depth pyramid the hierarchical trace walks, inside the trace's
+        // timestamps so its cost is counted with the trace it serves.
+        const bool hzb = _ssgi.hzbEnabled && _ssgi.hzbPipeline != VK_NULL_HANDLE;
+        if (hzb) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.hzbPipeline);
+            const VkExtent3D base = _ssgi.hzbImage.imageExtent;
+            for (uint32_t level = 0; level < SSGIState::HzbLevels; ++level) {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                    _ssgi.hzbPipelineLayout, 0, 1, &_ssgi.hzbSets[level], 0, nullptr);
+                const glm::ivec4 control(int(level), int(_drawExtent.width),
+                    int(_drawExtent.height), 0);
+                vkCmdPushConstants(cmd, _ssgi.hzbPipelineLayout,
+                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(control), &control);
+                vkCmdDispatch(cmd, ((base.width >> level) + 7u) / 8u,
+                    ((base.height >> level) + 7u) / 8u, 1);
+                vkutil::memory_barrier(cmd);
+            }
+        }
+
         const std::array<VkDescriptorSet, 2> sets{
             get_current_frame().sceneDescriptor,
             _ssgi.descriptors[writeIndex]};
@@ -659,7 +750,8 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             _ssgi.probePipeline != VK_NULL_HANDLE;
         pushConstants.quality = glm::uvec4(
             static_cast<uint32_t>(std::clamp(_ssgi.raysPerPixel, 1, 8)),
-            _drawExtent.width, _drawExtent.height, probes ? 1u : 0u);
+            _drawExtent.width, _drawExtent.height,
+            (probes ? 1u : 0u) | (hzb ? 2u : 0u));
         vkCmdPushConstants(
             cmd, traceLayout, VK_SHADER_STAGE_COMPUTE_BIT,
             0, sizeof(pushConstants), &pushConstants);
@@ -861,6 +953,8 @@ void VulkanEngine::write_ssgi_trace_descriptors()
         ssgiWriter.write_image(14, _ssgi.probeImage.imageView,
             VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        ssgiWriter.write_image(15, _ssgi.hzbImage.imageView, _prepass.sampler,
+            VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         ssgiWriter.update_set(_device, _ssgi.descriptors[writeIndex]);
     }
 }
