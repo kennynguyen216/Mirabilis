@@ -163,11 +163,17 @@ builds, so **a capture diff cannot validate a change in that scene** until the
 nondeterminism is tracked down. The Cornell box was bit-identical across
 builds, so it is usable as-is. Cause unknown — not investigated.
 
-**Pre-existing validation warnings, unrelated to GI.** Ten of them, in the
-living room: `mesh_shading.glsl` writes four MRT outputs (`outAlbedo`,
-`outVelocity`, `outDirectLighting`) but the portal view pass binds a
-single-attachment `VkRenderingInfo`. They appear with SSGI fully disabled.
-Harmless, noisy, worth fixing separately.
+**Validation warnings — fixed, see `f37b2d1`.** Ten of them in the living room,
+recorded here as the portal view pass's doing. That attribution was wrong:
+`portal_view_shading.glsl` declares one output, and `draw_portal_views` returns
+early in a scene with no portals. The source was the main camera's *transparent*
+pass, which restarts at `colorAttachmentCount = 1` while `mesh.frag` still
+declares four outputs. `mesh_transparent.frag` now compiles the same body with
+`MIRABILIS_COLOR_ONLY`. Living room, portal pair and Cornell box are all at 0.
+
+Worth remembering as a method note: the attribution was written from reading the
+code and looked obviously right. It took a second pass over the actual pipeline
+construction to find that the blamed pass never runs in that scene.
 
 ## After the brightness error
 

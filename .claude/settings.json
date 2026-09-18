@@ -10,7 +10,10 @@
       "Bash(git show:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(cmake --build:*)"
+      "Bash(cmake --build:*)",
+      "Bash(./engine.exe:*)",
+      "Bash(MIRABILIS_TEST_FRAMES=*)",
+      "Bash(glslangValidator:*)"
     ]
   }
 }
