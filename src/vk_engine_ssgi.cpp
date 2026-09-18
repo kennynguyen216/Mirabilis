@@ -66,6 +66,7 @@ void VulkanEngine::init_ssgi_descriptors()
         builder.add_binding(11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(13, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        builder.add_binding(14, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         _ssgi.descriptorLayout = builder.build(
             _device, VK_SHADER_STAGE_COMPUTE_BIT);
         for (VkDescriptorSet& set : _ssgi.descriptors) {
@@ -264,6 +265,10 @@ void VulkanEngine::init_ssgi_resources()
     _ssgi.filterScratchImage = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    // Nine SH coefficients per 8x8 tile, side by side.
+    _ssgi.probeImage = create_image(
+        VkExtent3D{(extent.width + 7u) / 8u * 9u, (extent.height + 7u) / 8u, 1u},
+        VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT);
     _ssgi.filteredImage = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -316,6 +321,9 @@ void VulkanEngine::init_ssgi_resources()
         vkutil::transition_image(
             cmd, _ssgi.filteredImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_GENERAL);
+        vkutil::transition_image(
+            cmd, _ssgi.probeImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL);
     });
 
     _mainDeletionQueue.push_function([this]() {
@@ -334,6 +342,7 @@ void VulkanEngine::init_ssgi_resources()
         destroy_image(_ssgi.temporalDiagnosticImage);
         destroy_image(_ssgi.filterScratchImage);
         destroy_image(_ssgi.filteredImage);
+        destroy_image(_ssgi.probeImage);
         for (const AllocatedImage& history : _sceneTargets.directLightingHistory) {
             destroy_image(history);
         }
@@ -409,8 +418,21 @@ void VulkanEngine::init_ssgi_pipelines()
         } else {
             fmt::print("Error loading ssgi_lumen.comp.spv; Lumen-lite fallback unavailable\n");
         }
+        ScopedShaderModule probeShader(_device);
+        if (probeShader.load("../../shaders/ssgi_probe.comp.spv")) {
+            VkComputePipelineCreateInfo probeCreate{
+                .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+            probeCreate.layout = _ssgi.lumenPipelineLayout;
+            probeCreate.stage = vkinit::pipeline_shader_stage_create_info(
+                VK_SHADER_STAGE_COMPUTE_BIT, probeShader.get());
+            VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1,
+                &probeCreate, nullptr, &_ssgi.probePipeline));
+        } else {
+            fmt::print("Error loading ssgi_probe.comp.spv; screen probes unavailable\n");
+        }
         _mainDeletionQueue.push_function([this]() {
             vkDestroyPipeline(_device, _ssgi.lumenPipeline, nullptr);
+            vkDestroyPipeline(_device, _ssgi.probePipeline, nullptr);
             vkDestroyPipelineLayout(_device, _ssgi.lumenPipelineLayout, nullptr);
             vkDestroyDescriptorSetLayout(_device, _ssgi.lumenLayout, nullptr);
         });
@@ -633,12 +655,23 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             _ssgi.depthRejection,
             _ssgi.normalRejection,
             _ssgi.velocityRejection);
+        const bool probes = lumen && _ssgi.probesEnabled &&
+            _ssgi.probePipeline != VK_NULL_HANDLE;
         pushConstants.quality = glm::uvec4(
             static_cast<uint32_t>(std::clamp(_ssgi.raysPerPixel, 1, 8)),
-            _drawExtent.width, _drawExtent.height, 0u);
+            _drawExtent.width, _drawExtent.height, probes ? 1u : 0u);
         vkCmdPushConstants(
             cmd, traceLayout, VK_SHADER_STAGE_COMPUTE_BIT,
             0, sizeof(pushConstants), &pushConstants);
+        if (probes) {
+            // Probes first, then the per-pixel pass gathers from them.  Same
+            // layout, so the bound sets and push constants carry over.
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.probePipeline);
+            vkCmdDispatch(cmd, (ssgiExtent.width + 7u) / 8u,
+                (ssgiExtent.height + 7u) / 8u, 1);
+            vkutil::memory_barrier(cmd);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.lumenPipeline);
+        }
         vkCmdDispatch(
             cmd,
             (ssgiExtent.width + 7u) / 8u,
@@ -823,6 +856,9 @@ void VulkanEngine::write_ssgi_trace_descriptors()
             _prepass.sampler, VK_IMAGE_LAYOUT_GENERAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         ssgiWriter.write_image(13, _ssgi.metadataHistory[writeIndex].imageView,
+            VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        ssgiWriter.write_image(14, _ssgi.probeImage.imageView,
             VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL,
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         ssgiWriter.update_set(_device, _ssgi.descriptors[writeIndex]);

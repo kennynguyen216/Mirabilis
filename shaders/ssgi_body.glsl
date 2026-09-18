@@ -27,7 +27,7 @@ layout(push_constant) uniform constants {
     // x = history weight, y = depth rejection threshold,
     // z = normal dot threshold, w = velocity rejection threshold.
     vec4 temporal;
-    // x = rays per pixel, yz = live draw extent.
+    // x = rays per pixel, yz = live draw extent, w = screen probes on.
     uvec4 quality;
 } PushConstants;
 
@@ -139,6 +139,236 @@ vec3 cosine_direction(vec3 normal, inout uint state)
     return normalize(tangent * local.x + bitangent * local.y + normal * local.z);
 }
 
+// A surface point the trace starts from, in the view space the screen march
+// works in and the world space the scene field works in.
+struct TraceOrigin {
+    vec3 position;
+    vec3 normal;
+    vec3 worldPosition;
+    vec3 worldNormal;
+};
+
+TraceOrigin trace_origin(vec2 screenUV, float depth)
+{
+    TraceOrigin o;
+    o.position = view_position(screenUV, depth);
+    o.normal = normalize(texture(prepassNormal,
+        frame_uv(screenUV, prepassNormal)).xyz);
+    vec4 world = sceneData.inverseViewProjection *
+        vec4(screenUV * 2.0 - 1.0, depth, 1.0);
+    o.worldPosition = world.xyz / world.w;
+    o.worldNormal = normalize(transpose(mat3(sceneData.view)) * o.normal);
+    return o;
+}
+
+// Radiance arriving at o along one view-space direction: the screen march
+// first, then the scene field for what the screen cannot answer.
+vec3 trace_incident(TraceOrigin o, vec3 direction,
+    out bool hit, out bool portalTermination, out int stepsTaken)
+{
+    vec3 origin = o.position + o.normal * PushConstants.settings.z;
+    int stepCount = max(1, int(PushConstants.settings.w + 0.5));
+    float stride = PushConstants.settings.x / float(stepCount);
+    hit = false;
+    portalTermination = false;
+    vec2 hitUV = vec2(0.0);
+    float hitDepth = 0.0;
+    stepsTaken = 0;
+    for (int stepIndex = 1; stepIndex <= stepCount; ++stepIndex) {
+        stepsTaken = stepIndex;
+        vec3 rayPoint = origin + direction * (stride * float(stepIndex));
+        vec4 clip = sceneData.proj * vec4(rayPoint, 1.0);
+        if (clip.w <= 0.0) break;
+        vec3 ndc = clip.xyz / clip.w;
+        vec2 rayUV = ndc.xy * 0.5 + 0.5;
+        if (any(lessThan(rayUV, vec2(0.0))) ||
+            any(greaterThanEqual(rayUV, vec2(1.0))) ||
+            ndc.z < 0.0 || ndc.z > 1.0) break;
+        if (texture(portalMask, frame_uv(rayUV, portalMask)).r > 0.5) {
+            portalTermination = true;
+            break;
+        }
+        float surfaceDepth = texture(
+            prepassDepth, frame_uv(rayUV, prepassDepth)).r;
+        if (surfaceDepth <= BackgroundDepth) continue;
+        vec3 surfacePosition = view_position(rayUV, surfaceDepth);
+        float separation = (-rayPoint.z) - (-surfacePosition.z);
+        float allowedThickness = PushConstants.settings.y *
+            (1.0 + 0.01 * max(-surfacePosition.z, 0.0));
+        if (separation >= 0.0 && separation <= allowedThickness) {
+            hit = true;
+            hitUV = rayUV;
+            hitDepth = surfaceDepth;
+            break;
+        }
+    }
+
+    vec3 incident = vec3(0.0);
+    if (hit && PushConstants.control.z != 0u) {
+        vec2 hitVelocity = texture(
+            gbufferVelocity, frame_uv(hitUV, gbufferVelocity)).xy;
+        vec2 previousHitUV = hitUV + hitVelocity;
+        if (all(greaterThanEqual(previousHitUV, vec2(0.0))) &&
+            all(lessThan(previousHitUV, vec2(1.0)))) {
+            incident = texture(previousDirectLighting,
+                frame_uv(previousHitUV, previousDirectLighting)).rgb;
+#ifdef LUMEN_LITE
+            // The screen knows only the direct light leaving what it hit.
+            // The cache knows that surface's bounce light too; adding it
+            // gives screen hits the same bounces as world-traced misses,
+            // which in a closed room are most rays.
+            vec4 hitWorld = sceneData.inverseViewProjection *
+                vec4(hitUV * 2.0 - 1.0, hitDepth, 1.0);
+            vec3 hitNormal = normalize(transpose(mat3(sceneData.view)) *
+                texture(prepassNormal, frame_uv(hitUV, prepassNormal)).xyz);
+            SurfaceCacheSample hitSurface =
+                surface_cache_lookup(hitWorld.xyz / hitWorld.w, hitNormal);
+            if (hitSurface.weight > 0.0) {
+                incident += hitSurface.albedo * hitSurface.indirect;
+            }
+#endif
+        } else {
+            hit = false;
+        }
+    }
+    if (!hit || PushConstants.control.z == 0u) {
+        vec3 worldDirection = normalize(
+            transpose(mat3(sceneData.view)) * direction);
+#ifdef LUMEN_LITE
+        incident = portalTermination
+            ? environment_radiance(worldDirection)
+            : lumen_trace(o.worldPosition, o.worldNormal, worldDirection);
+#else
+        incident = environment_radiance(worldDirection);
+#endif
+    }
+    return incident;
+}
+
+#ifdef LUMEN_LITE
+// Screen probes.  One probe per ProbeTile x ProbeTile pixel tile, placed on a
+// different pixel of its tile every frame, traces the rays its tile's pixels
+// would have traced (the same budget) over its hemisphere and keeps them as
+// band-2 spherical harmonics.  Each pixel then reads irradiance for its own
+// normal from the probes around it, so it is estimated from every ray in
+// several tiles rather than the handful it traced itself.  The existing
+// temporal pass accumulates across the jittered placements.
+//
+// ponytail: no importance sampling, probe-space filtering or adaptive
+// placement yet; pixels no probe can serve fall back to their own rays.
+const int ProbeTile = 8;
+layout(rgba16f, set = 1, binding = 14) uniform image2D probeRadiance;
+
+bool probes_enabled()
+{
+    return PushConstants.quality.w != 0u;
+}
+
+// The pixel a probe sits on this frame.  A hash of the tile and the frame, so
+// the probe pass and every pixel that gathers from it agree without storing
+// it.
+ivec2 probe_pixel(ivec2 probe, ivec2 extent)
+{
+    uint h = uint(probe.x) * 73856093u ^ uint(probe.y) * 19349663u ^
+        PushConstants.control.w * 83492791u;
+    h = (h ^ (h >> 16)) * 0x7feb352du;
+    h ^= h >> 15;
+    ivec2 offset = ivec2(h & 7u, (h >> 3) & 7u);
+    return min(probe * ProbeTile + offset, extent - 1);
+}
+
+// Real band-2 SH, the same basis and order as sky_irradiance() in
+// surface_cache_direct.comp.
+void sh_basis(vec3 n, out float y[9])
+{
+    y[0] = 0.282095;
+    y[1] = 0.488603 * n.y;
+    y[2] = 0.488603 * n.z;
+    y[3] = 0.488603 * n.x;
+    y[4] = 1.092548 * n.x * n.y;
+    y[5] = 1.092548 * n.y * n.z;
+    y[6] = 0.315392 * (3.0 * n.z * n.z - 1.0);
+    y[7] = 1.092548 * n.x * n.z;
+    y[8] = 0.546274 * (n.x * n.x - n.y * n.y);
+}
+
+// Mean cosine-weighted incident radiance around n (irradiance / pi, what the
+// per-pixel trace averages to) from a probe's radiance coefficients: the
+// clamped-cosine convolution, bands scaled by pi, 2pi/3 and pi/4, over pi.
+vec3 probe_incident(ivec2 probe, vec3 n)
+{
+    float y[9];
+    sh_basis(n, y);
+    const float band[9] = float[9](1.0, 2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0,
+        0.25, 0.25, 0.25, 0.25, 0.25);
+    vec3 e = vec3(0.0);
+    for (int i = 0; i < 9; ++i) {
+        e += imageLoad(probeRadiance, ivec2(probe.x * 9 + i, probe.y)).rgb *
+            band[i] * y[i];
+    }
+    return max(e, vec3(0.0));
+}
+#endif
+
+#ifdef SSGI_PROBE_TRACE
+// One workgroup per probe; each invocation traces raysPerPixel rays, so a
+// probe traces exactly what its tile's pixels would have.
+shared vec3 probeSum[64][9];
+
+void main()
+{
+    ivec2 probe = ivec2(gl_WorkGroupID.xy);
+    uint lane = gl_LocalInvocationIndex;
+    ivec2 extent = ivec2(PushConstants.control.xy);
+    ivec2 pixel = probe_pixel(probe, extent);
+    vec2 screenUV = (vec2(pixel) + 0.5) / vec2(extent);
+    float depth = texture(prepassDepth, frame_uv(screenUV, prepassDepth)).r;
+    // Uniform across the workgroup, so no invocation is left at the barrier.
+    if (depth <= BackgroundDepth) {
+        if (lane < 9u) {
+            imageStore(probeRadiance, ivec2(probe.x * 9 + int(lane), probe.y), vec4(0.0));
+        }
+        return;
+    }
+    TraceOrigin o = trace_origin(screenUV, depth);
+    vec3 helper = abs(o.normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(helper, o.normal));
+    vec3 bitangent = cross(o.normal, tangent);
+    uint state = uint(probe.x) * 1973u ^ uint(probe.y) * 9277u ^ lane * 26699u ^
+        PushConstants.control.w * 3079u ^ 0x68bc21ebu;
+
+    // Stratified uniform hemisphere: an 8 x (8 * rays) grid over (cos theta,
+    // phi), one jittered sample per cell.  Uniform rather than cosine, so the
+    // projection's weight stays finite at the horizon.
+    int rays = clamp(int(PushConstants.quality.x), 1, 8);
+    float coefficients[9];
+    vec3 sum[9];
+    for (int i = 0; i < 9; ++i) sum[i] = vec3(0.0);
+    for (int k = 0; k < rays; ++k) {
+        float u1 = (float(lane % 8u) + randomFloat(state)) / 8.0;
+        float u2 = (float(lane / 8u + 8u * uint(k)) + randomFloat(state)) /
+            float(8 * rays);
+        float r = sqrt(max(1.0 - u1 * u1, 0.0));
+        float phi = 2.0 * Pi * u2;
+        vec3 direction = normalize(tangent * (r * cos(phi)) +
+            bitangent * (r * sin(phi)) + o.normal * u1);
+        bool hit, portal;
+        int steps;
+        vec3 incident = trace_incident(o, direction, hit, portal, steps);
+        sh_basis(normalize(transpose(mat3(sceneData.view)) * direction), coefficients);
+        for (int i = 0; i < 9; ++i) sum[i] += incident * coefficients[i];
+    }
+    for (int i = 0; i < 9; ++i) probeSum[lane][i] = sum[i];
+    barrier();
+    if (lane < 9u) {
+        vec3 total = vec3(0.0);
+        for (int j = 0; j < 64; ++j) total += probeSum[j][lane];
+        // Uniform hemisphere pdf is 1 / 2pi.
+        total *= 2.0 * Pi / float(64 * rays);
+        imageStore(probeRadiance, ivec2(probe.x * 9 + int(lane), probe.y), vec4(total, 1.0));
+    }
+}
+#else
 void main()
 {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
@@ -156,101 +386,57 @@ void main()
         return;
     }
 
-    vec3 position = view_position(screenUV, depth);
-    vec3 normal = normalize(texture(prepassNormal,
-        frame_uv(screenUV, prepassNormal)).xyz);
+    TraceOrigin o = trace_origin(screenUV, depth);
+#ifdef LUMEN_LITE
+    if (probes_enabled()) {
+        // The four probes around this pixel, bilinear in tile space, each
+        // kept only if it lies on this pixel's surface and faces its way.
+        vec2 f = (vec2(pixel) + 0.5) / float(ProbeTile) - 0.5;
+        ivec2 base = ivec2(floor(f));
+        vec2 t = f - vec2(base);
+        ivec2 probes = (extent + ProbeTile - 1) / ProbeTile;
+        vec3 gathered = vec3(0.0);
+        float weightSum = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            ivec2 corner = ivec2(i & 1, i >> 1);
+            ivec2 probe = clamp(base + corner, ivec2(0), probes - 1);
+            if (imageLoad(probeRadiance, ivec2(probe.x * 9, probe.y)).a < 0.5) continue;
+            ivec2 probePixel = probe_pixel(probe, extent);
+            vec2 probeUV = (vec2(probePixel) + 0.5) / vec2(extent);
+            TraceOrigin p = trace_origin(probeUV,
+                texture(prepassDepth, frame_uv(probeUV, prepassDepth)).r);
+            float plane = abs(dot(o.worldNormal, p.worldPosition - o.worldPosition));
+            float facing = max(dot(o.worldNormal, p.worldNormal), 0.0);
+            float bilinear = (corner.x == 1 ? t.x : 1.0 - t.x) *
+                (corner.y == 1 ? t.y : 1.0 - t.y);
+            // A probe more than a few centimetres off this pixel's plane
+            // (scaled with distance, as depth precision is) is on another
+            // surface and saw a different hemisphere.
+            float planeWeight = exp(-plane / (0.02 * max(-o.position.z, 1.0)));
+            float weight = bilinear * planeWeight * pow(facing, 8.0);
+            gathered += probe_incident(probe, o.worldNormal) * weight;
+            weightSum += weight;
+        }
+        if (weightSum > 1e-3) {
+            imageStore(rawIndirectImage, pixel, vec4(gathered / weightSum, 1.0));
+            imageStore(diagnosticImage, pixel, vec4(0.75, 0.0, 0.0, 0.0));
+            return;
+        }
+    }
+#endif
     uint state = uint(pixel.x) * 1973u ^ uint(pixel.y) * 9277u ^
         PushConstants.control.w * 26699u ^ 0x68bc21ebu;
-    vec3 origin = position + normal * PushConstants.settings.z;
-#ifdef LUMEN_LITE
-    vec4 lumenWorld = sceneData.inverseViewProjection *
-        vec4(screenUV * 2.0 - 1.0, depth, 1.0);
-    vec3 lumenPosition = lumenWorld.xyz / lumenWorld.w;
-    vec3 lumenNormal = normalize(transpose(mat3(sceneData.view)) * normal);
-#endif
     int stepCount = max(1, int(PushConstants.settings.w + 0.5));
-    float stride = PushConstants.settings.x / float(stepCount);
     int rayCount = clamp(int(PushConstants.quality.x), 1, 8);
     vec3 indirect = vec3(0.0);
     int hitSamples = 0;
     int portalSamples = 0;
     int totalSteps = 0;
     for (int rayIndex = 0; rayIndex < rayCount; ++rayIndex) {
-        vec3 direction = cosine_direction(normal, state);
-        bool hit = false;
-        bool portalTermination = false;
-        vec2 hitUV = vec2(0.0);
-        float hitDepth = 0.0;
-        int stepsTaken = 0;
-        for (int stepIndex = 1; stepIndex <= stepCount; ++stepIndex) {
-            stepsTaken = stepIndex;
-            vec3 rayPoint = origin + direction * (stride * float(stepIndex));
-            vec4 clip = sceneData.proj * vec4(rayPoint, 1.0);
-            if (clip.w <= 0.0) break;
-            vec3 ndc = clip.xyz / clip.w;
-            vec2 rayUV = ndc.xy * 0.5 + 0.5;
-            if (any(lessThan(rayUV, vec2(0.0))) ||
-                any(greaterThanEqual(rayUV, vec2(1.0))) ||
-                ndc.z < 0.0 || ndc.z > 1.0) break;
-            if (texture(portalMask, frame_uv(rayUV, portalMask)).r > 0.5) {
-                portalTermination = true;
-                break;
-            }
-            float surfaceDepth = texture(
-                prepassDepth, frame_uv(rayUV, prepassDepth)).r;
-            if (surfaceDepth <= BackgroundDepth) continue;
-            vec3 surfacePosition = view_position(rayUV, surfaceDepth);
-            float separation = (-rayPoint.z) - (-surfacePosition.z);
-            float allowedThickness = PushConstants.settings.y *
-                (1.0 + 0.01 * max(-surfacePosition.z, 0.0));
-            if (separation >= 0.0 && separation <= allowedThickness) {
-                hit = true;
-                hitUV = rayUV;
-                hitDepth = surfaceDepth;
-                break;
-            }
-        }
-
-        vec3 incident = vec3(0.0);
-        if (hit && PushConstants.control.z != 0u) {
-            vec2 hitVelocity = texture(
-                gbufferVelocity, frame_uv(hitUV, gbufferVelocity)).xy;
-            vec2 previousHitUV = hitUV + hitVelocity;
-            if (all(greaterThanEqual(previousHitUV, vec2(0.0))) &&
-                all(lessThan(previousHitUV, vec2(1.0)))) {
-                incident = texture(previousDirectLighting,
-                    frame_uv(previousHitUV, previousDirectLighting)).rgb;
-#ifdef LUMEN_LITE
-                // The screen knows only the direct light leaving what it hit.
-                // The cache knows that surface's bounce light too; adding it
-                // gives screen hits the same bounces as world-traced misses,
-                // which in a closed room are most rays.
-                vec4 hitWorld = sceneData.inverseViewProjection *
-                    vec4(hitUV * 2.0 - 1.0, hitDepth, 1.0);
-                vec3 hitNormal = normalize(transpose(mat3(sceneData.view)) *
-                    texture(prepassNormal, frame_uv(hitUV, prepassNormal)).xyz);
-                SurfaceCacheSample hitSurface =
-                    surface_cache_lookup(hitWorld.xyz / hitWorld.w, hitNormal);
-                if (hitSurface.weight > 0.0) {
-                    incident += hitSurface.albedo * hitSurface.indirect;
-                }
-#endif
-            } else {
-                hit = false;
-            }
-        }
-        if (!hit || PushConstants.control.z == 0u) {
-            vec3 worldDirection = normalize(
-                transpose(mat3(sceneData.view)) * direction);
-#ifdef LUMEN_LITE
-            incident = portalTermination
-                ? environment_radiance(worldDirection)
-                : lumen_trace(lumenPosition, lumenNormal, worldDirection);
-#else
-            incident = environment_radiance(worldDirection);
-#endif
-        }
-        indirect += incident;
+        vec3 direction = cosine_direction(o.normal, state);
+        bool hit, portalTermination;
+        int stepsTaken;
+        indirect += trace_incident(o, direction, hit, portalTermination, stepsTaken);
         hitSamples += hit ? 1 : 0;
         portalSamples += portalTermination ? 1 : 0;
         totalSteps += stepsTaken;
@@ -268,5 +454,5 @@ void main()
         float(totalSteps) / float(stepCount * rayCount),
         1.0 - hitFraction,
         portalFraction));
-
 }
+#endif

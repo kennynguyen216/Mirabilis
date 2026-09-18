@@ -203,6 +203,9 @@ void VulkanEngine::init()
     if (SDL_getenv("MIRABILIS_LUMEN_LITE")) {
         _ssgi.lumenEnabled = true;
     }
+    if (SDL_getenv("MIRABILIS_SSGI_PROBES")) {
+        _ssgi.probesEnabled = true;
+    }
     if (SDL_getenv("MIRABILIS_SSGI_DISABLE")) {
         _ssgi.enabled = false;
     }

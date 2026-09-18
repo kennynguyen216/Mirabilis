@@ -96,9 +96,14 @@ void main()
     if (accepted) {
         vec3 neighborhoodMin = vec3(1e20);
         vec3 neighborhoodMax = vec3(-1e20);
+        // Screen probes (quality.w) make the raw image smooth within a probe
+        // tile, so adjacent pixels agree however noisy the probe was; the
+        // clamp has to span neighbouring probes to see that noise, or it pins
+        // history to the current frame and nothing accumulates.
+        int stride = PushConstants.quality.w != 0u ? 8 : 1;
         for (int y = -1; y <= 1; ++y) {
             for (int x = -1; x <= 1; ++x) {
-                ivec2 q = clamp(pixel + ivec2(x, y), ivec2(0), extent - 1);
+                ivec2 q = clamp(pixel + ivec2(x, y) * stride, ivec2(0), extent - 1);
                 vec3 sampleValue = imageLoad(rawIndirectImage, q).rgb;
                 neighborhoodMin = min(neighborhoodMin, sampleValue);
                 neighborhoodMax = max(neighborhoodMax, sampleValue);

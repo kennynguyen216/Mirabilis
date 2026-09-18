@@ -1,0 +1,6 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#define LUMEN_LITE 1
+#define SSGI_PROBE_TRACE 1
+#include "ssgi_body.glsl"

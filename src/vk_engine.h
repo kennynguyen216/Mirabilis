@@ -130,7 +130,8 @@ struct SSGIPushConstants {
     // z = normal dot threshold, w = velocity rejection threshold.
     glm::vec4 temporal{0.0f};
     // x = rays per pixel, yz = live draw extent (the region of the
-    // full-size G-buffer and prepass images written this frame).
+    // full-size G-buffer and prepass images written this frame), w = 1 when
+    // screen probes are on.
     glm::uvec4 quality{1u, 0u, 0u, 0u};
 };
 
@@ -1253,6 +1254,11 @@ class VulkanEngine{
             VkDescriptorSetLayout lumenLayout{};
             VkPipelineLayout lumenPipelineLayout{};
             VkPipeline lumenPipeline{};
+            // Screen probes (shaders/ssgi_body.glsl): per-tile hemispheres
+            // stored as SH, gathered per pixel.  Lumen-lite only.
+            bool probesEnabled{false};
+            VkPipeline probePipeline{};
+            AllocatedImage probeImage{};
             int filterRadius{3};
             float filterDepthFalloff{800.0f};
             float filterNormalPower{32.0f};

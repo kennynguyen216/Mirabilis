@@ -388,6 +388,53 @@ Cornell box 7.7 ms, living room 7.0 ms, Sponza 8.4 ms (SSGI alone 3.0–4.4 ms,
 against 0.5–0.7 ms for plain SSGI).  Debug and synchronization validation are
 clean in the Cornell box and the living room.
 
+## Stage: screen probes — implemented (#6)
+
+Off by default: Render Settings "Screen Probes", or `MIRABILIS_SSGI_PROBES=1`
+with Lumen-lite on. `shaders/ssgi_probe.comp` is the SSGI body compiled with
+`SSGI_PROBE_TRACE`.
+
+- One probe per 8×8 tile, on a pixel of that tile chosen by a hash of tile and
+  frame, so placement jitters every frame and no placement buffer exists.
+- Each probe traces the rays its tile's pixels would have (64 × rays per
+  pixel), stratified uniform over its hemisphere, through the same
+  `trace_incident()` the per-pixel path uses, and stores band-2 SH.
+- Each pixel gathers from its four surrounding probes, weighted by the bilinear
+  weight, distance off its plane and normal agreement, and evaluates
+  irradiance at its own normal. A pixel no probe serves traces its own rays:
+  2.1% of geometry pixels in the living room and 0.1% in the Cornell box, so
+  the ray budget is 1.02× and 1.001×.
+- The temporal clamp's 3×3 neighbourhood is taken at probe stride when probes
+  are on. At pixel stride, a probe's output is smooth across its tile however
+  noisy the probe was, so the clamp pins history to the current frame and
+  nothing accumulates.
+
+Acceptance, preset 0 (full res, 4 rays), Lumen-lite, 32 frames, filtered
+indirect. Speckle is luminance std/mean after removing a least-squares
+quadratic; with a plane instead the Cornell region reads flat at 11.8% → 11.7%,
+because its green bleed is curved lighting and not noise:
+
+| Region (full-res px), camera | Probes off | Probes on |
+|---|---:|---:|
+| Living room ceiling x 20–440 y 5–70, `'0 1.6 -3 0 3.14'` | 12.97% | **5.97%** |
+| Cornell back wall x 450–650 y 190–370, `'0 2 3.5 0 0'` | 8.30% | **5.20%** |
+
+With temporal accumulation disabled, the same regions read 40.1% → 16.4% and
+29.7% → 14.7%. SSGI GPU time rises 20.1 → 22.0 ms (living room) and 22.0 →
+22.6 ms (Cornell), Debug build.
+
+**Found on the way: the existing temporal pass darkens indirect light by
+~31%.** With accumulation off, the per-pixel region means are 0.01269 (living
+room) and 0.3687 (Cornell); with it on, 0.00871 and 0.2530. The probe means
+(0.01190, 0.3582) sit 6% and 3% below the unbiased figure, so turning probes on
+*brightens* indirect light by ~37–42% against the shipped path. That bears on
+the interior brightness error (#5): the shipped figure is lower than the trace
+it comes from.
+
+Not built: importance sampling, probe-space spatial filtering, adaptive
+placement, per-probe temporal accumulation. Each waits for a measurement that
+shows the simple version falls short.
+
 ## Next
 
 In order. The first item blocks meaningful judgement of everything below it,
@@ -403,8 +450,9 @@ because a 3.8× scale error swamps every other difference.
 3. **Anti-aliasing**, if the moulding stipple matters for how the renderer
    looks. It is a raster-path job — the velocity buffer and temporal
    reprojection TAA needs already exist, built for SSGI.
-4. **Then** the architectural work, in this order: screen probes (importance
-   sampling, per-probe accumulation), HZB screen tracing, field clipmaps,
+4. **Then** the architectural work, in this order: screen probes (basic
+   version done, above; importance sampling and per-probe accumulation when
+   measured to matter), HZB screen tracing, field clipmaps,
    world radiance cache, reflections. Each needs a written acceptance
    measurement before it starts, as checkpoints 1–7 had.
 5. Coverage: depth-peeled card layers for concave meshes (Sponza ~89%). Do it
