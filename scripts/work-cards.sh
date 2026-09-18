@@ -52,11 +52,19 @@ prompt_for() {
     # prompt.  A `claude -p` session has no interactive approval, so any gh
     # call it makes is denied; making it fetch its own card meant it could not
     # read its acceptance criterion and correctly refused to do anything.
-    local body
+    local body stage_note=""
     body=$(gh issue view "$1" --repo "$REPO" \
         --json title,body,labels \
         --jq '"TITLE: \(.title)\nLABELS: \([.labels[].name] | join(", "))\n\n\(.body)"' \
         2>/dev/null) || body="(could not fetch card #$1)"
+
+    # Only a stage card is an architectural stage.  Telling a bug card to
+    # "build the stage, not a scene fix" is at best noise and at worst an
+    # invitation to read an architecture task into a ten-line fix.
+    case "$body" in
+        *"LABELS:"*"stage"*) stage_note="
+Build the architectural stage, not a scene fix. No per-scene tuning." ;;
+    esac
 
     cat <<PROMPT
 /ponytail
@@ -78,8 +86,7 @@ If you cannot meet it, commit nothing. Say plainly what you found and why you
 stopped, and try to leave it on the card with 'gh issue comment $1'; if that is
 denied, printing it is enough. A wrong fix committed unattended costs more than
 a card left open.
-
-Build the architectural stage, not a scene fix. No per-scene tuning.
+$stage_note
 PROMPT
 }
 
