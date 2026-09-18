@@ -650,6 +650,11 @@ void VulkanEngine::update_scene_sdf()
             vkCmdBindPipeline(
                 cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _sceneSdf.compositePipeline);
             for (const Job& job : jobs) {
+                // Each dispatch is a load-min-store on voxels a neighbouring
+                // instance's region also covers.  Unordered, two of them race
+                // and one minimum is lost -- which one depends on scheduling,
+                // so the field differed from run to run.
+                vkutil::memory_barrier(cmd);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                     _sceneSdf.compositePipelineLayout, 0, 1, &job.set, 0, nullptr);
                 vkCmdPushConstants(cmd, _sceneSdf.compositePipelineLayout,

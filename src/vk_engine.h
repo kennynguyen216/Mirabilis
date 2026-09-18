@@ -1364,6 +1364,10 @@ class VulkanEngine{
             AllocatedImage direct{};
             // Bounce light arriving at each texel, in the same convention.
             AllocatedImage indirect{};
+            // indirect as it stood before this radiosity update.  Bounces read
+            // it, never the page being written, so the result does not depend
+            // on the order the GPU runs texels in.
+            AllocatedImage indirectPrevious{};
             glm::uvec2 atlasSize{0};
             // Target world size of one atlas texel; the build coarsens it when
             // the scene does not fit the largest atlas.

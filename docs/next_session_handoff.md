@@ -156,12 +156,14 @@ engine to print the current one):
 
 ## Two gotchas found last session
 
-**SSGI capture is not run-to-run deterministic in the living room.** Same
-binary, same frame count, twice: max per-pixel difference 9.8e-02, mean
-absolute 2.0e-06. That is *larger* than the difference between two different
-builds, so **a capture diff cannot validate a change in that scene** until the
-nondeterminism is tracked down. The Cornell box was bit-identical across
-builds, so it is usable as-is. Cause unknown — not investigated.
+**SSGI capture nondeterminism — fixed, see #12.** Two GPU races, neither to do
+with frame timing (a 1-frame capture differed too). The scene SDF merge ran
+every instance's load-min-store with no barrier between dispatches, so where
+regions overlap a minimum was lost at random. Radiosity read the indirect page
+it was writing. Captures are now bit-identical run to run in the living room
+and the Cornell box, so **a capture diff validates a change again**. Radiosity
+now reads last update's page, which converges slower, not elsewhere: Cornell
+indirect mean is 5.7% lower than before at 32 frames, 1.0% at 256.
 
 **Validation warnings — fixed, see `f37b2d1`.** Ten of them in the living room,
 recorded here as the portal view pass's doing. That attribution was wrong:

@@ -279,6 +279,7 @@ void VulkanEngine::init_surface_cache_resources()
         for (uint32_t binding = 7; binding <= 9; ++binding) {
             builder.add_binding(binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         }
+        builder.add_binding(10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         _surfaceCache.radiosityLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
         VkPushConstantRange range{
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -333,7 +334,7 @@ void VulkanEngine::init_surface_cache_resources()
                  &_surfaceCache.albedo, &_surfaceCache.normal,
                  &_surfaceCache.emissive, &_surfaceCache.depth,
                  &_surfaceCache.captureDepth, &_surfaceCache.direct,
-                 &_surfaceCache.indirect}) {
+                 &_surfaceCache.indirect, &_surfaceCache.indirectPrevious}) {
             if (image->image != VK_NULL_HANDLE) {
                 destroy_image(*image);
             }
@@ -494,7 +495,7 @@ void VulkanEngine::update_surface_cache()
                  &_surfaceCache.albedo, &_surfaceCache.normal,
                  &_surfaceCache.emissive, &_surfaceCache.depth,
                  &_surfaceCache.captureDepth, &_surfaceCache.direct,
-                 &_surfaceCache.indirect}) {
+                 &_surfaceCache.indirect, &_surfaceCache.indirectPrevious}) {
             if (image->image != VK_NULL_HANDLE) {
                 destroy_image(*image);
                 *image = AllocatedImage{};
@@ -517,6 +518,8 @@ void VulkanEngine::update_surface_cache()
         _surfaceCache.indirect = create_image(extent, VK_FORMAT_R16G16B16A16_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        _surfaceCache.indirectPrevious = create_image(extent, VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         immediate_submit([&](VkCommandBuffer cmd) {
             vkutil::transition_image(cmd, _surfaceCache.direct.image,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -1079,7 +1082,7 @@ void VulkanEngine::update_surface_cache_radiosity()
 
     std::array<DescriptorAllocatorGrowable::PoolSizeRatio, 3> ratios{{
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1.0f},
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 6.0f},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 7.0f},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3.0f}}};
     DescriptorAllocatorGrowable pool;
     pool.init(_device, 1, ratios);
@@ -1103,6 +1106,8 @@ void VulkanEngine::update_surface_cache_radiosity()
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
     writer.write_buffer(9, _surfaceCache.indexBuffer.buffer, VK_WHOLE_SIZE, 0,
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    writer.write_image(10, _surfaceCache.indirectPrevious.imageView, _prepass.sampler,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     writer.update_set(_device, set);
 
     // The next cards in round-robin order, up to the texel budget, so a large
@@ -1125,8 +1130,19 @@ void VulkanEngine::update_surface_cache_radiosity()
 
     const VkDescriptorSet sceneSet = get_current_frame().sceneDescriptor;
     immediate_submit([&](VkCommandBuffer cmd) {
+        // ponytail: copies the whole page each update; copy only the texels
+        // bounces can reach if the atlas copy shows up in a profile.
+        const VkExtent2D atlas{_surfaceCache.atlasSize.x, _surfaceCache.atlasSize.y};
         vkutil::transition_image(cmd, _surfaceCache.indirect.image,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        vkutil::transition_image(cmd, _surfaceCache.indirectPrevious.image,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkutil::copy_image_to_image(cmd, _surfaceCache.indirect.image,
+            _surfaceCache.indirectPrevious.image, atlas, atlas);
+        vkutil::transition_image(cmd, _surfaceCache.indirectPrevious.image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        vkutil::transition_image(cmd, _surfaceCache.indirect.image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _surfaceCache.radiosityPipeline);
         const std::array<VkDescriptorSet, 2> sets{sceneSet, set};
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,

@@ -32,23 +32,6 @@ constexpr std::array<SSGIPreset, 5> SSGIPresets{{
     {true,  2, 32, 12.0f, 0.35f, 0.08f, 3, 800.0f, 32.0f, 0.92f},
     {true,  1, 16,  8.0f, 0.45f, 0.10f, 2, 900.0f, 36.0f, 0.90f},
     {false, 8, 96, 20.0f, 0.25f, 0.05f, 5, 800.0f, 32.0f, 0.96f}}};
-
-// Everything the SSGI dispatches touch stays in GENERAL, so what has to be
-// ordered between them is the memory, not a layout.  One memory barrier does
-// for all of them what a same-layout transition per image did one at a time.
-void ssgi_compute_barrier(VkCommandBuffer cmd)
-{
-    VkMemoryBarrier2 barrier{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-    barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
-    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-    barrier.dstAccessMask =
-        VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
-    VkDependencyInfo dependency{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    dependency.memoryBarrierCount = 1;
-    dependency.pMemoryBarriers = &barrier;
-    vkCmdPipelineBarrier2(cmd, &dependency);
-}
 }
 
 void VulkanEngine::apply_ssgi_quality_preset(int preset)
@@ -593,7 +576,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
         }
         // Orders the preceding frame's fragment reads against this
         // dispatch's writes without changing descriptor state.
-        ssgi_compute_barrier(cmd);
+        vkutil::memory_barrier(cmd);
 
         const std::array<VkDescriptorSet, 2> sets{
             get_current_frame().sceneDescriptor,
@@ -665,7 +648,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 _ssgi.timestampPool, timingBase + 1);
         }
-        ssgi_compute_barrier(cmd);
+        vkutil::memory_barrier(cmd);
 
         // Temporal accumulation is a separate dispatch so every invocation
         // sees the complete current-frame raw image. This makes the 3x3
@@ -687,7 +670,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 _ssgi.timestampPool, timingBase + 2);
         }
-        ssgi_compute_barrier(cmd);
+        vkutil::memory_barrier(cmd);
 
         if (_ssgi.filterPipeline != VK_NULL_HANDLE) {
             vkCmdBindPipeline(
@@ -712,7 +695,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkCmdPushConstants(cmd, _ssgi.filterPipelineLayout,
                 VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(filterPush), &filterPush);
             vkCmdDispatch(cmd, groupX, groupY, 1);
-            ssgi_compute_barrier(cmd);
+            vkutil::memory_barrier(cmd);
 
             filterPush.control.z = 0;
             filterPush.control.w = 1;
@@ -722,7 +705,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkCmdPushConstants(cmd, _ssgi.filterPipelineLayout,
                 VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(filterPush), &filterPush);
             vkCmdDispatch(cmd, groupX, groupY, 1);
-            ssgi_compute_barrier(cmd);
+            vkutil::memory_barrier(cmd);
         }
         if (_gpuTiming.supported) {
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,

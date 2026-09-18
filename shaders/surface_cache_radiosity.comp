@@ -33,10 +33,11 @@ layout(set = 1, binding = 6) uniform sampler3D sceneField;
 #define SURFACE_CACHE_BINDING_CARDS 7
 #define SURFACE_CACHE_BINDING_GRID 8
 #define SURFACE_CACHE_BINDING_INDICES 9
-// Read from the page being written.  Other texels may or may not have been
-// updated yet this dispatch; either value is a valid previous estimate, and
-// the iteration converges from any order.
-#define SURFACE_CACHE_READ_INDIRECT(texel) imageLoad(indirectPage, texel).rgb
+// Bounces read the page as it stood before this update, not the one being
+// written: reading in place made the result depend on which texels the GPU
+// happened to have updated first, so no two runs agreed.
+layout(set = 1, binding = 10) uniform sampler2D cacheIndirectPrevious;
+#define SURFACE_CACHE_READ_INDIRECT(texel) texelFetch(cacheIndirectPrevious, texel, 0).rgb
 #include "surface_cache_lookup.glsl"
 
 layout(push_constant) uniform constants {
