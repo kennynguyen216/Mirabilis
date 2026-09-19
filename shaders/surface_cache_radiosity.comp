@@ -28,9 +28,6 @@ layout(set = 1, binding = 3) uniform sampler2D cacheAlbedo;
 layout(set = 1, binding = 4) uniform sampler2D cacheEmissive;
 layout(set = 1, binding = 5) uniform sampler2D cacheDirect;
 layout(set = 1, binding = 6) uniform sampler3D sceneField;
-#define SCENE_FIELD_SET 1
-#define SCENE_FIELD_BINDING_CASCADES 11
-#include "scene_field.glsl"
 
 #define SURFACE_CACHE_SET 1
 #define SURFACE_CACHE_BINDING_CARDS 7
@@ -89,9 +86,20 @@ vec3 cosine_direction(vec3 normal, inout uint state)
     return normalize(tangent * local.x + bitangent * local.y + normal * local.z);
 }
 
+float field_distance(vec3 world)
+{
+    return textureLod(sceneField,
+        (world - fieldMin.xyz) / (fieldMax.xyz - fieldMin.xyz), 0.0).r;
+}
+
 vec3 field_normal(vec3 p)
 {
-    return scene_field_normal(p);
+    float h = fieldMin.w;
+    vec3 gradient = vec3(
+        field_distance(p + vec3(h, 0, 0)) - field_distance(p - vec3(h, 0, 0)),
+        field_distance(p + vec3(0, h, 0)) - field_distance(p - vec3(0, h, 0)),
+        field_distance(p + vec3(0, 0, h)) - field_distance(p - vec3(0, 0, h)));
+    return normalize(gradient + vec3(1e-8));
 }
 
 void main()
@@ -114,14 +122,14 @@ void main()
 
     uint state = hash_uint(uint(texel.x) * 1973u ^ uint(texel.y) * 9277u ^
                            PushConstants.control.x * 26699u);
-    float originVoxel = scene_field_voxel(world);
+    float voxel = fieldMin.w;
     float maxDistance = PushConstants.settings.y;
     uint rays = max(PushConstants.control.y, 1u);
     vec3 sum = vec3(0.0);
     uint counted = 0u;
     for (uint r = 0u; r < rays; ++r) {
         vec3 direction = cosine_direction(normal, state);
-        vec3 origin = world + normal * (2.5 * originVoxel);
+        vec3 origin = world + normal * (2.5 * voxel);
 
         vec3 inverse = 1.0 / direction;
         vec3 t0 = (fieldMin.xyz - origin) * inverse;
@@ -131,8 +139,7 @@ void main()
         bool hit = false;
         float t = 0.0;
         for (int step = 0; step < 128 && t < tExit; ++step) {
-            float voxel;
-            float d = scene_field_distance(origin + direction * t, voxel);
+            float d = field_distance(origin + direction * t);
             if (d < 0.25 * voxel) {
                 hit = true;
                 break;

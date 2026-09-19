@@ -167,9 +167,9 @@ screen trace (existing SSGI march)
 
 ### Scene field (`src/vk_engine_sdf.cpp`, `shaders/sdf_composite.comp`)
 
-- Each instance's volume is merged into the scene field's cascades (see
-  *Stage: scene field clipmaps* below) by a compute pass that keeps the
-  minimum distance.  Outside an
+- Each instance's volume is merged into one R32F scene field (at most 384 per
+  axis by default, adjustable to 512) by a compute pass that keeps the minimum
+  distance.  Outside an
   instance's box it writes a conservative lower bound, and distances are
   converted with the transform's smallest scale so non-uniform scale never
   overstates free space.
@@ -177,7 +177,7 @@ screen trace (existing SSGI march)
 - The merge is submitted in batches of bounded voxel work so a large scene
   cannot hit the Windows GPU timeout.
 - It rebuilds when the set of drawn opaque instances or their transforms
-  change, and when the camera cascades need recentring.
+  change.
 
 ### Verification
 
@@ -220,8 +220,7 @@ the script still exits non-zero for that reason.
 ### Known limitations
 
 - Alpha-masked surfaces (foliage) are baked as solid cards.
-- No near-camera mesh tracing; the finest field detail is the 3.2 cm camera
-  cascade, and the 5 cm bake's half-voxel shell is a floor under the bias.
+- One field over the whole scene; no clipmaps, no near-camera mesh tracing.
 - Static: moving an object rebuilds the whole field.
 
 ## Checkpoints 4–6: surface cache
@@ -487,71 +486,6 @@ Cornell box against its 400-sample reference: frame 1.027× → 0.993×, deep
 With HZB off, captures are bit-identical to before in the living room and the
 Cornell box.
 
-## Stage: scene field clipmaps — implemented (#8)
-
-The field is a stack of cascades, finest first, all read through
-`shaders/scene_field.glsl`. Every tracer uses it: the SSGI world trace, cache
-direct light and radiosity, the compare view, and the debug trace.
-
-- The last cascade covers every placed volume at 512 voxels a side and never
-  moves. That is the old single field, raised from 384.
-- Before it, camera cascades of 3.2 cm, 6.4 cm and so on, 512³, are added while
-  each is meaningfully finer (×1.5) than the whole-scene one. Sponza gets one
-  camera cascade at 3.2 cm over a 7.3 cm whole-scene cascade. The living room
-  (1.2 cm) and the Cornell box (1.9 cm) are finer than that as a whole and get
-  none.
-- A trace samples the finest cascade that holds the point with a voxel of
-  margin. Hit threshold, minimum step and origin offset scale with that
-  cascade's voxel.
-- All cascades sit in one R8 volume, stacked along z. Each stores
-  distance ÷ (8 × its voxel), which resolves 1/32 of a voxel at a quarter of
-  R32F's size. Sponza's field is 512×512×849 bytes, 222 MB, against the old
-  83 MB. One table (`SceneFieldCascades`, a uniform buffer) says where each
-  cascade is.
-- The camera cascades are snapped to their own voxel grid and placed again
-  when the camera is an eighth of the finest one's width (2 m) from where they
-  were placed. That rebuilds every cascade: 21 ms in Sponza, plus 4 ms to
-  relight the cache, whose hash now includes the cascade table.
-  `ponytail:` scroll the camera cascades in slabs if that hitch ever matters.
-
-**Why these sizes.** At the acceptance camera the bias is not the −8.4 cm
-recorded above. That was the scene's default camera. From `'0 10 0 -0.5 0'`
-it is −15.0 cm with 37.7 cm p90 scatter, and it grows with distance
-(−12.5 cm under 5 m, −18.0 cm at 5–10 m). The hits are measured along the
-ray, and this camera meets the floor and walls at grazing angles, so a
-surface sitting δ in front reads as δ/cos θ. Measured with the field fitted to
-a cube round the camera before building anything:
-
-| Field voxel | Bias | 0–3 m | 3–5 m | 5–8 m |
-|---|---:|---:|---:|---:|
-| 4.7 cm | −6.25 cm | −4.3 | −5.9 | −7.4 |
-| 3.2 cm | −4.30 cm | −2.9 | −3.7 | −5.5 |
-| 1.6 cm | — (field too small) | −2.7 | −3.3 | — |
-
-The bias bottoms out near −3 cm: the bake's own 2.5 cm half-voxel shell.
-Half this view lies 5–8 m out, so the fine cascade has to reach about 8 m.
-Two 384³ cascades (3.2 cm to 6 m, then 6.5 cm) emulated at −5.47 cm and
-fail. 512³ at 3.2 cm is what passes.
-
-Acceptance, `check_sdf_agreement.py`, Release, 16 frames:
-
-| View, camera | Before | Cascades |
-|---|---|---|
-| Sponza `'0 10 0 -0.5 0'` | bias −15.04 cm, p90 37.70 cm, FAIL | **bias −4.10 cm, p90 4.10 cm, PASS** |
-| Living room `'0 1.5 1.0 0 0'` | bias −3.1 cm, p90 15.7 cm | bias −2.83 cm, p90 15.14 cm |
-
-The living room's p90 is still the see-through-the-windows effect recorded
-above, not the field.
-
-Against the path-traced references, with Lumen-lite and preset 0:
-
-- Cornell box: 1.027× → 1.024× frame, 0.873× → 0.862× deep.
-- Living room: 1.414× → 1.353× interior, 3.573× → 3.517× deep.
-- Living room shadow check: agree 96.8% → 96.3%, cache lit 27.5% → 26.6%.
-
-Debug and synchronization validation are clean with Lumen-lite on in the
-living room and the Cornell box.
-
 ## Next
 
 In order. The first item blocks meaningful judgement of everything below it,
@@ -569,7 +503,7 @@ because a 3.8× scale error swamps every other difference.
    reprojection TAA needs already exist, built for SSGI.
 4. **Then** the architectural work, in this order: screen probes (basic
    version done, above; importance sampling and per-probe accumulation when
-   measured to matter), HZB screen tracing (done, above), field clipmaps (done, below),
+   measured to matter), HZB screen tracing (done, above), field clipmaps,
    world radiance cache, reflections. Each needs a written acceptance
    measurement before it starts, as checkpoints 1–7 had.
 5. Coverage: depth-peeled card layers for concave meshes (Sponza ~89%). Do it

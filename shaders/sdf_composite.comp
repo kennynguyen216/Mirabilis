@@ -7,10 +7,10 @@
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
 
-// One cascade's slab of the stacked field (see scene_field.glsl): distance to
-// the nearest surface as a fraction of the cascade's maximum stored distance,
-// 0 inside.  Cleared to 1 before the first instance is merged.
-layout(r8, set = 0, binding = 0) uniform image3D sceneField;
+// Distance to the nearest surface in world units, negative inside, clamped
+// to at most the stored maximum.  Cleared to that maximum before the first
+// instance is merged.
+layout(r32f, set = 0, binding = 0) uniform image3D sceneField;
 // The instance's mesh volume, in the mesh's own local units.
 layout(set = 0, binding = 1) uniform sampler3D meshVolume;
 
@@ -32,8 +32,7 @@ layout(push_constant) uniform constants {
     // World distance by which this instance's shell is thickened; see
     // update_scene_sdf.
     float shellPad;
-    // xyz = voxel count of that region, w = first z slice of the cascade's
-    // slab in the stacked field.
+    // xyz = voxel count of that region.
     ivec4 regionSize;
 } PushConstants;
 
@@ -68,8 +67,6 @@ void main()
     float distanceWorld = distanceLocal * PushConstants.volumeMin.w - PushConstants.shellPad;
     distanceWorld = min(distanceWorld, PushConstants.volumeMax.w);
 
-    ivec3 slot = voxel + ivec3(0, 0, PushConstants.regionSize.w);
-    float existing = imageLoad(sceneField, slot).r;
-    imageStore(sceneField, slot,
-        vec4(min(existing, distanceWorld / PushConstants.volumeMax.w), 0.0, 0.0, 1.0));
+    float existing = imageLoad(sceneField, voxel).r;
+    imageStore(sceneField, voxel, vec4(min(existing, distanceWorld), 0.0, 0.0, 1.0));
 }

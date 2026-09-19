@@ -174,20 +174,6 @@ struct SdfCompositePushConstants {
 };
 static_assert(sizeof(SdfCompositePushConstants) == 128);
 
-// The cascade table every scene field tracer reads; std140, matching
-// SceneFieldCascades in shaders/scene_field.glsl.
-struct SceneFieldCascades {
-    // x = cascade count, y = stored distance in voxels.
-    glm::vec4 info{0.0f};
-    struct {
-        // xyz = minimum corner, w = voxel size.
-        glm::vec4 origin{0.0f};
-        // xyz = voxel counts, w = first z slice in the stacked field.
-        glm::vec4 size{0.0f};
-    } cascade[4];
-};
-static_assert(sizeof(SceneFieldCascades) == 144);
-
 // The occlusion kernel is a fixed set of points in the +Z hemisphere, sent to
 // the GPU once.  vec4 rather than vec3 because std140 pads an array element
 // out to sixteen bytes either way.
@@ -1368,27 +1354,7 @@ class VulkanEngine{
             // know the space ahead is clear, not how far past that it stays
             // clear.
             float maxDistanceVoxels{8.0f};
-            // Voxels a side of the whole-scene cascade.
-            int maxDimension{512};
-            // The cascades, finest first; see update_scene_sdf.  fieldMin,
-            // fieldMax and voxelSize above describe the last, whole-scene one.
-            struct Cascade {
-                glm::vec3 min{0.0f};
-                float voxel{0.0f};
-                glm::uvec3 dimensions{0u};
-                // First z slice of this cascade in the stacked field.
-                uint32_t zOffset{0u};
-            };
-            static constexpr size_t MaxCascades = 4;
-            std::vector<Cascade> cascades;
-            // Camera cascades: the finest voxel, doubling per cascade, and
-            // voxels a side.  3.2 cm x 512 reaches the 8 m within which 90%
-            // of Sponza's arcade view lies.
-            float fineVoxel{0.032f};
-            uint32_t fineDimension{512u};
-            // Where the camera was when the camera cascades were placed.
-            glm::vec3 cascadeCentre{0.0f};
-            AllocatedBuffer cascadeBuffer{};
+            int maxDimension{384};
 
             uint64_t drawHash{0};
             bool rebuildRequested{false};

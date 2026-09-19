@@ -1,5 +1,4 @@
 #version 450
-#extension GL_GOOGLE_include_directive : require
 
 // Lumen-lite checkpoint 2: sphere-trace one baked mesh distance field
 // straight into the draw image.  Nothing else in the frame is consulted; the
@@ -15,12 +14,6 @@ layout(set = 0, binding = 1) uniform sampler3D sdfVolume;
 // Reversed camera depth from the prepass, for comparing the trace against
 // what the rasteriser drew.  0 where nothing was drawn.
 layout(set = 0, binding = 2) uniform sampler2D prepassDepth;
-// With the scene field as the source, sdfVolume is the stacked cascade volume
-// and this table says where each cascade is.
-#define SCENE_FIELD_TEXTURE sdfVolume
-#define SCENE_FIELD_SET 0
-#define SCENE_FIELD_BINDING_CASCADES 3
-#include "scene_field.glsl"
 
 layout(push_constant) uniform constants {
     mat4 inverseViewProjection;
@@ -30,8 +23,7 @@ layout(push_constant) uniform constants {
     vec4 boundsMin;
     // xyz = world-space volume bounds, w = view mode.
     vec4 boundsMax;
-    // xy = draw extent, z = hit threshold in texels, w = 1 when the source is
-    // the scene field's cascades rather than one mesh volume.
+    // xy = draw extent, z = hit threshold in texels.
     vec4 extent;
 } PushConstants;
 
@@ -46,16 +38,8 @@ const int ViewAgreement = 3;
 // voxels (or a negative category code), g = traced distance, b = raster.
 const int ViewAgreementData = 4;
 
-bool scene_source()
-{
-    return PushConstants.extent.w > 0.5;
-}
-
 float volume_distance(vec3 worldPosition)
 {
-    if (scene_source()) {
-        return scene_field_distance(worldPosition);
-    }
     vec3 uvw = (worldPosition - PushConstants.boundsMin.xyz) /
         (PushConstants.boundsMax.xyz - PushConstants.boundsMin.xyz);
     return textureLod(sdfVolume, uvw, 0.0).r;
@@ -63,9 +47,6 @@ float volume_distance(vec3 worldPosition)
 
 vec3 volume_normal(vec3 p, vec3 texelSize)
 {
-    if (scene_source()) {
-        return scene_field_normal(p);
-    }
     vec3 h = texelSize;
     vec3 gradient = vec3(
         volume_distance(p + vec3(h.x, 0, 0)) - volume_distance(p - vec3(h.x, 0, 0)),
@@ -147,10 +128,6 @@ void main()
     for (; steps < maxSteps; ++steps) {
         vec3 p = origin + direction * t;
         float d = volume_distance(p);
-        // A cascade's threshold scales with its own voxel.
-        if (scene_source()) {
-            hitThreshold = PushConstants.extent.z * scene_field_voxel(p);
-        }
         if (d < hitThreshold) {
             hit = true;
             break;
@@ -172,8 +149,7 @@ void main()
             vec4 world = PushConstants.inverseViewProjection * vec4(ndc, depth, 1.0);
             rasterDistance = length(world.xyz / world.w - origin);
         }
-        float voxel = scene_source() ? scene_field_voxel(origin + direction * t)
-            : min(min(texelSize.x, texelSize.y), texelSize.z);
+        float voxel = min(min(texelSize.x, texelSize.y), texelSize.z);
         float error = abs(t - rasterDistance) / voxel;
         if (mode == ViewAgreementData) {
             float code = hit && rasterHit ? error
