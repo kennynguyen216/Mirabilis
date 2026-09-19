@@ -1,131 +1,128 @@
-# Next session prompts
+# Lumen-lite recovery task checklists
 
-Paste **Block 1** as the first message of a new session. Everything else here is
-a follow-on, to use when the one before it lands.
+These checklists implement the recovery sequence in
+[lumen_lite_design.md](lumen_lite_design.md). Execute one recovery task at a time; do not combine
+stages or optimize for landing code before its gate passes.
 
-Bias for this stretch: **build the architecture.** The last three sessions
-produced a complexity refactor, a correction to it, and documentation. Real, but
-none of it was a Lumen stage. Checkpoints 1–7 are done; stages 8 onward are not
-started. That is the work.
+## Required preamble for every coding session
 
----
+```text
+Read docs/lumen_lite_design.md completely before acting. It is the authoritative contract.
+Work only on the named recovery item. Do not begin a later item.
 
-## Block 1 — the opener
+Before editing:
+1. Show branch, HEAD, git status --short, and relevant environment variables.
+2. Preserve all pre-existing user changes; do not edit or commit assets/scenes/.last_scene.
+3. Create a dedicated branch.
+4. Paste a frozen experiment record using section 9 of the design document.
+5. State every command and GPU workload before running it.
 
-```
-Read docs/next_session_handoff.md for current state. Skim
-docs/lumen_lite_design.md for architecture and the "Settled, do not
-re-investigate" list. Don't re-derive either.
+Safety:
+- Do not run the Sponza path tracer on this laptop.
+- Do not launch hidden/background GPU work.
+- Do not push, fetch, merge, rewrite history, or touch tmp/card5.
+- Use Release for performance claims.
+- Stop on a failed gate, device instability, or missing evidence.
 
-This session builds a Lumen stage: screen probes. I've spent recent sessions on
-testing, refactoring and docs, and I want architecture now. Optimise for code
-that lands, not for more measurement.
-
-Step 0, time-boxed to the first hour: the interiors are ~3.8x too bright, and
-the handoff traces it to the raster ambient term being unoccluded when SSAO is
-off. If it's a small fix, make it. If it opens up, stop, write down what you
-found, and move on to the probes anyway - don't let it eat the session.
-
-Then screen probes. Before writing code, tell me in a few lines: where probes
-live in the frame, how they're placed and reprojected, how the gather reads them,
-and what you're reusing from the existing SSGI trace and temporal pass. Then
-build it.
-
-Acceptance, decided now so it isn't decided afterwards: probes reduce speckle at
-a fixed ray budget. Measure noise as standard deviation over mean on a flat wall,
-Cornell box and living room, cameras recorded. This is a relative measure, so the
-brightness error doesn't invalidate it either way.
-
-Build the stage, not a scene fix. No per-scene tuning.
+At the end, report the diff, exact commands, raw artifact paths, all regressions, and every
+acceptance line as PASS, FAIL, or BLOCKED. Do not commit unless all gates for this item pass.
+Do not proceed to the next recovery item.
 ```
 
----
+## R1 — controls and diagnostics
 
-## Block 2 — next stage, after probes land
+```text
+Perform only R1 from docs/lumen_lite_design.md.
 
-```
-Screen probes are in and measured. Next stage: HZB screen tracing.
+Fix boolean environment parsing for MIRABILIS_LUMEN_LITE, MIRABILIS_SSGI_PROBES, and
+MIRABILIS_SSGI_HZB so absent/empty/0/false/off are disabled, 1/true/on are enabled, and invalid
+values warn and remain disabled. Prefer one tested parser.
 
-Same shape as before - tell me the design in a few lines first, then build. The
-acceptance measure, decided now: screen trace cost at equal or better hit rate,
-in Sponza and the living room, cameras recorded. Compare against the current
-fixed-step march in ssgi_body.glsl.
+Make material debug-mode values agree between C++ and shaders, preferably from one shared source
+or with a test that fails on divergence.
 
-Reuse the existing depth pyramid if one exists; if not, say what building it
-costs before you build it.
-```
+Fix the Cornell ceiling emitter's geometry/winding/normal so its emitting face points into the
+room. Remove only guards proven to be obsolete by the source fix. Preserve explicit one- versus
+two-sided behavior; do not hide the error with abs(dot()).
 
-## Block 3 — the stage that needs the most design
-
-```
-Next stage: scene distance field clipmaps.
-
-This is the one the field agreement measurements have been pointing at.
-docs/lumen_lite_design.md records that bias tracks field voxel size directly:
--8.4 cm in Sponza at 9.7 cm voxels, -3.1 cm in the living room at 1.5 cm. One
-field over the whole scene can't fix that; clipmaps raise resolution only where
-the camera is.
-
-Design first, in a few lines: how many cascades, what voxel sizes, how they
-recentre as the camera moves, how a trace picks a cascade and crosses between
-them, and what happens to the existing single-field path.
-
-Acceptance: check_sdf_agreement.py bias within 5 cm in Sponza from camera
-'0 10 0 -0.5 0'. That's the threshold the script already enforces and currently
-fails.
+Add focused tests. Build Debug and Release and run unit tests. Use only a short, visible Cornell
+raster smoke test if runtime verification is necessary. Do not change GI equations, presets,
+probes, HZB, distance fields, or performance behavior.
 ```
 
-## Block 4 — remaining stages
+## R2 — coherent Balanced candidate
 
-```
-Next stage: <world radiance cache | reflections>.
+```text
+Perform only R2 from docs/lumen_lite_design.md after R1 is accepted.
 
-Same discipline: short design first, acceptance measure decided before building,
-architectural stage rather than scene tuning. Check
-docs/lumen_lite_design.md for what the surface cache and gather already provide
-so this builds on them rather than beside them.
-```
+Initialize quality preset 2 through the existing preset-application function so every derived
+setting is coherent. Keep Lumen-lite opt-in. Verify the startup log and explicit presets 0–4,
+plain-SSGI feature-off equivalence, and the fixed living-room Release benchmark.
 
----
-
-## Side quests
-
-Independent of the stages above. Use when one becomes annoying enough, or when
-you want something small.
-
-```
-SSGI capture isn't run-to-run deterministic in the living room: the same binary
-at the same frame count differs more per-pixel than two different builds do.
-Details in docs/next_session_handoff.md. The Cornell box is bit-identical, so
-it's scene-specific.
-
-Find the cause. It blocks using capture diffs to validate changes in that scene.
+The living-room frame-time gate is 6.968 ms + 0.5 ms at the documented camera and conditions.
+Do not tune shaders or alter GI output in this task.
 ```
 
-```
-Fix the ten validation warnings in the living room: mesh_shading.glsl writes four
-MRT outputs but the portal view pass binds a single-attachment VkRenderingInfo.
-They appear with SSGI fully disabled, so it's a raster/portal bug, not GI. Small
-and self-contained.
-```
+## R3 — reference provenance
 
-```
-The brightness error is closed. Re-grade every scene against a path-traced
-reference and update the tables in docs/lumen_lite_design.md - the checkpoint 7
-Cornell numbers predate both the sky entering the cache and the error being
-known, so they aren't a usable baseline.
+```text
+Perform only R3 from docs/lumen_lite_design.md after R2 is accepted.
 
-Run with environment policies matched (traceEnvironmentMap) and note in the doc
-which policy each number used.
+Create no renderer changes. Generate safe Cornell and living-room reference/candidate artifacts
+with complete metadata, fixed masks, verified image orientation, and repeated reference seeds.
+Do not run the Sponza path tracer. If a required safe reference cannot be generated, mark the
+gate BLOCKED and stop; never claim a missing file exists.
 ```
 
----
+## R4 — lighting ownership diagnosis and correction
 
-## Why the acceptance line is in every prompt
+```text
+Perform only R4 from docs/lumen_lite_design.md after R3 is accepted.
 
-It's one sentence written before the code, not a testing phase. Checkpoints 1–7
-each had one; checkpoint 8 doesn't, and the design doc's closing line asks for
-it. That habit is also what caught the 3.8× error — which had been present,
-unnoticed, across several sessions of work that looked fine.
+First add or use captures that isolate direct sun diffuse, diffuse environment, indirect
+diffuse, specular environment, emissive, screen hits, world hits, uncovered rays, and exhausted
+rays. Use those measurements to identify the brightness error causally.
 
-It costs a line. It isn't the thing that's been slowing the architecture down.
+Before changing equations, state the expected direction and magnitude of each affected metric.
+Apply receiver albedo exactly once and give every lighting contribution one owner. Do not add an
+ambient-retention or brightness scalar as a visual patch. Evaluate whole images and frozen
+regions against matched linear-HDR references.
+```
+
+## R5 — radiosity synchronization
+
+```text
+Perform only R5 from docs/lumen_lite_design.md after R4 is accepted.
+
+Replace the per-frame full-atlas immediate submission/CPU wait with explicit GPU ordering and
+stable resource ownership. Write the proposed resource-state timeline before code. Preserve the
+determinism fixes rather than deleting synchronization.
+
+Verify repeated hashes at frames 1, 32, 128, and 256; validation cleanliness; radiosity-on versus
+off whole-frame cost; and static plus moving Sponza raster/Lumen behavior. Do not run a Sponza
+path trace. The provisional living-room radiosity overhead gate is 0.5 ms.
+```
+
+## R6 — rebaseline and decision
+
+```text
+Perform only R6 from docs/lumen_lite_design.md after R5 is accepted.
+
+Make no architecture changes. Run the complete fixed matrix and record averages, percentiles,
+maximums, GPU pass times, memory, coverage classifications, linear-HDR correctness metrics, and
+feature-off equivalence. Preserve raw artifacts.
+
+Conclude only one of: Experimental, Accepted, or Default candidate, using the definitions in the
+design document. Any missing or failed required gate prevents advancement.
+```
+
+## Template for a future feature
+
+```text
+Do not implement yet. Write a proposed experiment record for <feature> using section 9 of
+docs/lumen_lite_design.md. Explain the causal limitation in the accepted baseline, the smallest
+testable change, shipped baseline, immutable metrics, cross-scene matrix, frame/pass/tail/memory
+budgets, feature-off test, safety constraints, and rollback.
+
+Stop after the proposal. Implementation requires owner approval of the frozen gate.
+```

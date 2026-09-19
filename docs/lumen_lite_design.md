@@ -1,516 +1,631 @@
-# Mirabilis Lumen-lite Global Illumination Design
+# Mirabilis Lumen-lite GI: authoritative design and validation contract
 
-## Document status
+| Field | Value |
+|---|---|
+| Status | Experimental; not accepted as the engine default |
+| Specification version | 2.0 |
+| Last evidence review | 2026-09-19 |
+| Reviewed code baseline | `main` at `6d994b4`, tree-identical to `adc87e3` |
+| Test GPU | NVIDIA RTX 3060 Laptop GPU |
+| Preserved rejected work | `recovery/lumen-experiments` at `4241d01` |
 
-**Status:** Checkpoints 1–7 implemented and measured against exact
-references: Lumen-lite diffuse GI runs end to end.  **Interiors currently
-render about 3.8× brighter than a path-traced reference** — see *Start here*
-below before building anything new.
-**Date:** 2026-09-17
-**Supersedes:** the 3D fallback tier of
-[hybrid_ray_traced_gi_design.md](hybrid_ray_traced_gi_design.md), which
-traced triangles through a BVH or ray queries.  This project follows Unreal's
-Lumen instead: screen tracing first, then mesh distance fields, with surface
-colour and lighting read from a surface cache.
+This is the canonical design and acceptance document for Lumen-lite. Git history preserves
+the earlier document as historical evidence; it is not an implementation contract. If a card,
+prompt, comment, or old benchmark conflicts with this document, stop and resolve the conflict
+before changing code.
 
-## Start here
+The words **must**, **must not**, **accepted**, **failed**, and **blocked** are intentional.
+An implementer may not silently weaken them.
 
-Read this section before changing anything. It records what the last session
-established, what it ruled out, and what to work on next. Everything in it is
-measured; where something is a guess it says so.
+## 1. Operating contract
 
-### The next job: interiors are ~3.8× too bright
+### 1.1 Current decision
 
-Measured in the living room, at the camera below, against a 400-sample path
-trace of the same view (interior pixels only, windows excluded):
+Do not add another GI subsystem yet. First complete the remediation sequence in section 10.
+Screen probes, HZB tracing, and distance-field clipmaps remain experiments behind disabled
+flags. Clipmaps are reverted. None may be described as shipped, complete, or accepted.
 
-| Render | Interior vs reference |
-|---|---:|
-| Peak preset (8 rays, full res) | 3.84× |
-| Balanced preset (2 rays, half res) | 3.71× |
-| SSGI off entirely | floor region 6.4× |
+### 1.2 Non-negotiable rules
 
-This is a scale error, not a sampling error. It is present **with GI switched
-off**, so it does not originate in the gather, the cache or the field. The
-leading suspect is the forward pass's IBL ambient being applied without any
-occlusion term: every surface receives full sky irradiance whether or not it
-can see sky, and the living room scene has SSAO disabled. `ambientRetention`
-(default 0.5) is a slider that exists to fudge exactly this.
+1. Before implementation, write down the hypothesis, comparison baseline, scenes, cameras,
+   build type, metrics, thresholds, expected trade-offs, and rollback command.
+2. Freeze that acceptance block before gathering results. A changed metric or threshold is a
+   new experiment and must retain the failed result.
+3. Compare against the configuration Mirabilis actually ships. A deliberately slow reference
+   may be useful diagnostically but cannot establish a performance win.
+4. Performance claims use Release builds. Debug timings may diagnose behavior but never support
+   an acceptance claim.
+5. Measure whole-frame time, affected GPU passes, tail latency or movement hitches, and memory.
+   An average for one pass is insufficient.
+6. Image comparisons use matched camera, geometry, materials, lights, exposure, resolution,
+   crop, and linear-HDR data. Never choose a crop or detrending model after seeing the result.
+7. Report every material regression in the result record before committing. A passing narrow
+   metric does not cancel a frame-time, brightness, stability, or memory regression.
+8. Never start a hidden or background GPU workload. State the exact workload first. Do not run
+   the Sponza path tracer on the current laptop; it has repeatedly caused device hangs.
+9. Missing evidence means **blocked**, not passed. Do not invent a reference, result, or test.
+10. With an experimental feature disabled, output and performance must remain equivalent to the
+    accepted baseline within the tolerances declared before the test.
+11. Stop when a gate fails. Diagnose and record the failure before attempting a redesign.
+12. A commit is not evidence. Build success and unit tests do not establish image correctness,
+    performance, stability, or design completion.
 
-The cache's new sky pass already computes the missing quantity per texel — how
-much sky a point can see, by a march through the scene field. The same idea
-applied to the raster ambient term is the obvious fix to try first.
+### 1.3 Status vocabulary
 
-**Before trusting 3.8× precisely:** the software path tracer lights its misses
-from the analytic gradient rather than the HDR panorama, so the two are not in
-environment parity. `traceEnvironmentMap` exists to match them. A gap this
-large is not explained by that, but the comparison should be re-run matched
-before the number is quoted as exact.
+| Status | Meaning |
+|---|---|
+| Proposed | A written hypothesis and frozen gate exist; implementation has not started. |
+| Experimental | Code exists, but all acceptance evidence is not present. |
+| Blocked | Required evidence or a safe test environment is unavailable. |
+| Accepted | Every frozen gate passed and the result record is complete. |
+| Default candidate | Accepted and explicitly approved for default-on soak testing. |
+| Rejected | A gate failed; retain evidence and do not build dependent work on it. |
+| Reverted | Rejected code was removed from the active tree and preserved in history. |
 
-### Settled, do not re-investigate
+Only the project owner may relax a gate, and only before the next attempt begins.
 
-- **The dark ceiling in the living room is correct.** It measures 1.08× a
-  400-sample path trace. The room is genuinely dark: the floor is wood with
-  albedo 0.27/0.15/0.09, reflecting about 17%, and the ceiling is lit almost
-  entirely by bounce from it. A whole session was spent hunting a bug here
-  that does not exist.
-- **The dotted lines along mouldings and window bars are geometric aliasing,
-  not GI.** They appear identically with SSGI disabled (4606 edge pixels off,
-  4844 on) and full resolution does not remove them. Those lips are about a
-  pixel wide, so FXAA cannot recover them. Fixing them means temporal
-  anti-aliasing or supersampling, in the raster path, not here. Toggling GI
-  changes the brightness around them, which is why they look GI-related.
-- **Ray count is not the current bottleneck.** Peak does 16× Balanced's work
-  (8 rays at full resolution against 2 at half) for 3.84× vs 3.71× against the
-  reference and 7.0% vs 7.3% speckle. Until the brightness error is resolved,
-  spending rays — including building screen probes — is premature.
+## 2. Evidence-backed current state
 
-### Tried and reverted; the measurement is in the commit history
+| Component | State | Evidence-based conclusion |
+|---|---|---|
+| Existing Lumen-lite foundations | Experimental | Functional, but radiometric ownership and reference parity are unresolved. |
+| Preset 0 | Diagnostic only | At 960×540 it is about 7.7× the measured plain-SSGI frame time in the living-room view. |
+| Preset 2 (Balanced) | Performance candidate | Viable living-room cost, but not yet a correctness-accepted default. |
+| Surface-cache radiosity | Experimental | Determinism fix is credible, but a full-atlas copy plus GPU wait occurs each Lumen-lite frame. |
+| Screen probes | Inconclusive; off | Original quality metric was selected after results; Debug timing and brightness regression invalidate acceptance. |
+| HZB screen trace | Failed; off | It loses against the shipped 32-step baseline and has a bounds-safety concern. |
+| Distance-field clipmaps | Reverted | Severe Sponza time, brightness, memory, and movement-hitch regressions. |
+| Sponza path-traced reference | Blocked | No valid reference exists; do not claim one does. |
 
-Each of these was implemented, measured and reverted. Do not retry without a
-new reason:
+### 2.1 Reproducible living-room performance evidence
 
-- Widening the temporal history clamp: no measurable change.
-- Firefly suppression by `1/(1 + luminance)`: no change. The raw samples max
-  out at 0.383 with a median of 0.0023 — there are no bright outliers to
-  suppress. The speckle is large *relative* variation in a very dim signal.
-- The same weighting made relative to each pixel's mean: removed 43% of the
-  indirect light, left speckle identical, made outliers worse.
-- Reading full cache radiance on screen hits instead of the screen's direct
-  buffer plus cache indirect: lost light (indirect 0.0110 → 0.0085). The
-  cache's card-resolution direct light is dimmer than the screen's
-  shadow-mapped direct buffer.
-- Averaging the bilateral upsample's fallback neighbourhood rather than taking
-  the nearest sample: no change; that branch almost never fires.
-- Dropping the SSGI start offset from 8 cm to 5 mm: indirect +3.6%, speckle
-  unchanged. Arguably more correct, not a fix for anything.
+Release build, fixed camera `4.740 1.700 -2.947 -0.133 -14.670`, 300-frame run,
+295 measured samples:
 
-### How to measure anything here
+| Configuration | Internal extent | Frame ms | SSGI GPU ms | Trace GPU ms |
+|---|---:|---:|---:|---:|
+| Plain SSGI, preset 0 | 960×540 | 3.779 | 2.345 | 1.991 |
+| Lumen-lite, preset 0, radiosity off | 960×540 | 29.063 | 27.617 | 27.257 |
+| Lumen-lite, preset 0, radiosity on | 960×540 | 31.018 | 27.590 | 27.215 |
+| Lumen-lite, preset 2, radiosity off | 480×270 | 5.154 | 3.844 | 3.643 |
+| Lumen-lite, preset 2, radiosity on | 480×270 | 6.968 | 3.868 | 3.664 |
 
-Guessing from the code failed repeatedly last session; measuring first
-succeeded every time. The tools:
+Interpretation:
 
-- **Press F9 in the running engine** to print the current camera as a
-  `MIRABILIS_TEST_CAMERA` string. An artifact visible from one viewpoint
-  cannot be measured from a guessed one.
-- Cameras that are actually useful (scene defaults are not — Sponza's faces a
-  wall):
+- Preset 0 is a validation mode, not a reasonable default on this GPU.
+- Balanced preset 2 is the only currently measured default candidate.
+- At preset 2, enabling radiosity adds about 1.81 ms of whole-frame cost while the reported
+  SSGI and trace timings barely move. The known blocking atlas transfer is the leading cause
+  to verify, not a settled attribution.
+- These numbers are one scene and one camera. They do not establish cross-scene acceptance.
 
-  | View | Camera |
-  |---|---|
-  | Living room, interior | `'0 1.6 -3 0 3.14'` |
-  | Living room, window corner | `'2.217 1.587 -0.677 0.216 -4.115'` |
-  | Sponza arcade | `'0 10 0 -0.5 0'` |
-  | Cornell box | `'0 2 3.5 0 0'` |
+### 2.2 Confirmed correctness and engineering debts
 
-- A headless capture: `MIRABILIS_TEST_SCENE`, `MIRABILIS_TEST_FRAMES`,
-  `MIRABILIS_TEST_CAMERA`, `MIRABILIS_RASTER_CAPTURE` (which appends `.pfm`).
-  `MIRABILIS_TEST_TRACE=1` with `MIRABILIS_CAPTURE` gives the path-traced
-  reference; 400 frames accumulate 400 samples.
-- **PFM rows run bottom to top.** Flip before indexing regions, and confirm
-  each region against the albedo debug view (`MIRABILIS_RENDER_DEBUG_VIEW=8`)
-  before trusting a number. An unflipped array produced a confident, entirely
-  wrong account of which surfaces had gained light.
-- Debug views that answered real questions: 8 albedo (is it dark paint or
-  missing light), 12 SSGI raw (is it noise or a denoiser problem), 18 filtered,
-  29 surface cache atlas with `MIRABILIS_SURFACE_CACHE_PAGE`.
-- Compare against a reference, not against the previous build. The reference
-  settled in one run what five hypotheses could not.
+- `MIRABILIS_LUMEN_LITE`, `MIRABILIS_SSGI_PROBES`, and `MIRABILIS_SSGI_HZB`
+  currently test variable presence. Setting one to `0` still enables it.
+- The material-debug shader constants are two positions out of sync with the C++ enum.
+- The Cornell ceiling emitter geometry faces upward into the ceiling. A guard masks a symptom;
+  the path tracer's absolute cosine can hide the orientation error.
+- HZB code performs an initial texel fetch before proving that the starting location is within
+  the valid screen/segment bounds.
+- Surface-cache radiosity copies the full RGBA16F indirect atlas and waits for completion on
+  every Lumen-lite frame.
+- The older “3.8×” living-room brightness claim concerns a deep-interior subset, not the whole
+  image. Whole-interior evidence was roughly 1.414×. Neither comparison is accepted until
+  reference parity is re-established.
+- The current one-cone `sky_visibility` estimate cannot faithfully represent partial
+  hemispherical visibility.
 
-## Why a distance field and a surface cache
+## 3. Product scope
 
-A distance field answers "how far is the nearest surface" everywhere, so a
-ray can leap through empty space safely, it runs as plain compute on both
-the RTX 3060 and the RX 5700, and it needs no ray-tracing extensions.  What a
-distance field cannot answer is what the surface it hit looks like or how
-brightly it is lit.  The surface cache answers that: every mesh is captured
-from a few directions into "cards" packed into an atlas, lighting is computed
-per card texel, and a trace hit is resolved to the card that saw that point.
-Lighting the cache from the cache itself, over successive frames, is what
-gives multiple bounces without recursive tracing.
+Lumen-lite targets stable, diffuse dynamic global illumination for indoor and mixed
+indoor/outdoor scenes on mid-range Vulkan hardware. It should reuse screen-space information
+when reliable, fall back to a bounded world-space representation, and amortize expensive
+lighting work through a surface cache.
 
-## Pipeline
+The first accepted version must provide:
+
+- stable diffuse indirect lighting during camera motion;
+- screen trace plus explicit world fallback behavior;
+- a bounded, updateable surface cache;
+- a Balanced-quality mode suitable for the RTX 3060 Laptop GPU;
+- deterministic automated captures; and
+- debug views and measurements that agree with the implementation.
+
+The first version does not promise:
+
+- full Unreal Engine Lumen feature parity;
+- production screen probes;
+- specular GI or reflection replacement;
+- arbitrary dynamic geometry in distance fields;
+- path-traced reference generation for Sponza on this laptop; or
+- zero bias. Bias must instead be measured, bounded, and documented.
+
+## 4. Radiometric and ownership contract
+
+### 4.1 Stored quantities
+
+Use one convention throughout code, shader comments, debug views, and tests:
+
+- `Li`: incident radiance arriving at a surface.
+- Direct diffuse cache value: irradiance divided by π, before receiver albedo.
+- Indirect diffuse cache value: irradiance divided by π, before receiver albedo.
+- Emissive: emitted radiance, stored and added separately.
+- Final diffuse outgoing radiance:
+
+  `Lo_diffuse = receiver_albedo * (direct_E_over_pi + indirect_E_over_pi)`
+
+- Final material output:
+
+  `Lo = Lo_diffuse + emissive + separately_owned_specular`
+
+A producer must not pre-apply receiver albedo if the consumer applies it. A sampled screen
+pixel must be converted to the documented incident-light representation before reuse; do not
+reapply the source material's albedo as though it were transport.
+
+### 4.2 Lighting ownership
+
+| Contribution | Sole owner |
+|---|---|
+| Direct sun diffuse | Direct-lighting path or direct surface-cache channel |
+| Environment diffuse | One diffuse-environment path, selected explicitly |
+| Indirect diffuse bounce | Lumen-lite/SSGI result |
+| Specular environment/reflections | Existing specular/IBL path |
+| Material emission | Emissive material path and explicitly sampled transport |
+
+No contribution may be owned by two paths. `ambientRetention` or an arbitrary multiplier is
+not a correctness mechanism. If the baseline ambient term is retained for graceful fallback,
+its ownership, units, and blend equation must be documented and tested.
+
+### 4.3 Ray-result contract
+
+Every ray must end with an explicit classification:
+
+| Result | Meaning and allowed output |
+|---|---|
+| Screen hit | Valid visible-surface sample converted to the incident-light convention |
+| Covered world-field hit | Sample the documented surface-cache/world-field representation |
+| Covered world-field miss/exit | Environment radiance, if the ray demonstrably exits geometry |
+| Uncovered world-field region | Explicit “unknown/uncovered” policy; never silently sky |
+| Step-budget exhaustion | No estimate/low confidence; never silently sky |
+| Portal/window exit | Environment only when the exit is demonstrated |
+
+Returning sky for “no card,” “outside coverage,” or “ran out of steps” creates light leaks and
+must not be used as a convenience fallback.
+
+### 4.4 Surface sidedness
+
+Emitters and cards must have a declared sidedness. One-sided emitters use a physically
+consistent outward normal and a clamped cosine. Tests must not use `abs(dot(n, wi))` to make
+back-facing emitters appear valid unless a material is explicitly two-sided.
+
+## 5. Pipeline and architecture
 
 ```text
-screen trace (existing SSGI march)
-    miss or unreliable
-        -> sphere trace the scene distance field
-            hit  -> surface cache radiance at the hit
-            miss -> environment
-    -> existing temporal + bilateral denoise -> composite
+G-buffer + depth
+       |
+       v
+bounded screen trace ---- valid hit ----> incident-light sample
+       |
+       +---- miss/uncertain ----> bounded world fallback
+                                      |
+                                      v
+                               surface-cache lookup
+                                      |
+                                      v
+                         classified ray result + confidence
+                                      |
+                                      v
+                         spatial/temporal reconstruction
+                                      |
+                                      v
+                   receiver albedo applied exactly once
 ```
 
-## Checkpoint 1–3: mesh and scene distance fields (implemented)
+### 5.1 Current world representation
 
-### Baking (`scripts/bake_sdf.py`)
+The accepted baseline currently contains the pre-clipmap scene distance-field path. Its
+monolithic volume and current resolution are constraints to measure, not permission to replace
+it without a migration gate. The reverted clipmap implementation is evidence that a nominally
+more scalable structure can still lose on tracing, lighting, memory, and update hitches.
 
-- The engine writes each scene instance's **opaque** triangles, in the mesh's
-  local space, to `assets/sdf/queue/<hash>.obj`.  The hash covers positions
-  and indices only, so the cache follows geometry, not names or load order,
-  and a mesh shared between files bakes once.  Transparent surfaces are left
-  out, matching the raster G-buffer: otherwise window glass would block the
-  light the render shows passing through.
-- `python scripts/bake_sdf.py --queue assets/sdf/queue assets/sdf/cache`
-  bakes each at 5 cm voxels in a grid shaped to the mesh, spending a voxel
-  budget per mesh (4 M voxels, 1024 per axis) rather than a fixed cap per
-  axis, so a mesh thin on one axis keeps its resolution on the others.
-  Output format is documented in the script.
-- **Every mesh is baked as a two-sided shell**: `|distance| − ½ voxel`, from
-  distances to surface points sampled directly on the triangles.  This was
-  measured, not assumed.  mesh_to_sdf's inside/outside test estimates normals
-  from its virtual scans, so a zero-thickness wall seen from both sides gets
-  opposite normals at the same place and the sign flickers, leaving holes and
-  drips.  Closed meshes baked signed still tore open inside concave crevices
-  (between sofa cushions).  Shells need no sign.
-- The shell puts the surface half a bake voxel in front of the real one.  At
-  5 cm that is a consistent ~3 cm early hit, measured as bias below.
+A future world representation must define:
 
-### Scene field (`src/vk_engine_sdf.cpp`, `shaders/sdf_composite.comp`)
+- coverage and resolution as world-space functions;
+- how uncovered space is classified;
+- update scheduling and maximum work per frame;
+- static versus dynamic geometry behavior;
+- memory ownership and hard budget;
+- synchronization and resource lifetime;
+- camera movement, teleport, and scene-change behavior; and
+- an accuracy test against analytic shapes before scene tests.
 
-- Each instance's volume is merged into one R32F scene field (at most 384 per
-  axis by default, adjustable to 512) by a compute pass that keeps the minimum
-  distance.  Outside an
-  instance's box it writes a conservative lower bound, and distances are
-  converted with the transform's smallest scale so non-uniform scale never
-  overstates free space.
-- Distances are truncated at 8 field voxels, as Lumen's global field is.
-- The merge is submitted in batches of bounded voxel work so a large scene
-  cannot hit the Windows GPU timeout.
-- It rebuilds when the set of drawn opaque instances or their transforms
-  change.
+### 5.2 Surface cache
 
-### Verification
+Surface cards cache lighting; they are not geometry truth. Missing card coverage must remain
+distinguishable from a geometric miss. Card allocation, atlas capacity, and eviction must have
+observable counters. Historical Sponza card-memory pressure, including an approximately 1 GB
+configuration, is a warning that capacity cannot be chosen from Cornell alone.
 
-`scripts/check_sdf_agreement.py` compares each pixel's traced hit distance
-with the raster depth, reporting bias (the median signed difference) and
-scatter around it, in centimetres.
+### 5.3 Direct cache and sky visibility
 
-Re-measured 2026-09-17, after the per-mesh voxel budget replaced the
-128-per-axis cap and the field grew to 384.  The camera is part of the
-measurement, so each row records one.
+A single normal-directed visibility cone is not hemispherical diffuse visibility. Until a
+better estimator is accepted, label this term as an approximation and measure its bias in
+windowed, corner, open-sky, and deep-interior regions. Do not compensate globally with a
+brightness multiplier.
 
-| View | Camera | Field voxel | Bias | p90 scatter | Within 5 cm of bias |
-|---|---|---:|---:|---:|---:|
-| Sponza arcade | scene default | 9.7 cm | −8.4 cm | 3.5 cm | 95.8% |
-| Living room, inside | `0 1.5 1.0 0 0` | 1.5 cm | −3.1 cm | 15.7 cm | 78.9% |
+### 5.4 Radiosity update
 
-The superseded numbers, measured under the 128-voxel cap and a 256 field,
-were Sponza −12.9 cm bias with 17.2 cm p90 scatter and 52.4% within 5 cm.
-Sponza's scatter is now inside the script's 5 cm limit; its bias is not, and
-the script still exits non-zero for that reason.
+The deterministic copy introduced at `7e80627` fixed two suspected GPU races, but its
+per-frame full-atlas transfer and synchronous wait are not acceptable as the final design.
+A replacement must preserve ordering with explicit GPU dependencies and avoid a CPU-visible
+queue drain in the steady-state frame.
 
-- Orientation (all 48 axis permutations and flips), world scaling and bounds
-  are separately verified by `bake_sdf.py --verify-axes`.
-- **Bias tracks the field's voxel size, not placement.** The merge thickens
-  every shell to at least ¾ of a field voxel, so the expected early hit is
-  `max(½ bake voxel, ¾ field voxel)`: 2.5 cm for the living room at 1.5 cm
-  voxels (−3.1 cm measured), 7.3 cm for Sponza at 9.7 cm (−8.4 cm measured).
-  Both scenes land within about a centimetre of that prediction, which is
-  what rules out a placement or orientation error.  Raising the field
-  resolution lowers this bias directly; clipmaps are the way to raise it only
-  where the camera is, which is the scaling step the gather will want.
-- The living room row is not comparable to the superseded one: the camera the
-  original used was never recorded, and the one above looks partly through
-  the windows, where the raster pass back-face culls surfaces the two-sided
-  field keeps.  That is what the p99 of 6 m and the wide p90 are — a handful
-  of pixels seeing through the set, not a regression in the field.  A fixed
-  interior camera is needed before this row means anything.
-- Debug and synchronization validation layers are clean for these passes.
+### 5.5 Quality presets
 
-### Known limitations
+Current preset behavior:
 
-- Alpha-masked surfaces (foliage) are baked as solid cards.
-- One field over the whole scene; no clipmaps, no near-camera mesh tracing.
-- Static: moving an object rebuilds the whole field.
+| Preset | Name/use | Internal resolution | Rays | Steps |
+|---:|---|---|---:|---:|
+| 0 | Full-resolution validation | Full | 4 | 32 |
+| 1 | High | Half | 4 | 48 |
+| 2 | Balanced candidate | Half | 2 | 32 |
+| 3 | Low | Half | 1 | 16 |
+| 4 | Reference stress mode | Full | 8 | 96 |
 
-## Checkpoints 4–6: surface cache
+Preset 0 is not the performance default. If changing the default, call the same preset
+application function used by runtime selection; changing only the integer leaves derived
+settings inconsistent.
 
-### Cards
+## 6. Experimental feature decisions
 
-For each opaque instance, six cards, one per local axis direction (±X, ±Y,
-±Z), each an orthographic view of the instance's local bounding box looking
-back along that direction.  A card only keeps surfaces facing it, so a
-room's inward-facing walls are each captured by the card on the opposite
-side of the box.
+### 6.1 Screen probes
 
-Six box cards miss surfaces hidden behind others facing the same way (an
-arcade's upper and lower floors).  Lumen clusters surfaces into many cards;
-the simpler first step here is to measure coverage and, where it falls
-short, add depth-peeled layers per direction.
+Status: **inconclusive, disabled**.
 
-### Atlas
+The existing implementation is a skeleton, not a Lumen-style screen-probe system. It lacks
+importance sampling, probe-space filtering, adaptive placement, and per-probe temporal
+accumulation. The original speckle metric was selected after a quadratic detrend produced a
+passing result; a planar detrend changed the Cornell region only from 11.79% to 11.67%.
+Timings came from Debug, and indirect illumination rose by 37–42% against the shipped path.
 
-One atlas, rectangles allocated per card at a target of one texel per 5 cm,
-scaled down globally if the scene does not fit.  Pages:
+Do not extend this implementation until the base radiometric contract passes. A future proposal
+must specify probe placement, sampling PDF and weights, reconstruction, disocclusion, temporal
+state, failure modes, and an immutable quality gate before code.
 
-| Page | Format | Holds |
+### 6.2 HZB screen tracing
+
+Status: **failed, disabled**.
+
+The original performance comparison used 128/256-step linear marches rather than the shipped
+32-step march. Against the shipped baseline, HZB approximately doubled screen-trace cost; the
+whole Lumen-lite trace was slightly slower in Sponza and only about 1 ms faster in the living
+room. It also requires a bounds-safe first sample and a real fix for the Cornell emitter.
+
+A retry must:
+
+- compare against the shipped screen tracer at matched scene hit rate and image error;
+- prove every texture fetch is in bounds;
+- report hierarchy build cost and whole-frame cost;
+- include thin geometry, screen-edge starts, behind-camera starts, and disocclusion; and
+- beat the baseline on the predeclared scene matrix without a correctness loss.
+
+### 6.3 Distance-field clipmaps
+
+Status: **rejected and reverted**.
+
+Observed Sponza regressions:
+
+- GI trace: about 34 ms to 49.5 ms;
+- indirect mean: 0.0549 to 0.0302, approximately 45% darker;
+- field memory: 83 MB to 222 MB; and
+- camera movement: approximately 25 ms hitch every 2 m.
+
+An attempted repair reached roughly 53 ms and was reverted. No Sponza reference exists, so the
+darker result cannot be called more correct.
+
+Do not resurrect the patch incrementally. Any retry requires a new design with analytic
+distance tests, explicit uncovered-space behavior, bounded incremental updates, a memory
+budget, and static/moving/teleport gates.
+
+## 7. Correctness validation protocol
+
+### 7.1 Reference metadata
+
+Every comparison directory must contain or record:
+
+- commit hash and dirty-tree status;
+- executable configuration and shader hash/time;
+- GPU and driver;
+- scene asset hash;
+- camera transform;
+- resolution, internal extent, sample count, and random seed;
+- all relevant environment variables;
+- light, material, exposure, tone-map, and sky settings;
+- capture format and row orientation; and
+- exact command used.
+
+If any parity field is unknown, the comparison is diagnostic only.
+
+### 7.2 Reference meaning
+
+A finite-sample path trace is a noisy reference, not exact truth. Record sample count and, when
+possible, repeat seeds to estimate reference variance. Never call a file a reference unless it
+exists and its provenance is recorded.
+
+### 7.3 Required image metrics
+
+Evaluate linear HDR before tone mapping:
+
+- mean luminance ratio and signed bias;
+- MAE and RMSE;
+- median and p90 relative error with a declared dark-pixel floor;
+- non-finite and negative-value counts;
+- temporal variance for static and moving cameras; and
+- valid-hit, fallback, uncovered, and exhaustion coverage.
+
+Report the whole image and predeclared semantic regions. A deep-interior crop may reveal a
+problem but cannot be presented as whole-scene behavior. Detrending, masks, and crop coordinates
+must be frozen before viewing results. Verify PFM/image row orientation with a known marker.
+
+### 7.4 Required scenes and fixed cameras
+
+| Scene | Camera | Purpose |
 |---|---|---|
-| Albedo | RGBA8 | base colour × factors, alpha = coverage |
-| Normal | RGBA8 | world normal |
-| Emissive | RGBA16F | emitted radiance |
-| Depth | R16F | position along the card axis, 1 = nothing captured |
-| Direct | RGBA16F | sun and emissive lighting |
-| Indirect | RGBA16F | accumulated bounce lighting |
+| Living-room interior | `0 1.6 -3 0 3.14` | Matched-reference whole room and deep interior |
+| Living-room window view | `4.740 1.700 -2.947 -0.133 -14.670` | Performance and high-contrast leakage |
+| Cornell box | `0 2 3.5 0 0` | Controlled energy/orientation test; regenerate after emitter fix |
+| Sponza | `0 10 0 -0.5 0` | Raster/Lumen performance, coverage, memory, and movement only |
 
-### Capture (checkpoint 4)
+Camera values must be verified against the parser before capture. Sponza path-traced reference
+generation is forbidden on the current laptop.
 
-Rasterise each instance into its card rectangles with its real materials,
-using the forward pass's material descriptor sets and push-constant layout
-(the three spare rows carry the orthographic card projection).  Static
-scenes capture once, on scene change.
+## 8. Performance and stability protocol
 
-Acceptance: an atlas debug view shows recognisable albedo and normals; a
-coverage metric reports the fraction of each mesh's surface area captured by
-some card.
+Use Release, a fixed executable and shader set, fixed camera, fixed resolution, and an idle
+machine. Warm up before measuring. A nominal run uses 300 frames with at least 295 measured
+samples. Record average, median, p95, p99, and maximum frame time, affected GPU pass times,
+CPU frame time where available, allocated/used VRAM, and device errors.
 
-**Implemented** (`src/vk_engine_surface_cache.cpp`, debug view "Surface cache
-atlas", `MIRABILIS_SURFACE_CACHE_COVERAGE=1`).  The capture reuses the forward
-pass's pipeline layout and material sets; the three previous-transform rows
-of its push constants carry the card projection, and the fragment shader
-discards surfaces facing away from the card from their normals, because the
-engine draws with culling off and glTF winding is not reliable.  Coverage
-samples points over every instance's opaque triangles and checks the depth
-page:
+Run both static-camera and scripted-motion tests. Averages cannot detect the prior recurring
+25 ms clipmap hitch.
 
-| Scene | Cards | Atlas | Capture | Surface area covered |
-|---|---:|---:|---:|---:|
-| Living room | 372 | 512² at 5 cm | 14 ms | 91.8% of 148 m² |
-| Sponza | 672 | 4096² at 5 cm | 88 ms | 88.6% of 9,681 m² |
+Command pattern:
 
-The misses are concentrated in large concave meshes (one Sponza chunk is at
-65%), exactly the case six box cards cannot see; depth-peeled layers are the
-planned fix once lighting is running end to end.  Debug and synchronization
-validation are clean.
+```bat
+set MIRABILIS_TEST_CAMERA=<verified camera>
+set MIRABILIS_TEST_FRAMES=300
+set MIRABILIS_SSGI_BENCHMARK=1
+set MIRABILIS_SSGI_PRESET=<preset>
+cd bin\Release
+engine.exe > ..\..\tmp\benchmark-<descriptive-name>.txt 2>&1
+```
 
-### Lighting (checkpoint 5) — implemented
+Do not set boolean presence flags to `0` until section 10 fixes parsing; remove them from the
+environment to disable them.
 
-`shaders/surface_cache_direct.comp` lights every captured texel with the sun,
-shadowed by a soft sphere-traced march through the scene field, and stores
-the light arriving (`sunColor × N·L × visibility`, no albedo) so the forward
-pass's Lambert term and the cache agree by construction.
+### 8.1 Provisional regression gates
 
-A shadow map is the wrong referee for this: its depth bias leaks light past
-edges the field correctly blocks.  The referee is exact: sample sun-facing
-cache texels, rebuild their world positions from the depth page, and cast one
-ray per sample through the path tracer's CPU BVH of the real triangles
-(`MIRABILIS_SURFACE_CACHE_SHADOW_CHECK=1`).
+These protect the current recovered baseline until a fuller baseline is recorded:
 
-| Scene | Lit by exact rays | Lit in cache | Agree |
-|---|---:|---:|---:|
-| Sponza | 49.0% | 48.8% | 97.2% |
-| Living room | 30.3% | 27.1% | 96.6% |
+- Balanced living-room frame time must not exceed 6.968 ms by more than 0.5 ms.
+- A changed GPU pass must not regress by more than 0.5 ms without a pre-approved quantified
+  correctness gain.
+- A recurring movement hitch must not exceed baseline p99 by more than 2 ms.
+- GPU memory must not rise by more than 5% without prior approval and a documented budget.
+- Mean indirect luminance must not fall by more than 2% unless matched-reference error improves
+  by a predeclared amount and the direction was predicted.
+- Feature-off captures must remain bit-identical where determinism permits, otherwise within a
+  predeclared numerical tolerance.
+- Validation errors, device loss, non-finite output, and corrupted captures are automatic fails.
 
-Errors are one-sided toward shadow: thin geometry (window bars) thickened by
-its shell narrows the light passing through it.
+Record fresh post-revert Sponza raster/Lumen baselines before using numeric Sponza gates.
 
-### Lookup — implemented
+## 9. Experiment record template
 
-`shaders/surface_cache_lookup.glsl` answers "what does the cache say about this
-world point": a uniform card grid lists overlapping cards per cell; each card
-facing the query normal projects the point, reads its depth page, and the
-surface nearest behind the point wins.  Cards whose surface lies further back
-fade by a Gaussian of a quarter texel, so a second card that captured the same
-surface still blends in but a different surface two centimetres behind (a
-light panel under a ceiling) does not.  At G-buffer positions a card is found
-for 94–95% of pixels, and the looked-up albedo matches the G-buffer's (median
-ratio 1.07).
+Copy this block into the issue/card before implementation:
 
-### Radiosity (checkpoint 6) — implemented
+```markdown
+Hypothesis:
+Baseline commit/configuration:
+Proposed change:
+Expected correctness effect:
+Expected performance/memory effect:
+Scenes and exact cameras:
+Build and hardware:
+Reference provenance:
+Frozen metrics and thresholds:
+Feature-off equivalence test:
+Static/movement/teleport tests:
+Safety constraints:
+Rollback command:
+```
 
-`shaders/surface_cache_radiosity.comp`: each update, the next cards in
-round-robin order up to a texel budget trace cosine-weighted rays through the
-field; hits read `albedo × (direct + indirect) + emissive` from the cache and
-rays that leave the field read the sky under SSGI's policy.  Averaging is
-progressive (`1/n` per card, down to a floor) so a static scene keeps
-converging.  Graded against the software path tracer in the Cornell box
-(emitter only, sealed), with its depths 2–4 extrapolated to infinite bounces:
+After testing, append:
 
-| Quantity | Cache | Path traced | Ratio |
-|---|---:|---:|---:|
-| One bounce (emitter light) | 0.0736 | 0.0781 | 0.94 |
-| All bounces | 0.1955 | 0.2229 (extrapolated) | 0.88 |
+```markdown
+Result commit and dirty-tree status:
+Exact commands/environment:
+Raw artifact paths:
+Complete results, including regressions:
+Gate-by-gate PASS / FAIL / BLOCKED:
+Unexpected observations:
+Decision: accepted / rejected / blocked
+Rollback performed:
+```
 
-The sealed box with no emitter converges to 0.0006, the same as with radiosity
-off.  Noise on a flat wall after 150 updates: 18% standard deviation over
-mean.
+No results comment means no acceptance. “Looks better,” build success, or one passing metric is
+not a result record.
 
-### Bugs the measurements found
+## 10. Recovery sequence
 
-Each of these produced plausible-looking images; each was found by a number
-that disagreed with a reference.
+Complete in order. Each item gets its own small commit only after its gates pass.
 
-1. **Per-axis bake cap.** 128 voxels per axis coarsened Sponza's 18 m roof
-   lattice to 14.5 cm; its shells closed the gaps and shadowed the courtyard.
-   Baking now spends a voxel budget per mesh.
-2. **Single-sided thin surfaces.** A ceiling light built from an upward-facing
-   plane was captured only on its top card, so rays from below read the dark
-   ceiling.  Instances thinner than two texels are captured two-sided.
-3. **Step exhaustion counted as sky.** A radiosity ray that ran out of march
-   steps was treated as having left the scene.
-4. **Shells thinner than the field.** A unit cube scaled to a 20 cm wall has
-   5 mm shells, invisible at 2.5 cm field voxels, and rays passed through the
-   walls of a sealed room.  The merge thickens every shell to at least three
-   quarters of a field voxel.
-5. **Blending across surfaces.** The lookup averaged every card within its
-   depth tolerance, so the ceiling light was averaged with the ceiling above
-   it and the room received half its light.
-6. **`AllocatedImage` has no member initialisers**, so new members must be
-   value-initialised (`AllocatedImage x{};`); found by the Debug build.
+### R1 — Repair trustworthy controls and diagnostics
 
-## Checkpoint 7: final gather — implemented
+Implement:
 
-`shaders/ssgi_lumen.comp` is the SSGI trace (`shaders/ssgi_body.glsl`) compiled
-with `LUMEN_LITE`; `ssgi.comp` compiles the same body without it, to
-byte-identical SPIR-V, so plain SSGI is unchanged.  With the Lumen-lite world
-fallback on (Render Settings checkbox, `MIRABILIS_LUMEN_LITE=1`):
+1. Parse boolean environment values consistently: absent/empty/0/false/off disable; 1/true/on
+   enable; invalid values produce a warning and remain disabled.
+2. Align material-debug shader constants with the C++ enum from one shared definition or a test.
+3. Correct the Cornell emitter geometry/winding/normal and enforce declared sidedness.
+4. Add CPU/unit tests for boolean parsing and debug-mode mapping where practical.
 
-- a ray the screen cannot answer traces the scene field and reads the cache at
-  its hit, or the sky if it leaves the scene;
-- a ray the screen does answer adds the cache's bounce light at the hit to the
-  direct light the screen reads, so screen hits carry as many bounces as
-  world-traced misses;
-- the scene field, cache capture and cache lighting are each gated on a hash
-  of what they depend on, so a still scene rebuilds none of them; only
-  radiosity runs every frame, within its texel budget.
+Acceptance:
 
-Graded in the Cornell box against the path tracer (albedo × SSGI's filtered
-incident light, emitter pixels excluded):
+- `=0` demonstrably disables Lumen-lite, probes, and HZB;
+- all C++ modes select their matching shader view;
+- Cornell emitter normal points into the room without a start-behind workaround;
+- Debug and Release compile, existing unit tests pass; and
+- no unrelated renderer behavior changes.
 
-| SSGI | Preset | Result ÷ extrapolated path-traced reference | SSGI GPU time |
-|---|---|---:|---:|
-| Plain (environment for misses) | Validation, full res | 0.054 | 3.0 ms |
-| Lumen-lite, misses only | Validation, full res | 0.571 | — |
-| Lumen-lite, misses and screen hits | Validation, full res | 0.767 | 21.9 ms |
-| Lumen-lite, misses and screen hits | Balanced, half res | 0.692 | 3.0 ms |
+### R2 — Make Balanced the coherent candidate default
 
-Balanced timings on the RTX 3060 laptop, whole frame including radiosity:
-Cornell box 7.7 ms, living room 7.0 ms, Sponza 8.4 ms (SSGI alone 3.0–4.4 ms,
-against 0.5–0.7 ms for plain SSGI).  Debug and synchronization validation are
-clean in the Cornell box and the living room.
+Use the preset application function to initialize preset 2 and all derived fields. Do not merely
+change `qualityPreset`.
 
-## Stage: screen probes — implemented (#6)
+Acceptance:
 
-Off by default: Render Settings "Screen Probes", or `MIRABILIS_SSGI_PROBES=1`
-with Lumen-lite on. `shaders/ssgi_probe.comp` is the SSGI body compiled with
-`SSGI_PROBE_TRACE`.
+- startup log states preset 2 and 480×270 at the measured output resolution;
+- explicit preset overrides still reproduce their table;
+- Lumen-lite remains opt-in until correctness gates pass;
+- living-room performance stays within section 8.1; and
+- plain SSGI behavior is unchanged.
 
-- One probe per 8×8 tile, on a pixel of that tile chosen by a hash of tile and
-  frame, so placement jitters every frame and no placement buffer exists.
-- Each probe traces the rays its tile's pixels would have (64 × rays per
-  pixel), stratified uniform over its hemisphere, through the same
-  `trace_incident()` the per-pixel path uses, and stores band-2 SH.
-- Each pixel gathers from its four surrounding probes, weighted by the bilinear
-  weight, distance off its plane and normal agreement, and evaluates
-  irradiance at its own normal. A pixel no probe serves traces its own rays:
-  2.1% of geometry pixels in the living room and 0.1% in the Cornell box, so
-  the ray budget is 1.02× and 1.001×.
-- The temporal clamp's 3×3 neighbourhood is taken at probe stride when probes
-  are on. At pixel stride, a probe's output is smooth across its tile however
-  noisy the probe was, so the clamp pins history to the current frame and
-  nothing accumulates.
+### R3 — Establish matched references
 
-Acceptance, preset 0 (full res, 4 rays), Lumen-lite, 32 frames, filtered
-indirect. Speckle is luminance std/mean after removing a least-squares
-quadratic; with a plane instead the Cornell region reads flat at 11.8% → 11.7%,
-because its green bleed is curved lighting and not noise:
+After the emitter fix, regenerate safe Cornell and living-room references with complete metadata.
+Do not change renderer behavior during this task. If a safe reference cannot be produced, mark
+the affected gate blocked.
 
-| Region (full-res px), camera | Probes off | Probes on |
-|---|---:|---:|
-| Living room ceiling x 20–440 y 5–70, `'0 1.6 -3 0 3.14'` | 12.97% | **5.97%** |
-| Cornell back wall x 450–650 y 190–370, `'0 2 3.5 0 0'` | 8.30% | **5.20%** |
+Acceptance:
 
-With temporal accumulation disabled, the same regions read 40.1% → 16.4% and
-29.7% → 14.7%. SSGI GPU time rises 20.1 → 22.0 ms (living room) and 22.0 →
-22.6 ms (Cornell), Debug build.
+- files exist and can be decoded;
+- parity fields are complete;
+- repeated reference seeds quantify noise;
+- masks/crops are stored before candidate comparison; and
+- orientation is verified.
 
-**Found on the way: the existing temporal pass darkens indirect light by
-~31%.** With accumulation off, the per-pixel region means are 0.01269 (living
-room) and 0.3687 (Cornell); with it on, 0.00871 and 0.2530. The probe means
-(0.01190, 0.3582) sit 6% and 3% below the unbiased figure, so turning probes on
-*brightens* indirect light by ~37–42% against the shipped path. That bears on
-the interior brightness error (#5): the shipped figure is lower than the trace
-it comes from.
+### R4 — Resolve lighting ownership and brightness
 
-Not built: importance sampling, probe-space spatial filtering, adaptive
-placement, per-probe temporal accumulation. Each waits for a measurement that
-shows the simple version falls short.
+Instrument, do not guess. Separately capture direct sun diffuse, diffuse environment, indirect
+diffuse, specular environment, emissive, and fallback classifications. Determine whether the
+known brightness mismatch is duplicate ownership, lost environment, albedo misuse, fallback
+misclassification, temporal darkening, or a combination.
 
-## Stage: HZB screen tracing — implemented (#7)
+Acceptance:
 
-Off by default: Render Settings "Hierarchical Screen Trace", or
-`MIRABILIS_SSGI_HZB=1`. It works with or without Lumen-lite and with probes.
+- each contribution has one owner and documented units;
+- removing any single owner produces the predicted delta;
+- whole-image and deep-interior metrics are both reported;
+- for matched references, mean ratio is initially within 0.8–1.2 and signed bias/RMSE improve
+  over the recovered baseline; and
+- no scalar fudge is introduced without a physical derivation and cross-scene validation.
 
-- There was no depth pyramid. `shaders/hzb_build.comp` builds one per frame,
-  8 levels, RG32F: nearest and farthest depth of each 2×2, padded to a multiple
-  of 128 px so every level halves exactly. It costs **0.11 ms** at 960×540 and
-  is timed inside the trace pass.
-- `hzb_march()` in `ssgi_body.glsl` walks the ray in screen pixels and NDC
-  depth. A cell is skipped a level up when the ray is in front of its nearest
-  depth, or behind its farthest by more than a hit's thickness. Otherwise the
-  walk drops a level. At level 0 the fixed march's thickness test decides a
-  hit, and a ray behind a thin surface carries on, so a hit means what it did
-  before. The iteration cap is 4 × the preset's step count.
-- Without the farthest channel, rays behind Sponza's columns walked a pixel at
-  a time: 22.4% hits for 14.2 ms.
-- A ray that starts behind the depth buffer is handed straight to the
-  fallback. The Cornell emitter's normal points into the ceiling, so its rays
-  began behind it. They found the panel's own emission and pushed the frame to
-  1.46× the path-traced reference. Rejecting back-facing hits instead also cost
-  real hits (0.895× → 0.858× off the panel).
-- Rays the screen cannot answer go to `lumen_trace` exactly as before.
+### R5 — Replace blocking radiosity synchronization
 
-Acceptance: screen-only SSGI (no world fallback), preset 0, Release, RTX 3060
-laptop, 300 frames. The fixed march's step count is its quality knob, so HZB is
-compared against it at matched hit rate:
+Design explicit GPU-to-GPU ordering and stable ping-pong resource ownership. Avoid a full-atlas
+per-frame CPU-blocking submission. Test captures at frames 1, 32, 128, and 256 across at least
+three repeated runs.
 
-| Scene, camera | March | Hit rate | Screen trace |
-|---|---|---:|---:|
-| Sponza `'0 10 0 -0.5 0'` | fixed, 32 steps (shipped) | 17.2% | 1.71 ms |
-| | fixed, 128 steps | 21.0% | 5.55 ms |
-| | fixed, 256 steps | 21.7% | 10.69 ms |
-| | **HZB** | **21.3%** | **3.44 ms** |
-| Living room `'0 1.6 -3 0 3.14'` | fixed, 32 steps (shipped) | 23.2% | 0.96 ms |
-| | fixed, 128 steps | 32.2% | 2.56 ms |
-| | fixed, 256 steps | 34.8% | 4.47 ms |
-| | **HZB** | **34.3%** | **2.03 ms** |
+Acceptance:
 
-At matched hit rate HZB is 1.6× cheaper in Sponza and 2.2× in the living room.
-The fixed march gets there only by taking far more steps. Against the shipped
-32 steps, HZB costs about 2× the screen time for 24% (Sponza) and 48% (living
-room) more hits. Under Lumen-lite those extra hits are rays the world trace no
-longer takes. The whole trace pass goes 20.46 → 19.37 ms in the living room
-and 34.04 → 34.39 ms in Sponza. The indirect mean moves +2.6% and −1.0%.
+- deterministic capture hashes at each checkpoint;
+- no race, validation message, or stale read;
+- radiosity-on overhead is no more than 0.5 ms over radiosity-off in the living-room Balanced
+  test, unless the owner approves a revised hardware-backed budget;
+- no recurring Sponza movement hitch above section 8.1; and
+- output remains within the accepted correctness tolerance.
 
-Cornell box against its 400-sample reference: frame 1.027× → 0.993×, deep
-0.873× → 0.869×, identical off the emitter panel (0.895× / 0.894×).
-With HZB off, captures are bit-identical to before in the living room and the
-Cornell box.
+### R6 — Rebaseline and decide
 
-## Next
+Record the full scene matrix, feature-off equivalence, static and movement tails, and memory.
+Only then decide whether Balanced Lumen-lite becomes a default candidate. Any failed required
+gate leaves it experimental and opt-in.
 
-In order. The first item blocks meaningful judgement of everything below it,
-because a 3.8× scale error swamps every other difference.
+## 11. Gate for future features
 
-1. **Resolve the interior brightness error** (see *Start here*). Re-run the
-   comparison with environment policies matched, then occlude the raster
-   ambient term. Expect `ambientRetention` to fall toward zero once the bounce
-   chain is carrying the light the fudge was standing in for.
-2. **Re-grade every scene against a reference afterwards.** The Cornell box
-   numbers below were measured before the sky entered the cache and before
-   this error was known.
-3. **Anti-aliasing**, if the moulding stipple matters for how the renderer
-   looks. It is a raster-path job — the velocity buffer and temporal
-   reprojection TAA needs already exist, built for SSGI.
-4. **Then** the architectural work, in this order: screen probes (basic
-   version done, above; importance sampling and per-probe accumulation when
-   measured to matter), HZB screen tracing (done, above), field clipmaps,
-   world radiance cache, reflections. Each needs a written acceptance
-   measurement before it starts, as checkpoints 1–7 had.
-5. Coverage: depth-peeled card layers for concave meshes (Sponza ~89%). Do it
-   when missing coverage visibly limits results.
-6. VRAM: the Sponza atlas is ~1 GB, on a 6 GB laptop card. Measure before
-   optimising.
+After R1–R6, a future feature must receive a fresh frozen experiment record. It must include:
 
-Checkpoint 8 is not written yet. Whatever it turns out to be, it needs the
-same thing the earlier checkpoints had and this document lost for a while: a
-reference measurement decided in advance, and a camera recorded beside it.
+- a causal reason the accepted baseline cannot meet a stated goal;
+- the smallest testable architectural change;
+- comparison to the shipped baseline;
+- a quality metric resistant to gaming;
+- whole-frame and pass timing;
+- memory and movement-tail budgets;
+- feature-off equivalence;
+- cross-scene validation; and
+- a one-command rollback.
+
+Do not stack experimental systems. Probes may not depend on unaccepted HZB behavior; a new world
+field may not land while its brightness semantics are unknown.
+
+## 12. Change-control and safety checklist
+
+Before code:
+
+- clean or explicitly account for the worktree;
+- create a named branch;
+- save baseline hashes and raw outputs;
+- confirm Release shaders match the executable; and
+- post the frozen experiment record.
+
+During work:
+
+- run the smallest safe test first;
+- keep GPU workloads visible and foreground;
+- stop after device instability;
+- preserve failed results;
+- do not modify unrelated assets or `tmp/card5`; and
+- do not push, fetch, merge, or rewrite history unless explicitly requested.
+
+Before commit:
+
+- inspect the full diff;
+- run Debug and Release builds plus unit tests;
+- run all frozen correctness/performance gates;
+- post complete results;
+- verify `git status --short`; and
+- use no contributor/co-author attribution unless requested.
+
+Rollback is a valid result, not a failure to deliver.
+
+## 13. Implementation map
+
+| Area | Primary location |
+|---|---|
+| Feature flags, frame scheduling, preset startup | `src/vk_engine.cpp` |
+| SSGI/Lumen trace orchestration | SSGI renderer source and associated shaders |
+| Surface cache and radiosity synchronization | `src/vk_engine_surface_cache.cpp` |
+| Distance fields | `src/vk_engine_sdf.cpp` and distance-field shaders |
+| Material debug modes | C++ render-mode enum and material/debug shaders |
+| Test scenes/cameras | `assets/scenes`, benchmark scripts, and capture metadata |
+
+Search current symbols before relying on line numbers; line numbers in historical reviews may
+move.
+
+## 14. Historical evidence that must not be reused as acceptance
+
+- the post-hoc quadratic speckle metric;
+- Debug-build probe timings;
+- HZB comparisons against 128/256-step marches as proof of a shipped-path win;
+- the claim that probes/HZB “cannot affect you” merely because their defaults are off;
+- the nonexistent Sponza reference;
+- the 3.8× deep-interior brightness ratio as a whole-scene result;
+- distance-field bias alone as a clipmap acceptance criterion; or
+- successful builds/tests as proof that the renderer runs correctly.
+
+## 15. Definition of an accepted baseline
+
+Lumen-lite is accepted only when all of the following are true:
+
+1. R1–R6 are complete with linked raw artifacts.
+2. All required scenes pass correctness, stability, performance, and memory gates.
+3. Feature-off behavior matches the recovered baseline.
+4. No unresolved validation errors, device hangs, non-finite pixels, or hidden fallbacks remain.
+5. The implementation and this document describe the same equations, presets, and ownership.
+6. A reviewer can reproduce each result from recorded commands without relying on chat history.
+
+Until then, describe Lumen-lite accurately: a promising experimental GI path with a viable
+Balanced performance point, unresolved radiometric correctness, and several isolated prototype
+features that are not part of the accepted architecture.
