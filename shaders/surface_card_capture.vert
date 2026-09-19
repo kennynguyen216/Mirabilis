@@ -13,6 +13,10 @@ layout(location = 2) out vec2 outUV;
 // How much the vertex normal faces the card.  Interpolated, so a surface
 // turned away from the card can be discarded per fragment.
 layout(location = 3) out float outFacing;
+// The same quantity before the two-sided flip below.  Reflectance is captured
+// from both sides of a thin surface, but emission is one-sided, so the
+// emissive page needs to know which card the authored normal actually faces.
+layout(location = 4) out float outAuthoredFacing;
 
 #include "vertex.glsl"
 
@@ -44,6 +48,7 @@ void main()
     // The depth row decreases along the card's viewing direction, so its
     // negation points from the surface toward the card.
     float facing = dot(vertex.normal, -PushConstants.cardRow2.xyz);
+    outAuthoredFacing = facing;
     vec3 normal = vertex.normal;
     if (PushConstants.twoSided != 0u && facing < 0.0) {
         // A thin surface is seen from both sides, and the side this card sees

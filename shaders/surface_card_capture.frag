@@ -7,6 +7,7 @@ layout(location = 0) in vec3 inWorldNormal;
 layout(location = 1) in vec4 inColor;
 layout(location = 2) in vec2 inUV;
 layout(location = 3) in float inFacing;
+layout(location = 4) in float inAuthoredFacing;
 
 // Base colour, alpha 1 wherever something was captured.
 layout(location = 0) out vec4 outAlbedo;
@@ -34,6 +35,13 @@ void main()
     }
     outAlbedo = vec4(baseColor.rgb, 1.0);
     outNormal = vec4(normalize(inWorldNormal) * 0.5 + 0.5, 1.0);
-    outEmissive = vec4(materialData.emission.rgb, 1.0);
+    // A thin surface is captured by the cards on both of its sides, with the
+    // normal flipped for the far one so reflectance is available either way.
+    // Emission is not symmetric like that: it leaves only the side the
+    // authored normal points to, so the opposite card stores none.  Without
+    // this the world-space fallback would read a ceiling panel as glowing up
+    // into the roof as well as down into the room.
+    outEmissive = vec4(
+        inAuthoredFacing > 0.0 ? materialData.emission.rgb : vec3(0.0), 1.0);
     outDepth = gl_FragCoord.z;
 }

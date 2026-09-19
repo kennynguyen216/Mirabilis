@@ -414,7 +414,7 @@
                         "portalPlaceable":  false,
                         "modelPath":  "",
                         "rotation":  [
-                                         0,
+                                         3.14159274,
                                          0,
                                          0
                                      ],

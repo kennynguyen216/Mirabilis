@@ -54,7 +54,14 @@ void sampleLights(inout TransportResult result,Material material,vec3 albedo,vec
             vec3 outgoing=delta*inversesqrt(distanceSquared),finalDirection=outgoing;
             for(uint k=0;k<chainLength;++k) finalDirection=(portals[chain[k]].transfer*vec4(finalDirection,0)).xyz;
             vec3 crossEdges=cross(emitter.p1.xyz-emitter.p0.xyz,emitter.p2.xyz-emitter.p0.xyz);
-            float twiceArea=length(crossEdges),cosineLight=abs(dot(crossEdges/twiceArea,-normalize(finalDirection)));
+            // Emitters are one-sided: the clamped oriented cosine is zero
+            // behind the emitter's authored normal, and the test below drops
+            // the sample.  An absolute cosine here would light a room from a
+            // panel that faces away from it, which is how the Cornell box's
+            // upward-facing ceiling emitter went unnoticed.
+            float twiceArea=length(crossEdges);
+            vec3 emitterNormal=authoredSideNormal(emitter,crossEdges/twiceArea);
+            float cosineLight=max(dot(emitterNormal,-normalize(finalDirection)),0.0);
             if(dot(outgoing,geometric)<=0||dot(outgoing,normal)<=0||cosineLight<=1e-8) continue;
             vec3 shadowOrigin=offsetOrigin(point,geometric,outgoing),shadowDelta=virtualPoint-shadowOrigin;
             float shadowDistance=length(shadowDelta);
@@ -80,10 +87,19 @@ TransportResult transport(vec3 origin,vec3 direction,inout uint state) {
         // Area emitters are sampled explicitly at every diffuse vertex.
         // Count camera-visible emission, suppress BSDF-hit emission after a
         // diffuse scatter to avoid counting the same light path twice.
-        if(bounce==0||previousDelta) addContribution(result,throughput*material.emission.rgb,bounce<=1);
+        // `emittingSide` keeps both of those one-sided, to the same side the
+        // explicit sample above uses: a ray arriving at an emitter's back face
+        // carries no emission, so what the camera sees and what the light
+        // sampler reports cannot disagree about which way a panel glows.  It
+        // is a separate test from `front`, which orients the shading frame
+        // towards the incoming ray and stays winding-based.
+        vec3 geometric=geometricNormal(t);
+        bool front=dot(direction,geometric)<0;
+        bool emittingSide=dot(direction,authoredSideNormal(t,geometric))<0;
+        if((bounce==0||previousDelta)&&emittingSide) addContribution(result,throughput*material.emission.rgb,bounce<=1);
         if(bounce==pc.sampling.x) break;
-        vec3 geometric=geometricNormal(t),normal=shadingNormal(t,hit.bary,geometric);
-        bool front=dot(direction,geometric)<0; geometric=front?geometric:-geometric; normal=front?normal:-normal;
+        vec3 normal=shadingNormal(t,hit.bary,geometric);
+        geometric=front?geometric:-geometric; normal=front?normal:-normal;
         vec3 point=origin+direction*hit.t,albedo=baseColorAt(material,t,hit.bary);
         float transmission=pc.sampling.z==0u?0:clamp(material.parameters.z,0,1);
         if(randomFloat(state)<transmission) {

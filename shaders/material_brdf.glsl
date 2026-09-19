@@ -296,22 +296,38 @@ vec3 material_diffuse_albedo(MaterialSurface surface)
         : surface.baseColor;
 }
 
-// Emitted radiance: added once, unaffected by lighting, shadow or occlusion.
-vec3 material_emission()
+// Emitted radiance: added once, unaffected by lighting, shadow or occlusion,
+// and leaving only the side the authored geometric normal points to.  Every
+// pass rasterises with culling disabled -- walls and floors are single-sided
+// geometry that must not vanish when seen from behind -- so the back face of
+// an emissive surface still shades, and without this test it would glow as
+// brightly as the front.  The geometric normal is used rather than the
+// shading normal because sidedness is a property of the surface, not of its
+// normal map, and rather than gl_FrontFacing because winding and authored
+// normal can disagree while the path tracer follows the authored one.
+vec3 material_emission(vec3 geometricNormal, vec3 worldPosition)
 {
-    return materialData.emission.rgb;
+    vec3 towardViewer = sceneData.cameraPosition.xyz - worldPosition;
+    return dot(geometricNormal, towardViewer) > 0.0
+        ? materialData.emission.rgb
+        : vec3(0.0);
 }
 
-// The forward-written debug views.  Values match RenderDebugView.
-const int MaterialDebugRoughness = 21;
-const int MaterialDebugMetallic = 22;
-const int MaterialDebugDirectDiffuse = 23;
-const int MaterialDebugDirectSpecular = 24;
-const int MaterialDebugEmission = 25;
-const int MaterialDebugShadingNormal = 26;
-const int MaterialDebugGeometricNormal = 27;
-const int MaterialDebugTangent = 28;
-const int MaterialDebugTangentHandedness = 29;
+// The forward-written debug views.  Values match RenderDebugView in
+// src/vk_engine.h, which is what the C++ side writes into
+// sceneData.materialDebug.x -- they were two apart, so "material roughness"
+// and "material metallic" showed nothing and the other seven views each
+// showed the one two places along.  tests/test_debug_view_modes.py fails if
+// the two lists drift again.
+const int MaterialDebugRoughness = 19;
+const int MaterialDebugMetallic = 20;
+const int MaterialDebugDirectDiffuse = 21;
+const int MaterialDebugDirectSpecular = 22;
+const int MaterialDebugEmission = 23;
+const int MaterialDebugShadingNormal = 24;
+const int MaterialDebugGeometricNormal = 25;
+const int MaterialDebugTangent = 26;
+const int MaterialDebugTangentHandedness = 27;
 
 // True while one of those views is selected, with the colour it shows.  The
 // lighting views stay in linear radiance, so a capture of "direct diffuse"

@@ -7,6 +7,8 @@
 #include <vk_initializers.h>
 #include <vk_images.h>
 
+#include "env_flags.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -34,6 +36,22 @@ constexpr bool bUseValidationLayers = true;
 #endif
 
 namespace {
+
+// Applies a boolean environment variable to a feature flag.  Absent, empty and
+// any false spelling all disable, so no way of saying "off" -- removing the
+// variable, clearing it, or setting it to 0 -- can leave the feature running.
+// A value the parser does not recognise is reported rather than guessed at,
+// because a capture run that silently disagrees with its own command line is
+// worse than a loud one.
+void apply_env_flag(const char* name, bool& flag)
+{
+    const EnvBool value = parse_env_bool(SDL_getenv(name));
+    if (value == EnvBool::Invalid) {
+        fmt::print("{} is not a boolean (use 0/1, false/true, off/on, no/yes); disabled\n",
+            name);
+    }
+    flag = value == EnvBool::On;
+}
 
 // Interpolates between two yaw angles along the shorter arc.  Yaw is
 // accumulated from mouse motion and is never wrapped, so the raw difference
@@ -200,15 +218,9 @@ void VulkanEngine::init()
     }
     // After the presets, so a capture run can compare against the frame
     // without screen-space GI whatever else it asked for.
-    if (SDL_getenv("MIRABILIS_LUMEN_LITE")) {
-        _ssgi.lumenEnabled = true;
-    }
-    if (SDL_getenv("MIRABILIS_SSGI_PROBES")) {
-        _ssgi.probesEnabled = true;
-    }
-    if (SDL_getenv("MIRABILIS_SSGI_HZB")) {
-        _ssgi.hzbEnabled = true;
-    }
+    apply_env_flag("MIRABILIS_LUMEN_LITE", _ssgi.lumenEnabled);
+    apply_env_flag("MIRABILIS_SSGI_PROBES", _ssgi.probesEnabled);
+    apply_env_flag("MIRABILIS_SSGI_HZB", _ssgi.hzbEnabled);
     if (SDL_getenv("MIRABILIS_SSGI_DISABLE")) {
         _ssgi.enabled = false;
     }
