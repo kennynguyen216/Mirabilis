@@ -9,8 +9,10 @@ gates.
 ## Repository state
 
 - Active branch: `main`
-- Active commit: `6d994b4`, the revert of distance-field clipmaps
-- Active tree: identical to `adc87e3`
+- Active commit: R2, on top of `bac9b45` (R1) and `6d994b4` (the clipmap revert)
+- R1 complete: boolean flags, debug-view constants, Cornell emitter sidedness
+- R2 complete: Balanced (preset 2) is the implicit startup default, applied through
+  `apply_ssgi_quality_preset()`; the preset table is the only source of the derived settings
 - Preserved rejected tip: `recovery/lumen-experiments` at `4241d01`
 - Clipmaps: reverted
 - Screen probes: experimental and disabled
@@ -28,7 +30,7 @@ Release build, RTX 3060 Laptop GPU, camera
 
 | Configuration | Extent | Frame ms | SSGI GPU ms | Trace GPU ms |
 |---|---:|---:|---:|---:|
-| Plain SSGI, preset 0 | 960×540 | 3.779 | 2.345 | 1.991 |
+| Plain SSGI, explicit preset 0 (pre-R2 implicit default) | 960×540 | 3.779 | 2.345 | 1.991 |
 | Lumen preset 0, radiosity off | 960×540 | 29.063 | 27.617 | 27.257 |
 | Lumen preset 0, radiosity on | 960×540 | 31.018 | 27.590 | 27.215 |
 | Lumen preset 2, radiosity off | 480×270 | 5.154 | 3.844 | 3.643 |
@@ -37,26 +39,32 @@ Release build, RTX 3060 Laptop GPU, camera
 Preset 0 is a diagnostic mode. Preset 2 is the performance candidate. It is not yet a
 correctness-accepted default.
 
-## Next task: R1 only
+## Next task: R3 only
 
-Do not start probes, HZB, clipmaps, or a brightness adjustment. Complete the specification's
-R1 task:
+Do not start probes, HZB, clipmaps, or a brightness adjustment. R1 and R2 are complete.
+Complete the specification's R3 task:
 
-1. Fix boolean environment parsing so `=0` is disabled.
-2. Align material-debug constants with the C++ enum.
-3. Correct the Cornell emitter orientation/sidedness at the source.
-4. Add focused tests and verify Debug and Release builds.
+1. Regenerate the Cornell reference now the ceiling emitter faces the room.
+2. Regenerate the living-room reference with matched environment settings.
+3. Record every parity field in section 7.1 beside each capture.
+4. Repeat reference seeds to quantify noise, and store masks and crops before comparing.
+
+Do not change renderer behavior during R3. If a safe reference cannot be produced, mark the
+affected gate blocked. Sponza reference generation stays forbidden on this laptop.
 
 Before editing, create a branch and post the frozen experiment record from the specification.
-After R1, stop and report every gate as PASS, FAIL, or BLOCKED. Do not proceed automatically to
-R2.
+After R3, stop and report every gate as PASS, FAIL, or BLOCKED. Do not proceed automatically to
+R4.
 
 ## Known hazards
 
 - Never run the Sponza path tracer on this laptop.
 - Never start a GPU workload in the background or without stating it first.
-- Removing a boolean environment variable disables it; setting the current presence-based flags
-  to `0` does not.
+- `MIRABILIS_LUMEN_LITE`, `MIRABILIS_SSGI_PROBES` and `MIRABILIS_SSGI_HZB` parse `0`/`false`/
+  `off`/`no` as disabled since R1. Every other `MIRABILIS_*` variable is still presence-based,
+  so writing `=0` for one of those enables it.
+- Run-to-run frame-time spread is about 0.34 ms at 3.8 ms. A single run cannot resolve a
+  0.5 ms gate.
 - A successful build does not validate runtime behavior.
 - No valid Sponza path-traced reference exists.
 - The Cornell reference must be regenerated after fixing its ceiling emitter.

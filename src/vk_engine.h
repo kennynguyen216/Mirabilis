@@ -1238,12 +1238,17 @@ class VulkanEngine{
             bool historyValid{false};
             uint32_t historyWriteIndex{0};
             VkExtent2D historyExtent{0, 0};
-            int stepCount{32};
-            int raysPerPixel{4};
-            float rayLength{12.0f};
-            float thickness{0.35f};
-            float startOffset{0.08f};
-            float historyWeight{0.92f};
+            // Owned by SSGIPresets in vk_engine_ssgi.cpp and written only by
+            // apply_ssgi_quality_preset(), which init() calls before the first
+            // frame.  Left zeroed here on purpose: a second set of literals
+            // that merely happened to match the table is how the preset number
+            // and the settings it names drifted apart.
+            int stepCount{};
+            int raysPerPixel{};
+            float rayLength{};
+            float thickness{};
+            float startOffset{};
+            float historyWeight{};
             float depthRejection{0.003f};
             float normalRejection{0.85f};
             float velocityRejection{0.10f};
@@ -1269,9 +1274,10 @@ class VulkanEngine{
             std::array<VkDescriptorSet, HzbLevels> hzbSets{};
             VkPipelineLayout hzbPipelineLayout{};
             VkPipeline hzbPipeline{};
-            int filterRadius{3};
-            float filterDepthFalloff{800.0f};
-            float filterNormalPower{32.0f};
+            // Preset-owned; see the note on stepCount above.
+            int filterRadius{};
+            float filterDepthFalloff{};
+            float filterNormalPower{};
             float intensity{1.0f};
             // How much of the flat ambient term survives while SSGI is on.
             // Zero is the coherent setting in the sense that nothing is
@@ -1289,8 +1295,9 @@ class VulkanEngine{
             // software path tracer, which still lights its misses from the
             // gradient.
             bool traceEnvironmentMap{true};
-            bool halfResolution{false};
-            int qualityPreset{0};
+            // Preset-owned; see the note on stepCount above.
+            bool halfResolution{};
+            int qualityPreset{};
             VkQueryPool timestampPool{VK_NULL_HANDLE};
             std::array<bool, FRAME_OVERLAP> timingWritten{};
         };

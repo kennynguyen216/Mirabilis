@@ -84,7 +84,8 @@ Release build, fixed camera `4.740 1.700 -2.947 -0.133 -14.670`, 300-frame run,
 
 | Configuration | Internal extent | Frame ms | SSGI GPU ms | Trace GPU ms |
 |---|---:|---:|---:|---:|
-| Plain SSGI, preset 0 | 960×540 | 3.779 | 2.345 | 1.991 |
+| Plain SSGI, explicit preset 0 (pre-R2 implicit default) | 960×540 | 3.779 | 2.345 | 1.991 |
+| Plain SSGI, explicit preset 2 (R2 implicit default) | 480×270 | 1.894 | 0.503 | 0.295 |
 | Lumen-lite, preset 0, radiosity off | 960×540 | 29.063 | 27.617 | 27.257 |
 | Lumen-lite, preset 0, radiosity on | 960×540 | 31.018 | 27.590 | 27.215 |
 | Lumen-lite, preset 2, radiosity off | 480×270 | 5.154 | 3.844 | 3.643 |
@@ -92,7 +93,14 @@ Release build, fixed camera `4.740 1.700 -2.947 -0.133 -14.670`, 300-frame run,
 
 Interpretation:
 
-- Preset 0 is a validation mode, not a reasonable default on this GPU.
+- Preset 0 is a validation mode, not a reasonable default on this GPU. The 3.779 ms row is
+  retained as the pre-R2 explicit-preset-0 baseline; it is not the post-R2 shipped default.
+- The preset-2 row was measured at R2 with Lumen-lite, probes and HZB explicitly disabled.
+  Re-measuring explicit preset 0 at the same build gave 4.089 ms and 3.750 ms in two runs
+  against the recorded 3.779 ms, so preset 0 reproduces and neither R1 nor R2 regressed it.
+  Both samples are recorded because the spread is the finding: run-to-run variance is about
+  0.34 ms peak-to-peak at this frame time, which consumes most of the 0.5 ms pass budget in
+  section 8.1. Treat a sub-0.5 ms difference from a single run as unmeasured, not as a pass.
 - Balanced preset 2 is the only currently measured default candidate.
 - At preset 2, enabling radiosity adds about 1.81 ms of whole-frame cost while the reported
   SSGI and trace timings barely move. The known blocking atlas transfer is the leading cause
@@ -486,11 +494,15 @@ change `qualityPreset`.
 
 Acceptance:
 
-- startup log states preset 2 and 480×270 at the measured output resolution;
-- explicit preset overrides still reproduce their table;
-- Lumen-lite remains opt-in until correctness gates pass;
-- living-room performance stays within section 8.1; and
-- plain SSGI behavior is unchanged.
+- startup log states mode, selected preset, output extent, and internal SSGI extent;
+- plain SSGI shader behavior and explicit presets 0–4 remain unchanged;
+- the implicit startup preset intentionally changes from preset 0 to preset 2, so the
+  pre-R2 plain-SSGI figure in section 2.1 no longer describes the shipped default;
+- feature-off equivalence must compare identical explicit presets, not the old and new
+  implicit defaults;
+- explicit preset overrides still reproduce their table and win over the startup default;
+- Lumen-lite remains opt-in until correctness gates pass; and
+- living-room performance stays within section 8.1.
 
 ### R3 — Establish matched references
 

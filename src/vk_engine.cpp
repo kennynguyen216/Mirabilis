@@ -200,6 +200,13 @@ void VulkanEngine::init()
             static_cast<int>(RenderDebugView::SurfaceCache));
         _debugViews.view = static_cast<RenderDebugView>(value);
     }
+    // The startup default runs through the same function runtime selection
+    // uses, so the derived fields can never disagree with the preset number
+    // the engine reports.  They used to be written twice, once in the preset
+    // table and once as member initialisers, and agreed only by coincidence.
+    // Balanced is the candidate default: preset 0 is a full-resolution
+    // validation mode and costs about 7.7x plain SSGI on this GPU.
+    apply_ssgi_quality_preset(2);
     if (const char* preset = SDL_getenv("MIRABILIS_SSGI_PRESET")) {
         apply_ssgi_quality_preset(std::atoi(preset));
     }
@@ -585,6 +592,20 @@ void VulkanEngine::draw(float deltaTime)
         1u,
         static_cast<uint32_t>(
             std::min(_swapchainExtent.height, _drawImage.imageExtent.height) * renderScale));
+
+    // Printed from the first frame rather than from init() because the draw
+    // extent is computed here, from the swapchain and render scale: a line
+    // written earlier would report what init predicted instead of what the
+    // engine went on to use, and a diagnostic that can differ from the
+    // measured configuration is worse than none.
+    if (_frameNumber == 0) {
+        const VkExtent2D ssgiExtent = active_ssgi_extent();
+        fmt::print(
+            "SSGI startup: mode={} preset={} output={}x{} internal={}x{}\n",
+            !_ssgi.enabled ? "off" : (_ssgi.lumenEnabled ? "lumen-lite" : "plain-ssgi"),
+            _ssgi.qualityPreset, _drawExtent.width, _drawExtent.height,
+            ssgiExtent.width, ssgiExtent.height);
+    }
 
     update_scene(deltaTime);
     // Before recording starts: a rebuild waits for the GPU and runs its own
