@@ -4,6 +4,22 @@ Mirabilis is a C++ Vulkan-based real-time engine prototype focused on editor-aut
 
 [Watch the current milestone demo](https://kennynguyen216.github.io/portfolio/media/mirabilis-milestone2-demo.mp4) | [View my portfolio](https://kennynguyen216.github.io/portfolio/)
 
+## Latest captures
+
+### Real-time shadow pass
+
+| Before | After |
+| --- | --- |
+| ![Sponza before the shadow pass](docs/media/mirabilis-before-shadows.png) | ![Sponza after the shadow pass](docs/media/mirabilis-after-shadows.png) |
+
+[Watch before shadows](docs/media/mirabilis-before-shadows.mp4) · [Watch the shadow pass](docs/media/mirabilis-after-shadows.mp4)
+
+### Timed movement course
+
+[![Mirabilis timed movement course](docs/media/mirabilis-movement-time-trial.jpg)](docs/media/mirabilis-movement-time-trial.mp4)
+
+Click the preview to watch the run.
+
 ## Highlights
 
 ### Vulkan rendering
