@@ -513,7 +513,7 @@ Acceptance:
 - Lumen-lite remains opt-in until correctness gates pass; and
 - living-room performance stays within section 8.1.
 
-### R3 — Establish matched references
+### R3 — Establish matched references — COMPLETE
 
 After the emitter fix, regenerate safe Cornell and living-room references with complete metadata.
 Do not change renderer behavior during this task. If a safe reference cannot be produced, mark
@@ -555,6 +555,141 @@ change renderer behavior.
 Parity is auditable after the fact: each capture's sidecar records sun radiance,
 environment intensity and the black-environment flag, so a comparison whose two sides
 disagree on those fields is invalid regardless of what its metrics say.
+
+#### R3.2 Result — accepted, 0 failed, 0 blocked
+
+Every R3 acceptance item above passes. Validation reports **0 failed, 0 blocked**.
+
+| | |
+|---|---|
+| Source commit | `89b5e7794d48592d901b69dd7e8290bbb1a50d8a`, clean worktree |
+| Seeds | 1337, 2026, 90210 |
+| Samples per seed | 512 accumulated path-traced samples, identical for every scene and seed |
+| Scenes | Cornell (`gi_cornell_box.json`, camera `0 2 3.5 0 0`) and living room (`living_room_showcase.json`, camera `0 1.6 -3 0 3.14`) |
+| Executable build | Release, engine SHA-256 `EA9255A3401758ABEB1AAE917D4F2C0C8910B52CD3C3D53CCED76170718F13C7` |
+| Artifact directory | `tmp/r3-references/20260922-212524` (local only — see below) |
+
+Canonical references, SHA-256 of the linear-HDR PFM. All six are recorded because R4 compares
+against the indirect files directly, not only the combined ones:
+
+```
+E38AB084D90B9B23D5B667189099B5F480B3F303EB26E59F19FEDE9DB6025663  cornell-reference.direct.pfm
+579E3A3D7867D8CB6F51D6950294A7FEF9319B1FEAC9E5469D23418485BA9A26  cornell-reference.indirect.pfm
+DCF02720C1328019904539A1AD6DA536D251D10E5FDE6634B999443BE3E7ACA1  cornell-reference.pfm
+B70CDE1D4DC159DA8D6FC9DFD2268B6AE661C24D5C3069843F8FAE530CFB15FB  living-room-reference.direct.pfm
+9E062708263D99BE5FD65A6875851CAF555A1299DEC02372446429CDD15B86B5  living-room-reference.indirect.pfm
+64FFE8792C23B48E7C0243AC3D27DC8AB50FE6145F7817C37CF7EDE842BAA2E6  living-room-reference.pfm
+```
+
+A candidate that cites an R3 reference must cite the hash of the exact file it compared against.
+The per-seed captures these were formed from are retained unmodified.
+
+**These references are not yet usable to discharge a gate.** R3.1 still holds: no environment
+variable sets `traceEnvironmentMap`, so an unattended candidate cannot be put in environment
+parity with them. That control is the first R4 task.
+
+##### Measured reference noise
+
+Two different quantities are measured here and they must not be confused, because they differ by
+two to three orders of magnitude on the same data. **Neither is a statistical bound**, and
+neither may be used as a tolerance on its own:
+
+- **Pixel-level noise** — the mean of the per-pixel sample standard deviations across the three
+  seeds, divided by the region mean. It is an empirical noise estimate relevant to *pixelwise*
+  metrics: MAE, RMSE, per-pixel ratio, image difference. It informs their uncertainty; it does
+  not directly bound either metric, because the relationship between per-pixel scatter and an
+  aggregated error statistic depends on the metric's own form.
+- **Region-mean spread** — the sample standard deviation of the three per-seed *region means*,
+  divided by the region mean. It is an empirical repeatability estimate relevant to
+  *region-level* metrics: mean ratio, signed bias, or any other aggregate over a region.
+  Averaging over a region cancels most of the per-pixel scatter, which is why it is so much
+  smaller. It is computed from **three samples**, so it is a repeatability measurement, not a
+  confidence interval and not a hard limit.
+
+Full per-region data is in `noise.json` and `validation.txt` beside the captures.
+
+| Scene | Component | Region | Pixel-level | Region-mean spread |
+|---|---|---|---:|---:|
+| Cornell | combined | whole | 0.9018% | 0.0009% |
+| Cornell | direct | whole | 0.2946% | 0.0013% |
+| Cornell | indirect | whole | 6.9295% | 0.0038% |
+| Cornell | indirect | floor_centre | 6.0289% | 0.0429% |
+| Cornell | indirect | ceiling_emitter | 6.2684% | 0.0756% |
+| Cornell | indirect | right_wall_green | 6.5476% | 0.0199% |
+| Cornell | indirect | back_wall_centre | 7.3919% | 0.0286% |
+| Cornell | indirect | deep_interior | 8.0740% | 0.0334% |
+| Cornell | indirect | left_wall_red | 8.8786% | 0.0345% |
+| living room | combined | whole | 2.2008% | 0.0694% |
+| living room | direct | whole | 1.6849% | 0.0058% |
+| living room | indirect | whole | 19.8838% | 0.9441% |
+| living room | indirect | deep_interior | 17.0737% | 0.0378% |
+
+The direct component is quiet by both measures. The indirect component is noisy **per pixel** —
+Cornell indirect regions sit at roughly 6–9%, and the living room at 19.8838% whole and 17.0737%
+deep interior, because its indirect means are small (0.0094 and 0.0158 linear) so the per-pixel
+scatter is a large fraction of them. Its **region means** are nevertheless repeatable across the
+three seeds: 0.9441% and 0.0378% respectively, and every Cornell indirect region is below
+0.076%.
+
+**Consequence for R4.** No pass/fail exclusion zone is defined here, and neither column may be
+turned into one. In particular the 17–20% figures describe average pixel-level scatter; they do
+**not** express an uncertainty in a region-level mean ratio, and using them that way would
+discard real R4 findings as noise. What this table provides is prior evidence of where the
+reference is noisy and where it is repeatable — an input to choosing an uncertainty method, not
+the method itself.
+
+R4 must **derive an uncertainty for each metric it reports, and freeze that derivation in
+writing before viewing any candidate result.** Deriving it means computing the metric itself
+under the reference's own variation — for example evaluating the metric against each seed
+individually and against the ensemble, or defining a bootstrap or confidence procedure over the
+per-seed captures — and stating the pass/fail rule in terms of that derived quantity. Choosing
+the method after seeing the numbers is the failure mode section 9 exists to prevent.
+
+What follows from a result that is small relative to its derived uncertainty is likewise for the
+frozen method to state. More samples per seed, with a reference set regenerated at that higher
+sample count, is one available response; it is not an automatic consequence of any figure in
+this table.
+
+##### Cross-run determinism observation — not blocking, deferred to R5
+
+Two capture runs produced output that was not byte-identical: **15 of 18 raw PFM files differed**
+between `tmp/r3-references/20260922-204519` and `tmp/r3-references/20260922-212524`.
+
+What was identical between the two runs: the **engine binary**
+(`EA9255A3401758ABEB1AAE917D4F2C0C8910B52CD3C3D53CCED76170718F13C7`), the **shader manifest**,
+the **scene manifest**, and the **seeds** (1337, 2026, 90210) — verified by comparing
+`binary-sha256.txt`, `shader-sha256.txt` and `scene-sha256.txt` across the two directories.
+
+The two runs were **not** from the same Git commit: the first recorded `742c0a6` and the
+accepted run `89b5e77`. Both trees were clean. The intervening commits changed capture tooling,
+not renderer code — which is consistent with the identical binary and shader hashes — but the
+commit is not the thing that was held constant, and the observation must not be cited as if it
+were. The controlled inputs are the four listed above.
+
+The differences are small: mean absolute difference approximately **1e-9 to 3e-8**, maximum
+absolute difference **0.0017**. **The cause is unexplained.** Non-deterministic accumulation
+order is one hypothesis and has not been tested; so are driver or scheduling variation and
+uninitialised state. Nothing here establishes which, and the record should not imply otherwise
+until R5 measures it.
+
+Every R3 acceptance item is stated over decoded values and measured noise, and this spread is
+far below both noise measures above, so it does not block R3 and the capture set is accepted.
+
+It is recorded because it directly contradicts a later requirement: **R5's acceptance demands
+deterministic capture hashes at frames 1, 32, 128 and 256 across at least three repeated runs.**
+That gate cannot pass while identical inputs yield different bytes. R5 must either identify and
+remove the source of the variance, or replace its deterministic-hash acceptance with an explicit
+tolerance derived from a measurement — a decision to make in R5, with evidence, not by quietly
+loosening the gate.
+
+##### Artifact retention
+
+The accepted artifact directory is **151 MiB** and is deliberately **not** added to ordinary Git
+history; `tmp/` is ignored. Nothing in the repository reproduces those bytes — the PFMs are the
+reference. **`tmp/r3-references/20260922-212524` must be preserved and backed up separately**
+(external drive or archive), and the six canonical hashes above are the only in-repo record that
+can prove a restored copy is the accepted set. If that directory is lost, R3 must be re-run and
+every comparison made against it is void.
 
 ### R4 — Resolve lighting ownership and brightness
 
