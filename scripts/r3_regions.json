@@ -1,0 +1,29 @@
+{
+  "_purpose": "Predeclared comparison regions for R3, frozen before any candidate comparison (docs/lumen_lite_design.md section 7.3). Normalised to the image: x and y run 0..1 from the TOP-LEFT of the image as displayed, after PFM rows have been decoded by scripts/pfm_to_png.py read_pfm(). Multiply by width/height for pixels.",
+  "_provenance": "Cornell regions are derived from assets/scenes/gi_cornell_box.json geometry and the fixed camera, not from looking at a rendered image. Living-room regions cannot be derived that way: the room is a loaded mesh with no per-surface entries in the scene file, so its regions are geometric guesses at the framing.",
+  "_amendment_rule": "Phase 2 verifies each region lands on the surface it names, using the FIRST reference capture only. Any region that misses its surface is corrected once, in a commit that states the old and new coordinates and the reason. After the first candidate comparison these coordinates are frozen; a region may not be re-chosen after seeing a candidate result.",
+  "_status": "provisional-pending-first-reference",
+
+  "gi_cornell_box.json": {
+    "camera": "0 2 3.5 0 0",
+    "_layout": "Box spans x -4..4, z -4..4, floor y=0, ceiling y=4. Camera at (0,2,3.5) faces -Z, so the red wall (x=-4) is on the left, the green wall (x=+4) on the right, and the 2x2 emitter panel at (0,3.88,0) is centred above the view.",
+    "regions": {
+      "whole": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0, "_intent": "whole-image mean, bias and RMSE"},
+      "ceiling_emitter": {"x0": 0.40, "y0": 0.04, "x1": 0.60, "y1": 0.18, "_intent": "the emitter panel itself; must be lit on its downward face only"},
+      "left_wall_red": {"x0": 0.02, "y0": 0.35, "x1": 0.15, "y1": 0.75, "_intent": "colour bleed source, left"},
+      "right_wall_green": {"x0": 0.85, "y0": 0.35, "x1": 0.98, "y1": 0.75, "_intent": "colour bleed source, right"},
+      "back_wall_centre": {"x0": 0.43, "y0": 0.42, "x1": 0.57, "y1": 0.58, "_intent": "between the two blocks; indirect only"},
+      "floor_centre": {"x0": 0.40, "y0": 0.80, "x1": 0.60, "y1": 0.95, "_intent": "directly under the emitter; strongest direct term"},
+      "deep_interior": {"x0": 0.05, "y0": 0.78, "x1": 0.25, "y1": 0.95, "_intent": "floor corner furthest from the emitter; where fallback and leak errors show first"}
+    }
+  },
+
+  "living_room_showcase.json": {
+    "camera": "0 1.6 -3 0 3.14",
+    "_layout": "Loaded mesh; no per-surface geometry in the scene file. These rectangles are guesses at the framing and carry the amendment rule above.",
+    "regions": {
+      "whole": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0, "_intent": "whole-image mean, bias and RMSE; the figure any brightness claim must quote"},
+      "deep_interior": {"x0": 0.30, "y0": 0.45, "x1": 0.70, "y1": 0.80, "_intent": "central interior away from direct sun; the historical 3.8x claim came from a subset like this and must never again be reported as whole-scene"}
+    }
+  }
+}

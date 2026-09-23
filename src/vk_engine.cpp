@@ -928,6 +928,22 @@ void VulkanEngine::run(){
         if(const char* camera=SDL_getenv("MIRABILIS_TEST_CAMERA")) {
             std::sscanf(camera,"%f %f %f %f %f",&_editorCamera.position.x,&_editorCamera.position.y,&_editorCamera.position.z,&_editorCamera.pitch,&_editorCamera.yaw);
         }
+        // Reference captures have to state the seed they were rendered at, and
+        // only the editor could set it before this, which an unattended run has
+        // no way to reach.  Bounded runs only: interactive sessions keep the
+        // baseSeed default and the Render Settings field.  A malformed value
+        // stops the run rather than rendering at 1337 and writing a metadata
+        // file claiming the seed the author asked for.
+        const EnvInt testSeed = parse_env_int(SDL_getenv("MIRABILIS_TEST_SEED"));
+        if (testSeed.status == EnvIntStatus::Invalid) {
+            fmt::print("GI TEST FAIL: MIRABILIS_TEST_SEED must be a whole number\n");
+            std::abort();
+        }
+        if (testSeed.status == EnvIntStatus::Valid) {
+            _traceSettings.baseSeed = testSeed.value;
+        }
+        fmt::print("GI test seed: {} ({})\n", _traceSettings.baseSeed,
+            testSeed.status == EnvIntStatus::Valid ? "MIRABILIS_TEST_SEED" : "default");
         if (std::getenv("MIRABILIS_TEST_TRACE")) {
             _rendererMode = _traceSupported ? RendererMode::SoftwarePathTrace : RendererMode::Raster;
             if(_traceSupported) validate_path_trace();
