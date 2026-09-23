@@ -177,8 +177,7 @@ def write_side_files(directory, frames=SAMPLES, acceptable="yes", dirty="no"):
     ]) + "\n", encoding="utf-8")
     (directory / "source.txt").write_text("placeholder\n", encoding="utf-8")
     (directory / "binary-sha256.txt").write_text(
-        f"Algorithm : SHA256\nHash      : {FAKE_HASH}\nPath      : engine.exe\n",
-        encoding="utf-8")
+        f"{FAKE_HASH}  bin/Release/engine.exe\n", encoding="utf-8")
     (directory / "shader-sha256.txt").write_text(
         f"{FAKE_HASH}  ssgi_body.glsl\n{'B' * 64}  material_brdf.glsl\n",
         encoding="utf-8")
@@ -656,10 +655,30 @@ class R3Validator(unittest.TestCase):
     def test_binary_hash_without_a_sha256_fails(self):
         self.build_clean()
         (self.directory / "binary-sha256.txt").write_text(
-            "Algorithm : SHA256\nHash      : oops\n", encoding="utf-8")
+            "oops  bin/Release/engine.exe\n", encoding="utf-8")
         code, text = run_validator(self.directory)
         self.assertEqual(code, 1)
-        self.assertTrue(failing_lines(text, "binary-sha256.txt holds a SHA-256"), text)
+        self.assertTrue(
+            failing_lines(text, "binary-sha256.txt is exactly one SHA-256 record"), text)
+
+    def test_binary_hash_wrapped_across_two_lines_fails(self):
+        """Exactly the shape the first real capture run produced."""
+        self.build_clean()
+        (self.directory / "binary-sha256.txt").write_text(
+            f"{FAKE_HASH[:32]}\n{FAKE_HASH[32:]}  bin/Release/engine.exe\n",
+            encoding="utf-8")
+        code, text = run_validator(self.directory)
+        self.assertEqual(code, 1)
+        self.assertTrue(
+            failing_lines(text, "binary-sha256.txt is exactly one SHA-256 record"), text)
+
+    def test_utf16_binary_hash_fails(self):
+        self.build_clean()
+        (self.directory / "binary-sha256.txt").write_bytes(
+            f"{FAKE_HASH}  bin/Release/engine.exe\n".encode("utf-16"))
+        code, text = run_validator(self.directory)
+        self.assertEqual(code, 1)
+        self.assertTrue(failing_lines(text, "binary-sha256.txt is not UTF-16"), text)
 
     def test_scene_hash_missing_a_required_scene_fails(self):
         self.build_clean()
@@ -733,8 +752,13 @@ class LastSceneProtection(unittest.TestCase):
         self.assertIn("$lastSceneViolation = $true", tail)
 
     def test_capture_script_freezes_regions_and_records_their_hash(self):
-        self.assertIn("$regionsFrozen = Join-Path $output 'r3_regions.json'", self.script)
-        self.assertIn("regions-sha256.txt", self.script)
+        # The freeze moved into the extracted writer; the capture script must
+        # still load it, and tests/test_r3_metadata_serialization.py proves the
+        # writer's real output rather than its source text.
+        writer = (ROOT / "scripts" / "r3_metadata.ps1").read_text(encoding="utf-8")
+        self.assertIn("$regionsFrozen = Join-Path $Output 'r3_regions.json'", writer)
+        self.assertIn("regions-sha256.txt", writer)
+        self.assertIn(". (Join-Path $PSScriptRoot 'r3_metadata.ps1')", self.script)
 
     def test_capture_script_passes_the_frozen_regions_to_the_validator(self):
         self.assertIn("--regions $regionsFrozen", self.script,

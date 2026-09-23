@@ -39,6 +39,7 @@ if ($Frames -le 0) { throw ('Frames must be positive; got ' + $Frames) }
 if ($TimeoutSeconds -le 0) { throw ('TimeoutSeconds must be positive; got ' + $TimeoutSeconds) }
 
 $repo = Split-Path $PSScriptRoot -Parent
+. (Join-Path $PSScriptRoot 'r3_metadata.ps1')
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $output = Join-Path $repo ('tmp/r3-references/' + $stamp)
 if (Test-Path -LiteralPath $output) { throw ($output + ' already exists') }
@@ -169,85 +170,18 @@ try {
     $branch = git rev-parse --abbrev-ref HEAD
     $accepted = if ($dirty.Count -gt 0) { 'NO - diagnostic only, worktree was dirty' } else { 'yes' }
 
-    # A self-contained manifest: someone holding only this directory can say
-    # what produced these files and how to read them, without the repository,
-    # this script's source, or any chat history.
-    $manifest = @(
-        'R3 reference capture manifest',
-        '',
-        'Acceptable as an R3 reference: ' + $accepted,
-        'Captured (local): ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss K'),
-        'Commit: ' + $revision,
-        'Branch: ' + $branch,
-        'Dirty tree: ' + $(if ($dirty.Count -gt 0) { 'YES' } else { 'no' }),
-        '',
-        'Invocation: ' + $MyInvocation.Line.Trim(),
-        'Script: scripts/capture_r3_references.ps1',
-        'Script SHA-256: ' + (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash,
-        'Validator: scripts/validate_r3_capture.py',
-        'Validator SHA-256: ' + (Get-FileHash -LiteralPath (Join-Path $repo 'scripts/validate_r3_capture.py') -Algorithm SHA256).Hash,
-        'Regions: r3_regions.json beside this file is the frozen copy validation uses;',
-        '  its SHA-256 is in regions-sha256.txt. The repository copy is not consulted.',
-        'Seeds: ' + ($Seeds -join ', '),
-        'Frames (accumulated samples per capture): ' + $Frames,
-        'Per-run timeout (s): ' + $TimeoutSeconds,
-        'Build configuration: Release',
-        'Engine: bin/Release/engine.exe (SHA-256 in binary-sha256.txt)',
-        '',
-        'Capture format',
-        '  <name>.pfm           combined linear radiance, PFM, 3 channels, 32-bit float',
-        '  <name>.direct.pfm    direct component only, same format',
-        '  <name>.indirect.pfm  indirect component only, same format',
-        '  <name>.bmp           24-bit preview, tone mapped by the engine (NOT for metrics)',
-        '  <name>.txt           per-capture metadata written by the engine',
-        '  <name>.env.txt       the exact environment that run was given',
-        '  <name>.log/.stderr.log  preserved stdout and stderr',
-        '',
-        'Colour and units',
-        '  The .pfm files are LINEAR HDR radiance. NO TONE MAPPING, no exposure and',
-        '  no sRGB transfer has been applied to them. Every metric in section 7.3 is',
-        '  computed on these linear values. The .bmp is the only tone-mapped artifact',
-        '  and exists to look at, not to measure.',
-        '',
-        'Row orientation',
-        '  PFM header scale is -1.0, meaning little-endian samples. Rows are stored',
-        '  bottom-to-top per the PFM format: the first row in the file is the BOTTOM',
-        '  row of the image. A reader must flip vertically before indexing, as',
-        '  scripts/pfm_to_png.py read_pfm() and scripts/validate_r3_capture.py do.',
-        '  This is verified per capture against the engine-written .bmp, not assumed;',
-        '  see the orientation lines in validation.txt.',
-        '  Region coordinates in r3_regions.json are normalised 0..1 from the TOP-LEFT',
-        '  of the image as displayed, i.e. after that flip.',
-        '',
-        'Scenes and cameras'
-    )
-    foreach ($case in $scenes) {
-        $manifest += ('  ' + $case.name + ': ' + $case.scene + '  camera ' + $case.camera)
-    }
-    $manifest += @('', 'Worktree at capture time:') + $dirty
-    $manifest | Set-Content (Join-Path $output 'manifest.txt')
-
-    @('Commit: ' + $revision, 'Branch: ' + $branch,
-      'Dirty tree: ' + $(if ($dirty.Count -gt 0) { 'YES' } else { 'no' }), 'Worktree:') + $dirty |
-        Set-Content (Join-Path $output 'source.txt')
-
-    Get-FileHash -LiteralPath $engine -Algorithm SHA256 | Format-List | Out-File (Join-Path $output 'binary-sha256.txt')
-    Get-ChildItem (Join-Path $repo 'shaders') -File | Sort-Object Name | ForEach-Object {
-        '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash, $_.Name
-    } | Set-Content (Join-Path $output 'shader-sha256.txt')
-    # Frozen here, hash recorded beside it. Validation reads this copy, not the
-    # repository's, so an edit to the regions after the fact cannot redefine
-    # what a region meant when these images were judged.
-    $regionsSource = Join-Path $repo 'scripts/r3_regions.json'
-    $regionsFrozen = Join-Path $output 'r3_regions.json'
-    Copy-Item -LiteralPath $regionsSource -Destination $regionsFrozen
-    '{0}  {1}' -f (Get-FileHash -LiteralPath $regionsFrozen -Algorithm SHA256).Hash, 'r3_regions.json' |
-        Set-Content (Join-Path $output 'regions-sha256.txt')
+    # Provenance is written by scripts/r3_metadata.ps1 so it can be exercised
+    # without an engine or a GPU. The first real run shipped a manifest with
+    # every dynamic line split in two and a console-width-wrapped UTF-16 hash,
+    # none of which the fixture-based tests could see.
+    $invocation = Get-R3InvocationDescription -Seeds $Seeds -Frames $Frames `
+        -TimeoutSeconds $TimeoutSeconds -Diagnostic:$Diagnostic.IsPresent
+    $regionsFrozen = Write-R3Metadata -Output $output -Repo $repo -Revision $revision `
+        -Branch $branch -Dirty $dirty -Seeds $Seeds -Frames $Frames `
+        -TimeoutSeconds $TimeoutSeconds -Invocation $invocation -EnginePath $engine `
+        -Scenes $scenes
 
     foreach ($case in $scenes) {
-        $sceneFile = Join-Path $repo ('assets/scenes/' + $case.scene)
-        '{0}  {1}' -f (Get-FileHash -LiteralPath $sceneFile -Algorithm SHA256).Hash, $case.scene |
-            Add-Content (Join-Path $output 'scene-sha256.txt')
 
         foreach ($seed in $Seeds) {
             $name = $case.name + '-seed' + $seed

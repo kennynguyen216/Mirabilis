@@ -390,13 +390,22 @@ HASH_RECORD = re.compile(r"^([0-9A-Fa-f]{64})\s\s+(\S.*)$")
 
 def validate_hash_files(directory, report):
     """A manifest of hashes that is not itself well formed records nothing."""
+    # binary-sha256.txt is one record and only one: `<64 hex>  bin/Release/engine.exe`.
+    # It used to be written through Format-List | Out-File, which emitted UTF-16
+    # and wrapped the hash at the host's console width, so the recorded hash of
+    # the executable was two half-hashes on separate lines. Nothing here accepts
+    # a wrapped, truncated or otherwise malformed record.
     binary = directory / "binary-sha256.txt"
     if binary.exists():
-        # Get-FileHash | Format-List writes `Hash : <64 hex>` among other lines.
-        hashes = re.findall(r"(?mi)^Hash\s*:\s*([0-9A-Fa-f]{64})\s*$",
-                            binary.read_text(encoding="utf-8", errors="replace"))
-        report.check(bool(hashes), "directory: binary-sha256.txt holds a SHA-256",
-                     f"found {len(hashes)}")
+        raw = binary.read_bytes()
+        report.check(b"\x00" not in raw,
+                     "directory: binary-sha256.txt is not UTF-16")
+        lines = [line for line in raw.decode("utf-8", errors="replace").splitlines()
+                 if line.strip()]
+        records = [line for line in lines if HASH_RECORD.match(line)]
+        report.check(len(lines) == 1 and len(records) == 1,
+                     "directory: binary-sha256.txt is exactly one SHA-256 record",
+                     f"{len(records)} valid of {len(lines)} non-empty lines")
 
     for name in ("shader-sha256.txt", "scene-sha256.txt"):
         path = directory / name
@@ -414,9 +423,11 @@ def validate_hash_files(directory, report):
                       for match in (HASH_RECORD.match(line) for line in lines) if match}
             for scene in sorted(REQUIRED_SCENES):
                 wanted = REQUIRED_SCENES[scene]["file"]
+                # Detail only when it failed: "PASS ... not listed" is the kind
+                # of self-contradicting diagnostic this project keeps paying for.
                 report.check(wanted in listed,
                              f"directory: scene hash recorded for {scene}",
-                             f"{wanted} not listed")
+                             "" if wanted in listed else f"{wanted} not listed")
 
 
 def clear_stale_references(directory):
