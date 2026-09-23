@@ -95,3 +95,92 @@ static_assert(parse_env_bool("01") == EnvBool::Invalid);
 static_assert(parse_env_bool("enabled") == EnvBool::Invalid);
 static_assert(parse_env_bool("0 1") == EnvBool::Invalid);
 static_assert(parse_env_bool("-1") == EnvBool::Invalid);
+
+// Integer environment values, for test-only controls that have to be recorded
+// in a result record.  A reference capture whose seed cannot be stated is a
+// capture nobody can repeat, so a wrong value must stop the run rather than
+// quietly fall back to the default and produce a file labelled with a seed it
+// was not rendered at.
+enum class EnvIntStatus {
+    Absent,   // absent or empty: the caller keeps its own default
+    Valid,    // a complete integer, in range
+    Invalid,  // anything else: the caller fails the run
+};
+
+struct EnvInt {
+    EnvIntStatus status;
+    int value;
+
+    constexpr bool operator==(const EnvInt& other) const
+    {
+        return status == other.status && value == other.value;
+    }
+};
+
+// Strict on purpose: the whole trimmed string has to be one integer, so "7x",
+// "0x10", "1 2", "7.0" and "" are refused rather than silently read as 7, 0, 1
+// and 7.  Overflow is refused too, instead of wrapping into a seed nobody
+// chose.
+constexpr EnvInt parse_env_int(const char* value)
+{
+    if (value == nullptr) {
+        return {EnvIntStatus::Absent, 0};
+    }
+    const std::string_view text = env_flags_detail::trim(value);
+    if (text.empty()) {
+        // `set VAR=` is how a batch file clears a variable; treating it as
+        // absent keeps it saying the same thing as never setting it at all.
+        return {EnvIntStatus::Absent, 0};
+    }
+    std::size_t index = 0;
+    bool negative = false;
+    if (text[0] == '+' || text[0] == '-') {
+        negative = text[0] == '-';
+        index = 1;
+    }
+    if (index >= text.size()) {
+        return {EnvIntStatus::Invalid, 0};
+    }
+    // Accumulated as long long so the range check is a comparison rather than
+    // signed overflow, which would be undefined and is not constant-evaluable.
+    long long accumulated = 0;
+    for (; index < text.size(); ++index) {
+        const char digit = text[index];
+        if (digit < '0' || digit > '9') {
+            return {EnvIntStatus::Invalid, 0};
+        }
+        accumulated = accumulated * 10 + (digit - '0');
+        if (accumulated > 2147483648LL) {
+            return {EnvIntStatus::Invalid, 0};
+        }
+    }
+    const long long signed_value = negative ? -accumulated : accumulated;
+    if (signed_value < -2147483648LL || signed_value > 2147483647LL) {
+        return {EnvIntStatus::Invalid, 0};
+    }
+    return {EnvIntStatus::Valid, static_cast<int>(signed_value)};
+}
+
+static_assert(parse_env_int(nullptr).status == EnvIntStatus::Absent);
+static_assert(parse_env_int("").status == EnvIntStatus::Absent);
+static_assert(parse_env_int("   ").status == EnvIntStatus::Absent);
+static_assert(parse_env_int("0") == EnvInt{EnvIntStatus::Valid, 0});
+static_assert(parse_env_int("1337") == EnvInt{EnvIntStatus::Valid, 1337});
+static_assert(parse_env_int(" 1337 ") == EnvInt{EnvIntStatus::Valid, 1337});
+static_assert(parse_env_int("\t42\r\n") == EnvInt{EnvIntStatus::Valid, 42});
+static_assert(parse_env_int("-7") == EnvInt{EnvIntStatus::Valid, -7});
+static_assert(parse_env_int("+7") == EnvInt{EnvIntStatus::Valid, 7});
+static_assert(parse_env_int("007") == EnvInt{EnvIntStatus::Valid, 7});
+static_assert(parse_env_int("2147483647") == EnvInt{EnvIntStatus::Valid, 2147483647});
+static_assert(parse_env_int("-2147483648") == EnvInt{EnvIntStatus::Valid, -2147483647 - 1});
+static_assert(parse_env_int("2147483648").status == EnvIntStatus::Invalid);
+static_assert(parse_env_int("-2147483649").status == EnvIntStatus::Invalid);
+static_assert(parse_env_int("99999999999999999999").status == EnvIntStatus::Invalid);
+static_assert(parse_env_int("7x").status == EnvIntStatus::Invalid);
+static_assert(parse_env_int("x7").status == EnvIntStatus::Invalid);
+static_assert(parse_env_int("0x10").status == EnvIntStatus::Invalid);
+static_assert(parse_env_int("7.0").status == EnvIntStatus::Invalid);
+static_assert(parse_env_int("1 2").status == EnvIntStatus::Invalid);
+static_assert(parse_env_int("-").status == EnvIntStatus::Invalid);
+static_assert(parse_env_int("+").status == EnvIntStatus::Invalid);
+static_assert(parse_env_int("--1").status == EnvIntStatus::Invalid);

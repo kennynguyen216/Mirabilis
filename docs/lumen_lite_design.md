@@ -109,11 +109,20 @@ Interpretation:
 
 ### 2.2 Confirmed correctness and engineering debts
 
-- `MIRABILIS_LUMEN_LITE`, `MIRABILIS_SSGI_PROBES`, and `MIRABILIS_SSGI_HZB`
-  currently test variable presence. Setting one to `0` still enables it.
-- The material-debug shader constants are two positions out of sync with the C++ enum.
-- The Cornell ceiling emitter geometry faces upward into the ceiling. A guard masks a symptom;
-  the path tracer's absolute cosine can hide the orientation error.
+Resolved by R1 at `bac9b45`, retained so the evidence trail stays readable:
+
+- `MIRABILIS_LUMEN_LITE`, `MIRABILIS_SSGI_PROBES`, and `MIRABILIS_SSGI_HZB` tested variable
+  presence, so `=0` enabled them. They now parse `0`/`false`/`off`/`no` as disabled through
+  `parse_env_bool` in `src/env_flags.h`, and an invalid value warns and stays disabled.
+  Every other `MIRABILIS_*` variable is still presence-based.
+- The material-debug shader constants were two positions out of sync with the C++ enum, so
+  nine debug views showed the wrong buffer. `tests/test_debug_view_modes.py` now fails if they
+  drift again.
+- The Cornell ceiling emitter faced upward into the ceiling, and the path tracer's absolute
+  cosine hid it. Geometry, winding and declared sidedness were corrected at the source.
+
+Still open:
+
 - HZB code performs an initial texel fetch before proving that the starting location is within
   the valid screen/segment bounds.
 - Surface-cache radiosity copies the full RGBA16F indirect atlas and waits for completion on
@@ -517,6 +526,35 @@ Acceptance:
 - repeated reference seeds quantify noise;
 - masks/crops are stored before candidate comparison; and
 - orientation is verified.
+
+#### R3.1 Frozen environment-parity contract for later candidates
+
+Frozen now, before any candidate exists, so the matching rule cannot be chosen after
+seeing a comparison result. This section describes how a candidate must be configured to
+be comparable with these references. It changes no lighting equation and no default.
+
+The two paths do not light a ray miss the same way:
+
+- the software path tracer fills misses from the **analytic gradient**;
+- SSGI fills misses from the **selected skybox**, because `traceEnvironmentMap` defaults
+  to true (`SSGIState`, `src/vk_engine.h`).
+
+A candidate compared against an R3 reference must therefore run with `traceEnvironmentMap`
+false, so both paths light misses from the analytic gradient. No other environment
+reconciliation is permitted: the reference must not be re-rendered against the skybox, the
+candidate must not be scaled to match, and `ambientRetention` must not be used to close the
+gap. If the two still disagree with `traceEnvironmentMap` false, that disagreement is a
+finding for R4, not a parameter to tune.
+
+Known gap, recorded rather than worked around: **no environment variable sets
+`traceEnvironmentMap`**, so an unattended candidate run cannot currently select it. Until
+that control exists, every candidate-versus-reference comparison is diagnostic only and
+may not discharge a gate. Adding it is the first task of R4, not of R3, because R3 must not
+change renderer behavior.
+
+Parity is auditable after the fact: each capture's sidecar records sun radiance,
+environment intensity and the black-environment flag, so a comparison whose two sides
+disagree on those fields is invalid regardless of what its metrics say.
 
 ### R4 — Resolve lighting ownership and brightness
 
