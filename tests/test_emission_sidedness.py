@@ -105,7 +105,7 @@ class OneNormalConventionEverywhere(unittest.TestCase):
     def test_the_shared_helper_consults_the_authored_vertex_normals(self):
         body = re.search(
             r"vec3 authoredSideNormal\(([^)]*)\)\s*\{(.*?)\n\}",
-            source("path_trace_intersect.glsl"),
+            source("trace_scene.glsl"),
             re.S,
         )
         self.assertIsNotNone(
