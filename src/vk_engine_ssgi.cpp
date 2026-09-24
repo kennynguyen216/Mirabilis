@@ -1,5 +1,6 @@
 #include "vk_engine.h"
 #include "vk_engine_render_helpers.h"
+#include "r4_contributions.h"
 
 #include <algorithm>
 #include <array>
@@ -254,7 +255,8 @@ void VulkanEngine::init_ssgi_resources()
     const VkExtent3D extent = _drawImage.imageExtent;
     _sceneTargets.gbufferAlbedo = create_image(
         extent, VK_FORMAT_R8G8B8A8_UNORM,
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     _sceneTargets.gbufferVelocity = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
@@ -441,6 +443,9 @@ void VulkanEngine::init_ssgi_pipelines()
         for (uint32_t binding = 6; binding <= 8; ++binding) {
             builder.add_binding(binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         }
+        builder.add_binding(9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        // The albedo volume, for field hits no card holds (R4.61).
+        builder.add_binding(10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         _ssgi.lumenLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
         const std::array<VkDescriptorSetLayout, 3> lumenLayouts{
             _gpuSceneDataDescriptorLayout, _ssgi.descriptorLayout, _ssgi.lumenLayout};
@@ -717,6 +722,12 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
             writer.write_buffer(8, _surfaceCache.indexBuffer.buffer, VK_WHOLE_SIZE, 0,
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+            writer.write_image(9, _surfaceCache.sky.imageView, _prepass.sampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            writer.write_image(10, _surfaceCache.albedoVolume.imageView, _sdf.sampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             writer.update_set(_device, lumenSet);
             traceLayout = _ssgi.lumenPipelineLayout;
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.lumenPipeline);
@@ -751,7 +762,15 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
         pushConstants.quality = glm::uvec4(
             static_cast<uint32_t>(std::clamp(_ssgi.raysPerPixel, 1, 8)),
             _drawExtent.width, _drawExtent.height,
-            (probes ? 1u : 0u) | (hzb ? 2u : 0u));
+            (probes ? 1u : 0u) | (hzb ? 2u : 0u) |
+                (_r4Contributions.rayCoverage ? 4u : 0u) |
+                // Hit-lit sun at uncovered field hits follows the cache's
+                // own sun source (R4.61).
+                ((_r4Contributions.cacheSources & r4::LightSun) != 0u ? 8u : 0u) |
+                // R4.64 same-build control: the temporal clamp at full
+                // strength, as before the motion-scaled clamp.
+                (_ssgi.fullClampControl ? 16u : 0u) |
+                (_r4Contributions.ray << 8));
         vkCmdPushConstants(
             cmd, traceLayout, VK_SHADER_STAGE_COMPUTE_BIT,
             0, sizeof(pushConstants), &pushConstants);

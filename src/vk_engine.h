@@ -535,6 +535,10 @@ class VulkanEngine{
     void capture_path_trace(const char* filename);
     void capture_ssgi(const char* filename);
     void capture_raster(const char* filename);
+    // The lighting, material and R4 instrumentation state a raster or SSGI
+    // capture was taken under, read from the main camera's uploaded scene
+    // data, so a comparison can be checked for parity after the fact.
+    void write_capture_lighting(std::ostream& out) const;
     // A slow yaw sweep and push-in from one known-clear vantage, not a
     // multi-point path: finding even one camera position inside Sponza that
     // does not clip through a wall took several tries, so a scripted path
@@ -680,6 +684,9 @@ class VulkanEngine{
     // device's ceiling.  _textureAnisotropy is the preset's requested level;
     // material_anisotropy() is what a sampler is actually allowed to ask for.
     bool _samplerAnisotropySupported{false};
+    // Surface cards rasterize conservatively where the device can, so
+    // geometry thinner than a card texel is still captured (R4.60).
+    bool _conservativeRasterSupported{false};
     float _maxSamplerAnisotropy{1.0f};
     float _textureAnisotropy{16.0f};
     // Clamped to the device limit and to 1 when the feature is missing, so a
@@ -793,6 +800,13 @@ class VulkanEngine{
         void init_default_data();
         bool set_skybox(int selection);
         void update_skybox_descriptors();
+        // Explicit emitter sampling in the forward pass (R4.9): how many
+        // emitter triangles it samples this frame (0 = off), and the scene-set
+        // bindings it reads, rewritten each frame because the scene field and
+        // the trace buffers are rebuilt at runtime.
+        uint32_t sampled_emitter_count() const;
+        void write_emitter_descriptors(FrameData& frame);
+        AllocatedBuffer _emitterBufferPlaceholder{};
         void init_image_based_lighting();
         // radiance(x, y) returns the linear, sun-clamped radiance of a texel.
         void project_environment_sh(
@@ -838,6 +852,30 @@ class VulkanEngine{
         // change.
         void update_surface_cache();
         void measure_surface_cache_shadows();
+        void measure_cache_sun_visibility(const char* csvPath);
+        void measure_cache_source_importance(const char* csvPath);
+        // A trace triangle's linear base colour at barycentric (u, v): the
+        // material factor, vertex colour and bilinear texture, as the path
+        // tracer reads it.
+        glm::vec3 trace_albedo(const TraceTriangle& triangle, glm::vec2 bary) const;
+        // R4.61: area-weighted albedo per voxel of a dims-sized grid from lo,
+        // over every opaque, non-emissive, non-transmissive trace triangle.
+        std::vector<glm::vec4> build_albedo_volume(glm::vec3 lo, glm::vec3 voxel,
+            glm::uvec3 dims) const;
+        // R4.61: (re)builds _surfaceCache.albedoVolume when the trace scene
+        // or the field box changes.
+        void update_albedo_volume();
+        void measure_emitter_visibility();
+        void measure_sky_visibility(const char* csvPath);
+        // A shader-read image's texels, copied to the CPU for a diagnostic.
+        std::vector<uint8_t> read_image_bytes(const AllocatedImage& image, VkExtent3D extent,
+            size_t bytesPerTexel, VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT);
+        // Removes the scene light sources MIRABILIS_R4_LIGHT_SOURCES leaves
+        // out, after every scene load (R4.13).
+        void apply_r4_light_sources();
+        // R4.15: shadow-map sun visibility (the coverage-mode raster image)
+        // against the path tracer's BVH for the same visible points.
+        void measure_sun_visibility(const std::vector<glm::vec4>& rasterVisibility, VkExtent2D extent);
         void draw_surface_cache_debug(VkCommandBuffer cmd);
         void draw_surface_cache_settings();
         // Reads back the card depth page and reports what fraction of each
@@ -1249,6 +1287,8 @@ class VulkanEngine{
             float thickness{};
             float startOffset{};
             float historyWeight{};
+            // R4.64 control: clamp temporal history at full strength.
+            bool fullClampControl{false};
             float depthRejection{0.003f};
             float normalRejection{0.85f};
             float velocityRejection{0.10f};
@@ -1279,17 +1319,6 @@ class VulkanEngine{
             float filterDepthFalloff{};
             float filterNormalPower{};
             float intensity{1.0f};
-            // How much of the flat ambient term survives while SSGI is on.
-            // Zero is the coherent setting in the sense that nothing is
-            // counted twice, but it is not the honest one yet: the bounce this
-            // renderer gathers comes from a direct-lighting buffer that
-            // excludes ambient, so stone out of the sun contributes nothing
-            // at all to it, and an arcade lit only by what the sun reaches
-            // reads far darker than the same geometry in life.  Half is a
-            // starting point to tune by eye, not a derived value, and it is a
-            // slider because the right answer depends on how enclosed the
-            // scene is.
-            float ambientRetention{0.5f};
             // Fill ray misses from the selected skybox rather than the
             // analytic gradient.  Turning this off restores parity with the
             // software path tracer, which still lights its misses from the
@@ -1302,6 +1331,19 @@ class VulkanEngine{
             std::array<bool, FRAME_OVERLAP> timingWritten{};
         };
         SSGIState _ssgi;
+        // R4 ownership instrumentation (src/r4_contributions.h).  All set
+        // unless MIRABILIS_R4_CONTRIBUTIONS names a subset.
+        struct R4ContributionState {
+            uint32_t forward{0xffu};
+            uint32_t ray{0xfffu};
+            bool rayCoverage{false};
+            // Direct sources the cache keeps (bit 0 sun, 1 sky, 2 emitters);
+            // a diagnostic mask, all three by default (R4.13).
+            uint32_t cacheSources{0x7u};
+            // Scene light sources kept (bit 0 sun, 1 sky), R4.13.
+            uint32_t lightSources{0x3u};
+            bool sunVisibilityCheck{false};
+        } _r4Contributions;
         struct SdfVolumeState {
             AllocatedImage volume{};
             // Chosen at load: the 32-bit float is exact, but linear filtering
@@ -1385,12 +1427,25 @@ class VulkanEngine{
             AllocatedImage captureDepth{};
             // Light arriving at each captured texel, without albedo.
             AllocatedImage direct{};
+            // The exact sky share of direct, for covered primary SSGI origins.
+            AllocatedImage sky{};
+            // The emitter share of `direct` alone, with its visible fraction
+            // in alpha (R4.12), for the forward pass.
+            AllocatedImage emitter{};
             // Bounce light arriving at each texel, in the same convention.
             AllocatedImage indirect{};
             // indirect as it stood before this radiosity update.  Bounces read
             // it, never the page being written, so the result does not depend
             // on the order the GPU runs texels in.
             AllocatedImage indirectPrevious{};
+            // Coarse albedo of the opaque trace triangles over the scene
+            // field's box, weighted by the surface area in each voxel (rgb =
+            // albedo x area, a = area), for field hits no card captured
+            // (R4.61).  Premultiplied, so a filtered read divides by a.
+            AllocatedImage albedoVolume{};
+            glm::uvec3 albedoVolumeSize{0};
+            float albedoVolumeVoxel{0.0f};
+            uint64_t albedoVolumeHash{0};
             glm::uvec2 atlasSize{0};
             // Target world size of one atlas texel; the build coarsens it when
             // the scene does not fit the largest atlas.
@@ -1413,6 +1468,7 @@ class VulkanEngine{
             int debugPage{0};
             bool measureCoverage{false};
             bool measureShadows{false};
+            bool measureEmitterVisibility{false};
             bool radiosityEnabled{true};
             uint32_t radiosityCursor{0};
             // Per card: how many radiosity updates it has had since the last

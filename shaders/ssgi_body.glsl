@@ -32,6 +32,34 @@ layout(push_constant) uniform constants {
     uvec4 quality;
 } PushConstants;
 
+// R4 ray classes (src/r4_contributions.h).  Every ray ends in exactly one;
+// quality.w bits 8.. say which classes the image keeps, and bit 2 replaces a
+// kept class's radiance with 1 so a capture measures its coverage.
+const uint RayScreenHit = 1u << 0;
+const uint RayScreenHitCache = 1u << 1;
+const uint RayExit = 1u << 2;
+const uint RayExhausted = 1u << 3;
+const uint RayUnusableHit = 1u << 4;
+const uint RayPortal = 1u << 5;
+const uint RayFieldCache = 1u << 6;
+const uint RayFieldUncovered = 1u << 7;
+const uint RayFieldExit = 1u << 8;
+const uint RayFieldExhausted = 1u << 9;
+const uint RayScreenHitUncached = 1u << 10;
+const uint RayPrimaryCacheSky = 1u << 11;
+
+// What one class of ray adds: its radiance, nothing if the class was
+// removed, or 1 while coverage is being measured.  With every class kept and
+// coverage off this is the radiance unchanged.
+vec3 r4_ray_value(uint rayClass, vec3 radiance)
+{
+    bool kept = ((PushConstants.quality.w >> 8) & rayClass) != 0u;
+    if ((PushConstants.quality.w & 4u) != 0u) {
+        return kept ? vec3(1.0) : vec3(0.0);
+    }
+    return kept ? radiance : vec3(0.0);
+}
+
 // The sky every miss ray is filled from, and the policy that decides how
 // much of it a miss is worth.  Shared with the portal cameras, which have
 // no screen-space pass of their own to fall back from.
@@ -46,12 +74,18 @@ layout(set = 2, binding = 2) uniform sampler2D cacheEmissive;
 layout(set = 2, binding = 3) uniform sampler2D cacheDepth;
 layout(set = 2, binding = 4) uniform sampler2D cacheDirect;
 layout(set = 2, binding = 5) uniform sampler2D cacheIndirect;
+layout(set = 2, binding = 9) uniform sampler2D cacheSky;
 #define SURFACE_CACHE_SET 2
 #define SURFACE_CACHE_BINDING_CARDS 6
 #define SURFACE_CACHE_BINDING_GRID 7
 #define SURFACE_CACHE_BINDING_INDICES 8
 #define SURFACE_CACHE_READ_INDIRECT(texel) texelFetch(cacheIndirect, texel, 0).rgb
+#define SURFACE_CACHE_READ_SKY(texel) texelFetch(cacheSky, texel, 0).rgb
 #include "surface_cache_lookup.glsl"
+// Mean albedo of the surfaces in each voxel of the field's box, premultiplied
+// by presence (a = 1 where a surface is), for hits no card holds (R4.61).
+layout(set = 2, binding = 10) uniform sampler3D albedoVolume;
+#include "sun_shadow.glsl"
 
 float lumen_field_distance(vec3 world)
 {
@@ -69,10 +103,32 @@ vec3 lumen_field_normal(vec3 p)
     return normalize(gradient + vec3(1e-8));
 }
 
+// Hit lighting for a field hit no card captured (R4.61): the sun it reflects,
+// in the cache's convention (albedo x sunColor x N.L x visibility), with
+// visibility from the forward pass's own shadow map.  Its sky, emitters and
+// bounce light are unknown here and stay 0.  Half of the living room's first
+// sun bounce lands on stacked window bars one card layer cannot hold (R4.60).
+vec3 lumen_hit_sun(vec3 p)
+{
+    if ((PushConstants.quality.w & 8u) == 0u) {
+        return vec3(0.0);
+    }
+    vec4 albedo = textureLod(albedoVolume,
+        (p - fieldMin.xyz) / (fieldMax.xyz - fieldMin.xyz), 0.0);
+    vec3 n = lumen_field_normal(p);
+    float noL = dot(n, normalize(sceneData.sunlightDirection.xyz));
+    if (albedo.a < 1e-3 || noL <= 0.0) {
+        return vec3(0.0);
+    }
+    return albedo.rgb / albedo.a * sceneData.sunlightColor.rgb * noL *
+        sunlight_visibility(p, n);
+}
+
 // Light arriving along one ray the screen could not answer: the surface the
 // scene field hits, read from the surface cache, or the sky for a ray that
 // leaves the scene.
-vec3 lumen_trace(vec3 worldPosition, vec3 worldNormal, vec3 worldDirection)
+vec3 lumen_trace(vec3 worldPosition, vec3 worldNormal, vec3 worldDirection,
+    out uint rayClass)
 {
     float voxel = fieldMin.w;
     vec3 origin = worldPosition + worldNormal * (2.5 * voxel);
@@ -87,18 +143,24 @@ vec3 lumen_trace(vec3 worldPosition, vec3 worldNormal, vec3 worldDirection)
             vec3 p = origin + worldDirection * t;
             SurfaceCacheSample surface = surface_cache_lookup(p, lumen_field_normal(p));
             if (surface.weight > 0.0) {
+                rayClass = RayFieldCache;
+                // Emitted light is sampled explicitly at the receiver while
+                // emitterSettings.x > 0 (R4.9), so a hit adds only what the
+                // surface reflects.
                 return surface.albedo * (surface.direct + surface.indirect) +
-                    surface.emissive;
+                    (sceneData.emitterSettings.x > 0.5 ? vec3(0.0) : surface.emissive);
             }
-            // A surface no card saw: its light is unknown.  The sky is the
-            // same guess plain SSGI makes for every miss.
-            return environment_radiance(worldDirection);
+            // A surface no card saw: only its sun is known (R4.61); guessing
+            // its sky once lit sealed rooms (section 4.3).
+            rayClass = RayFieldUncovered;
+            return lumen_hit_sun(p);
         }
         t += max(d, 0.5 * voxel);
     }
     // Left the field: the sky.  Ran out of steps while still inside: no
     // estimate rather than the sky, which would let daylight into a sealed
     // room (the same rule the cache's radiosity follows).
+    rayClass = t >= tExit ? RayFieldExit : RayFieldExhausted;
     return t >= tExit ? environment_radiance(worldDirection) : vec3(0.0);
 }
 #endif
@@ -289,7 +351,7 @@ TraceOrigin trace_origin(vec2 screenUV, float depth)
 
 // Radiance arriving at o along one view-space direction: the screen march
 // first, then the scene field for what the screen cannot answer.
-vec3 trace_incident(TraceOrigin o, vec3 direction,
+vec3 trace_incident(TraceOrigin o, vec3 direction, bool primarySkyCached,
     out bool hit, out bool portalTermination, out int stepsTaken)
 {
     vec3 origin = o.position + o.normal * PushConstants.settings.z;
@@ -300,6 +362,10 @@ vec3 trace_incident(TraceOrigin o, vec3 direction,
     vec2 hitUV = vec2(0.0);
     float hitDepth = 0.0;
     stepsTaken = 0;
+    // R4: a plain miss is either a ray that left what the screen covers or
+    // one that used every step on screen.  HZB misses are not split and all
+    // read as exhausted; HZB is outside the R4 contract and must be off.
+    bool leftScreen = false;
     if (hzb_enabled()) {
         hit = hzb_march(origin, direction, hitUV, hitDepth,
             portalTermination, stepsTaken);
@@ -307,12 +373,18 @@ vec3 trace_incident(TraceOrigin o, vec3 direction,
         stepsTaken = stepIndex;
         vec3 rayPoint = origin + direction * (stride * float(stepIndex));
         vec4 clip = sceneData.proj * vec4(rayPoint, 1.0);
-        if (clip.w <= 0.0) break;
+        if (clip.w <= 0.0) {
+            leftScreen = true;
+            break;
+        }
         vec3 ndc = clip.xyz / clip.w;
         vec2 rayUV = ndc.xy * 0.5 + 0.5;
         if (any(lessThan(rayUV, vec2(0.0))) ||
             any(greaterThanEqual(rayUV, vec2(1.0))) ||
-            ndc.z < 0.0 || ndc.z > 1.0) break;
+            ndc.z < 0.0 || ndc.z > 1.0) {
+            leftScreen = true;
+            break;
+        }
         if (texture(portalMask, frame_uv(rayUV, portalMask)).r > 0.5) {
             portalTermination = true;
             break;
@@ -333,19 +405,24 @@ vec3 trace_incident(TraceOrigin o, vec3 direction,
     }
 
     vec3 incident = vec3(0.0);
+    // Set when a screen hit could not be used, so the miss path below knows
+    // it is standing in for a hit rather than for a genuine miss.
+    bool unusableHit = hit && PushConstants.control.z == 0u;
     if (hit && PushConstants.control.z != 0u) {
         vec2 hitVelocity = texture(
             gbufferVelocity, frame_uv(hitUV, gbufferVelocity)).xy;
         vec2 previousHitUV = hitUV + hitVelocity;
         if (all(greaterThanEqual(previousHitUV, vec2(0.0))) &&
             all(lessThan(previousHitUV, vec2(1.0)))) {
-            incident = texture(previousDirectLighting,
+            vec3 screenDirect = texture(previousDirectLighting,
                 frame_uv(previousHitUV, previousDirectLighting)).rgb;
 #ifdef LUMEN_LITE
-            // The screen knows only the direct light leaving what it hit.
-            // The cache knows that surface's bounce light too; adding it
-            // gives screen hits the same bounces as world-traced misses,
-            // which in a closed room are most rays.
+            // A screen hit reads the cache, as a field hit does, so both carry
+            // one source: the direct page's sun, sky and emitters (R4.14).
+            // The screen's own direct-lighting target has no sky -- diffuse
+            // sky is SSGI's -- so a sky-lit wall used to pass on nothing.
+            // Where the cache does not cover the hit, that known direct light
+            // is kept and the ray is counted as uncached; no sky is invented.
             vec4 hitWorld = sceneData.inverseViewProjection *
                 vec4(hitUV * 2.0 - 1.0, hitDepth, 1.0);
             vec3 hitNormal = normalize(transpose(mat3(sceneData.view)) *
@@ -353,23 +430,45 @@ vec3 trace_incident(TraceOrigin o, vec3 direction,
             SurfaceCacheSample hitSurface =
                 surface_cache_lookup(hitWorld.xyz / hitWorld.w, hitNormal);
             if (hitSurface.weight > 0.0) {
-                incident += hitSurface.albedo * hitSurface.indirect;
+                incident = r4_ray_value(RayScreenHit,
+                    hitSurface.albedo * hitSurface.direct +
+                    (sceneData.emitterSettings.x > 0.5 ? vec3(0.0) : hitSurface.emissive));
+                incident += r4_ray_value(RayScreenHitCache,
+                    hitSurface.albedo * hitSurface.indirect);
+            } else {
+                incident = r4_ray_value(RayScreenHitUncached, screenDirect);
             }
+#else
+            incident = r4_ray_value(RayScreenHit, screenDirect);
 #endif
         } else {
             hit = false;
+            unusableHit = true;
         }
     }
+    // Section 4.3: only a ray that demonstrably left the scene is lit from the
+    // sky, and only the scene field can show that.  Every other ray the screen
+    // could not answer -- off screen, out of steps, stopped at a portal, or a
+    // hit that cannot be reprojected -- is "no estimate" and adds nothing.
+    // SSGI owns diffuse environment light, so nothing else adds it back.
     if (!hit || PushConstants.control.z == 0u) {
-        vec3 worldDirection = normalize(
-            transpose(mat3(sceneData.view)) * direction);
 #ifdef LUMEN_LITE
+        uint rayClass = RayPortal;
         incident = portalTermination
-            ? environment_radiance(worldDirection)
-            : lumen_trace(o.worldPosition, o.worldNormal, worldDirection);
+            ? vec3(0.0)
+            : lumen_trace(o.worldPosition, o.worldNormal,
+                normalize(transpose(mat3(sceneData.view)) * direction),
+                rayClass);
 #else
-        incident = environment_radiance(worldDirection);
+        uint rayClass = portalTermination ? RayPortal
+            : (unusableHit ? RayUnusableHit
+            : (leftScreen ? RayExit : RayExhausted));
+        incident = vec3(0.0);
 #endif
+        // The exact cache sky already supplies this origin's first sky
+        // bounce. Uncovered origins still use the field exit as before.
+        incident = primarySkyCached && rayClass == RayFieldExit
+            ? vec3(0.0) : r4_ray_value(rayClass, incident);
     }
     return incident;
 }
@@ -483,7 +582,7 @@ void main()
             bitangent * (r * sin(phi)) + o.normal * u1);
         bool hit, portal;
         int steps;
-        vec3 incident = trace_incident(o, direction, hit, portal, steps);
+        vec3 incident = trace_incident(o, direction, false, hit, portal, steps);
         sh_basis(normalize(transpose(mat3(sceneData.view)) * direction), coefficients);
         for (int i = 0; i < 9; ++i) sum[i] += incident * coefficients[i];
     }
@@ -555,6 +654,13 @@ void main()
 #endif
     uint state = uint(pixel.x) * 1973u ^ uint(pixel.y) * 9277u ^
         PushConstants.control.w * 26699u ^ 0x68bc21ebu;
+#ifdef LUMEN_LITE
+    SurfaceCacheSample primarySky = surface_cache_lookup(
+        o.worldPosition, o.worldNormal, true);
+    bool primarySkyCached = primarySky.weight > 0.0;
+#else
+    bool primarySkyCached = false;
+#endif
     int stepCount = max(1, int(PushConstants.settings.w + 0.5));
     int rayCount = clamp(int(PushConstants.quality.x), 1, 8);
     vec3 indirect = vec3(0.0);
@@ -565,7 +671,8 @@ void main()
         vec3 direction = cosine_direction(o.normal, state);
         bool hit, portalTermination;
         int stepsTaken;
-        indirect += trace_incident(o, direction, hit, portalTermination, stepsTaken);
+        indirect += trace_incident(o, direction, primarySkyCached,
+            hit, portalTermination, stepsTaken);
         hitSamples += hit ? 1 : 0;
         portalSamples += portalTermination ? 1 : 0;
         totalSteps += stepsTaken;
@@ -573,6 +680,11 @@ void main()
     // Incident radiance, not reflected colour: the composite multiplies by
     // the receiver's albedo after the temporal and spatial filters have run.
     indirect /= float(rayCount);
+#ifdef LUMEN_LITE
+    if (primarySkyCached) {
+        indirect += r4_ray_value(RayPrimaryCacheSky, primarySky.sky);
+    }
+#endif
     imageStore(rawIndirectImage, pixel, vec4(indirect, 1.0));
     float hitFraction = float(hitSamples) / float(rayCount);
     float portalFraction = float(portalSamples) / float(rayCount);

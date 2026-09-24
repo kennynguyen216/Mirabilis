@@ -54,17 +54,13 @@ void main()
     // much of the surrounding hemisphere nearby geometry blocks.
     float visibility = sunlight_visibility(inWorldPosition, geometricNormal);
     float occlusion = ambient_occlusion(gl_FragCoord.xy);
-    // Once SSGI is composited, the flat ambient stand-in risks counting the
-    // same indirect light a second time, because a ray that leaves the depth
-    // buffer is filled from the same sky this term stands in for.  How much
-    // of it survives is a policy rather than a constant: replacing ambient
-    // outright is only honest while misses carry real environment radiance,
-    // and an enclosed scene whose rays mostly hit unlit stone has nothing to
-    // put in its place.  Portal cameras clear the SSGI flag and keep the
-    // whole term until they receive their own screen-space pass.
-    float ambientScale = sceneData.screenSpaceSettings.z > 0.5
-        ? clamp(sceneData.indirectSettings.x, 0.0, 1.0)
-        : 1.0;
+    // Diffuse environment has one owner (docs/lumen_lite_design.md 4.2).
+    // While SSGI runs it is the trace, which lights a ray from the sky only
+    // when the ray demonstrably left the scene, so the diffuse ambient term
+    // here is zero.  Specular is not SSGI's and is never scaled.  Portal
+    // cameras clear the SSGI flag and keep the whole term until they receive
+    // their own screen-space pass.
+    float ambientScale = sceneData.screenSpaceSettings.z > 0.5 ? 0.0 : 1.0;
     vec3 ambientLight = sceneData.ambientColor.rgb * occlusion * ambientScale;
 
     // The sun term is left out of occlusion: it already has its own visibility
@@ -83,11 +79,43 @@ void main()
         material_ambient(surface, ambientLight, ambientDiffuse, ambientSpecular);
     }
     vec3 emission = material_emission(geometricNormal, inWorldPosition);
+    vec3 emitterDiffuse;
+    vec3 emitterSpecular;
+    material_emitters(surface, inWorldPosition, geometricNormal, gl_FragCoord.xy,
+        emitterDiffuse, emitterSpecular);
+    // While emitters are sampled explicitly, their first bounce is owned here,
+    // so emission must not also reach SSGI through the transport target: the
+    // path tracer likewise drops emission a BSDF-sampled ray finds after a
+    // diffuse scatter (R4.9).
+    bool emittersSampled = sceneData.emitterSettings.x > 0.5;
 
+    // R4 ownership instrumentation (src/r4_contributions.h): an owner left
+    // out of materialDebug.y adds nothing to the image.  Only this sum is
+    // masked; the direct-lighting target below is what SSGI transports, and
+    // it has to stay the full frame's.
+    uint keep = uint(sceneData.materialDebug.y + 0.5);
     outFragColor = vec4(
-        directDiffuse + directSpecular + ambientDiffuse + ambientSpecular +
-            emission,
+        ((keep & 1u) != 0u ? directDiffuse : vec3(0.0)) +
+            ((keep & 2u) != 0u ? directSpecular : vec3(0.0)) +
+            ((keep & 4u) != 0u ? ambientDiffuse : vec3(0.0)) +
+            ((keep & 8u) != 0u ? ambientSpecular : vec3(0.0)) +
+            ((keep & 16u) != 0u ? emission : vec3(0.0)) +
+            ((keep & 64u) != 0u ? emitterDiffuse : vec3(0.0)) +
+            ((keep & 128u) != 0u ? emitterSpecular : vec3(0.0)),
         1.0);
+    // R4.15 diagnostic: in coverage mode with only sun_diffuse kept, the
+    // shadow-map visibility this fragment was lit with, where it faces the sun.
+    // Blended panes add nothing then, so they cannot overwrite the reading of
+    // the opaque surface behind them.
+    if (sceneData.emitterSettings.w > 0.5 && keep == 1u) {
+#ifdef MIRABILIS_COLOR_ONLY
+        outFragColor = vec4(0.0);
+#else
+        outFragColor = vec4(vec3(
+            dot(geometricNormal, normalize(sceneData.sunlightDirection.xyz)) > 0.0
+                ? visibility : 0.0), 1.0);
+#endif
+    }
     vec3 debugColor;
     if (material_debug_color(
             surface, geometricNormal, inTangent,
@@ -104,8 +132,9 @@ void main()
     outVelocity = vec4(previousUV - currentUV, 0.0, 1.0);
     // SSGI reads this as the radiance leaving a surface towards other
     // surfaces.  Specular depends on the direction it leaves in, and only the
-    // camera's was evaluated, so it stays out; emission leaves in every
-    // direction and belongs here.
-    outDirectLighting = vec4(directDiffuse + emission, 1.0);
+    // camera's was evaluated, so it stays out.  Emission leaves in every
+    // direction and belongs here unless emitters are sampled explicitly.
+    outDirectLighting = vec4(directDiffuse + emitterDiffuse +
+        (emittersSampled ? vec3(0.0) : emission), 1.0);
 #endif
 }

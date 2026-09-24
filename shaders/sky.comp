@@ -7,8 +7,15 @@ layout(rgba16f, set = 0, binding = 0) uniform image2D image;
 // latitude, avoiding a six-texture cubemap for this first skybox version.
 layout(set = 0, binding = 1) uniform sampler2D skyboxTexture;
 
+#extension GL_GOOGLE_include_directive : require
+#include "environment_gradient.glsl"
+
 layout(push_constant) uniform constants
 {
+    // x = 1 for the panorama, 0 for the analytic gradient
+    // (traceEnvironmentMap); y = environment intensity; z = 1 for a black
+    // environment.  The same selection and policy every other path uses, so
+    // background pixels match the reference's camera misses (R4.9).
     vec4 data1;
     vec4 data2;
     vec4 data3;
@@ -18,14 +25,6 @@ layout(push_constant) uniform constants
 float hash12(vec2 p)
 {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
-}
-
-vec2 equirectangular_uv(vec3 direction)
-{
-    const float pi = 3.14159265359;
-    float longitude = atan(direction.z, direction.x) / (2.0 * pi) + 0.5;
-    float latitude = acos(clamp(direction.y, -1.0, 1.0)) / pi;
-    return vec2(longitude, latitude);
 }
 
 void main()
@@ -46,9 +45,12 @@ void main()
             screen.x * aspect * tanHalfFov * PushConstants.data2.xyz +
             screen.y * tanHalfFov * PushConstants.data3.xyz);
 
-        imageStore(
-            image,
-            texelCoord,
-            vec4(texture(skyboxTexture, equirectangular_uv(direction)).rgb, 1.0));
+        vec3 radiance = PushConstants.data1.x > 0.5
+            ? texture(skyboxTexture, equirectangular_uv(direction)).rgb
+            : gradient_radiance(direction);
+        radiance = PushConstants.data1.z > 0.5
+            ? vec3(0.0)
+            : radiance * PushConstants.data1.y;
+        imageStore(image, texelCoord, vec4(radiance, 1.0));
     }
 }

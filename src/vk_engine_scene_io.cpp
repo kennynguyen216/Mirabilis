@@ -956,6 +956,7 @@ bool VulkanEngine::load_editor_scene()
     _ssao.settings = pendingSSAO;
     _ssao.sceneOverride = pendingSSAOOverride;
     _traceSettings.lighting = pendingReference;
+    apply_r4_light_sources();
     _shadow.sunlightDirection = pendingLighting.sunlightDirection;
     _shadow.enabled = pendingLighting.shadowsEnabled;
     _shadow.radius = pendingLighting.shadowRadius;

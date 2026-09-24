@@ -111,7 +111,15 @@ void main()
         }
         vec3 history = texture(previousTemporalIndirect,
             ssgi_uv(previousUV, previousTemporalIndirect)).rgb;
-        history = clamp(history, neighborhoodMin, neighborhoodMax);
+        // The clamp guards against stale history under motion.  On a still,
+        // accepted reprojection it only biases: at two rays a pixel most
+        // neighbourhoods of a sparse sun path are near 0, and clamping to
+        // them erased half the living room's sun bounce (R4.63).  So it
+        // fades in with screen motion, fully from one pixel a frame.
+        // quality.w bit 4: R4.64 same-build control, clamped as before.
+        float motion = (PushConstants.quality.w & 16u) != 0u ? 1.0
+            : clamp(length(velocity * vec2(extent)), 0.0, 1.0);
+        history = mix(history, clamp(history, neighborhoodMin, neighborhoodMax), motion);
         result = mix(current, history,
             clamp(PushConstants.temporal.x, 0.0, 0.99));
     }

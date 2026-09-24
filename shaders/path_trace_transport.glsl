@@ -15,9 +15,11 @@ vec3 offsetOrigin(vec3 p,vec3 geometric,vec3 outgoing) {
     float epsilon=max(0.0002,max(abs(p.x),max(abs(p.y),abs(p.z)))*0.000002);
     return p+geometric*(dot(geometric,outgoing)>0?epsilon:-epsilon);
 }
-struct TransportResult {vec3 direct; vec3 indirect; bool invalid;};
+struct TransportResult {vec3 direct; vec3 indirect; bool invalid; vec3 firstSpecFraction;};
 void addContribution(inout TransportResult r,vec3 value,bool direct) {
     if(any(isnan(value))||any(isinf(value))) {r.invalid=true;return;}
+    if(!direct&&pc.settings.w>0.5) value*=pc.settings.w>1.5
+        ? r.firstSpecFraction : vec3(1.0)-r.firstSpecFraction;
     if(direct) r.direct+=value; else r.indirect+=value;
 }
 void sampleLights(inout TransportResult result,Material material,vec3 albedo,vec3 point,vec3 geometric,vec3 normal,vec3 view,
@@ -73,7 +75,7 @@ void sampleLights(inout TransportResult result,Material material,vec3 albedo,vec
     }
 }
 TransportResult transport(vec3 origin,vec3 direction,inout uint state) {
-    TransportResult result=TransportResult(vec3(0),vec3(0),false);
+    TransportResult result=TransportResult(vec3(0),vec3(0),false,vec3(0));
     vec3 throughput=vec3(1); bool previousDelta=false; uint portalCount=0;
     for(uint bounce=0;bounce<=min(pc.sampling.x,4u);++bounce) {
         bool limited; float travelled;
@@ -103,6 +105,7 @@ TransportResult transport(vec3 origin,vec3 direction,inout uint state) {
         vec3 point=origin+direction*hit.t,albedo=baseColorAt(material,t,hit.bary);
         float transmission=pc.sampling.z==0u?0:clamp(material.parameters.z,0,1);
         if(randomFloat(state)<transmission) {
+            if(bounce==0u) result.firstSpecFraction=vec3(1.0);
             float ior=clamp(material.parameters.w,1.0,3.0),etaIncident=front?1:ior,etaTransmitted=front?ior:1;
             // Perfect dielectric interfaces use the geometric normal. The
             // radiance-mode eta^2 factors cancel on entry/exit through glass.
@@ -120,7 +123,14 @@ TransportResult transport(vec3 origin,vec3 direction,inout uint state) {
         if(dot(next,geometric)<=0) break;
         float pdf=brdfPdf(material,normal,-direction,next);
         if(pdf<=1e-12||isnan(pdf)||isinf(pdf)) break;
-        throughput*=evaluateBRDF(material,albedo,normal,-direction,next)*max(dot(normal,next),0)/pdf;
+        vec3 brdf;
+        if(bounce==0u) {
+            vec3 diffuse,specular;
+            evaluateBRDFComponents(material,albedo,normal,-direction,next,diffuse,specular);
+            brdf=diffuse+specular;
+            result.firstSpecFraction=specular/max(brdf,vec3(1e-20));
+        } else brdf=evaluateBRDF(material,albedo,normal,-direction,next);
+        throughput*=brdf*max(dot(normal,next),0)/pdf;
         if(any(isnan(throughput))||any(isinf(throughput))) {result.invalid=true;break;}
         if(bounce>=2) {
             float survival=clamp(max(throughput.x,max(throughput.y,throughput.z)),0.05,0.95);

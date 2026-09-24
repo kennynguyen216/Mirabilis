@@ -7,6 +7,7 @@
 //   sampler2D cacheAlbedo, cacheEmissive, cacheDepth, cacheDirect
 //   SURFACE_CACHE_READ_INDIRECT(ivec2 texel) -> vec3, reading the indirect
 //     page (the radiosity pass reads the storage image it is writing)
+//   SURFACE_CACHE_READ_SKY(ivec2 texel) -> vec3 only for primary sky lookups
 //   the three SSBOs below at SURFACE_CACHE_SET / SURFACE_CACHE_BINDING_*
 
 struct SurfaceCacheCard {
@@ -60,9 +61,17 @@ struct SurfaceCacheSample {
     vec3 emissive;
     // Light arriving at the surface (no albedo), as in the direct page.
     vec3 direct;
+    // The direct page's alpha, blended the same way (the emitter page keeps
+    // its visible fraction there, R4.12).
+    float directAlpha;
     // Bounce light arriving at the surface, in the same convention.
     vec3 indirect;
+    vec3 sky;
 };
+
+#ifndef SURFACE_CACHE_READ_SKY
+#define SURFACE_CACHE_READ_SKY(texel) vec3(0.0)
+#endif
 
 // Where a card sees a world point, if it sees it at all: the atlas texel, how
 // far behind the point the captured surface lies along the card's viewing
@@ -90,14 +99,16 @@ bool card_probe(uint cardIndex, vec4 p, vec3 normal, float minimumFacing,
     return true;
 }
 
-SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal)
+SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky)
 {
     SurfaceCacheSample result;
     result.weight = 0.0;
     result.albedo = vec3(0.0);
     result.emissive = vec3(0.0);
     result.direct = vec3(0.0);
+    result.directAlpha = 0.0;
     result.indirect = vec3(0.0);
+    result.sky = vec3(0.0);
 
     vec3 cellCoord = (world - gridMin.xyz) / gridMin.w;
     ivec3 cell = ivec3(floor(cellCoord));
@@ -157,16 +168,29 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal)
             continue;
         }
         result.weight += weight;
+        if (readSky) {
+            result.sky += weight * SURFACE_CACHE_READ_SKY(texel);
+            continue;
+        }
         result.albedo += weight * texelFetch(cacheAlbedo, texel, 0).rgb;
         result.emissive += weight * texelFetch(cacheEmissive, texel, 0).rgb;
-        result.direct += weight * texelFetch(cacheDirect, texel, 0).rgb;
+        vec4 direct = texelFetch(cacheDirect, texel, 0);
+        result.direct += weight * direct.rgb;
+        result.directAlpha += weight * direct.a;
         result.indirect += weight * SURFACE_CACHE_READ_INDIRECT(texel);
     }
     if (result.weight > 0.0) {
         result.albedo /= result.weight;
         result.emissive /= result.weight;
         result.direct /= result.weight;
+        result.directAlpha /= result.weight;
         result.indirect /= result.weight;
+        result.sky /= result.weight;
     }
     return result;
+}
+
+SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal)
+{
+    return surface_cache_lookup(world, normal, false);
 }

@@ -1,9 +1,6 @@
 #include "scene_data.glsl"
 
-// The sunlight depth map. Unlike the main camera this uses conventional
-// depth (near = 0, far = 1), so the comparison below is LESS_OR_EQUAL and
-// the sampler's white border leaves everything outside the map lit.
-layout(set = 0, binding = 1) uniform sampler2DShadow shadowMap;
+#include "sun_shadow.glsl"
 
 // Screen-space ambient occlusion for this camera, at half resolution and
 // sampled linearly.  It is bound for every camera in the frame, but only the
@@ -21,6 +18,28 @@ layout(set = 0, binding = 3) uniform sampler2D environmentTexture;
 // roughness k / iblSettings.y, and the split-sum (scale, bias) table.
 layout(set = 0, binding = 4) uniform sampler2D prefilteredEnvironment;
 layout(set = 0, binding = 5) uniform sampler2D brdfLut;
+// Emitter light at the visible surface (R4.9, R4.12): the path tracer's own
+// triangles, materials and emitter list for specular sampling, and the
+// surface cache with its emitter page for the shadowed diffuse term.
+// Placeholders are bound while emitter sampling is off
+// (sceneData.emitterSettings.x == 0), and nothing reads them then.
+#include "trace_scene.glsl"
+layout(std430, set = 0, binding = 7) readonly buffer Triangles { Triangle triangles[]; };
+layout(std430, set = 0, binding = 8) readonly buffer Materials { Material materials[]; };
+layout(std430, set = 0, binding = 9) readonly buffer Emitters { uint emitters[]; };
+layout(set = 0, binding = 6) uniform sampler2D cacheAlbedo;
+layout(set = 0, binding = 10) uniform sampler2D cacheEmissive;
+layout(set = 0, binding = 11) uniform sampler2D cacheDepth;
+// Bound to the cache's emitter page, not its direct page: the lookup's
+// `direct` is then emitter light alone, and sun and sky stay the forward
+// pass's own.
+layout(set = 0, binding = 12) uniform sampler2D cacheDirect;
+#define SURFACE_CACHE_SET 0
+#define SURFACE_CACHE_BINDING_CARDS 13
+#define SURFACE_CACHE_BINDING_GRID 14
+#define SURFACE_CACHE_BINDING_INDICES 15
+#define SURFACE_CACHE_READ_INDIRECT(texel) vec3(0.0)
+#include "surface_cache_lookup.glsl"
 
 // How much of the surrounding hemisphere reaches this surface: 1 fully open,
 // 0 fully enclosed.  Only the ambient term should be scaled by it.  Direct
@@ -69,62 +88,3 @@ layout(set = 1, binding = 2) uniform sampler2D metalRoughTex;
 // Tangent-space normal map, stored linear.  Materials without one are bound a
 // 1x1 flat normal, (0.5, 0.5, 1).
 layout(set = 1, binding = 3) uniform sampler2D normalTex;
-
-// Returns how much of the sunlight reaches this surface: 1 fully lit, 0 fully
-// blocked.  Only the sunlight term should be scaled by it; ambient light is
-// what keeps a shadowed surface from going black.
-float sunlight_visibility(vec3 worldPosition, vec3 normal)
-{
-    if (sceneData.shadowSettings.w < 0.5) {
-        return 1.0;
-    }
-
-    // Pushing the sample point along the normal before projecting removes
-    // most self-shadowing acne on surfaces that face the sun edge-on, and it
-    // does far less to detach contact shadows than depth bias alone.
-    // Respect the value shown in the UI. A tiny nonzero floor avoids exact
-    // coplanar comparisons without silently replacing the authored bias.
-    float normalBias = max(sceneData.shadowSettings.y, 0.001);
-    vec4 lightClip = sceneData.sunViewProjection *
-        vec4(worldPosition + normal * normalBias, 1.0);
-    vec3 projected = lightClip.xyz / lightClip.w;
-    // Beyond the shadow camera's depth range there is nothing recorded to
-    // compare against, so treat the surface as lit rather than shadowed.
-    if (projected.z < 0.0 || projected.z > 1.0) {
-        return 1.0;
-    }
-
-    vec2 shadowUV = projected.xy * 0.5 + 0.5;
-    // Surfaces facing across the light direction need more receiver bias than
-    // ones facing it head-on. This slope-aware term removes the regular
-    // columns caused by tiny depth changes across large grazing-angle faces.
-    vec3 lightDirection = normalize(sceneData.sunlightDirection.xyz);
-    float grazing = 1.0 - abs(dot(normalize(normal), lightDirection));
-    float depthBias = max(sceneData.shadowSettings.x, 0.00002);
-    float reference = projected.z - depthBias * mix(1.0, 2.5, grazing);
-    float texel = sceneData.shadowSettings.z;
-
-    // A deterministic 7x7 tent kernel produces a continuous transition with
-    // no per-pixel random rotation. The previous rotated Poisson pattern was
-    // visible as fine stripes on large, flat surfaces. Each comparison is
-    // also bilinear on depth formats that support linear compare filtering.
-    float filterRadius = max(sceneData.shadowFilterSettings.x, 0.0);
-    if (filterRadius < 0.01) {
-        return texture(shadowMap, vec3(shadowUV, reference));
-    }
-    float visibility = 0.0;
-    float totalWeight = 0.0;
-    float tapSpacing = filterRadius * texel / 3.0;
-    for (int y = -3; y <= 3; ++y) {
-        float weightY = 4.0 - abs(float(y));
-        for (int x = -3; x <= 3; ++x) {
-            float weightX = 4.0 - abs(float(x));
-            float weight = weightX * weightY;
-            vec2 offset = vec2(x, y) * tapSpacing;
-            visibility += weight * texture(
-                shadowMap, vec3(shadowUV + offset, reference));
-            totalWeight += weight;
-        }
-    }
-    return visibility / totalWeight;
-}

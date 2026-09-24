@@ -15,19 +15,7 @@
 
 const float EnvironmentPi = 3.14159265359;
 
-// The analytic stand-in sky.  It is kept rather than deleted because the
-// software path tracer still lights its misses with it, and a reference
-// comparison only means something when both sides see the same environment.
-const vec3 EnvironmentDownColor = vec3(0.7, 0.8, 1.0);
-const vec3 EnvironmentUpColor = vec3(0.12, 0.3, 0.65);
-
-vec2 equirectangular_uv(vec3 direction)
-{
-    float longitude =
-        atan(direction.z, direction.x) / (2.0 * EnvironmentPi) + 0.5;
-    float latitude = acos(clamp(direction.y, -1.0, 1.0)) / EnvironmentPi;
-    return vec2(longitude, latitude);
-}
+#include "environment_gradient.glsl"
 
 // Everything about an environment sample except where the radiance came from.
 // The panorama and the gradient are two sources under one policy, and it is
@@ -68,10 +56,7 @@ vec3 environment_radiance(vec3 worldDirection)
             environmentTexture,
             equirectangular_uv(worldDirection),
             sceneData.indirectSettings.z).rgb
-        : mix(
-            EnvironmentDownColor,
-            EnvironmentUpColor,
-            clamp(worldDirection.y * 0.5 + 0.5, 0.0, 1.0));
+        : gradient_radiance(worldDirection);
     return apply_environment_policy(radiance);
 }
 
@@ -93,10 +78,7 @@ vec3 environment_irradiance(vec3 worldNormal)
             environmentTexture,
             equirectangular_uv(worldNormal),
             sceneData.indirectSettings.z + HemisphereLodBias).rgb
-        : mix(
-            EnvironmentDownColor,
-            EnvironmentUpColor,
-            clamp(worldNormal.y / 3.0 + 0.5, 0.0, 1.0));
+        : gradient_irradiance(worldNormal);
     return apply_environment_policy(radiance);
 }
 

@@ -94,6 +94,13 @@ void VulkanEngine::update_scene(float deltaTime)
         sky.data.data4 = glm::vec4(
             glm::normalize(glm::vec3(rotation * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f))),
             0.0f);
+        // Background parity (R4.9): the environment source every other path
+        // selects, with the same intensity and black policy.
+        sky.data.data1 = glm::vec4(
+            _ssgi.traceEnvironmentMap ? 1.0f : 0.0f,
+            _traceSettings.lighting.environment.x,
+            _traceSettings.lighting.environment.y,
+            0.0f);
     }
 
     mainDrawContext.OpaqueSurfaces.clear();

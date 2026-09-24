@@ -62,7 +62,8 @@ layout(push_constant) uniform constants {
     vec4 viewToWorld1;
     vec4 viewToWorld2;
     // xy = draw extent, z = mode (0 cache lit colour, 1 agreement colour,
-    // 2 data, 3 albedo data, 4 blocked sun ray hit positions), w = unused.
+    // 2 data, 3 albedo data, 4 blocked sun ray hit positions,
+    // 5 visible cache indirect bounce), w = unused.
     vec4 settings;
 } PushConstants;
 
@@ -82,7 +83,8 @@ void main()
     float depth = texelFetch(prepassDepth, pixel, 0).r;
     if (depth <= 0.0) {
         imageStore(image, pixel, mode == 2 ? vec4(-1.0, 0.0, 0.0, 1.0)
-                                           : vec4(0.02, 0.02, 0.03, 1.0));
+            : (mode == 5 ? vec4(0.0, 0.0, 0.0, 1.0)
+                         : vec4(0.02, 0.02, 0.03, 1.0)));
         return;
     }
     vec2 ndc = (vec2(pixel) + 0.5) / vec2(size) * 2.0 - 1.0;
@@ -95,6 +97,11 @@ void main()
         dot(PushConstants.viewToWorld2.xyz, viewNormal)));
 
     SurfaceCacheSample cache = surface_cache_lookup(world.xyz, normal);
+    if (mode == 5) {
+        imageStore(image, pixel, vec4(cache.weight > 0.0
+            ? cache.albedo * cache.indirect : vec3(0.0), 1.0));
+        return;
+    }
     vec3 albedo = texelFetch(gbufferAlbedo, pixel, 0).rgb;
     float albedoLuminance = luminance(albedo);
     float rasterLight = albedoLuminance > 0.05

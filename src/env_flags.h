@@ -96,6 +96,47 @@ static_assert(parse_env_bool("enabled") == EnvBool::Invalid);
 static_assert(parse_env_bool("0 1") == EnvBool::Invalid);
 static_assert(parse_env_bool("-1") == EnvBool::Invalid);
 
+// A boolean control whose default is not "off".  parse_env_bool folds absent
+// into Off, which is right for opt-in features but would silently change the
+// default of a setting that starts enabled.  Absent keeps the caller's
+// default; every present value means what parse_env_bool says it means,
+// including empty, which is Off.  An invalid value is reported as such
+// rather than defaulted, so a parity run cannot quietly render the
+// configuration it was trying to avoid: the caller must stop the run.
+struct EnvBoolOverride {
+    bool valid;
+    bool value;
+
+    constexpr bool operator==(const EnvBoolOverride& other) const
+    {
+        return valid == other.valid && value == other.value;
+    }
+};
+
+constexpr EnvBoolOverride parse_env_bool_override(const char* value, bool fallback)
+{
+    if (value == nullptr) {
+        return {true, fallback};
+    }
+    const EnvBool parsed = parse_env_bool(value);
+    return {parsed != EnvBool::Invalid, parsed == EnvBool::On};
+}
+
+static_assert(parse_env_bool_override(nullptr, true) == EnvBoolOverride{true, true});
+static_assert(parse_env_bool_override(nullptr, false) == EnvBoolOverride{true, false});
+static_assert(parse_env_bool_override("1", false) == EnvBoolOverride{true, true});
+static_assert(parse_env_bool_override("true", false) == EnvBoolOverride{true, true});
+static_assert(parse_env_bool_override(" ON ", false) == EnvBoolOverride{true, true});
+static_assert(parse_env_bool_override("yes", false) == EnvBoolOverride{true, true});
+static_assert(parse_env_bool_override("0", true) == EnvBoolOverride{true, false});
+static_assert(parse_env_bool_override("false", true) == EnvBoolOverride{true, false});
+static_assert(parse_env_bool_override("Off", true) == EnvBoolOverride{true, false});
+static_assert(parse_env_bool_override("no", true) == EnvBoolOverride{true, false});
+static_assert(parse_env_bool_override("", true) == EnvBoolOverride{true, false});
+static_assert(!parse_env_bool_override("2", true).valid);
+static_assert(!parse_env_bool_override("enabled", true).valid);
+static_assert(!parse_env_bool_override("-1", false).valid);
+
 // Integer environment values, for test-only controls that have to be recorded
 // in a result record.  A reference capture whose seed cannot be stated is a
 // capture nobody can repeat, so a wrong value must stop the run rather than

@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 // Lumen-lite surface cache, checkpoint 5: direct light for one card's texels.
 // Stores the light arriving at each captured surface point, without albedo,
@@ -6,11 +7,12 @@
 // (baseColor * that) and later the radiosity that multiplies by albedo once
 // more per bounce.
 //
-// Two sources, because indoors they are not interchangeable.  The sun:
-// sunColor * N.L * visibility.  And the sky, which is what actually lights a
-// room whose windows face daylight -- with sunlight alone a cache texel
-// indoors is black, radiosity bounces that black around the room faithfully,
-// and the ceiling never receives anything.
+// Every direct source lands here, so the page means one thing in every scene:
+// irradiance / pi before receiver albedo (docs/lumen_lite_design.md R4.7).
+// The sun: sunColor * N.L * visibility.  The sky, which is what actually
+// lights a room whose windows face daylight.  And emissive triangles, sampled
+// explicitly with the path tracer's own data and convention; radiosity used
+// to carry emitted light instead, so turning it off lost the first bounce.
 //
 // Visibility comes from a soft shadow march through the scene distance field,
 // not the shadow map: the map only covers the region around the camera, and
@@ -19,6 +21,11 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(rgba16f, set = 0, binding = 0) uniform image2D directPage;
+// Emitter light alone (R4.12): rgb = the emitter share of the direct page,
+// a = its visible fraction.  The forward pass reads this, so it never picks
+// up the sun or sky the forward pass already owns.
+layout(rgba16f, set = 0, binding = 8) uniform image2D emitterPage;
+layout(rgba16f, set = 0, binding = 11) uniform image2D skyPage;
 layout(set = 0, binding = 1) uniform sampler2D normalPage;
 layout(set = 0, binding = 2) uniform sampler2D depthPage;
 // Scene distance field, world units, truncated.  See sdf_composite.comp.
@@ -27,7 +34,27 @@ layout(set = 0, binding = 3) uniform sampler3D sceneField;
 // texel under open sky and a rastered surface under open sky agree.
 layout(set = 0, binding = 4) uniform SkyIrradiance {
     vec4 sh[9];
+    // x = 1 to read the panorama's harmonics, 0 for the analytic gradient
+    // (traceEnvironmentMap, R3.1 parity); y = emitter count; z = the direct
+    // sources kept (bit 0 sun, 1 sky, 2 emitters), a diagnostic mask that
+    // is all three unless MIRABILIS_R4_CACHE_SOURCES names fewer (R4.13).
+    // w = exact BVH sky visibility available (R4.21).
+    uvec4 settings;
+    // x = panorama mip, y = the sky's radiance ceiling (indirectSettings.zw).
+    vec4 environment;
 } sky;
+// The selected panorama, for a hemispherical sky sample that leaves the field.
+layout(set = 0, binding = 9) uniform sampler2D environmentPanorama;
+
+// The path tracer's scene buffers, bound as they are, so emitter geometry,
+// emission and sidedness are the reference's own bytes.
+#include "trace_scene.glsl"
+#include "environment_gradient.glsl"
+layout(std430, set = 0, binding = 5) readonly buffer Triangles { Triangle triangles[]; };
+layout(std430, set = 0, binding = 6) readonly buffer Materials { Material materials[]; };
+layout(std430, set = 0, binding = 7) readonly buffer Emitters { uint emitters[]; };
+struct BVHNode { vec3 minimum; uint first; vec3 maximum; uint count; };
+layout(std430, set = 0, binding = 10) readonly buffer Nodes { BVHNode nodes[]; };
 
 layout(push_constant) uniform constants {
     // Rows of card -> world: input (u, v, depth, 1) with u and v across the
@@ -80,33 +107,164 @@ float sun_visibility(vec3 origin, vec3 direction)
 
 const float Pi = 3.14159265359;
 
-// The same basis, in the same order, as sh_basis() in vk_engine_ibl.cpp and
-// material_ibl_diffuse_light() in material_brdf.glsl.  A cache texel and a
-// rastered surface under the same sky have to agree, or the bounce light
-// disagrees with the direct light it is meant to continue.
-vec3 sky_irradiance(vec3 n)
+float emitter_field_distance(vec3 world)
 {
-    vec3 irradiance =
-        sky.sh[0].rgb * 0.282095 +
-        sky.sh[1].rgb * (0.488603 * n.y) +
-        sky.sh[2].rgb * (0.488603 * n.z) +
-        sky.sh[3].rgb * (0.488603 * n.x) +
-        sky.sh[4].rgb * (1.092548 * n.x * n.y) +
-        sky.sh[5].rgb * (1.092548 * n.y * n.z) +
-        sky.sh[6].rgb * (0.315392 * (3.0 * n.z * n.z - 1.0)) +
-        sky.sh[7].rgb * (1.092548 * n.x * n.z) +
-        sky.sh[8].rgb * (0.546274 * (n.x * n.x - n.y * n.y));
-    // Band-2 ringing can dip below zero opposite a very bright region.
-    return max(irradiance, vec3(0.0)) / Pi;
+    return field_distance(world);
+}
+#define EMITTER_FIELD_VISIBILITY
+#include "emitter_sampling.glsl"
+
+// The cache is lit once, so each texel takes enough stratified samples for a
+// settled estimate.
+const uint EmitterSamples = 64u;
+
+// The sky's irradiance / pi at a cache texel (R4.14), estimated over the whole
+// hemisphere rather than along one cone: cosine-weighted directions from the
+// shared strata, each marched through the scene field.  Only a ray that
+// demonstrably leaves the field sees the sky; a hit, or a march that runs out
+// of steps inside, adds nothing.  Cosine-distributed samples make the mean
+// irradiance / pi directly.
+const uint SkySamples = 32u;
+
+vec3 sky_radiance(vec3 direction)
+{
+    if (sky.settings.x == 0u) {
+        return gradient_radiance(direction);
+    }
+    // environment_radiance()'s panorama read: the same mip, and the same
+    // ceiling separating the sky from a sun disk the sun term delivers.
+    vec3 radiance = textureLod(environmentPanorama, equirectangular_uv(direction),
+        sky.environment.x).rgb;
+    float luminance = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+    if (luminance > sky.environment.y) {
+        radiance *= sky.environment.y / luminance;
+    }
+    return radiance;
 }
 
-// How much of the sky this texel can see, as one cone along the normal.  A
-// texel deep inside a room is largely closed off and should receive little;
-// one on a sill facing a window sees most of it.  The march reuses the sun's
-// softness so an opening's edge fades rather than stepping.
-float sky_visibility(vec3 origin, vec3 normal)
+// Same double-sided triangle and BVH hit convention as the CPU R4 diagnostic.
+// Invalid traversal cannot be interpreted as an opening.
+bool sky_visible_exact(vec3 origin, vec3 direction)
 {
-    return sun_visibility(origin, normal);
+    if (nodes.length() == 0 || triangles.length() == 0) return false;
+    uint stack[64];
+    uint top = 0u;
+    stack[top++] = 0u;
+    while (top > 0u) {
+        uint index = stack[--top];
+        if (index >= nodes.length()) return false;
+        BVHNode node = nodes[index];
+        float low = 0.0001, high = 1e30;
+        for (int axis = 0; axis < 3; ++axis) {
+            if (abs(direction[axis]) < 1e-20) {
+                if (origin[axis] < node.minimum[axis] || origin[axis] > node.maximum[axis]) high = -1.0;
+            } else {
+                float a = (node.minimum[axis] - origin[axis]) / direction[axis];
+                float b = (node.maximum[axis] - origin[axis]) / direction[axis];
+                low = max(low, min(a, b));
+                high = min(high, max(a, b));
+            }
+        }
+        if (high < low) continue;
+        if (node.count == 0u) {
+            if (top + 2u > 64u || node.first + 1u >= nodes.length()) return false;
+            stack[top++] = node.first;
+            stack[top++] = node.first + 1u;
+            continue;
+        }
+        if (node.first >= triangles.length() || node.count > triangles.length() - node.first) return false;
+        for (uint i = node.first; i < node.first + node.count; ++i) {
+            Triangle tri = triangles[i];
+            vec3 e1 = tri.p1.xyz - tri.p0.xyz, e2 = tri.p2.xyz - tri.p0.xyz;
+            vec3 p = cross(direction, e2);
+            float det = dot(e1, p);
+            if (abs(det) < 1e-8) continue;
+            vec3 s = origin - tri.p0.xyz;
+            float u = dot(s, p) / det;
+            if (u < 0.0 || u > 1.0) continue;
+            vec3 q = cross(s, e1);
+            float v = dot(direction, q) / det;
+            if (v < 0.0 || u + v > 1.0) continue;
+            if (dot(e2, q) / det > 0.0001) return false;
+        }
+    }
+    return true;
+}
+
+vec3 sky_irradiance(vec3 world, vec3 normal, ivec2 texel)
+{
+    float voxel = PushConstants.fieldMin.w;
+    vec3 origin = world + normal * (2.5 * voxel);
+    float epsilon = max(0.0002, max(max(abs(world.x), abs(world.y)), abs(world.z)) * 0.000002);
+    vec3 exactOrigin = world + normal * epsilon;
+    vec3 helper = abs(normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(helper, normal));
+    vec3 bitangent = cross(normal, tangent);
+    vec3 rotation = emitter_rotation(uint(texel.x) * 1973u ^ uint(texel.y) * 9277u ^ 0x5bd1e995u);
+    vec3 sum = vec3(0.0);
+    for (uint i = 0u; i < SkySamples; ++i) {
+        vec2 xi = emitter_stratum(i, SkySamples, rotation).yz;
+        float radius = sqrt(xi.x);
+        float angle = 2.0 * Pi * xi.y;
+        vec3 direction = normalize(tangent * (radius * cos(angle)) +
+            bitangent * (radius * sin(angle)) + normal * sqrt(max(1.0 - xi.x, 0.0)));
+        if (sky.settings.w != 0u) {
+            if (sky_visible_exact(exactOrigin, direction)) sum += sky_radiance(direction);
+            continue;
+        }
+        vec3 inverse = 1.0 / direction;
+        vec3 t0 = (PushConstants.fieldMin.xyz - origin) * inverse;
+        vec3 t1 = (PushConstants.fieldMax.xyz - origin) * inverse;
+        float tExit = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
+        float t = 0.0;
+        bool blocked = false;
+        for (int step = 0; step < 96 && t < tExit; ++step) {
+            float d = field_distance(origin + direction * t);
+            if (d < 0.25 * voxel) {
+                blocked = true;
+                break;
+            }
+            t += max(d, 0.5 * voxel);
+        }
+        if (!blocked && t >= tExit) {
+            sum += sky_radiance(direction);
+        }
+    }
+    return sum / float(SkySamples);
+}
+
+// Irradiance / pi from emissive triangles at a cache texel, and the fraction
+// of it visibility lets through (shadowed / unshadowed luminance), which the
+// forward pass applies to its unshadowed emitter specular (R4.12).
+vec3 emitter_irradiance(vec3 world, vec3 normal, ivec2 texel, out float visibleFraction)
+{
+    visibleFraction = 1.0;
+    uint count = sky.settings.y;
+    if (count == 0u) {
+        return vec3(0.0);
+    }
+    float voxel = PushConstants.fieldMin.w;
+    vec3 origin = world + normal * (EmitterClearanceVoxels * voxel);
+    vec3 rotation = emitter_rotation(uint(texel.x) * 1973u ^ uint(texel.y) * 9277u ^ 0x68bc21ebu);
+    const vec3 Luminance = vec3(0.2126, 0.7152, 0.0722);
+    vec3 sum = vec3(0.0);
+    float unshadowed = 0.0;
+    for (uint i = 0u; i < EmitterSamples; ++i) {
+        vec3 direction;
+        vec3 target;
+        vec3 light = emitter_sample(world, normal, count,
+            emitter_stratum(i, EmitterSamples, rotation), voxel, direction, target) *
+            max(dot(normal, direction), 0.0);
+        if (dot(light, light) <= 0.0) {
+            continue;
+        }
+        unshadowed += dot(light, Luminance);
+        sum += light * emitter_visibility(origin, target, voxel);
+    }
+    if (unshadowed > 0.0) {
+        visibleFraction = dot(sum, Luminance) / unshadowed;
+    }
+    return sum / float(EmitterSamples);
 }
 
 void main()
@@ -119,6 +277,8 @@ void main()
     float depth = texelFetch(depthPage, texel, 0).r;
     if (depth >= 1.0) {
         imageStore(directPage, texel, vec4(0.0));
+        imageStore(emitterPage, texel, vec4(0.0, 0.0, 0.0, 1.0));
+        imageStore(skyPage, texel, vec4(0.0));
         return;
     }
 
@@ -129,10 +289,16 @@ void main()
     vec3 normal = normalize(texelFetch(normalPage, texel, 0).xyz * 2.0 - 1.0);
     vec3 lightDirection = normalize(PushConstants.sunDirection.xyz);
     float noL = dot(normal, lightDirection);
+    uint sources = sky.settings.z;
     vec3 light = vec3(0.0);
-    if (noL > 0.0) {
+    if (noL > 0.0 && (sources & 1u) != 0u) {
         float visibility = 1.0;
-        if (PushConstants.sunDirection.w > 0.5) {
+        if (PushConstants.sunDirection.w > 0.5 && sky.settings.w != 0u) {
+            // One exact BVH ray, as the sky uses: the field's shell falsely
+            // blocked three quarters of the sun these texels pass on (R4.60).
+            float epsilon = max(0.0002, max(max(abs(world.x), abs(world.y)), abs(world.z)) * 0.000002);
+            visibility = sky_visible_exact(world + normal * epsilon, lightDirection) ? 1.0 : 0.0;
+        } else if (PushConstants.sunDirection.w > 0.5) {
             // Start clear of the surface's own shell, which sits up to half a
             // bake voxel in front of it, and of the field's own voxel.
             vec3 origin = world + normal * (2.5 * PushConstants.fieldMin.w);
@@ -140,12 +306,20 @@ void main()
         }
         light = PushConstants.sunColor.rgb * noL * visibility;
     }
-    // The sky, along the normal, attenuated by how much of it this texel can
-    // actually see.  Outdoors this is most of the hemisphere; indoors it is
-    // whatever reaches through the windows, which is the light the room is
-    // lit by and the light radiosity needs something to bounce.
-    vec3 skyOrigin = world + normal * (2.5 * PushConstants.fieldMin.w);
-    light += sky_irradiance(normal) * PushConstants.sunColor.w *
-        sky_visibility(skyOrigin, normal);
+    // The sky over the whole hemisphere this texel faces: outdoors most of
+    // it, indoors whatever reaches through the windows.
+    vec3 skyLight = (sources & 2u) != 0u
+        ? sky_irradiance(world, normal, texel) * PushConstants.sunColor.w
+        : vec3(0.0);
+    light += skyLight;
+    float visibleFraction;
+    vec3 emitterLight = (sources & 4u) != 0u
+        ? emitter_irradiance(world, normal, texel, visibleFraction) : vec3(0.0);
+    if ((sources & 4u) == 0u) {
+        visibleFraction = 1.0;
+    }
+    light += emitterLight;
     imageStore(directPage, texel, vec4(light, 1.0));
+    imageStore(emitterPage, texel, vec4(emitterLight, visibleFraction));
+    imageStore(skyPage, texel, vec4(skyLight, 1.0));
 }

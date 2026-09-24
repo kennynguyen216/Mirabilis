@@ -3,9 +3,9 @@
 // the software path tracer's BRDF (path_trace_material.glsl) copied formula
 // for formula, which keeps that renderer a meaningful reference.
 //
-// Light units: the raster sun colour behaves as irradiance, and the Lambert
-// term this replaced had no 1/pi.  Each BRDF below is therefore multiplied by
-// pi, so a rough dielectric keeps the brightness it had.
+// Light units: sunlightColor is the path tracer's sun irradiance divided by
+// pi (set in build_scene_data), and each BRDF below is multiplied by pi, so
+// the two renderers light a surface identically.
 //
 // Include after input_structures.glsl.
 
@@ -136,27 +136,24 @@ vec3 material_fresnel_schlick(vec3 f0, float voH)
     return f0 + (1.0 - f0) * pow(clamp(1.0 - voH, 0.0, 1.0), 5.0);
 }
 
-// Direct sunlight, split into the part that leaves a surface in every
-// direction and the part that depends on where it is seen from.
-// visibility is the shadow-map result.
-void material_sun(
+// Light from one direction, split into the part that leaves a surface in
+// every direction and the part that depends on where it is seen from.
+// light is irradiance / pi per unit receiver cosine, visibility included:
+// the sun colour times its shadow, or one explicit emitter sample.
+void material_direct_light(
     MaterialSurface surface,
-    float visibility,
+    vec3 lightDirection,
+    vec3 light,
     out vec3 diffuse,
     out vec3 specular)
 {
     diffuse = vec3(0.0);
     specular = vec3(0.0);
-    // y = 1 is the ambient-only tuning view.
-    if (sceneData.screenSpaceSettings.y > 0.5) {
-        return;
-    }
-    vec3 lightDirection = normalize(sceneData.sunlightDirection.xyz);
     float noL = dot(surface.normal, lightDirection);
     if (noL <= 0.0) {
         return;
     }
-    vec3 sun = MaterialPi * sceneData.sunlightColor.rgb * noL * visibility;
+    vec3 sun = MaterialPi * light * noL;
     if (!material_specular_enabled()) {
         // Lambert alone: exactly the term this model replaced.
         diffuse = surface.baseColor / MaterialPi * sun;
@@ -179,6 +176,23 @@ void material_sun(
         material_smith_g1(noL, alpha);
     specular = fresnel * distribution /
         max(4.0 * surface.noV * noL, 1e-4) * sun;
+}
+
+// Direct sunlight.  visibility is the shadow-map result.
+void material_sun(
+    MaterialSurface surface,
+    float visibility,
+    out vec3 diffuse,
+    out vec3 specular)
+{
+    diffuse = vec3(0.0);
+    specular = vec3(0.0);
+    // y = 1 is the ambient-only tuning view.
+    if (sceneData.screenSpaceSettings.y > 0.5) {
+        return;
+    }
+    material_direct_light(surface, normalize(sceneData.sunlightDirection.xyz),
+        sceneData.sunlightColor.rgb * visibility, diffuse, specular);
 }
 
 // Karis, "Physically Based Shading on Mobile" (2014): an analytic fit of the
@@ -294,6 +308,58 @@ vec3 material_diffuse_albedo(MaterialSurface surface)
     return material_specular_enabled()
         ? surface.baseColor * (1.0 - surface.metallic)
         : surface.baseColor;
+}
+
+// Emitter light at the visible surface (docs/lumen_lite_design.md R4.12).
+// Diffuse reads the surface cache's emitter page, which already carries the
+// cache's 64 visibility-tested samples, so no field is marched per fragment:
+// Lambert only, since the per-direction (1 - F) of material_direct_light()
+// cannot be applied to cached irradiance.  Specular stays explicit: a few
+// unshadowed samples through the same BRDF as the sun, scaled by the cached
+// visible fraction.  A surface the cache does not cover gets no estimate.
+#include "emitter_sampling.glsl"
+
+void material_emitters(
+    MaterialSurface surface,
+    vec3 worldPosition,
+    vec3 geometricNormal,
+    vec2 pixel,
+    out vec3 diffuse,
+    out vec3 specular)
+{
+    diffuse = vec3(0.0);
+    specular = vec3(0.0);
+    uint count = uint(sceneData.emitterSettings.x + 0.5);
+    if (count == 0u || sceneData.screenSpaceSettings.y > 0.5) {
+        return;
+    }
+    SurfaceCacheSample cached = surface_cache_lookup(worldPosition, geometricNormal);
+    if (sceneData.emitterSettings.w > 0.5) {
+        // Coverage: 1 where the cache answered, 0.5 where it did not.
+        diffuse = vec3(cached.weight > 0.0 ? 1.0 : 0.5);
+        return;
+    }
+    if (cached.weight <= 0.0) {
+        return;
+    }
+    diffuse = material_diffuse_albedo(surface) * cached.direct;
+    if (!material_specular_enabled()) {
+        return;
+    }
+    uint samples = max(uint(sceneData.emitterSettings.z + 0.5), 1u);
+    vec3 rotation = emitter_rotation(uint(pixel.x) * 1973u ^ uint(pixel.y) * 9277u ^
+        uint(sceneData.emitterSettings.y + 0.5) * 26699u);
+    for (uint i = 0u; i < samples; ++i) {
+        vec3 direction;
+        vec3 target;
+        vec3 light = emitter_sample(worldPosition, geometricNormal, count,
+            emitter_stratum(i, samples, rotation), 0.0, direction, target);
+        vec3 sampleDiffuse;
+        vec3 sampleSpecular;
+        material_direct_light(surface, direction, light, sampleDiffuse, sampleSpecular);
+        specular += sampleSpecular;
+    }
+    specular *= cached.directAlpha / float(samples);
 }
 
 // Emitted radiance: added once, unaffected by lighting, shadow or occlusion,

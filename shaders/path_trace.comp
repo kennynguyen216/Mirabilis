@@ -3,8 +3,7 @@
 layout(local_size_x=8,local_size_y=8) in;
 layout(set=0,binding=0,rgba16f) uniform writeonly image2D displayImage;
 layout(set=0,binding=1,rgba32f) uniform image2D historyImage;
-struct Triangle { vec4 p0; vec4 p1; vec4 p2; vec4 n0; vec4 n1; vec4 n2; vec4 uv12; uvec4 meta; vec4 c0; vec4 c1; vec4 c2; };
-struct Material { vec4 baseColor; vec4 emission; vec4 parameters; vec4 uvScale; uvec4 textureInfo; };
+#include "trace_scene.glsl"
 layout(std430,set=0,binding=2) readonly buffer Triangles { Triangle triangles[]; };
 layout(std430,set=0,binding=3) readonly buffer Materials { Material materials[]; };
 layout(set=0,binding=5) uniform sampler2D rasterDepth;

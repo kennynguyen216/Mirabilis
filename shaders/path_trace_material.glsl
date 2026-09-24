@@ -26,16 +26,22 @@ float ggxD(float noH,float alpha) {
 float smithG1(float noV,float alpha) {return 2*noV/(noV+sqrt(alpha*alpha+(1-alpha*alpha)*noV*noV));}
 vec3 fresnelSchlick(vec3 f0,float voH) {return f0+(1-f0)*pow(clamp(1-voH,0,1),5);}
 float specularProbability(Material m) {return m.parameters.x>=0.999?1.0:0.5;}
-vec3 evaluateBRDF(Material m,vec3 albedo,vec3 n,vec3 view,vec3 outgoing) {
+void evaluateBRDFComponents(Material m,vec3 albedo,vec3 n,vec3 view,vec3 outgoing,
+    out vec3 diffuse,out vec3 specular) {
     float noV=dot(n,view),noL=dot(n,outgoing);
-    if(noV<=0||noL<=0) return vec3(0);
-    if(pc.sampling.z==0u) return albedo/3.14159265359;
-    vec3 sum=view+outgoing; if(dot(sum,sum)<1e-12) return vec3(0);
+    diffuse=vec3(0); specular=vec3(0);
+    if(noV<=0||noL<=0) return;
+    if(pc.sampling.z==0u) {diffuse=albedo/3.14159265359;return;}
+    vec3 sum=view+outgoing; if(dot(sum,sum)<1e-12) return;
     vec3 h=normalize(sum); float voH=max(dot(view,h),0),noH=max(dot(n,h),0);
     float alpha=max(m.parameters.y*m.parameters.y,0.002025);
     vec3 f=fresnelSchlick(mix(vec3(0.04),albedo,clamp(m.parameters.x,0,1)),voH);
-    vec3 diffuse=(1-f)*(1-clamp(m.parameters.x,0,1))*albedo/3.14159265359;
-    vec3 specular=f*(ggxD(noH,alpha)*smithG1(noV,alpha)*smithG1(noL,alpha)/(4*noV*noL));
+    diffuse=(1-f)*(1-clamp(m.parameters.x,0,1))*albedo/3.14159265359;
+    specular=f*(ggxD(noH,alpha)*smithG1(noV,alpha)*smithG1(noL,alpha)/(4*noV*noL));
+}
+vec3 evaluateBRDF(Material m,vec3 albedo,vec3 n,vec3 view,vec3 outgoing) {
+    vec3 diffuse,specular;
+    evaluateBRDFComponents(m,albedo,n,view,outgoing,diffuse,specular);
     return diffuse+specular;
 }
 float brdfPdf(Material m,vec3 n,vec3 view,vec3 outgoing) {

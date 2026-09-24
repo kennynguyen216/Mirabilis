@@ -1418,11 +1418,20 @@ void VulkanEngine::draw_sun_shadow_settings()
             "Shadow Radius", &_shadow.radius, 10.0f, 200.0f);
         ImGui::Checkbox("Show Shadow Bounds", &_shadow.showBounds);
         // Too little bias and surfaces shadow themselves; too much and a
-        // shadow detaches from the object casting it.
+        // shadow detaches from the object casting it.  The R4.41 candidate
+        // derives both from the shadow texel instead (build_scene_data());
+        // the authored values apply only under the same-build control.
+        const bool authoredShadowBias =
+            SDL_getenv("MIRABILIS_R4_AUTHORED_SHADOW_CONTROL") != nullptr;
+        ImGui::BeginDisabled(!authoredShadowBias);
         lightingEdited |= ImGui::SliderFloat(
             "Depth Bias", &_shadow.depthBias, 0.0f, 0.005f, "%.5f");
         lightingEdited |= ImGui::SliderFloat(
             "Normal Bias", &_shadow.normalBias, 0.0f, 0.5f, "%.3f");
+        ImGui::EndDisabled();
+        if (!authoredShadowBias) {
+            ImGui::TextDisabled("Bias derived from shadow texel size (R4.41)");
+        }
         ImGui::SliderFloat(
             "Shadow Softness", &_shadow.filterRadius,
             0.0f, 12.0f, "%.2f texels");
@@ -1676,18 +1685,7 @@ void VulkanEngine::draw_screen_buffer_settings()
         ImGui::SeparatorText("SSGI Milestone 7");
         ImGui::SliderFloat(
             "Indirect Intensity", &_ssgi.intensity, 0.0f, 2.0f, "%.2f");
-        // Enabling SSGI used to delete the flat ambient term outright, which
-        // is why turning it on read as a large drop in brightness rather than
-        // as indirect light.  The two are alternative answers to the same
-        // question, so the split between them is now visible and adjustable.
-        ImGui::SliderFloat(
-            "Ambient Retention", &_ssgi.ambientRetention, 0.0f, 1.0f, "%.2f");
-        ImGui::TextDisabled("0: SSGI replaces flat ambient.");
-        ImGui::TextDisabled(
-            "1: SSGI adds on top of it, which counts sky fill");
-        ImGui::TextDisabled(
-            "twice but can never darken a region SSGI has");
-        ImGui::TextDisabled("nothing to say about.");
+        ImGui::TextDisabled("SSGI owns diffuse environment light while it runs.");
         // A traced ray that leaves the depth buffer has to be filled from
         // somewhere.  The analytic gradient is what the software path tracer
         // still uses, so it stays reachable for reference comparisons.

@@ -38,9 +38,8 @@ layout(set = 0, binding = 0) uniform SceneData {
     vec4 ssgiFallbackSettings;
     // x = PCF footprint radius in shadow-map texels.
     vec4 shadowFilterSettings;
-    // How the flat ambient term and the screen-space indirect estimate divide
-    // the same job.  x = the fraction of ambient that survives while SSGI is
-    // enabled, y = 1 to fill SSGI ray misses from the environment map rather
+    // x = unused (SSGI owns diffuse environment since R4),
+    // y = 1 to fill SSGI ray misses from the environment map rather
     // than the analytic gradient, z = the mip level to sample it at,
     // w = the radiance ceiling a miss ray may return, which separates the
     // sky from a sun disk the direct term already delivers.
@@ -63,4 +62,9 @@ layout(set = 0, binding = 0) uniform SceneData {
     vec4 iblSettings;
     // Band-2 spherical-harmonic irradiance, convolved and sun-clamped.
     vec4 environmentSH[9];
+    // Emitter light at the visible surface (R4.9, R4.12).  x = emitter
+    // triangles sampled, 0 while off (no lit surface cache, no software trace
+    // scene), y = frame index for the per-frame sample rotation, z = specular
+    // samples per pixel, w = 1 while measuring cache-lookup coverage.
+    vec4 emitterSettings;
 } sceneData;

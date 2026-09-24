@@ -8,6 +8,7 @@
 #include <vk_images.h>
 
 #include "env_flags.h"
+#include "r4_contributions.h"
 
 #include <algorithm>
 #include <array>
@@ -15,6 +16,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <fstream>
 #include <thread>
 
 #define VMA_IMPLEMENTATION
@@ -213,6 +215,8 @@ void VulkanEngine::init()
     if (SDL_getenv("MIRABILIS_MAX_FIDELITY")) {
         apply_max_fidelity_settings();
     }
+    // R4.64 same-build control for the motion-scaled temporal clamp.
+    _ssgi.fullClampControl = SDL_getenv("MIRABILIS_R4_FULL_CLAMP_CONTROL") != nullptr;
     if (const char* sdfPath = SDL_getenv("MIRABILIS_VALIDATE_SDF")) {
         validate_sdf_bake(sdfPath);
     }
@@ -223,11 +227,68 @@ void VulkanEngine::init()
         // fast for comparison purposes rather than reading as "capped at 60".
         _frameRateCapEnabled = false;
     }
+    if (SDL_getenv("MIRABILIS_R4_UNCAP_FRAMES")) {
+        _frameRateCapEnabled = false;
+    }
     // After the presets, so a capture run can compare against the frame
     // without screen-space GI whatever else it asked for.
     apply_env_flag("MIRABILIS_LUMEN_LITE", _ssgi.lumenEnabled);
     apply_env_flag("MIRABILIS_SSGI_PROBES", _ssgi.probesEnabled);
     apply_env_flag("MIRABILIS_SSGI_HZB", _ssgi.hzbEnabled);
+    // R3.1 environment parity: a candidate compared against a path-traced
+    // reference must light ray misses from the analytic gradient, as the
+    // reference does.  Absent keeps the skybox default; an unreadable value
+    // stops the run rather than rendering a comparison that cannot be valid.
+    {
+        const EnvBoolOverride traceEnvironmentMap = parse_env_bool_override(
+            SDL_getenv("MIRABILIS_SSGI_TRACE_ENVIRONMENT_MAP"),
+            _ssgi.traceEnvironmentMap);
+        if (!traceEnvironmentMap.valid) {
+            fmt::print("GI TEST FAIL: MIRABILIS_SSGI_TRACE_ENVIRONMENT_MAP is not a boolean "
+                "(use 0/1, false/true, off/on, no/yes)\n");
+            std::abort();
+        }
+        _ssgi.traceEnvironmentMap = traceEnvironmentMap.value;
+    }
+    // R4.1 instrumentation.  Test-only, and inert while unset; a value that
+    // does not parse stops the run, because a capture labelled with owners it
+    // did not isolate would be read as evidence.
+    {
+        const r4::Contributions contributions =
+            r4::parse_contributions(SDL_getenv("MIRABILIS_R4_CONTRIBUTIONS"));
+        if (!contributions.valid) {
+            fmt::print("GI TEST FAIL: MIRABILIS_R4_CONTRIBUTIONS must list owner names "
+                "from src/r4_contributions.h, separated by commas\n");
+            std::abort();
+        }
+        _r4Contributions.forward = contributions.forward;
+        _r4Contributions.ray = contributions.ray;
+        const EnvBool coverage = parse_env_bool(SDL_getenv("MIRABILIS_R4_RAY_COVERAGE"));
+        if (coverage == EnvBool::Invalid) {
+            fmt::print("GI TEST FAIL: MIRABILIS_R4_RAY_COVERAGE is not a boolean\n");
+            std::abort();
+        }
+        _r4Contributions.rayCoverage = coverage == EnvBool::On;
+        const r4::CacheSources sources =
+            r4::parse_cache_sources(SDL_getenv("MIRABILIS_R4_CACHE_SOURCES"));
+        if (!sources.valid) {
+            fmt::print("GI TEST FAIL: MIRABILIS_R4_CACHE_SOURCES must list sun, sky or emitter, "
+                "separated by commas\n");
+            std::abort();
+        }
+        _r4Contributions.cacheSources = sources.mask;
+        const r4::CacheSources lights =
+            r4::parse_light_sources(SDL_getenv("MIRABILIS_R4_LIGHT_SOURCES"));
+        if (!lights.valid) {
+            fmt::print("GI TEST FAIL: MIRABILIS_R4_LIGHT_SOURCES must list sun or sky, "
+                "separated by commas\n");
+            std::abort();
+        }
+        _r4Contributions.lightSources = lights.mask;
+        _r4Contributions.sunVisibilityCheck = SDL_getenv("MIRABILIS_R4_SUN_VISIBILITY_CHECK") != nullptr;
+        // The startup scene was loaded before this ran.
+        apply_r4_light_sources();
+    }
     if (SDL_getenv("MIRABILIS_SSGI_DISABLE")) {
         _ssgi.enabled = false;
     }
@@ -388,6 +449,8 @@ void VulkanEngine::init_vulkan()
     anisotropyFeature.samplerAnisotropy = VK_TRUE;
     _samplerAnisotropySupported =
         physicalDevice.enable_features_if_present(anisotropyFeature);
+    _conservativeRasterSupported = physicalDevice.enable_extension_if_present(
+        VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
 
     // create the vulkan device now
 
@@ -620,6 +683,8 @@ void VulkanEngine::draw(float deltaTime)
         update_surface_cache();
         update_surface_cache_radiosity();
     }
+    // After the field and the trace scene are current, before recording.
+    write_emitter_descriptors(get_current_frame());
 
     VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
 
@@ -688,6 +753,13 @@ void VulkanEngine::draw(float deltaTime)
 
 	ComputeEffect& effect = backgroundEffects[currentBackgroundEffect];
 
+	if ((_r4Contributions.forward & r4::Background) == 0u) {
+		// R4: the background owner removed, so sky pixels hold nothing.
+		const VkClearColorValue black{{0.0f, 0.0f, 0.0f, 1.0f}};
+		const VkImageSubresourceRange range =
+			vkinit::image_subresource_range(VK_IMAGE_ASPECT_COLOR_BIT);
+		vkCmdClearColorImage(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &range);
+	} else {
 	// bind the selected background compute pipeline
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, effect.pipeline);
 
@@ -701,6 +773,7 @@ void VulkanEngine::draw(float deltaTime)
 	vkCmdDispatch(cmd,
 		static_cast<uint32_t>(std::ceil(_drawExtent.width / 16.0)),
 		static_cast<uint32_t>(std::ceil(_drawExtent.height / 16.0)), 1);
+	}
 
 	vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 	vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -981,6 +1054,12 @@ void VulkanEngine::run(){
         begin_cinematic_recording(
             cinematicFrames, outputDirectory, /*quitWhenDone=*/true);
     }
+    std::ofstream r4FrameTimes;
+    if (const char* path = SDL_getenv("MIRABILIS_R4_FRAME_TIME_LOG")) {
+        r4FrameTimes.open(path);
+        if (!r4FrameTimes) std::abort();
+        r4FrameTimes << "frame,ms\n";
+    }
     auto previousTime = std::chrono::steady_clock::now();
 
     //main loop
@@ -1098,6 +1177,11 @@ void VulkanEngine::run(){
             if(testFrame==17&&!_authoredPortals.pairs.empty()) _authoredPortals.pairs[0].first.position.x+=0.125f;
         }
         draw(deltaTime);
+        if (r4FrameTimes && _cinematic.recording) {
+            const double elapsedMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - currentTime).count();
+            r4FrameTimes << _cinematic.frameIndex << ',' << elapsedMs << '\n';
+        }
         if (_cinematic.recording) {
             capture_cinematic_frame();
             ++_cinematic.frameIndex;
@@ -1143,8 +1227,9 @@ void VulkanEngine::run(){
             if (benchmarkFrames > 0) {
                 const VkExtent2D extent = active_ssgi_extent();
                 fmt::print(
-                    "SSGI benchmark: preset={} extent={}x{} average-frame-ms={:.3f} average-ssgi-gpu-ms={:.3f} average-trace-gpu-ms={:.3f} samples={}\n",
+                    "SSGI benchmark: preset={} extent={}x{} trace-environment-map={} average-frame-ms={:.3f} average-ssgi-gpu-ms={:.3f} average-trace-gpu-ms={:.3f} samples={}\n",
                     _ssgi.qualityPreset, extent.width, extent.height,
+                    _ssgi.traceEnvironmentMap,
                     benchmarkMilliseconds / benchmarkFrames,
                     benchmarkSsgiMilliseconds / benchmarkFrames,
                     benchmarkTraceMilliseconds / benchmarkFrames,
@@ -1153,6 +1238,8 @@ void VulkanEngine::run(){
             if (const char* capture=SDL_getenv("MIRABILIS_CAPTURE")) capture_path_trace(capture);
             if (const char* capture=SDL_getenv("MIRABILIS_SSGI_CAPTURE")) capture_ssgi(capture);
             if (const char* capture=SDL_getenv("MIRABILIS_RASTER_CAPTURE")) capture_raster(capture);
+            if (const char* path=SDL_getenv("MIRABILIS_R4_SOURCE_IMPORTANCE_CSV"))
+                measure_cache_source_importance(path);
             fmt::print("GI bounded run complete: frames={} renderer={}\n",_frameNumber,
                 _rendererMode==RendererMode::SoftwarePathTrace&&_traceSupported?"software":"raster");
             bQuit = true;

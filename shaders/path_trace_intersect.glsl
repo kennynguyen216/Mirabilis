@@ -47,15 +47,5 @@ vec3 shadingNormal(Triangle t,vec2 b,vec3 geometric) {
 // normals rather than with its winding.  The two disagree under a mirrored
 // transform -- the winding reverses while transpose(inverse(linear)) leaves
 // the normal alone -- and on imported geometry with inconsistent winding.
-// Emission sidedness has to use one convention in every renderer: the forward
-// pass and the surface cache both classify it from the authored normal, so a
-// winding-derived test here would let a panel glow in the raster image and
-// emit from its other face in the reference trace.
-//
-// The plane normal is what is returned, not the interpolated vertex normal:
-// only its SIGN is taken from the authored normals, because the area-to-solid
-// -angle conversion at an area light needs the geometric normal.
-vec3 authoredSideNormal(Triangle t,vec3 geometric) {
-    vec3 authored=t.n0.xyz+t.n1.xyz+t.n2.xyz;
-    return dot(authored,authored)>1e-16&&dot(authored,geometric)<0?-geometric:geometric;
-}
+// authoredSideNormal() lives in trace_scene.glsl, shared with the surface
+// cache's emitter sampling.

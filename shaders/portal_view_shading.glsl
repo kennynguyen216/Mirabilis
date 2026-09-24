@@ -60,8 +60,7 @@ void main()
     // portal camera cannot see.  It only stops the two cameras disagreeing
     // about how much indirect light there is.
     float substitute = sceneData.portalIndirectSettings.x;
-    float ambientScale = mix(
-        1.0, clamp(sceneData.indirectSettings.x, 0.0, 1.0), substitute);
+    float ambientScale = 1.0 - substitute;
     vec3 ambientLight = sceneData.ambientColor.rgb * occlusion * ambientScale +
         substitute * environment_irradiance(normal) * occlusion;
 
