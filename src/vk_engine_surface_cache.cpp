@@ -438,9 +438,14 @@ void VulkanEngine::init_surface_cache_resources()
             VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1,
                 &createInfo, nullptr, &_surfaceCache.radiosityPipeline));
         }
+        VkQueryPoolCreateInfo query{.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        query.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        query.queryCount = 2 * FRAME_OVERLAP;
+        VK_CHECK(vkCreateQueryPool(_device, &query, nullptr, &_surfaceCache.radiosityTimestampPool));
     }
 
     _mainDeletionQueue.push_function([this]() {
+        vkDestroyQueryPool(_device, _surfaceCache.radiosityTimestampPool, nullptr);
         vkDestroyPipeline(_device, _surfaceCache.radiosityPipeline, nullptr);
         vkDestroyPipelineLayout(_device, _surfaceCache.radiosityPipelineLayout, nullptr);
         vkDestroyDescriptorSetLayout(_device, _surfaceCache.radiosityLayout, nullptr);
@@ -781,17 +786,19 @@ void VulkanEngine::update_surface_cache()
 
     _surfaceCache.lightingValid = false;
     _surfaceCache.lightingHash = 0;
-    // A recapture moves cards, so bounce light starts again from zero.
+    // A recapture moves cards, so bounce light starts again from zero, in
+    // both pages: radiosity relies on them being equal between updates.
     immediate_submit([&](VkCommandBuffer cmd) {
-        vkutil::transition_image(cmd, _surfaceCache.indirect.image,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
         VkClearColorValue zero{};
         const VkImageSubresourceRange range =
             vkinit::image_subresource_range(VK_IMAGE_ASPECT_COLOR_BIT);
-        vkCmdClearColorImage(cmd, _surfaceCache.indirect.image,
-            VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
-        vkutil::transition_image(cmd, _surfaceCache.indirect.image,
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        for (VkImage page : {_surfaceCache.indirect.image, _surfaceCache.indirectPrevious.image}) {
+            vkutil::transition_image(cmd, page,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+            vkCmdClearColorImage(cmd, page, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+            vkutil::transition_image(cmd, page,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
     });
     _surfaceCache.radiosityCursor = 0;
     _surfaceCache.radiosityUpdate = 0;
@@ -1287,24 +1294,29 @@ bool VulkanEngine::lumen_lite_ready() const
         _surfaceCache.albedoVolume.image != VK_NULL_HANDLE;
 }
 
-void VulkanEngine::update_surface_cache_radiosity()
+void VulkanEngine::update_surface_cache_radiosity(VkCommandBuffer cmd)
 {
+    // This slot's fence has passed, so the timing it last wrote is final.
+    const uint32_t slot = _frameNumber % FRAME_OVERLAP;
+    if (_surfaceCache.radiosityTimingWritten[slot]) {
+        _surfaceCache.radiosityTimingWritten[slot] = false;
+        std::array<uint64_t, 2> ticks{};
+        if (vkGetQueryPoolResults(_device, _surfaceCache.radiosityTimestampPool, slot * 2, 2,
+                sizeof(ticks), ticks.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+            _surfaceCache.radiosityMilliseconds =
+                float(ticks[1] - ticks[0]) * _gpuTiming.timestampPeriod * 1e-6f;
+        }
+    }
     if (!_surfaceCache.radiosityEnabled || !_surfaceCache.valid ||
         !_surfaceCache.lightingValid || !_surfaceCache.lookupValid ||
         !_sceneSdf.fieldValid || _surfaceCache.radiosityPipeline == VK_NULL_HANDLE ||
         _surfaceCache.cards.empty()) {
         return;
     }
-    const auto started = std::chrono::steady_clock::now();
     const auto& cards = _surfaceCache.cards;
 
-    std::array<DescriptorAllocatorGrowable::PoolSizeRatio, 3> ratios{{
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1.0f},
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 7.0f},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3.0f}}};
-    DescriptorAllocatorGrowable pool;
-    pool.init(_device, 1, ratios);
-    VkDescriptorSet set = pool.allocate(_device, _surfaceCache.radiosityLayout);
+    VkDescriptorSet set = get_current_frame()._frameDescriptors.allocate(
+        _device, _surfaceCache.radiosityLayout);
     DescriptorWriter writer;
     writer.write_image(0, _surfaceCache.indirect.imageView, VK_NULL_HANDLE,
         VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
@@ -1346,50 +1358,66 @@ void VulkanEngine::update_surface_cache_radiosity()
         (_surfaceCache.radiosityCursor + static_cast<uint32_t>(batch.size())) % cardCount;
     const uint32_t update = _surfaceCache.radiosityUpdate++;
 
-    const VkDescriptorSet sceneSet = get_current_frame().sceneDescriptor;
-    immediate_submit([&](VkCommandBuffer cmd) {
-        // ponytail: copies the whole page each update; copy only the texels
-        // bounces can reach if the atlas copy shows up in a profile.
-        const VkExtent2D atlas{_surfaceCache.atlasSize.x, _surfaceCache.atlasSize.y};
-        vkutil::transition_image(cmd, _surfaceCache.indirect.image,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-        vkutil::transition_image(cmd, _surfaceCache.indirectPrevious.image,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        vkutil::copy_image_to_image(cmd, _surfaceCache.indirect.image,
-            _surfaceCache.indirectPrevious.image, atlas, atlas);
-        vkutil::transition_image(cmd, _surfaceCache.indirectPrevious.image,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        vkutil::transition_image(cmd, _surfaceCache.indirect.image,
-            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _surfaceCache.radiosityPipeline);
-        const std::array<VkDescriptorSet, 2> sets{sceneSet, set};
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-            _surfaceCache.radiosityPipelineLayout, 0, 2, sets.data(), 0, nullptr);
-        for (uint32_t index : batch) {
-            const SurfaceCard& card = cards[index];
-            SurfaceCacheRadiosityPushConstants push{};
-            push.cardToWorld0 = glm::row(card.cardToWorld, 0);
-            push.cardToWorld1 = glm::row(card.cardToWorld, 1);
-            push.cardToWorld2 = glm::row(card.cardToWorld, 2);
-            push.rect = card.rect;
-            push.control = glm::uvec4(update, _surfaceCache.raysPerTexel,
-                _surfaceCache.singleBounce ? 1u : 0u, 0);
-            uint32_t& updates = _surfaceCache.cardUpdates[index];
-            const float blend = std::max(
-                1.0f / float(updates + 1), _surfaceCache.radiosityBlend);
-            ++updates;
-            push.settings = glm::vec4(
-                blend, _surfaceCache.radiosityMaxDistance, 0.0f, 0.0f);
-            vkCmdPushConstants(cmd, _surfaceCache.radiosityPipelineLayout,
-                VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-            vkCmdDispatch(cmd, (card.rect.z + 7) / 8, (card.rect.w + 7) / 8, 1);
-        }
-        vkutil::transition_image(cmd, _surfaceCache.indirect.image,
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    });
-    pool.destroy_pools(_device);
-    _surfaceCache.radiosityMilliseconds = std::chrono::duration<float, std::milli>(
-        std::chrono::steady_clock::now() - started).count();
+    const bool timed = _gpuTiming.supported;
+    if (timed) {
+        vkCmdResetQueryPool(cmd, _surfaceCache.radiosityTimestampPool, slot * 2, 2);
+        vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            _surfaceCache.radiosityTimestampPool, slot * 2);
+    }
+    // Bounces read indirectPrevious, which equals indirect here; the batch is
+    // written into indirect, then copied back so the two agree again.  The
+    // barriers are all-commands, so the previous frame's reads of indirect
+    // finish before this update writes it.
+    vkutil::transition_image(cmd, _surfaceCache.indirect.image,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _surfaceCache.radiosityPipeline);
+    const std::array<VkDescriptorSet, 2> sets{get_current_frame().sceneDescriptor, set};
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+        _surfaceCache.radiosityPipelineLayout, 0, 2, sets.data(), 0, nullptr);
+    std::vector<VkImageCopy> regions;
+    regions.reserve(batch.size());
+    for (uint32_t index : batch) {
+        const SurfaceCard& card = cards[index];
+        SurfaceCacheRadiosityPushConstants push{};
+        push.cardToWorld0 = glm::row(card.cardToWorld, 0);
+        push.cardToWorld1 = glm::row(card.cardToWorld, 1);
+        push.cardToWorld2 = glm::row(card.cardToWorld, 2);
+        push.rect = card.rect;
+        push.control = glm::uvec4(update, _surfaceCache.raysPerTexel,
+            _surfaceCache.singleBounce ? 1u : 0u, 0);
+        uint32_t& updates = _surfaceCache.cardUpdates[index];
+        const float blend = std::max(
+            1.0f / float(updates + 1), _surfaceCache.radiosityBlend);
+        ++updates;
+        push.settings = glm::vec4(
+            blend, _surfaceCache.radiosityMaxDistance, 0.0f, 0.0f);
+        vkCmdPushConstants(cmd, _surfaceCache.radiosityPipelineLayout,
+            VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+        vkCmdDispatch(cmd, (card.rect.z + 7) / 8, (card.rect.w + 7) / 8, 1);
+
+        VkImageCopy& region = regions.emplace_back();
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.dstSubresource = region.srcSubresource;
+        region.srcOffset = {int32_t(card.rect.x), int32_t(card.rect.y), 0};
+        region.dstOffset = region.srcOffset;
+        region.extent = {card.rect.z, card.rect.w, 1};
+    }
+    vkutil::transition_image(cmd, _surfaceCache.indirect.image,
+        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    vkutil::transition_image(cmd, _surfaceCache.indirectPrevious.image,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    vkCmdCopyImage(cmd, _surfaceCache.indirect.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        _surfaceCache.indirectPrevious.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        static_cast<uint32_t>(regions.size()), regions.data());
+    vkutil::transition_image(cmd, _surfaceCache.indirectPrevious.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vkutil::transition_image(cmd, _surfaceCache.indirect.image,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (timed) {
+        vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            _surfaceCache.radiosityTimestampPool, slot * 2 + 1);
+        _surfaceCache.radiosityTimingWritten[slot] = true;
+    }
 }
 
 void VulkanEngine::measure_surface_cache_shadows()

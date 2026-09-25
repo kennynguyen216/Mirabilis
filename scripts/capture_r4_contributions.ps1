@@ -19,8 +19,13 @@
 #                by source.  Measurement only.
 #   measure      the whole R4.1 matrix: repeats, owner isolation, owner
 #                removal and ray coverage, for configurations S, L and L0
+#   determinism  R5.1: full captures at frames 1, 32, 128 and 256, three runs
+#                each, for the -Config configurations; compare hashes.txt
+#
+# benchmark without -Config keeps the R4 form (L0, runs a/b).  With -Config it
+# interleaves the named configurations over runs a/b/c (R5.1 overhead gate).
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('equivalence', 'measure', 'benchmark', 'sources')][string]$Phase,
+    [Parameter(Mandatory = $true)][ValidateSet('equivalence', 'measure', 'benchmark', 'sources', 'determinism')][string]$Phase,
     [string]$Label = '',
     # One scene per invocation keeps each foreground run short; both is the default.
     [ValidateSet('cornell', 'living-room', 'both')][string]$Scene = 'both',
@@ -248,16 +253,32 @@ try {
             continue
         }
         if ($Phase -eq 'benchmark') {
-            foreach ($run in @('a', 'b')) {
-                $v = Get-BaseVariables $case 300
-                $v['MIRABILIS_LUMEN_LITE'] = '1'
-                $v['MIRABILIS_SURFACE_CACHE_RADIOSITY'] = '0'
-                $v['MIRABILIS_SSGI_BENCHMARK'] = '1'
-                $name = $case.name + '-L0-benchmark-' + $run
-                Invoke-Capture $name $v
-                $line = Select-String -Path (Join-Path $output ($name + '.log')) -Pattern 'SSGI benchmark:' | Select-Object -Last 1
-                if (!$line) { throw ('No benchmark line for ' + $name) }
-                Add-Content (Join-Path $output 'benchmark.txt') ($name + ': ' + $line.Line.Trim())
+            $explicit = $PSBoundParameters.ContainsKey('Config')
+            # Interleaved in the order -Config names them.
+            $benchConfigs = if ($explicit) { foreach ($n in $configNames) { $configurations | Where-Object { $_.name -eq $n } } } else { @($configurations | Where-Object { $_.name -eq 'L0' }) }
+            foreach ($run in $(if ($explicit) { @('a', 'b', 'c') } else { @('a', 'b') })) {
+                foreach ($cfg in $benchConfigs) {
+                    $v = Get-BaseVariables $case 300
+                    foreach ($key in $cfg.variables.Keys) { $v[$key] = $cfg.variables[$key] }
+                    $v['MIRABILIS_SSGI_BENCHMARK'] = '1'
+                    $name = $case.name + '-' + $cfg.name + '-benchmark-' + $run
+                    Invoke-Capture $name $v
+                    $line = Select-String -Path (Join-Path $output ($name + '.log')) -Pattern 'SSGI benchmark:' | Select-Object -Last 1
+                    if (!$line) { throw ('No benchmark line for ' + $name) }
+                    Add-Content (Join-Path $output 'benchmark.txt') ($name + ': ' + $line.Line.Trim())
+                }
+            }
+            continue
+        }
+        if ($Phase -eq 'determinism') {
+            foreach ($cfg in $configurations) {
+                foreach ($frames in @(1, 32, 128, 256)) {
+                    foreach ($run in @('a', 'b', 'c')) {
+                        $v = Get-BaseVariables $case $frames
+                        foreach ($key in $cfg.variables.Keys) { $v[$key] = $cfg.variables[$key] }
+                        Invoke-Capture ($case.name + '-' + $cfg.name + '-full-f' + $frames + '-' + $run) $v
+                    }
+                }
             }
             continue
         }

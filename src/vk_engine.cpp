@@ -678,10 +678,10 @@ void VulkanEngine::draw(float deltaTime)
         (_ssgi.lumenEnabled && _ssgi.enabled)) {
         update_scene_sdf();
     }
-    if (_debugViews.view == RenderDebugView::SurfaceCache ||
-        (_ssgi.lumenEnabled && _ssgi.enabled)) {
+    const bool surfaceCacheActive = _debugViews.view == RenderDebugView::SurfaceCache ||
+        (_ssgi.lumenEnabled && _ssgi.enabled);
+    if (surfaceCacheActive) {
         update_surface_cache();
-        update_surface_cache_radiosity();
     }
     // After the field and the trace scene are current, before recording.
     write_emitter_descriptors(get_current_frame());
@@ -703,6 +703,11 @@ void VulkanEngine::draw(float deltaTime)
 			SSGITimestampsPerFrame);
 		_ssgi.timingWritten[_frameNumber % FRAME_OVERLAP] = false;
 	}
+    // First in the frame, where the blocking submission used to run, so every
+    // later pass sees this update's page.
+    if (surfaceCacheActive) {
+        update_surface_cache_radiosity(cmd);
+    }
 
 	// The shadow and prepass counters are recorded before the main pass
 	// resets its own, so they are cleared here instead.
@@ -944,6 +949,7 @@ void VulkanEngine::run(){
     double benchmarkMilliseconds = 0.0;
     double benchmarkSsgiMilliseconds = 0.0;
     double benchmarkTraceMilliseconds = 0.0;
+    double benchmarkRadiosityMilliseconds = 0.0;
     uint32_t benchmarkFrames = 0;
     // Opt-in unattended validation; ordinary interactive sessions are unchanged.
     const char* frameLimitText = std::getenv("MIRABILIS_TEST_FRAMES");
@@ -1216,6 +1222,7 @@ void VulkanEngine::run(){
             benchmarkMilliseconds += static_cast<double>(deltaTime) * 1000.0;
             benchmarkSsgiMilliseconds += stats.ssgi_total_time;
             benchmarkTraceMilliseconds += stats.ssgi_raw_time;
+            benchmarkRadiosityMilliseconds += _surfaceCache.radiosityMilliseconds;
             ++benchmarkFrames;
         }
         if(testInvalidation&&testFrame>=2&&testFrame<=17) {
@@ -1227,12 +1234,13 @@ void VulkanEngine::run(){
             if (benchmarkFrames > 0) {
                 const VkExtent2D extent = active_ssgi_extent();
                 fmt::print(
-                    "SSGI benchmark: preset={} extent={}x{} trace-environment-map={} average-frame-ms={:.3f} average-ssgi-gpu-ms={:.3f} average-trace-gpu-ms={:.3f} samples={}\n",
+                    "SSGI benchmark: preset={} extent={}x{} trace-environment-map={} average-frame-ms={:.3f} average-ssgi-gpu-ms={:.3f} average-trace-gpu-ms={:.3f} average-radiosity-gpu-ms={:.3f} samples={}\n",
                     _ssgi.qualityPreset, extent.width, extent.height,
                     _ssgi.traceEnvironmentMap,
                     benchmarkMilliseconds / benchmarkFrames,
                     benchmarkSsgiMilliseconds / benchmarkFrames,
                     benchmarkTraceMilliseconds / benchmarkFrames,
+                    benchmarkRadiosityMilliseconds / benchmarkFrames,
                     benchmarkFrames);
             }
             if (const char* capture=SDL_getenv("MIRABILIS_CAPTURE")) capture_path_trace(capture);

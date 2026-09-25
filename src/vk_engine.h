@@ -889,7 +889,8 @@ class VulkanEngine{
         void build_surface_cache_lookup();
         // One budgeted radiosity update: the next cards in round-robin order
         // trace bounce rays and blend the result into the indirect page.
-        void update_surface_cache_radiosity();
+        // Recorded into the frame's command buffer; nothing waits on it.
+        void update_surface_cache_radiosity(VkCommandBuffer cmd);
         // True when the scene field and a lit surface cache are ready for
         // the SSGI world fallback.
         bool lumen_lite_ready() const;
@@ -1436,7 +1437,8 @@ class VulkanEngine{
             AllocatedImage indirect{};
             // indirect as it stood before this radiosity update.  Bounces read
             // it, never the page being written, so the result does not depend
-            // on the order the GPU runs texels in.
+            // on the order the GPU runs texels in.  Radiosity's alone: between
+            // updates it equals indirect bit for bit (R5.1).
             AllocatedImage indirectPrevious{};
             // Coarse albedo of the opaque trace triangles over the scene
             // field's box, weighted by the surface area in each voxel (rgb =
@@ -1483,7 +1485,10 @@ class VulkanEngine{
             bool singleBounce{false};
             float radiosityBlend{0.02f};
             float radiosityMaxDistance{40.0f};
+            // GPU time of the last timed update, two timestamps per frame slot.
             float radiosityMilliseconds{0.0f};
+            VkQueryPool radiosityTimestampPool{};
+            std::array<bool, FRAME_OVERLAP> radiosityTimingWritten{};
             VkDescriptorSetLayout radiosityLayout{};
             VkPipelineLayout radiosityPipelineLayout{};
             VkPipeline radiosityPipeline{};
