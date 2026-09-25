@@ -1311,6 +1311,7 @@ void VulkanEngine::update_surface_cache_radiosity(VkCommandBuffer cmd)
         !_surfaceCache.lightingValid || !_surfaceCache.lookupValid ||
         !_sceneSdf.fieldValid || _surfaceCache.radiosityPipeline == VK_NULL_HANDLE ||
         _surfaceCache.cards.empty()) {
+        _surfaceCache.radiosityBatchTexels = 0;
         return;
     }
     const auto& cards = _surfaceCache.cards;
@@ -1357,6 +1358,7 @@ void VulkanEngine::update_surface_cache_radiosity(VkCommandBuffer cmd)
     _surfaceCache.radiosityCursor =
         (_surfaceCache.radiosityCursor + static_cast<uint32_t>(batch.size())) % cardCount;
     const uint32_t update = _surfaceCache.radiosityUpdate++;
+    _surfaceCache.radiosityBatchTexels = texels;
 
     const bool timed = _gpuTiming.supported;
     if (timed) {

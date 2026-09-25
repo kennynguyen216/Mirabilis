@@ -1488,6 +1488,8 @@ class VulkanEngine{
             // GPU time of the last timed update, two timestamps per frame slot.
             float radiosityMilliseconds{0.0f};
             VkQueryPool radiosityTimestampPool{};
+            // Texels in this frame's batch, for the frame-time log.
+            uint64_t radiosityBatchTexels{0};
             std::array<bool, FRAME_OVERLAP> radiosityTimingWritten{};
             VkDescriptorSetLayout radiosityLayout{};
             VkPipelineLayout radiosityPipelineLayout{};

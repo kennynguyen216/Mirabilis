@@ -1064,7 +1064,7 @@ void VulkanEngine::run(){
     if (const char* path = SDL_getenv("MIRABILIS_R4_FRAME_TIME_LOG")) {
         r4FrameTimes.open(path);
         if (!r4FrameTimes) std::abort();
-        r4FrameTimes << "frame,ms\n";
+        r4FrameTimes << "frame,ms,radiosity_gpu_ms,ssgi_gpu_ms,radiosity_texels\n";
     }
     auto previousTime = std::chrono::steady_clock::now();
 
@@ -1186,7 +1186,10 @@ void VulkanEngine::run(){
         if (r4FrameTimes && _cinematic.recording) {
             const double elapsedMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - currentTime).count();
-            r4FrameTimes << _cinematic.frameIndex << ',' << elapsedMs << '\n';
+            // GPU times are the latest read back, from this slot's previous use.
+            r4FrameTimes << _cinematic.frameIndex << ',' << elapsedMs << ','
+                << _surfaceCache.radiosityMilliseconds << ',' << stats.ssgi_total_time << ','
+                << _surfaceCache.radiosityBatchTexels << '\n';
         }
         if (_cinematic.recording) {
             capture_cinematic_frame();
