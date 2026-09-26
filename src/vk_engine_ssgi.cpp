@@ -784,6 +784,8 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             (probes ? 1u : 0u) | (hzb ? 2u : 0u) |
                 (_r4Contributions.rayCoverage ? 4u : 0u) |
                 (_ssgi.staticAccumulation ? 32u : 0u) |
+                // IQ10 control: the nearest-texel primary cache-sky read.
+                (SDL_getenv("MIRABILIS_IQ10_NEAREST_SKY") ? 64u : 0u) |
                 // Hit-lit sun at uncovered field hits follows the cache's
                 // own sun source (R4.61).
                 ((_r4Contributions.cacheSources & r4::LightSun) != 0u ? 8u : 0u) |

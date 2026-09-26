@@ -655,8 +655,9 @@ void main()
     uint state = uint(pixel.x) * 1973u ^ uint(pixel.y) * 9277u ^
         PushConstants.control.w * 26699u ^ 0x68bc21ebu;
 #ifdef LUMEN_LITE
+    // quality.w bit 6: IQ10's control, the nearest-texel sky read.
     SurfaceCacheSample primarySky = surface_cache_lookup(
-        o.worldPosition, o.worldNormal, true);
+        o.worldPosition, o.worldNormal, true, (PushConstants.quality.w & 64u) == 0u);
     bool primarySkyCached = primarySky.weight > 0.0;
 #else
     bool primarySkyCached = false;

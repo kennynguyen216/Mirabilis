@@ -77,7 +77,7 @@ struct SurfaceCacheSample {
 // far behind the point the captured surface lies along the card's viewing
 // direction (negative in front), and how squarely the surface faces the card.
 bool card_probe(uint cardIndex, vec4 p, vec3 normal, float minimumFacing,
-    out ivec2 texel, out float behind, out float facing)
+    out ivec2 texel, out float behind, out float facing, out vec2 cardUV)
 {
     SurfaceCacheCard card = cards[cardIndex];
     facing = dot(normal, card.direction.xyz);
@@ -89,6 +89,7 @@ bool card_probe(uint cardIndex, vec4 p, vec3 normal, float minimumFacing,
     if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0)))) {
         return false;
     }
+    cardUV = c.xy;
     texel = ivec2(card.rect.xy) + min(
         ivec2(c.xy * vec2(card.rect.zw)), ivec2(card.rect.zw) - 1);
     float stored = texelFetch(cacheDepth, texel, 0).r;
@@ -99,7 +100,33 @@ bool card_probe(uint cardIndex, vec4 p, vec3 normal, float minimumFacing,
     return true;
 }
 
-SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky)
+// IQ10: the sky page read bilinearly inside one card, over the texels that
+// captured the same surface as the centre texel; the nearest read turned each
+// 5 cm texel into a flat square wherever the cache is seen directly.
+vec3 surface_cache_sky_bilinear(SurfaceCacheCard card, vec2 cardUV, ivec2 centre, float margin)
+{
+    vec2 f = cardUV * vec2(card.rect.zw) - 0.5;
+    ivec2 base = ivec2(floor(f));
+    vec2 t = f - vec2(base);
+    float centreDepth = texelFetch(cacheDepth, centre, 0).r;
+    vec3 sum = vec3(0.0);
+    float total = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        ivec2 corner = ivec2(i & 1, i >> 1);
+        ivec2 texel = ivec2(card.rect.xy) +
+            clamp(base + corner, ivec2(0), ivec2(card.rect.zw) - 1);
+        float stored = texelFetch(cacheDepth, texel, 0).r;
+        float weight = (corner.x == 1 ? t.x : 1.0 - t.x) * (corner.y == 1 ? t.y : 1.0 - t.y);
+        if (stored >= 1.0 || abs(stored - centreDepth) * card.direction.w > margin) {
+            weight = 0.0;
+        }
+        sum += weight * SURFACE_CACHE_READ_SKY(texel);
+        total += weight;
+    }
+    return total > 1e-4 ? sum / total : SURFACE_CACHE_READ_SKY(centre);
+}
+
+SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky, bool bilinearSky)
 {
     SurfaceCacheSample result;
     result.weight = 0.0;
@@ -139,8 +166,9 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky)
         ivec2 texel;
         float behind;
         float facing;
+        vec2 cardUV;
         if (!card_probe(cardIndices[range.x + i], p, normal, minimumFacing,
-                texel, behind, facing) ||
+                texel, behind, facing, cardUV) ||
             behind < -frontTolerance || behind > depthTolerance) {
             continue;
         }
@@ -154,8 +182,9 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky)
         ivec2 texel;
         float behind;
         float facing;
+        vec2 cardUV;
         if (!card_probe(cardIndices[range.x + i], p, normal, minimumFacing,
-                texel, behind, facing) || behind < -frontTolerance) {
+                texel, behind, facing, cardUV) || behind < -frontTolerance) {
             continue;
         }
         // Full weight for the nearest surface and any other card that
@@ -169,7 +198,10 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky)
         }
         result.weight += weight;
         if (readSky) {
-            result.sky += weight * SURFACE_CACHE_READ_SKY(texel);
+            result.sky += weight * (bilinearSky
+                ? surface_cache_sky_bilinear(cards[cardIndices[range.x + i]], cardUV, texel,
+                    sameSurfaceMargin)
+                : SURFACE_CACHE_READ_SKY(texel));
             continue;
         }
         result.albedo += weight * texelFetch(cacheAlbedo, texel, 0).rgb;
@@ -192,5 +224,5 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky)
 
 SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal)
 {
-    return surface_cache_lookup(world, normal, false);
+    return surface_cache_lookup(world, normal, false, false);
 }
