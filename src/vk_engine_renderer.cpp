@@ -101,6 +101,9 @@ void VulkanEngine::init_descriptor_pools()
         // image-based lighting images.
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 6 }
     };
+    if (_rayQueryShadows) {
+        sizes.push_back({ VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 });
+    }
 
     globalDescriptorAllocator.init(_device, 10, sizes);
 
@@ -172,6 +175,11 @@ void VulkanEngine::init_scene_descriptors()
         builder.add_binding(13, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         builder.add_binding(14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         builder.add_binding(15, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        // IQ2: the sun casters' TLAS, only on the ray-query device, where
+        // write_emitter_descriptors() binds it every frame.
+        if (_rayQueryShadows) {
+            builder.add_binding(16, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
+        }
         // Compute is here because both occlusion passes bind this same set
         // for the projection and its inverse rather than duplicating them.
         _gpuSceneDataDescriptorLayout = builder.build(
@@ -659,6 +667,9 @@ void VulkanEngine::write_emitter_descriptors(FrameData& frame)
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         writer.write_buffer(15, buffer(_surfaceCache.indexBuffer, cache), VK_WHOLE_SIZE, 0,
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        if (_rayQueryShadows) {
+            writer.write_acceleration_structure(16, _sunCasters.tlas);
+        }
         writer.update_set(_device, set);
     };
     write(frame.sceneDescriptor);

@@ -41,6 +41,21 @@ foreach(GLSL ${GLSL_SOURCE_FILES})
   list(APPEND SPIRV_BINARY_FILES ${SPIRV})
 endforeach(GLSL)
 
+# IQ2: ray-query builds of every entry point that calls sunlight_visibility(),
+# loaded only on devices with VK_KHR_ray_query.  The .spv builds above do not
+# change.
+foreach(NAME mesh.frag mesh_mask.frag mesh_transparent.frag portal_view.frag
+        portal_view_mask.frag ssgi_lumen.comp ssgi_probe.comp)
+  set(GLSL "${PROJECT_SOURCE_DIR}/shaders/${NAME}")
+  set(SPIRV "${PROJECT_SOURCE_DIR}/shaders/${NAME}.rt.spv")
+  add_custom_command(
+    OUTPUT ${SPIRV}
+    COMMAND ${GLSL_VALIDATOR} -V --target-env vulkan1.2 --glsl-version 460
+            -DMIRABILIS_RT_SHADOWS ${GLSL} -o ${SPIRV}
+    DEPENDS ${GLSL} ${GLSL_INCLUDE_FILES})
+  list(APPEND SPIRV_BINARY_FILES ${SPIRV})
+endforeach(NAME)
+
 add_custom_target(
     Shaders 
     DEPENDS ${SPIRV_BINARY_FILES}

@@ -21,16 +21,16 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     ScopedShaderModule transparentFragmentShader(engine->_device);
     ScopedShaderModule colliderDebugVertexShader(engine->_device);
     ScopedShaderModule colliderDebugFragmentShader(engine->_device);
-    if (!fragmentShader.load("../../shaders/mesh.frag.spv") ||
+    if (!fragmentShader.load(engine->sun_visibility_shader("mesh.frag").c_str()) ||
         !vertexShader.load("../../shaders/mesh.vert.spv") ||
         !portalMaskVertexShader.load("../../shaders/portal_mask.vert.spv") ||
         !portalViewVertexShader.load("../../shaders/portal_view.vert.spv") ||
-        !maskFragmentShader.load("../../shaders/mesh_mask.frag.spv") ||
+        !maskFragmentShader.load(engine->sun_visibility_shader("mesh_mask.frag").c_str()) ||
         !transparentFragmentShader.load(
-            "../../shaders/mesh_transparent.frag.spv") ||
-        !portalViewFragmentShader.load("../../shaders/portal_view.frag.spv") ||
+            engine->sun_visibility_shader("mesh_transparent.frag").c_str()) ||
+        !portalViewFragmentShader.load(engine->sun_visibility_shader("portal_view.frag").c_str()) ||
         !portalViewMaskFragmentShader.load(
-            "../../shaders/portal_view_mask.frag.spv") ||
+            engine->sun_visibility_shader("portal_view_mask.frag").c_str()) ||
         !portalCompositeFragmentShader.load(
             "../../shaders/portal_composite.frag.spv") ||
         !portalMaskFragmentShader.load(

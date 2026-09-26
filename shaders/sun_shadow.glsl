@@ -10,6 +10,32 @@
 // the sampler's white border leaves everything outside the map lit.
 layout(set = 0, binding = 1) uniform sampler2DShadow shadowMap;
 
+#ifdef MIRABILIS_RT_SHADOWS
+// IQ2 (docs/lumen_lite_design.md): the *.rt.spv builds, loaded only on a
+// ray-query device, trace the trace scene's opaque casters exactly.  The
+// shadow map then holds only the casters that scene leaves out (alpha-masked
+// draws, the player's body), so each caster is tested once.
+#extension GL_EXT_ray_query : require
+layout(set = 0, binding = 16) uniform accelerationStructureEXT sunCasters;
+
+bool sun_ray_blocked(vec3 worldPosition, vec3 normal)
+{
+    // R4.11's endpoint rule, with the CPU sun-visibility check's epsilon.
+    vec3 magnitude = abs(worldPosition);
+    float epsilon = max(0.0002,
+        max(max(magnitude.x, magnitude.y), magnitude.z) * 0.000002);
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, sunCasters,
+        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFF,
+        worldPosition + normalize(normal) * epsilon, 0.0,
+        normalize(sceneData.sunlightDirection.xyz), 1.0e6);
+    while (rayQueryProceedEXT(query)) {
+    }
+    return rayQueryGetIntersectionTypeEXT(query, true) !=
+        gl_RayQueryCommittedIntersectionNoneEXT;
+}
+#endif
+
 // Returns how much of the sunlight reaches this surface: 1 fully lit, 0 fully
 // blocked.  Only the sunlight term should be scaled by it; ambient light is
 // what keeps a shadowed surface from going black.
@@ -18,6 +44,11 @@ float sunlight_visibility(vec3 worldPosition, vec3 normal)
     if (sceneData.shadowSettings.w < 0.5) {
         return 1.0;
     }
+#ifdef MIRABILIS_RT_SHADOWS
+    if (sun_ray_blocked(worldPosition, normal)) {
+        return 0.0;
+    }
+#endif
 
     // Pushing the sample point along the normal before projecting removes
     // most self-shadowing acne on surfaces that face the sun edge-on, and it

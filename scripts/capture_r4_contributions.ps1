@@ -42,7 +42,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $configNames = @($Config -split '[,\s]+' | Where-Object { $_ })
-foreach ($c in $configNames) { if (@('S', 'L', 'L0') -cnotcontains $c) { throw ('Unknown configuration: ' + $c) } }
+foreach ($c in $configNames) { if (@('S', 'L', 'L0', 'Lmap', 'L0map') -cnotcontains $c) { throw ('Unknown configuration: ' + $c) } }
 
 $repo = Split-Path $PSScriptRoot -Parent
 $engine = Join-Path $repo 'bin/Release/engine.exe'
@@ -72,6 +72,13 @@ $configurations = @(
     # R4.5 gate: radiosity off, so the cache holds one bounce and matches the
     # depth-2 references.
     @{ name = 'L0'; variables = @{ MIRABILIS_LUMEN_LITE = '1'; MIRABILIS_SURFACE_CACHE_RADIOSITY = '0' };
+       rays = @('ray_screen_hit', 'ray_screen_hit_cache', 'ray_screen_hit_uncached', 'ray_portal', 'ray_field_cache', 'ray_field_uncovered', 'ray_field_exit', 'ray_primary_cache_sky');
+       coverageOnly = @('ray_field_exhausted') },
+    # IQ2 same-build controls: L and L0 on the shadow map alone.
+    @{ name = 'Lmap'; variables = @{ MIRABILIS_LUMEN_LITE = '1'; MIRABILIS_IQ_RT_SHADOWS = '0' };
+       rays = @('ray_screen_hit', 'ray_screen_hit_cache', 'ray_screen_hit_uncached', 'ray_portal', 'ray_field_cache', 'ray_field_uncovered', 'ray_field_exit', 'ray_primary_cache_sky');
+       coverageOnly = @('ray_field_exhausted') },
+    @{ name = 'L0map'; variables = @{ MIRABILIS_LUMEN_LITE = '1'; MIRABILIS_SURFACE_CACHE_RADIOSITY = '0'; MIRABILIS_IQ_RT_SHADOWS = '0' };
        rays = @('ray_screen_hit', 'ray_screen_hit_cache', 'ray_screen_hit_uncached', 'ray_portal', 'ray_field_cache', 'ray_field_uncovered', 'ray_field_exit', 'ray_primary_cache_sky');
        coverageOnly = @('ray_field_exhausted') }
 ) | Where-Object { $configNames -contains $_.name }

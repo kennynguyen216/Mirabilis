@@ -457,7 +457,7 @@ void VulkanEngine::init_ssgi_pipelines()
         VK_CHECK(vkCreatePipelineLayout(
             _device, &lumenInfo, nullptr, &_ssgi.lumenPipelineLayout));
         ScopedShaderModule lumenShader(_device);
-        if (lumenShader.load("../../shaders/ssgi_lumen.comp.spv")) {
+        if (lumenShader.load(sun_visibility_shader("ssgi_lumen.comp").c_str())) {
             VkComputePipelineCreateInfo lumenCreate{
                 .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             lumenCreate.layout = _ssgi.lumenPipelineLayout;
@@ -469,7 +469,7 @@ void VulkanEngine::init_ssgi_pipelines()
             fmt::print("Error loading ssgi_lumen.comp.spv; Lumen-lite fallback unavailable\n");
         }
         ScopedShaderModule probeShader(_device);
-        if (probeShader.load("../../shaders/ssgi_probe.comp.spv")) {
+        if (probeShader.load(sun_visibility_shader("ssgi_probe.comp").c_str())) {
             VkComputePipelineCreateInfo probeCreate{
                 .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             probeCreate.layout = _ssgi.lumenPipelineLayout;

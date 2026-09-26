@@ -687,6 +687,17 @@ class VulkanEngine{
     // Surface cards rasterize conservatively where the device can, so
     // geometry thinner than a card texel is still captured (R4.60).
     bool _conservativeRasterSupported{false};
+    // IQ2 (docs/lumen_lite_design.md): sun visibility by ray query against the
+    // trace scene's opaque casters, on devices with VK_KHR_ray_query unless
+    // MIRABILIS_IQ_RT_SHADOWS=0.  While it is off nothing IQ2 adds is created
+    // or loaded, and the shadow map works exactly as before.
+    bool _rayQueryShadows{false};
+    // The build to load of an entry point that calls sunlight_visibility().
+    std::string sun_visibility_shader(const char* name) const
+    {
+        return std::string("../../shaders/") + name +
+            (_rayQueryShadows ? ".rt.spv" : ".spv");
+    }
     float _maxSamplerAnisotropy{1.0f};
     float _textureAnisotropy{16.0f};
     // Clamped to the device limit and to 1 when the feature is missing, so a
@@ -1219,6 +1230,25 @@ class VulkanEngine{
             const char* formatName{"none"};
         };
         ShadowState _shadow;
+        // IQ2: the ray-query half of sun visibility.  One BLAS holds the
+        // trace scene's opaque casters in world space and one TLAS instance
+        // points at it; both are rebuilt when that draw list changes.  The
+        // shadow map keeps only the casters left out of it.
+        struct SunCasterScene {
+            PFN_vkCreateAccelerationStructureKHR create{};
+            PFN_vkDestroyAccelerationStructureKHR destroy{};
+            PFN_vkGetAccelerationStructureBuildSizesKHR buildSizes{};
+            PFN_vkCmdBuildAccelerationStructuresKHR build{};
+            PFN_vkGetAccelerationStructureDeviceAddressKHR address{};
+            VkDeviceSize scratchAlignment{256};
+            VkAccelerationStructureKHR blas{}, tlas{};
+            AllocatedBuffer blasBuffer{}, tlasBuffer{};
+            uint64_t hash{0};
+        };
+        SunCasterScene _sunCasters;
+        bool ray_query_caster(const RenderObject& object) const;
+        void update_sun_casters();
+        void destroy_sun_casters();
         glm::mat4 _previousMainViewProjection{1.0f};
         bool _previousMainViewProjectionValid{false};
         struct PrepassState {

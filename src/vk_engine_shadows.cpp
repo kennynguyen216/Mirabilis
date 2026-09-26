@@ -2,7 +2,9 @@
 #include "vk_engine_render_helpers.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstring>
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -208,8 +210,18 @@ void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
         // surface has no single silhouette to cast.  Masked ones do, and they
         // go through _shadow.maskPipeline so foliage and grates cast their
         // cutout rather than the rectangle it is painted on.
-        for (const RenderObject& renderObject :
-                portalViewDrawContext.OpaqueSurfaces) {
+        // IQ2: while the ray query owns the trace scene's casters, the map
+        // keeps only what that scene leaves out: masked draws, and the body,
+        // which update_scene() appends after the world's draws.
+        const size_t worldDraws = worldDrawContext.OpaqueSurfaces.size();
+        for (size_t drawIndex = 0;
+                drawIndex < portalViewDrawContext.OpaqueSurfaces.size(); ++drawIndex) {
+            const RenderObject& renderObject =
+                portalViewDrawContext.OpaqueSurfaces[drawIndex];
+            if (_rayQueryShadows && drawIndex < worldDraws &&
+                    ray_query_caster(renderObject)) {
+                continue;
+            }
             // Cull against the light, never against the player's camera: an
             // object behind the camera can still drop a shadow into view.
             if (!is_visible(renderObject, _shadow.sunViewProjection)) {
@@ -283,6 +295,225 @@ void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
 
     stats.shadow_record_time = std::chrono::duration<float, std::milli>(
         std::chrono::steady_clock::now() - startTime).count();
+}
+
+bool VulkanEngine::ray_query_caster(const RenderObject& object) const
+{
+    // update_trace_scene()'s filter, so the BLAS holds exactly _traceTriangles.
+    if (object.material == nullptr || object.material->passType != MaterialPass::MainColor) {
+        return false;
+    }
+    const auto source = _traceMeshSources.find(object.vertexBufferAddress);
+    return source != _traceMeshSources.end() && !source->second.expired() &&
+        std::abs(glm::determinant(glm::mat3(object.transform))) >= 1e-12f;
+}
+
+void VulkanEngine::destroy_sun_casters()
+{
+    if (_sunCasters.tlas) _sunCasters.destroy(_device, _sunCasters.tlas, nullptr);
+    if (_sunCasters.blas) _sunCasters.destroy(_device, _sunCasters.blas, nullptr);
+    destroy_buffer(_sunCasters.tlasBuffer);
+    destroy_buffer(_sunCasters.blasBuffer);
+    _sunCasters.tlas = _sunCasters.blas = VK_NULL_HANDLE;
+    _sunCasters.tlasBuffer = _sunCasters.blasBuffer = {};
+}
+
+void VulkanEngine::update_sun_casters()
+{
+    if (!_rayQueryShadows) {
+        return;
+    }
+    struct Caster { const RenderObject* object; uint32_t vertexCount; };
+    std::vector<Caster> casters;
+    uint64_t hash = 1469598103934665603ull;
+    const auto mix = [&](const void* data, size_t bytes) {
+        const auto* p = static_cast<const uint8_t*>(data);
+        for (size_t i = 0; i < bytes; ++i) { hash ^= p[i]; hash *= 1099511628211ull; }
+    };
+    for (const RenderObject& object : worldDrawContext.OpaqueSurfaces) {
+        if (!ray_query_caster(object)) {
+            continue;
+        }
+        casters.push_back({&object, static_cast<uint32_t>(
+            _traceMeshSources.at(object.vertexBufferAddress).lock()->vertices.size())});
+        mix(&object.transform, sizeof(object.transform));
+        mix(&object.vertexBufferAddress, sizeof(object.vertexBufferAddress));
+        mix(&object.indexBuffer, sizeof(object.indexBuffer));
+        mix(&object.firstIndex, sizeof(object.firstIndex));
+        mix(&object.indexCount, sizeof(object.indexCount));
+    }
+    if (_sunCasters.tlas != VK_NULL_HANDLE && hash == _sunCasters.hash) {
+        return;
+    }
+    // ponytail: static-scene policy, as update_trace_scene(): any caster change
+    // rebuilds everything behind a device wait.  Per-mesh BLASes and per-draw
+    // TLAS instances, rebuilt in the frame, if moving casters ever matter.
+    const auto start = std::chrono::steady_clock::now();
+    VK_CHECK(vkDeviceWaitIdle(_device));
+    destroy_sun_casters();
+    _sunCasters.hash = hash;
+
+    const auto bufferAddress = [&](VkBuffer buffer) {
+        const VkBufferDeviceAddressInfo info{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = buffer};
+        return vkGetBufferDeviceAddress(_device, &info);
+    };
+    constexpr VkBufferUsageFlags buildInput =
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+
+    // One geometry per draw: its own vertex and index buffers, placed in the
+    // world by a row-major 3x4 copy of its transform.
+    AllocatedBuffer transforms = create_buffer(
+        std::max<size_t>(casters.size(), 1) * sizeof(VkTransformMatrixKHR),
+        buildInput, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    auto* matrices = static_cast<VkTransformMatrixKHR*>(transforms.info.pMappedData);
+    std::vector<VkAccelerationStructureGeometryKHR> geometries(casters.size());
+    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges(casters.size());
+    std::vector<uint32_t> triangleCounts(casters.size());
+    size_t triangles = 0;
+    for (size_t i = 0; i < casters.size(); ++i) {
+        const RenderObject& object = *casters[i].object;
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 4; ++column) {
+                matrices[i].matrix[row][column] = object.transform[column][row];
+            }
+        }
+        VkAccelerationStructureGeometryKHR& geometry = geometries[i];
+        geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+        geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        VkAccelerationStructureGeometryTrianglesDataKHR& data = geometry.geometry.triangles;
+        data.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        data.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+        data.vertexData.deviceAddress = object.vertexBufferAddress; // Vertex::position leads
+        data.vertexStride = sizeof(Vertex);
+        data.maxVertex = std::max(casters[i].vertexCount, 1u) - 1;
+        data.indexType = VK_INDEX_TYPE_UINT32;
+        data.indexData.deviceAddress = bufferAddress(object.indexBuffer);
+        data.transformData.deviceAddress = bufferAddress(transforms.buffer);
+        triangleCounts[i] = object.indexCount / 3;
+        ranges[i] = {triangleCounts[i], static_cast<uint32_t>(object.firstIndex * sizeof(uint32_t)),
+            0, static_cast<uint32_t>(i * sizeof(VkTransformMatrixKHR))};
+        triangles += triangleCounts[i];
+    }
+    vmaFlushAllocation(_allocator, transforms.allocation, 0, VK_WHOLE_SIZE);
+
+    const auto create = [&](VkAccelerationStructureTypeKHR type, VkDeviceSize size,
+            AllocatedBuffer& buffer, VkAccelerationStructureKHR& structure) {
+        buffer = create_buffer(size,
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            VMA_MEMORY_USAGE_GPU_ONLY);
+        VkAccelerationStructureCreateInfoKHR info{
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+        info.buffer = buffer.buffer;
+        info.size = size;
+        info.type = type;
+        VK_CHECK(_sunCasters.create(_device, &info, nullptr, &structure));
+    };
+    const auto sizes = [&](VkAccelerationStructureBuildGeometryInfoKHR& info, const uint32_t* counts) {
+        VkAccelerationStructureBuildSizesInfoKHR result{
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+        _sunCasters.buildSizes(_device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+            &info, counts, &result);
+        return result;
+    };
+
+    VkAccelerationStructureBuildGeometryInfoKHR blasInfo{
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    blasInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    blasInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    blasInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    blasInfo.geometryCount = static_cast<uint32_t>(geometries.size());
+    blasInfo.pGeometries = geometries.data();
+    VkAccelerationStructureBuildSizesInfoKHR blasSizes{};
+    VkAccelerationStructureInstanceKHR instance{};
+    if (!casters.empty()) {
+        blasSizes = sizes(blasInfo, triangleCounts.data());
+        create(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+            blasSizes.accelerationStructureSize, _sunCasters.blasBuffer, _sunCasters.blas);
+        const VkAccelerationStructureDeviceAddressInfoKHR blasAddress{
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+            .accelerationStructure = _sunCasters.blas};
+        instance.accelerationStructureReference = _sunCasters.address(_device, &blasAddress);
+    }
+    // The BLAS is already in world space.  Casting from either face is what
+    // the shadow pass does too (it culls nothing).
+    instance.transform.matrix[0][0] = instance.transform.matrix[1][1] =
+        instance.transform.matrix[2][2] = 1.0f;
+    instance.mask = 0xFF;
+    instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
+        VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+    AllocatedBuffer instances = create_buffer(
+        sizeof(instance), buildInput, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    std::memcpy(instances.info.pMappedData, &instance, sizeof(instance));
+    vmaFlushAllocation(_allocator, instances.allocation, 0, VK_WHOLE_SIZE);
+
+    VkAccelerationStructureGeometryKHR instanceGeometry{
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    instanceGeometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    instanceGeometry.geometry.instances.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    instanceGeometry.geometry.instances.data.deviceAddress = bufferAddress(instances.buffer);
+    VkAccelerationStructureBuildGeometryInfoKHR tlasInfo{
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    tlasInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    tlasInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    tlasInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    tlasInfo.geometryCount = 1;
+    tlasInfo.pGeometries = &instanceGeometry;
+    // An empty scene still gets a TLAS, with no instance: the ray-query
+    // shaders bind one whatever the scene holds.
+    const uint32_t instanceCount = casters.empty() ? 0u : 1u;
+    const VkAccelerationStructureBuildSizesInfoKHR tlasSizes = sizes(tlasInfo, &instanceCount);
+    create(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+        tlasSizes.accelerationStructureSize, _sunCasters.tlasBuffer, _sunCasters.tlas);
+
+    // One scratch buffer serves both builds, one after the other.
+    const VkDeviceSize alignment = _sunCasters.scratchAlignment;
+    AllocatedBuffer scratch = create_buffer(
+        std::max(blasSizes.buildScratchSize, tlasSizes.buildScratchSize) + alignment,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY);
+    const VkDeviceAddress scratchAddress =
+        (bufferAddress(scratch.buffer) + alignment - 1) / alignment * alignment;
+
+    immediate_submit([&](VkCommandBuffer cmd) {
+        if (!casters.empty()) {
+            blasInfo.dstAccelerationStructure = _sunCasters.blas;
+            blasInfo.scratchData.deviceAddress = scratchAddress;
+            const VkAccelerationStructureBuildRangeInfoKHR* blasRanges = ranges.data();
+            _sunCasters.build(cmd, 1, &blasInfo, &blasRanges);
+            // The TLAS reads the BLAS and reuses its scratch memory.
+            VkMemoryBarrier2 barrier{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            barrier.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+            barrier.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+            barrier.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+            barrier.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+            VkDependencyInfo dependency{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            dependency.memoryBarrierCount = 1;
+            dependency.pMemoryBarriers = &barrier;
+            vkCmdPipelineBarrier2(cmd, &dependency);
+        }
+        tlasInfo.dstAccelerationStructure = _sunCasters.tlas;
+        tlasInfo.scratchData.deviceAddress = scratchAddress;
+        const VkAccelerationStructureBuildRangeInfoKHR tlasRange{instanceCount, 0, 0, 0};
+        const VkAccelerationStructureBuildRangeInfoKHR* tlasRanges = &tlasRange;
+        _sunCasters.build(cmd, 1, &tlasInfo, &tlasRanges);
+    });
+    destroy_buffer(scratch);
+    destroy_buffer(instances);
+    destroy_buffer(transforms);
+    const double milliseconds = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+    constexpr double MiB = 1024.0 * 1024.0;
+    fmt::print("IQ2 sun casters: {} draws, {} triangles; BLAS {:.2f} MiB, TLAS {:.3f} MiB, "
+        "scratch {:.2f} MiB; build {:.1f} ms (wall clock, device wait included)\n",
+        casters.size(), triangles, blasSizes.accelerationStructureSize / MiB,
+        tlasSizes.accelerationStructureSize / MiB,
+        std::max(blasSizes.buildScratchSize, tlasSizes.buildScratchSize) / MiB, milliseconds);
 }
 
 glm::mat4 VulkanEngine::compute_sun_view_projection(const glm::vec3& focusPoint) const

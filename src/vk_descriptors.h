@@ -61,6 +61,7 @@ private:
 struct DescriptorWriter {
     std::deque<VkDescriptorImageInfo> imageInfos;
     std::deque<VkDescriptorBufferInfo> bufferInfos;
+    std::deque<VkWriteDescriptorSetAccelerationStructureKHR> accelerationStructureInfos;
     std::vector<VkWriteDescriptorSet> writes;
 
     void write_image(
@@ -75,6 +76,9 @@ struct DescriptorWriter {
         size_t size,
         size_t offset,
         VkDescriptorType type);
+    // `structure` is read at update_set(), so it must outlive the writer.
+    void write_acceleration_structure(
+        int binding, const VkAccelerationStructureKHR& structure);
     void clear();
     void update_set(VkDevice device, VkDescriptorSet set);
 };

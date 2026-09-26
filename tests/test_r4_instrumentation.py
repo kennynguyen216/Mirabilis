@@ -159,6 +159,23 @@ class CacheChannelContract(unittest.TestCase):
         direct = self.DIRECT.read_text(encoding="utf-8")
         self.assertIn("sky_visible_exact(world + normal * epsilon, lightDirection)", direct)
 
+    def test_iq2_every_shadow_caller_has_a_ray_query_build(self):
+        """IQ2: with ray-query shadows on, the shadow map no longer holds the
+        opaque casters, so an entry point that reaches sunlight_visibility()
+        without an .rt.spv build would lose their shadows."""
+        shaders = ROOT / "shaders"
+        text = {p.name: p.read_text(encoding="utf-8") for p in shaders.iterdir()
+                if p.suffix in (".glsl", ".frag", ".vert", ".comp")}
+        callers = {n for n, t in text.items()
+                   if "sunlight_visibility(" in t and n != "sun_shadow.glsl"}
+        # ssgi_body.glsl includes the shadow test only for Lumen-lite.
+        need = sorted(n for n, t in text.items() if not n.endswith(".glsl") and (
+            n in callers or any(f'#include "{c}"' in t and (
+                c != "ssgi_body.glsl" or "#define LUMEN_LITE" in t) for c in callers)))
+        cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8-sig")
+        listed = re.search(r"foreach\(NAME ([^)]*)\)", cmake).group(1).split()
+        self.assertEqual(sorted(listed), need)
+
     def test_one_gradient_definition(self):
         shaders = ROOT / "shaders"
         owners = [p.name for p in shaders.glob("*.glsl")

@@ -779,11 +779,16 @@ GPUMeshBuffers VulkanEngine::uploadMesh(
     const size_t indexBufferSize = indices.size_bytes();
 
     GPUMeshBuffers newSurface{};
+    // IQ2 builds the sun casters' BLAS straight from these two buffers.
+    const VkBufferUsageFlags buildInput = _rayQueryShadows
+        ? VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+        : 0;
     newSurface.vertexBuffer = create_buffer(
         vertexBufferSize,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
             VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | buildInput,
         VMA_MEMORY_USAGE_GPU_ONLY);
 
     VkBufferDeviceAddressInfo addressInfo{
@@ -797,7 +802,7 @@ GPUMeshBuffers VulkanEngine::uploadMesh(
 
     newSurface.indexBuffer = create_buffer(
         indexBufferSize,
-        VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | buildInput,
         VMA_MEMORY_USAGE_GPU_ONLY);
 
     AllocatedBuffer staging = create_buffer(

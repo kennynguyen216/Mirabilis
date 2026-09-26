@@ -641,6 +641,7 @@ void VulkanEngine::write_capture_lighting(std::ostream& out) const
         << "\nLumen-lite: " << _ssgi.lumenEnabled
         << "\nScreen probes: " << _ssgi.probesEnabled
         << "\nHZB: " << _ssgi.hzbEnabled
+        << "\nRay-query sun shadows: " << _rayQueryShadows
         << "\nSurface-cache radiosity: " << _surfaceCache.radiosityEnabled
         << " single-bounce=" << _surfaceCache.singleBounce
         << "\nR4 contributions:";
@@ -766,8 +767,8 @@ void VulkanEngine::measure_sun_visibility(
         }
     }
     const auto pct = [&](size_t n) { return facing ? 100.0 * double(n) / double(facing) : 0.0; };
-    fmt::print("Sun visibility check: {} sun-facing pixels; both lit {:.1f}%, both shadowed {:.1f}%, "
-        "raster lit only {:.1f}%, BVH lit only {:.1f}%\n",
+    fmt::print("Sun visibility check: {} sun-facing pixels; both lit {:.2f}%, both shadowed {:.2f}%, "
+        "raster lit only {:.2f}%, BVH lit only {:.2f}%\n",
         facing, pct(bothLit), pct(bothShadowed), pct(rasterOnlyLit), pct(exactOnlyLit));
     if (rasterOnlyLit > 0) {
         fmt::print("  raster lit, BVH shadowed: {} outside the shadow map's depth range, {} outside its "

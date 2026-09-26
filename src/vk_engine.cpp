@@ -451,6 +451,30 @@ void VulkanEngine::init_vulkan()
         physicalDevice.enable_features_if_present(anisotropyFeature);
     _conservativeRasterSupported = physicalDevice.enable_extension_if_present(
         VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
+    // IQ2 ray-query sun shadows, optional.  Device extensions are fixed here,
+    // so the MIRABILIS_IQ_RT_SHADOWS=0 control leaves them off as well and
+    // runs on the same device as a machine without ray tracing.
+    const char* rtShadowsValue = SDL_getenv("MIRABILIS_IQ_RT_SHADOWS");
+    const EnvBool rtShadows = rtShadowsValue ? parse_env_bool(rtShadowsValue) : EnvBool::On;
+    if (rtShadows == EnvBool::Invalid) {
+        fmt::print("MIRABILIS_IQ_RT_SHADOWS='{}' is not 0/1/true/false/on/off/yes/no\n",
+            rtShadowsValue);
+        abort();
+    }
+    if (rtShadows == EnvBool::On) {
+        VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
+        accelerationFeatures.accelerationStructure = VK_TRUE;
+        VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+        rayQueryFeatures.rayQuery = VK_TRUE;
+        _rayQueryShadows = physicalDevice.enable_extensions_if_present({
+                VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+                VK_KHR_RAY_QUERY_EXTENSION_NAME,
+                VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME}) &&
+            physicalDevice.enable_extension_features_if_present(accelerationFeatures) &&
+            physicalDevice.enable_extension_features_if_present(rayQueryFeatures);
+    }
 
     // create the vulkan device now
 
@@ -462,6 +486,31 @@ void VulkanEngine::init_vulkan()
     _chosenGPU = physicalDevice.physical_device;
     _graphicsQueue = vkbDevice.get_queue(vkb::QueueType::graphics).value();
     _graphicsQueueFamily = vkbDevice.get_queue_index(vkb::QueueType::graphics).value();
+
+    if (_rayQueryShadows) {
+        // Extension entry points are not exported by the loader library.
+        const auto load = [&](auto& function, const char* name) {
+            function = reinterpret_cast<std::remove_reference_t<decltype(function)>>(
+                vkGetDeviceProcAddr(_device, name));
+            return function != nullptr;
+        };
+        _rayQueryShadows =
+            load(_sunCasters.create, "vkCreateAccelerationStructureKHR") &&
+            load(_sunCasters.destroy, "vkDestroyAccelerationStructureKHR") &&
+            load(_sunCasters.buildSizes, "vkGetAccelerationStructureBuildSizesKHR") &&
+            load(_sunCasters.build, "vkCmdBuildAccelerationStructuresKHR") &&
+            load(_sunCasters.address, "vkGetAccelerationStructureDeviceAddressKHR");
+        VkPhysicalDeviceAccelerationStructurePropertiesKHR accelerationProperties{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
+        VkPhysicalDeviceProperties2 properties{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            .pNext = &accelerationProperties};
+        vkGetPhysicalDeviceProperties2(_chosenGPU, &properties);
+        _sunCasters.scratchAlignment = std::max<VkDeviceSize>(
+            accelerationProperties.minAccelerationStructureScratchOffsetAlignment, 1);
+    }
+    fmt::print("IQ2 ray-query sun shadows: {}\n", _rayQueryShadows ? "on"
+        : rtShadows == EnvBool::Off ? "off (MIRABILIS_IQ_RT_SHADOWS=0)" : "unsupported");
 
     // maxSamplerAnisotropy is only meaningful once the feature is on; a device
     // that reports 16 while the feature is off still rejects any sampler that
@@ -561,6 +610,7 @@ void VulkanEngine::cleanup()
     if(_isInitialized) {
         vkDeviceWaitIdle(_device);
         destroy_path_trace();
+        destroy_sun_casters();
 
         // The explicit File > Save Scene command is still useful for named
         // checkpoints, but closing the editor should not discard unsaved
@@ -683,6 +733,8 @@ void VulkanEngine::draw(float deltaTime)
     if (surfaceCacheActive) {
         update_surface_cache();
     }
+    // A rebuild waits for the GPU too, and the descriptors below bind its TLAS.
+    update_sun_casters();
     // After the field and the trace scene are current, before recording.
     write_emitter_descriptors(get_current_frame());
 
