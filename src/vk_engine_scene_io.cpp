@@ -977,6 +977,8 @@ bool VulkanEngine::load_editor_scene()
         if (lastSceneFile) lastSceneFile << _sceneDocument.activeFilename << '\n';
     }
     rebuild_collision_from_scene();
+    // A new scene is a cut, not a change of light to adapt to.
+    _autoExposure.snap = true;
     fmt::print("Loaded editor scene: {}\n", scenePath.string());
     return true;
 }

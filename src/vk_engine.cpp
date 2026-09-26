@@ -667,6 +667,7 @@ void VulkanEngine::draw(float deltaTime)
     // The fence has passed, so any timestamps this slot recorded belong to a
     // submission that has finished and can be read without stalling.
     read_gpu_timestamps(_frameNumber % FRAME_OVERLAP);
+    update_auto_exposure(deltaTime);
     get_current_frame()._deletionQueue.flush();
     get_current_frame()._frameDescriptors.clear_pools(_device);
     //request image from the swapchain 
@@ -1002,6 +1003,7 @@ void VulkanEngine::run(){
     double benchmarkSsgiMilliseconds = 0.0;
     double benchmarkTraceMilliseconds = 0.0;
     double benchmarkRadiosityMilliseconds = 0.0;
+    double benchmarkExposureMilliseconds = 0.0;
     uint32_t benchmarkFrames = 0;
     // Opt-in unattended validation; ordinary interactive sessions are unchanged.
     const char* frameLimitText = std::getenv("MIRABILIS_TEST_FRAMES");
@@ -1278,6 +1280,7 @@ void VulkanEngine::run(){
             benchmarkSsgiMilliseconds += stats.ssgi_total_time;
             benchmarkTraceMilliseconds += stats.ssgi_raw_time;
             benchmarkRadiosityMilliseconds += _surfaceCache.radiosityMilliseconds;
+            benchmarkExposureMilliseconds += _autoExposure.gpuMilliseconds;
             ++benchmarkFrames;
         }
         if(testInvalidation&&testFrame>=2&&testFrame<=17) {
@@ -1289,13 +1292,14 @@ void VulkanEngine::run(){
             if (benchmarkFrames > 0) {
                 const VkExtent2D extent = active_ssgi_extent();
                 fmt::print(
-                    "SSGI benchmark: preset={} extent={}x{} trace-environment-map={} average-frame-ms={:.3f} average-ssgi-gpu-ms={:.3f} average-trace-gpu-ms={:.3f} average-radiosity-gpu-ms={:.3f} samples={}\n",
+                    "SSGI benchmark: preset={} extent={}x{} trace-environment-map={} average-frame-ms={:.3f} average-ssgi-gpu-ms={:.3f} average-trace-gpu-ms={:.3f} average-radiosity-gpu-ms={:.3f} average-exposure-gpu-ms={:.3f} samples={}\n",
                     _ssgi.qualityPreset, extent.width, extent.height,
                     _ssgi.traceEnvironmentMap,
                     benchmarkMilliseconds / benchmarkFrames,
                     benchmarkSsgiMilliseconds / benchmarkFrames,
                     benchmarkTraceMilliseconds / benchmarkFrames,
                     benchmarkRadiosityMilliseconds / benchmarkFrames,
+                    benchmarkExposureMilliseconds / benchmarkFrames,
                     benchmarkFrames);
             }
             if (const char* capture=SDL_getenv("MIRABILIS_CAPTURE")) capture_path_trace(capture);

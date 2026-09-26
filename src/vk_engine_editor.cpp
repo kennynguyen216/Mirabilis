@@ -1554,8 +1554,24 @@ void VulkanEngine::draw_tonemap_settings()
                 &_postProcess.tonemapOperator,
                 operatorNames,
                 IM_ARRAYSIZE(operatorNames));
-            ImGui::SliderFloat(
-                "Exposure", &_postProcess.tonemapExposure, 0.05f, 8.0f, "%.2f");
+            // IQ3: metered from the frame's luminance; manual when off.
+            if (ImGui::Checkbox("Auto Exposure", &_autoExposure.enabled) &&
+                    _autoExposure.enabled) {
+                _autoExposure.snap = true;
+            }
+            if (_autoExposure.enabled) {
+                ImGui::Text("Exposure %.2f (EV %.2f)",
+                    _postProcess.tonemapExposure, _autoExposure.ev);
+                ImGui::SliderFloat("Compensation (EV)",
+                    &_autoExposure.compensation, -4.0f, 4.0f, "%.1f");
+                ImGui::SliderFloat("Min EV", &_autoExposure.minEv, -8.0f, 8.0f, "%.1f");
+                ImGui::SliderFloat("Max EV", &_autoExposure.maxEv, -8.0f, 12.0f, "%.1f");
+                ImGui::SliderFloat("Adaptation (1/s)",
+                    &_autoExposure.speed, 0.1f, 10.0f, "%.1f");
+            } else {
+                ImGui::SliderFloat(
+                    "Exposure", &_postProcess.tonemapExposure, 0.05f, 8.0f, "%.2f");
+            }
             // Separates the two things this pass does, so a frame that looks
             // wrong can be blamed on the curve or on the transfer function
             // rather than on both at once.

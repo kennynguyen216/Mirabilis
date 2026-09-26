@@ -1651,6 +1651,37 @@ class VulkanEngine{
             bool fxaaShowEdges{false};
         };
         PostProcessState _postProcess;
+        // IQ3 auto-exposure (docs/lumen_lite_design.md): a log2 luminance
+        // histogram of the linear frame, read back once the frame slot's fence
+        // has passed, sets _postProcess.tonemapExposure.  Off in bounded runs
+        // unless MIRABILIS_AUTO_EXPOSURE=1, and then nothing here runs.
+        struct AutoExposureState {
+            bool enabled{false};
+            // Jump straight to the metered exposure instead of adapting: set
+            // when the feature turns on and when a scene loads.
+            bool snap{true};
+            // Bounded runs that enable it log every frame's EV.
+            bool logFrames{false};
+            float compensation{0.0f};
+            float minEv{-4.0f};
+            float maxEv{8.0f};
+            // Exponential adaptation rate, per second.
+            float speed{1.5f};
+            float ev{0.0f};
+            float gpuMilliseconds{0.0f};
+            std::array<bool, FRAME_OVERLAP> written{};
+            VkDescriptorSetLayout setLayout{};
+            VkDescriptorSet set{};
+            MaterialPipeline pipeline;
+            // FRAME_OVERLAP slots of 256 bins each, on the device and readable
+            // by the host.
+            AllocatedBuffer histogram{}, readback{};
+            VkQueryPool timestampPool{VK_NULL_HANDLE};
+        };
+        AutoExposureState _autoExposure;
+        void init_auto_exposure();
+        void update_auto_exposure(float deltaTime);
+        void record_auto_exposure(VkCommandBuffer cmd);
         // The sandbox level lives here: the floor, the boundary walls, the
         // portal test panels, and the player body all render and collide from
         // these objects.  Nothing about the level is hard-coded twice.

@@ -308,6 +308,7 @@ void VulkanEngine::init_pipelines()
     // metalRoughMaterial.materialLayout, which build_pipelines() creates.
     init_render_debug_pipeline();
     init_tonemap_pipeline();
+    init_auto_exposure();
     init_fxaa_pipeline();
     init_ssao_pipelines();
     metalRoughMaterial.build_pipelines(this);
