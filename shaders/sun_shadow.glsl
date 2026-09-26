@@ -24,9 +24,15 @@ float sunlight_visibility(vec3 worldPosition, vec3 normal)
     // does far less to detach contact shadows than depth bias alone.
     // One shadow texel at normal incidence, at most three for grazing faces.
     vec3 lightDirection = normalize(sceneData.sunlightDirection.xyz);
+    // IQ1 diagnostic bits (0 in normal use): 1 single tap, 2 no normal
+    // offset, 4 no depth bias.
+    uint diagnostic = uint(sceneData.shadowFilterSettings.z + 0.5);
     float normalBias = max(sceneData.shadowSettings.y, 0.001);
     if (sceneData.shadowFilterSettings.y < 0.5) {
         normalBias /= max(abs(dot(normalize(normal), lightDirection)), 1.0 / 3.0);
+    }
+    if ((diagnostic & 2u) != 0u) {
+        normalBias = 0.0;
     }
     vec4 lightClip = sceneData.sunViewProjection *
         vec4(worldPosition + normal * normalBias, 1.0);
@@ -43,14 +49,16 @@ float sunlight_visibility(vec3 worldPosition, vec3 normal)
     // columns caused by tiny depth changes across large grazing-angle faces.
     float grazing = 1.0 - abs(dot(normalize(normal), lightDirection));
     float depthBias = max(sceneData.shadowSettings.x, 0.00002);
-    float reference = projected.z - depthBias * mix(1.0, 2.5, grazing);
+    float reference = projected.z -
+        ((diagnostic & 4u) != 0u ? 0.0 : depthBias * mix(1.0, 2.5, grazing));
     float texel = sceneData.shadowSettings.z;
 
     // A deterministic 7x7 tent kernel produces a continuous transition with
     // no per-pixel random rotation. The previous rotated Poisson pattern was
     // visible as fine stripes on large, flat surfaces. Each comparison is
     // also bilinear on depth formats that support linear compare filtering.
-    float filterRadius = max(sceneData.shadowFilterSettings.x, 0.0);
+    float filterRadius = (diagnostic & 1u) != 0u
+        ? 0.0 : max(sceneData.shadowFilterSettings.x, 0.0);
     if (filterRadius < 0.01) {
         return texture(shadowMap, vec3(shadowUV, reference));
     }

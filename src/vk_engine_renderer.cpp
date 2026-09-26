@@ -532,8 +532,11 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
         authoredShadowControl ? _shadow.normalBias : shadowTexelWorld,
         1.0f / static_cast<float>(ShadowMapResolution),
         _shadow.enabled ? 1.0f : 0.0f);
+    // z: IQ1 diagnostic bitmask for sun_shadow.glsl, unset in normal use.
+    const char* shadowDiagnostic = SDL_getenv("MIRABILIS_IQ_SHADOW_DIAG");
     data.shadowFilterSettings = glm::vec4(
-        _shadow.filterRadius, authoredShadowControl ? 1.0f : 0.0f, 0.0f, 0.0f);
+        _shadow.filterRadius, authoredShadowControl ? 1.0f : 0.0f,
+        shadowDiagnostic ? float(std::atoi(shadowDiagnostic) & 7) : 0.0f, 0.0f);
     // Screen-space passes get a depth buffer rather than a position per
     // fragment; these are what turn one back into the other.
     data.inverseProjection = glm::inverse(data.proj);
