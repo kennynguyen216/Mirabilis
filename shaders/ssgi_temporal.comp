@@ -11,7 +11,9 @@ layout(set = 1, binding = 2) uniform sampler2D prepassDepth;
 layout(set = 1, binding = 3) uniform sampler2D prepassNormal;
 layout(set = 1, binding = 6) uniform sampler2D portalMask;
 layout(set = 1, binding = 8) uniform sampler2D gbufferVelocity;
-layout(rgba16f, set = 1, binding = 9) writeonly uniform image2D temporalIndirectImage;
+// No format qualifier: the history is RGBA32F under IQ9's static accumulation
+// and RGBA16F for its control (shaderStorageImageWriteWithoutFormat).
+layout(set = 1, binding = 9) writeonly uniform image2D temporalIndirectImage;
 layout(rgba16f, set = 1, binding = 10) writeonly uniform image2D temporalDiagnosticImage;
 layout(set = 1, binding = 11) uniform sampler2D previousTemporalIndirect;
 layout(set = 1, binding = 12) uniform sampler2D previousMetadata;
@@ -120,8 +122,14 @@ void main()
         float motion = (PushConstants.quality.w & 16u) != 0u ? 1.0
             : clamp(length(velocity * vec2(extent)), 0.0, 1.0);
         history = mix(history, clamp(history, neighborhoodMin, neighborhoodMax), motion);
-        result = mix(current, history,
-            clamp(PushConstants.temporal.x, 0.0, 0.99));
+        // IQ9 (quality.w bit 5): a still pixel accumulates towards 0.98, about
+        // 50 frames; motion fades it back to the preset weight.  The control
+        // keeps the preset weight exactly.
+        float weight = PushConstants.temporal.x;
+        if ((PushConstants.quality.w & 32u) != 0u && weight < 0.98) {
+            weight = mix(0.98, weight, motion);
+        }
+        result = mix(current, history, clamp(weight, 0.0, 0.99));
     }
 
     imageStore(temporalIndirectImage, pixel, vec4(result, 1.0));

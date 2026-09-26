@@ -1284,6 +1284,10 @@ class VulkanEngine{
         struct SSGIState {
             AllocatedImage rawImage;
             AllocatedImage debugImage;
+            // IQ9: still pixels accumulate towards weight 0.98, in full-precision
+            // history.  MIRABILIS_IQ9_STATIC_ACCUMULATION=0 restores half
+            // precision and the preset weight everywhere.
+            bool staticAccumulation{true};
             std::array<AllocatedImage, 2> temporalHistory{};
             std::array<AllocatedImage, 2> metadataHistory{};
             AllocatedImage temporalDiagnosticImage;

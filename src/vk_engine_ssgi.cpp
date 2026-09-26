@@ -1,6 +1,7 @@
 #include "vk_engine.h"
 #include "vk_engine_render_helpers.h"
 #include "r4_contributions.h"
+#include "env_flags.h"
 
 #include <algorithm>
 #include <array>
@@ -280,9 +281,17 @@ void VulkanEngine::init_ssgi_resources()
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    const char* staticAccumulation = SDL_getenv("MIRABILIS_IQ9_STATIC_ACCUMULATION");
+    if (parse_env_bool(staticAccumulation) == EnvBool::Invalid) {
+        fmt::print("MIRABILIS_IQ9_STATIC_ACCUMULATION='{}' is not a boolean\n", staticAccumulation);
+        abort();
+    }
+    _ssgi.staticAccumulation = !staticAccumulation || parse_env_bool(staticAccumulation) == EnvBool::On;
+    // Full precision for long accumulation: at weight 0.98 each frame moves the
+    // history by 2%, below half-float resolution for most differences (IQ9).
     for (AllocatedImage& history : _ssgi.temporalHistory) {
-        history = create_image(
-            extent, VK_FORMAT_R16G16B16A16_SFLOAT,
+        history = create_image(extent,
+            _ssgi.staticAccumulation ? VK_FORMAT_R32G32B32A32_SFLOAT : VK_FORMAT_R16G16B16A16_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     }
     for (AllocatedImage& history : _ssgi.metadataHistory) {
@@ -748,11 +757,15 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
                 0, static_cast<uint32_t>(sets.size()), sets.data(), 0, nullptr);
         }
         SSGIPushConstants pushConstants{};
+        // IQ9 diagnostic: an SSGI seed offset gives an independent noise
+        // realisation of the same frame; unset changes nothing.
+        const char* seedOffset = SDL_getenv("MIRABILIS_IQ9_SSGI_SEED");
         pushConstants.control = glm::uvec4(
             ssgiExtent.width,
             ssgiExtent.height,
             _ssgi.historyValid ? 1u : 0u,
-            static_cast<uint32_t>(_frameNumber));
+            static_cast<uint32_t>(_frameNumber) +
+                (seedOffset ? static_cast<uint32_t>(std::atoi(seedOffset)) * 7919u : 0u));
         pushConstants.settings = glm::vec4(
             _ssgi.rayLength,
             _ssgi.thickness,
@@ -770,6 +783,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             _drawExtent.width, _drawExtent.height,
             (probes ? 1u : 0u) | (hzb ? 2u : 0u) |
                 (_r4Contributions.rayCoverage ? 4u : 0u) |
+                (_ssgi.staticAccumulation ? 32u : 0u) |
                 // Hit-lit sun at uncovered field hits follows the cache's
                 // own sun source (R4.61).
                 ((_r4Contributions.cacheSources & r4::LightSun) != 0u ? 8u : 0u) |
