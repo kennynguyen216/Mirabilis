@@ -819,6 +819,9 @@ class VulkanEngine{
         uint32_t sampled_emitter_count() const;
         void write_emitter_descriptors(FrameData& frame);
         AllocatedBuffer _emitterBufferPlaceholder{};
+        // Diagnostic MIRABILIS_DIAG_VRAM_BALLAST_MB: device memory touched
+        // every frame, so it stays resident and squeezes everything else.
+        AllocatedBuffer _vramBallast{};
         void init_image_based_lighting();
         // radiance(x, y) returns the linear, sun-clamped radiance of a texel.
         void project_environment_sh(

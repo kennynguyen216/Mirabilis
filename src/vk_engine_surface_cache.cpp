@@ -630,10 +630,17 @@ void VulkanEngine::update_surface_cache()
         return;
     }
     _surfaceCache.texelSize = texel;
+    // Shelves fill from the top, so the rows below the last card hold nothing:
+    // allocate only the rows the cards use (R5.5; Sponza's VRAM headroom).
+    uint32_t height = 0;
+    for (const SurfaceCard& card : _surfaceCache.cards) {
+        height = std::max(height, card.rect.y + card.rect.w + Gutter);
+    }
+    const glm::uvec2 atlasSize(side, std::min(side, (height + 63u) / 64u * 64u));
 
     // Anything submitted earlier may still sample the old pages.
     VK_CHECK(vkDeviceWaitIdle(_device));
-    if (_surfaceCache.atlasSize != glm::uvec2(side)) {
+    if (_surfaceCache.atlasSize != atlasSize) {
         for (AllocatedImage* image : {
                  &_surfaceCache.albedo, &_surfaceCache.normal,
                  &_surfaceCache.emissive, &_surfaceCache.depth,
@@ -645,7 +652,7 @@ void VulkanEngine::update_surface_cache()
                 *image = AllocatedImage{};
             }
         }
-        const VkExtent3D extent{side, side, 1};
+        const VkExtent3D extent{atlasSize.x, atlasSize.y, 1};
         constexpr VkImageUsageFlags pageUsage =
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -678,13 +685,13 @@ void VulkanEngine::update_surface_cache()
             vkutil::transition_image(cmd, _surfaceCache.sky.image,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         });
-        _surfaceCache.atlasSize = glm::uvec2(side);
+        _surfaceCache.atlasSize = atlasSize;
     }
 
     const std::array<AllocatedImage*, 4> pages{
         &_surfaceCache.albedo, &_surfaceCache.normal,
         &_surfaceCache.emissive, &_surfaceCache.depth};
-    const VkExtent2D atlasExtent{side, side};
+    const VkExtent2D atlasExtent{atlasSize.x, atlasSize.y};
 
     // One pass per batch of cards, each loading what the last one wrote, so a
     // large scene's capture is split across submissions.
@@ -784,7 +791,7 @@ void VulkanEngine::update_surface_cache()
         std::chrono::steady_clock::now() - started).count();
     _surfaceCache.status = fmt::format(
         "{} instances, {} cards in a {}x{} atlas at {:.1f} cm texels, captured in {:.0f} ms",
-        _surfaceCache.instances.size(), _surfaceCache.cards.size(), side, side,
+        _surfaceCache.instances.size(), _surfaceCache.cards.size(), atlasSize.x, atlasSize.y,
         texel * 100.0f, _surfaceCache.captureMilliseconds);
     fmt::print("Surface cache: {}\n", _surfaceCache.status);
 

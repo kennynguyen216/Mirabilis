@@ -742,6 +742,19 @@ void VulkanEngine::draw(float deltaTime)
 
     VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
 
+    // Diagnostic VRAM pressure: a buffer referenced by every frame stays
+    // resident, so the rest of the working set has that much less room.
+    if (const char* ballast = SDL_getenv("MIRABILIS_DIAG_VRAM_BALLAST_MB");
+            ballast && _vramBallast.buffer == VK_NULL_HANDLE) {
+        _vramBallast = create_buffer(size_t(std::max(std::atoi(ballast), 1)) << 20,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+        _mainDeletionQueue.push_function([this]() { destroy_buffer(_vramBallast); });
+        fmt::print("Diagnostic VRAM ballast: {} MiB\n", std::atoi(ballast));
+    }
+    if (_vramBallast.buffer != VK_NULL_HANDLE) {
+        vkCmdFillBuffer(cmd, _vramBallast.buffer, 0, 4, 0);
+    }
+
 	// Timestamps have to be reset before they are written again, and this
 	// slot's results were read above.
 	if (_gpuTiming.supported) {
