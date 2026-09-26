@@ -174,7 +174,9 @@ class CacheChannelContract(unittest.TestCase):
                 c != "ssgi_body.glsl" or "#define LUMEN_LITE" in t) for c in callers)))
         cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8-sig")
         listed = re.search(r"foreach\(NAME ([^)]*)\)", cmake).group(1).split()
-        self.assertEqual(sorted(listed), need)
+        self.assertEqual(sorted(set(need) - set(listed)), [])
+        # IQ8's cache relight is the one other ray-query build.
+        self.assertEqual(sorted(set(listed) - set(need)), ["surface_cache_direct.comp"])
 
     def test_one_gradient_definition(self):
         shaders = ROOT / "shaders"

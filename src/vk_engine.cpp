@@ -722,6 +722,9 @@ void VulkanEngine::draw(float deltaTime)
     }
 
     update_scene(deltaTime);
+    // Before the surface cache: a relight traces this TLAS (IQ8).  A rebuild
+    // waits for the GPU too, and the descriptors below bind it.
+    update_sun_casters();
     // Before recording starts: a rebuild waits for the GPU and runs its own
     // submissions, which must not happen in the middle of this frame's.
     if ((_debugViews.view == RenderDebugView::SDFTrace && _sdf.source == 1) ||
@@ -734,8 +737,6 @@ void VulkanEngine::draw(float deltaTime)
     if (surfaceCacheActive) {
         update_surface_cache();
     }
-    // A rebuild waits for the GPU too, and the descriptors below bind its TLAS.
-    update_sun_casters();
     // After the field and the trace scene are current, before recording.
     write_emitter_descriptors(get_current_frame());
 

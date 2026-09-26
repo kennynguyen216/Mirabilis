@@ -332,6 +332,10 @@ void VulkanEngine::init_surface_cache_resources()
         // Existing trace-scene BVH, queried only during cache relight (R4.21).
         builder.add_binding(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         builder.add_binding(11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        // IQ8: the sun casters' TLAS, which replaces that BVH on the ray-query device.
+        if (_rayQueryShadows) {
+            builder.add_binding(12, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
+        }
         _surfaceCache.directLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
         VkPushConstantRange directRange{
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -345,7 +349,7 @@ void VulkanEngine::init_surface_cache_resources()
         VK_CHECK(vkCreatePipelineLayout(
             _device, &directLayoutInfo, nullptr, &_surfaceCache.directPipelineLayout));
         ScopedShaderModule directShader(_device);
-        if (directShader.load("../../shaders/surface_cache_direct.comp.spv")) {
+        if (directShader.load(ray_query_shader("surface_cache_direct.comp").c_str())) {
             VkPipelineShaderStageCreateInfo stage{
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
             stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -868,7 +872,18 @@ void VulkanEngine::light_surface_cache()
     mix(&skyIntensity, sizeof(skyIntensity));
     mix(_ibl.environmentSH.data(), sizeof(glm::vec4) * 9);
     mix(&panoramaSky, sizeof(panoramaSky));
-    const glm::vec4 skyEnvironment(_skyboxEnvironmentLod, _skyboxIndirectClamp, 0.0f, 0.0f);
+    // Sky directions per texel: 32 through the software BVH; 256 by ray query
+    // (IQ8), where they cost about what 32 did; MIRABILIS_IQ5_CACHE_SKY_SAMPLES
+    // overrides either.  z = 0 keeps the shader's own 32 and the lighting hash.
+    const char* skySamplesText = SDL_getenv("MIRABILIS_IQ5_CACHE_SKY_SAMPLES");
+    const uint32_t skySamples = skySamplesText
+        ? std::clamp(std::atoi(skySamplesText), 1, 1024) : (_rayQueryShadows ? 256 : 32);
+    // IQ7 diagnostic: a second rotation seed for the sky directions, so two
+    // relights differ only in their per-texel noise (0 = unchanged).
+    const char* skySeedText = SDL_getenv("MIRABILIS_IQ7_SKY_SEED");
+    const glm::vec4 skyEnvironment(_skyboxEnvironmentLod, _skyboxIndirectClamp,
+        skySamplesText || _rayQueryShadows ? float(skySamples) : 0.0f,
+        skySeedText ? float(std::clamp(std::atoi(skySeedText), 0, 65535)) : 0.0f);
     mix(&skyEnvironment, sizeof(skyEnvironment));
     mix(&_r4Contributions.cacheSources, sizeof(_r4Contributions.cacheSources));
     mix(&emitterCount, sizeof(emitterCount));
@@ -886,12 +901,15 @@ void VulkanEngine::light_surface_cache()
     }
     const auto started = std::chrono::steady_clock::now();
 
-    // Bindings 5, 6, 7 and 10 are storage buffers.
-    std::array<DescriptorAllocatorGrowable::PoolSizeRatio, 4> ratios{{
+    // Bindings 5, 6, 7 and 10 are storage buffers; 12 is the TLAS (IQ8).
+    std::vector<DescriptorAllocatorGrowable::PoolSizeRatio> ratios{{
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3.0f},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4.0f},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1.0f},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4.0f}}};
+    if (_rayQueryShadows) {
+        ratios.push_back({VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1.0f});
+    }
     DescriptorAllocatorGrowable pool;
     pool.init(_device, 1, ratios);
     VkDescriptorSet set = pool.allocate(_device, _surfaceCache.directLayout);
@@ -943,6 +961,9 @@ void VulkanEngine::light_surface_cache()
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
     writer.write_image(11, _surfaceCache.sky.imageView, VK_NULL_HANDLE,
         VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+    if (_rayQueryShadows) {
+        writer.write_acceleration_structure(12, _sunCasters.tlas);
+    }
     writer.update_set(_device, set);
 
     VK_CHECK(vkDeviceWaitIdle(_device));
@@ -959,7 +980,7 @@ void VulkanEngine::light_surface_cache()
     // to keep each submission well inside the driver's GPU timeout.  The
     // budget was sized for two marches; the hemispherical sky takes 32 and
     // emitter sampling 64 more, and it shrinks by the same factor (R4.14).
-    const uint64_t TexelBudget = 1'500'000ull * 2 / (2 + 32 + (emitterCount > 0 ? 64 : 0));
+    const uint64_t TexelBudget = 1'500'000ull * 2 / (2 + skySamples + (emitterCount > 0 ? 64 : 0));
     size_t next = 0;
     const auto& cards = _surfaceCache.cards;
     while (next < cards.size()) {

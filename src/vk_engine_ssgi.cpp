@@ -49,6 +49,12 @@ void VulkanEngine::apply_ssgi_quality_preset(int preset)
     _ssgi.filterDepthFalloff = chosen.filterDepthFalloff;
     _ssgi.filterNormalPower = chosen.filterNormalPower;
     _ssgi.historyWeight = chosen.historyWeight;
+    // IQ4 step 0 diagnostic (docs/screen_probe_proposal.md): a longer temporal
+    // accumulation, which tells blotch variance from cache bias.  Unset changes
+    // nothing; the temporal shader caps the weight at 0.99.
+    if (const char* weight = SDL_getenv("MIRABILIS_IQ4_HISTORY_WEIGHT")) {
+        _ssgi.historyWeight = std::clamp(static_cast<float>(std::atof(weight)), 0.0f, 0.99f);
+    }
     _ssgi.spatialFilterEnabled = true;
     _ssgi.historyValid = false;
 }
@@ -457,7 +463,7 @@ void VulkanEngine::init_ssgi_pipelines()
         VK_CHECK(vkCreatePipelineLayout(
             _device, &lumenInfo, nullptr, &_ssgi.lumenPipelineLayout));
         ScopedShaderModule lumenShader(_device);
-        if (lumenShader.load(sun_visibility_shader("ssgi_lumen.comp").c_str())) {
+        if (lumenShader.load(ray_query_shader("ssgi_lumen.comp").c_str())) {
             VkComputePipelineCreateInfo lumenCreate{
                 .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             lumenCreate.layout = _ssgi.lumenPipelineLayout;
@@ -469,7 +475,7 @@ void VulkanEngine::init_ssgi_pipelines()
             fmt::print("Error loading ssgi_lumen.comp.spv; Lumen-lite fallback unavailable\n");
         }
         ScopedShaderModule probeShader(_device);
-        if (probeShader.load(sun_visibility_shader("ssgi_probe.comp").c_str())) {
+        if (probeShader.load(ray_query_shader("ssgi_probe.comp").c_str())) {
             VkComputePipelineCreateInfo probeCreate{
                 .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             probeCreate.layout = _ssgi.lumenPipelineLayout;

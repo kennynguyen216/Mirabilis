@@ -42,10 +42,10 @@ foreach(GLSL ${GLSL_SOURCE_FILES})
 endforeach(GLSL)
 
 # IQ2: ray-query builds of every entry point that calls sunlight_visibility(),
-# loaded only on devices with VK_KHR_ray_query.  The .spv builds above do not
-# change.
+# and IQ8's cache relight, loaded only on devices with VK_KHR_ray_query.  The
+# .spv builds above do not change.
 foreach(NAME mesh.frag mesh_mask.frag mesh_transparent.frag portal_view.frag
-        portal_view_mask.frag ssgi_lumen.comp ssgi_probe.comp)
+        portal_view_mask.frag ssgi_lumen.comp ssgi_probe.comp surface_cache_direct.comp)
   set(GLSL "${PROJECT_SOURCE_DIR}/shaders/${NAME}")
   set(SPIRV "${PROJECT_SOURCE_DIR}/shaders/${NAME}.rt.spv")
   add_custom_command(

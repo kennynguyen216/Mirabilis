@@ -38,7 +38,10 @@ param(
     [switch]$SourceOwnerRepeats,
     # Only runs whose name matches this regex, so a slow matrix can be split
     # across foreground calls instead of running as one long one.
-    [string]$Only = ''
+    [string]$Only = '',
+    # Diagnostic variables added to every run, NAME=VALUE;NAME=VALUE.  They
+    # land in each run's .env.txt and in the manifest.
+    [string]$Extra = ''
 )
 $ErrorActionPreference = 'Stop'
 $configNames = @($Config -split '[,\s]+' | Where-Object { $_ })
@@ -106,7 +109,7 @@ try {
     'Revision: ' + $revision
     'Dirty: ' + $(if ($dirty.Count) { 'yes (worktree.diff, untracked/)' } else { 'no' })
     'Engine SHA-256: ' + (Get-FileHash -LiteralPath $engine -Algorithm SHA256).Hash
-    'Invocation: powershell -ExecutionPolicy Bypass -File scripts/capture_r4_contributions.ps1 -Phase ' + $Phase + ' -Scene ' + $Scene + ' -Config ' + ($configNames -join ',') + $(if ($Label) { ' -Label ' + $Label } else { '' })
+    'Invocation: powershell -ExecutionPolicy Bypass -File scripts/capture_r4_contributions.ps1 -Phase ' + $Phase + ' -Scene ' + $Scene + ' -Config ' + ($configNames -join ',') + $(if ($Label) { ' -Label ' + $Label } else { '' }) + $(if ($Extra) { " -Extra '" + $Extra + "'" } else { '' })
 ) | Set-Content (Join-Path $output ('manifest' + $tag + '.txt'))
 Get-ChildItem -LiteralPath (Join-Path $repo 'shaders') -Filter *.spv | Sort-Object Name | ForEach-Object {
     '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash, $_.Name
@@ -201,6 +204,10 @@ function Get-BaseVariables($case, [int]$frames) {
         MIRABILIS_TEST_CAMERA = $case.camera
         MIRABILIS_MATCH_REFERENCE = '1'
         MIRABILIS_SSGI_TRACE_ENVIRONMENT_MAP = '0'
+    }
+    foreach ($pair in @($Extra -split ';' | Where-Object { $_ })) {
+        $name, $value = $pair -split '=', 2
+        $variables[$name.Trim()] = $value
     }
     return $variables
 }

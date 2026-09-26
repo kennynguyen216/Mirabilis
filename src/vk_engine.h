@@ -692,8 +692,9 @@ class VulkanEngine{
     // MIRABILIS_IQ_RT_SHADOWS=0.  While it is off nothing IQ2 adds is created
     // or loaded, and the shadow map works exactly as before.
     bool _rayQueryShadows{false};
-    // The build to load of an entry point that calls sunlight_visibility().
-    std::string sun_visibility_shader(const char* name) const
+    // The build of a shader to load: its ray-query build (*.rt.spv, IQ2/IQ8)
+    // while _rayQueryShadows is on.
+    std::string ray_query_shader(const char* name) const
     {
         return std::string("../../shaders/") + name +
             (_rayQueryShadows ? ".rt.spv" : ".spv");

@@ -142,10 +142,28 @@ vec3 sky_radiance(vec3 direction)
     return radiance;
 }
 
+#ifdef MIRABILIS_RT_SHADOWS
+// IQ8: the *.rt.spv build traces IQ2's TLAS, which holds the same casters as
+// the BVH below, by ray query: fast enough for 256 sky directions per texel.
+#extension GL_EXT_ray_query : require
+layout(set = 0, binding = 12) uniform accelerationStructureEXT sunCasters;
+#endif
+
 // Same double-sided triangle and BVH hit convention as the CPU R4 diagnostic.
 // Invalid traversal cannot be interpreted as an opening.
 bool sky_visible_exact(vec3 origin, vec3 direction)
 {
+#ifdef MIRABILIS_RT_SHADOWS
+    // No culling (TLAS instance flag) and the same 0.1 mm minimum hit distance.
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, sunCasters,
+        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFF,
+        origin, 0.0001, direction, 1.0e6);
+    while (rayQueryProceedEXT(query)) {
+    }
+    return rayQueryGetIntersectionTypeEXT(query, true) ==
+        gl_RayQueryCommittedIntersectionNoneEXT;
+#else
     if (nodes.length() == 0 || triangles.length() == 0) return false;
     uint stack[64];
     uint top = 0u;
@@ -189,6 +207,7 @@ bool sky_visible_exact(vec3 origin, vec3 direction)
         }
     }
     return true;
+#endif
 }
 
 vec3 sky_irradiance(vec3 world, vec3 normal, ivec2 texel)
@@ -200,10 +219,14 @@ vec3 sky_irradiance(vec3 world, vec3 normal, ivec2 texel)
     vec3 helper = abs(normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
     vec3 tangent = normalize(cross(helper, normal));
     vec3 bitangent = cross(normal, tangent);
-    vec3 rotation = emitter_rotation(uint(texel.x) * 1973u ^ uint(texel.y) * 9277u ^ 0x5bd1e995u);
+    // IQ7 diagnostic: environment.w, 0 unless set, reseeds the rotation.
+    vec3 rotation = emitter_rotation(uint(texel.x) * 1973u ^ uint(texel.y) * 9277u ^ 0x5bd1e995u ^
+        uint(sky.environment.w + 0.5));
+    // IQ5 diagnostic: environment.z overrides the count when non-zero.
+    uint samples = sky.environment.z > 0.5 ? uint(sky.environment.z) : SkySamples;
     vec3 sum = vec3(0.0);
-    for (uint i = 0u; i < SkySamples; ++i) {
-        vec2 xi = emitter_stratum(i, SkySamples, rotation).yz;
+    for (uint i = 0u; i < samples; ++i) {
+        vec2 xi = emitter_stratum(i, samples, rotation).yz;
         float radius = sqrt(xi.x);
         float angle = 2.0 * Pi * xi.y;
         vec3 direction = normalize(tangent * (radius * cos(angle)) +
@@ -230,7 +253,7 @@ vec3 sky_irradiance(vec3 world, vec3 normal, ivec2 texel)
             sum += sky_radiance(direction);
         }
     }
-    return sum / float(SkySamples);
+    return sum / float(samples);
 }
 
 // Irradiance / pi from emissive triangles at a cache texel, and the fraction
