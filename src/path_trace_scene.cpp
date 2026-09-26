@@ -1,5 +1,6 @@
 #include "path_trace_scene.h"
 #include <algorithm>
+#include <chrono>
 #include <functional>
 #include <stdexcept>
 #include <cmath>
@@ -66,7 +67,12 @@ void validate_trace_bvh(const std::vector<TraceTriangle>& triangles,const std::v
     uint32_t state=12345;
     auto random=[&](){state=state*1664525u+1013904223u; return float(state>>8)*(1.f/16777216.f);};
     float maxError=0;
-    for(int i=0;i<4096;++i) {
+    // Brute force is rays x triangles: 4096 rays over Sponza's 3.7M triangles
+    // took most of a bounded run's four-minute first frame (R5.6).  Cap the
+    // work at 1e9 triangle tests; small scenes keep all 4096 rays.
+    const int rays=int(std::clamp<size_t>(1'000'000'000/std::max<size_t>(triangles.size(),1),64,4096));
+    const auto start=std::chrono::steady_clock::now();
+    for(int i=0;i<rays;++i) {
         glm::vec3 o(random()*40-20,random()*20-5,random()*40-20);
         glm::vec3 d=glm::normalize(glm::vec3(random()*2-1,random()*2-1,random()*2-1));
         if(i<6) {d=glm::vec3(0); d[i/2]=i%2?1.f:-1.f;}
@@ -74,6 +80,7 @@ void validate_trace_bvh(const std::vector<TraceTriangle>& triangles,const std::v
         if((a.triangle<0)!=(b.triangle<0)) throw std::runtime_error("BVH hit/miss disagreement");
         if(a.triangle>=0) maxError=std::max(maxError,std::abs(a.t-b.t));
     }
-    fmt::print("GI CPU BVH vs brute force: 4096 rays, max t error={}\n",maxError);
+    fmt::print("GI CPU BVH vs brute force: {} rays, max t error={}, {:.1f} s\n",rays,maxError,
+        std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count());
     if(maxError>1e-4f) throw std::runtime_error("BVH distance disagreement");
 }
