@@ -499,7 +499,9 @@ void VulkanEngine::init_vulkan()
             load(_sunCasters.destroy, "vkDestroyAccelerationStructureKHR") &&
             load(_sunCasters.buildSizes, "vkGetAccelerationStructureBuildSizesKHR") &&
             load(_sunCasters.build, "vkCmdBuildAccelerationStructuresKHR") &&
-            load(_sunCasters.address, "vkGetAccelerationStructureDeviceAddressKHR");
+            load(_sunCasters.address, "vkGetAccelerationStructureDeviceAddressKHR") &&
+            load(_sunCasters.writeProperties, "vkCmdWriteAccelerationStructuresPropertiesKHR") &&
+            load(_sunCasters.copy, "vkCmdCopyAccelerationStructureKHR");
         VkPhysicalDeviceAccelerationStructurePropertiesKHR accelerationProperties{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
         VkPhysicalDeviceProperties2 properties{

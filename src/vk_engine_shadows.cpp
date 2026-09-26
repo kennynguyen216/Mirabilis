@@ -423,33 +423,20 @@ void VulkanEngine::update_sun_casters()
     VkAccelerationStructureBuildGeometryInfoKHR blasInfo{
         .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     blasInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-    blasInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    // IQ11: compacted after the build, about half the memory for the same rays.
+    blasInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+        VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
     blasInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     blasInfo.geometryCount = static_cast<uint32_t>(geometries.size());
     blasInfo.pGeometries = geometries.data();
     VkAccelerationStructureBuildSizesInfoKHR blasSizes{};
-    VkAccelerationStructureInstanceKHR instance{};
     if (!casters.empty()) {
         blasSizes = sizes(blasInfo, triangleCounts.data());
         create(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
             blasSizes.accelerationStructureSize, _sunCasters.blasBuffer, _sunCasters.blas);
-        const VkAccelerationStructureDeviceAddressInfoKHR blasAddress{
-            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-            .accelerationStructure = _sunCasters.blas};
-        instance.accelerationStructureReference = _sunCasters.address(_device, &blasAddress);
     }
-    // The BLAS is already in world space.  Casting from either face is what
-    // the shadow pass does too (it culls nothing).
-    instance.transform.matrix[0][0] = instance.transform.matrix[1][1] =
-        instance.transform.matrix[2][2] = 1.0f;
-    instance.mask = 0xFF;
-    instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
-        VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
     AllocatedBuffer instances = create_buffer(
-        sizeof(instance), buildInput, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    std::memcpy(instances.info.pMappedData, &instance, sizeof(instance));
-    vmaFlushAllocation(_allocator, instances.allocation, 0, VK_WHOLE_SIZE);
-
+        sizeof(VkAccelerationStructureInstanceKHR), buildInput, VMA_MEMORY_USAGE_CPU_TO_GPU);
     VkAccelerationStructureGeometryKHR instanceGeometry{
         .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
     instanceGeometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
@@ -478,24 +465,71 @@ void VulkanEngine::update_sun_casters()
         VMA_MEMORY_USAGE_GPU_ONLY);
     const VkDeviceAddress scratchAddress =
         (bufferAddress(scratch.buffer) + alignment - 1) / alignment * alignment;
+    // A build or copy finishes before the next reads its result or reuses scratch.
+    // Without VK_KHR_ray_tracing_maintenance1, copies run in the BUILD stage.
+    const auto structureBarrier = [](VkCommandBuffer cmd) {
+        VkMemoryBarrier2 barrier{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        barrier.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        barrier.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+            VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        VkDependencyInfo dependency{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dependency.memoryBarrierCount = 1;
+        dependency.pMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(cmd, &dependency);
+    };
 
-    immediate_submit([&](VkCommandBuffer cmd) {
-        if (!casters.empty()) {
+    VkAccelerationStructureInstanceKHR instance{};
+    VkDeviceSize compactedSize = 0;
+    VkAccelerationStructureKHR compact = VK_NULL_HANDLE;
+    AllocatedBuffer compactBuffer{};
+    if (!casters.empty()) {
+        VkQueryPoolCreateInfo queryInfo{.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        queryInfo.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
+        queryInfo.queryCount = 1;
+        VkQueryPool query = VK_NULL_HANDLE;
+        VK_CHECK(vkCreateQueryPool(_device, &queryInfo, nullptr, &query));
+        immediate_submit([&](VkCommandBuffer cmd) {
+            vkCmdResetQueryPool(cmd, query, 0, 1);
             blasInfo.dstAccelerationStructure = _sunCasters.blas;
             blasInfo.scratchData.deviceAddress = scratchAddress;
             const VkAccelerationStructureBuildRangeInfoKHR* blasRanges = ranges.data();
             _sunCasters.build(cmd, 1, &blasInfo, &blasRanges);
-            // The TLAS reads the BLAS and reuses its scratch memory.
-            VkMemoryBarrier2 barrier{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-            barrier.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
-            barrier.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-            barrier.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
-            barrier.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR |
-                VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-            VkDependencyInfo dependency{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-            dependency.memoryBarrierCount = 1;
-            dependency.pMemoryBarriers = &barrier;
-            vkCmdPipelineBarrier2(cmd, &dependency);
+            structureBarrier(cmd);
+            _sunCasters.writeProperties(cmd, 1, &_sunCasters.blas,
+                VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR, query, 0);
+        });
+        VK_CHECK(vkGetQueryPoolResults(_device, query, 0, 1, sizeof(compactedSize),
+            &compactedSize, sizeof(compactedSize),
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT));
+        vkDestroyQueryPool(_device, query, nullptr);
+        create(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, compactedSize,
+            compactBuffer, compact);
+        const VkAccelerationStructureDeviceAddressInfoKHR compactAddress{
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+            .accelerationStructure = compact};
+        instance.accelerationStructureReference = _sunCasters.address(_device, &compactAddress);
+    }
+    // The BLAS is already in world space.  Casting from either face is what
+    // the shadow pass does too (it culls nothing).
+    instance.transform.matrix[0][0] = instance.transform.matrix[1][1] =
+        instance.transform.matrix[2][2] = 1.0f;
+    instance.mask = 0xFF;
+    instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
+        VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+    std::memcpy(instances.info.pMappedData, &instance, sizeof(instance));
+    vmaFlushAllocation(_allocator, instances.allocation, 0, VK_WHOLE_SIZE);
+
+    immediate_submit([&](VkCommandBuffer cmd) {
+        if (compact != VK_NULL_HANDLE) {
+            VkCopyAccelerationStructureInfoKHR copyInfo{
+                .sType = VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR};
+            copyInfo.src = _sunCasters.blas;
+            copyInfo.dst = compact;
+            copyInfo.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
+            _sunCasters.copy(cmd, &copyInfo);
+            structureBarrier(cmd);
         }
         tlasInfo.dstAccelerationStructure = _sunCasters.tlas;
         tlasInfo.scratchData.deviceAddress = scratchAddress;
@@ -503,15 +537,21 @@ void VulkanEngine::update_sun_casters()
         const VkAccelerationStructureBuildRangeInfoKHR* tlasRanges = &tlasRange;
         _sunCasters.build(cmd, 1, &tlasInfo, &tlasRanges);
     });
+    if (compact != VK_NULL_HANDLE) {
+        _sunCasters.destroy(_device, _sunCasters.blas, nullptr);
+        destroy_buffer(_sunCasters.blasBuffer);
+        _sunCasters.blas = compact;
+        _sunCasters.blasBuffer = compactBuffer;
+    }
     destroy_buffer(scratch);
     destroy_buffer(instances);
     destroy_buffer(transforms);
     const double milliseconds = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - start).count();
     constexpr double MiB = 1024.0 * 1024.0;
-    fmt::print("IQ2 sun casters: {} draws, {} triangles; BLAS {:.2f} MiB, TLAS {:.3f} MiB, "
-        "scratch {:.2f} MiB; build {:.1f} ms (wall clock, device wait included)\n",
-        casters.size(), triangles, blasSizes.accelerationStructureSize / MiB,
+    fmt::print("IQ2 sun casters: {} draws, {} triangles; BLAS {:.2f} MiB (compacted from {:.2f}), "
+        "TLAS {:.3f} MiB, scratch {:.2f} MiB; build {:.1f} ms (wall clock, device wait included)\n",
+        casters.size(), triangles, compactedSize / MiB, blasSizes.accelerationStructureSize / MiB,
         tlasSizes.accelerationStructureSize / MiB,
         std::max(blasSizes.buildScratchSize, tlasSizes.buildScratchSize) / MiB, milliseconds);
 }

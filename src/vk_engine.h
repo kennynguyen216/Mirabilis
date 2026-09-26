@@ -1244,6 +1244,9 @@ class VulkanEngine{
             PFN_vkGetAccelerationStructureBuildSizesKHR buildSizes{};
             PFN_vkCmdBuildAccelerationStructuresKHR build{};
             PFN_vkGetAccelerationStructureDeviceAddressKHR address{};
+            // IQ11 compaction.
+            PFN_vkCmdWriteAccelerationStructuresPropertiesKHR writeProperties{};
+            PFN_vkCmdCopyAccelerationStructureKHR copy{};
             VkDeviceSize scratchAlignment{256};
             VkAccelerationStructureKHR blas{}, tlas{};
             AllocatedBuffer blasBuffer{}, tlasBuffer{};
