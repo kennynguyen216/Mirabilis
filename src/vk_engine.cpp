@@ -1222,6 +1222,11 @@ void VulkanEngine::run(){
             if (_frameNumber == 12) renderScale = 0.7f;
             if (_frameNumber >= 14&&!testMinimized) {SDL_MinimizeWindow(_window);testMinimized=true;}
         }
+        // IQ13 test hook: frames 100-129 move the sun as a slider drag would.
+        if (frameLimit && SDL_getenv("MIRABILIS_TEST_SUN_DRAG") &&
+            _frameNumber >= 100 && _frameNumber < 130) {
+            _shadow.sunlightDirection.x += 0.005f;
+        }
         const bool testInvalidation=frameLimit&&SDL_getenv("MIRABILIS_TEST_INVALIDATION");
         const int testFrame=_frameNumber;
         if(testInvalidation) {

@@ -274,9 +274,11 @@ void VulkanEngine::init_ssgi_resources()
     _sceneTargets.portalMask = create_image(
         extent, VK_FORMAT_R8_UNORM,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    // Transfer source for the raw capture (R4.5), which copies it out.
     _ssgi.rawImage = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     _ssgi.debugImage = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |

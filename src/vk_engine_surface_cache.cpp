@@ -504,6 +504,13 @@ void VulkanEngine::init_surface_cache_resources()
     if (SDL_getenv("MIRABILIS_R4_EMITTER_VISIBILITY_CHECK")) {
         _surfaceCache.measureEmitterVisibility = true;
     }
+    const EnvBoolOverride sunOnly = parse_env_bool_override(
+        SDL_getenv("MIRABILIS_IQ13_SUN_ONLY_RELIGHT"), _surfaceCache.sunOnlyRelight);
+    if (!sunOnly.valid) {
+        fmt::print("GI TEST FAIL: MIRABILIS_IQ13_SUN_ONLY_RELIGHT is not a boolean\n");
+        std::abort();
+    }
+    _surfaceCache.sunOnlyRelight = sunOnly.value;
 }
 
 void VulkanEngine::update_surface_cache()
@@ -872,8 +879,6 @@ void VulkanEngine::light_surface_cache()
             hash *= 1099511628211ull;
         }
     };
-    mix(&sunDirection, sizeof(sunDirection));
-    mix(&sunColor, sizeof(sunColor));
     // A changed sky relights the cache: swapping the skybox otherwise leaves
     // every card carrying the previous one's light.
     mix(&skyIntensity, sizeof(skyIntensity));
@@ -900,9 +905,17 @@ void VulkanEngine::light_surface_cache()
     mix(&_sceneSdf.fieldMin, sizeof(_sceneSdf.fieldMin));
     mix(&_sceneSdf.voxelSize, sizeof(_sceneSdf.voxelSize));
     mix(&_surfaceCache.drawHash, sizeof(_surfaceCache.drawHash));
+    // The sun last (IQ13): when nothing before it changed, the sky and emitter
+    // pages still hold every texel's light, and only the sun ray is traced
+    // again.  A dragged sun slider otherwise relit the whole cache per frame.
+    const uint64_t restHash = hash;
+    mix(&sunDirection, sizeof(sunDirection));
+    mix(&sunColor, sizeof(sunColor));
     if (_surfaceCache.lightingValid && hash == _surfaceCache.lightingHash) {
         return;
     }
+    const bool sunOnly = _surfaceCache.sunOnlyRelight && _surfaceCache.lightingValid &&
+        restHash == _surfaceCache.lightingRestHash;
     if (!_traceSupported) {
         fmt::print("Surface cache: emissive triangles unsampled (software trace unavailable)\n");
     }
@@ -987,7 +1000,8 @@ void VulkanEngine::light_surface_cache()
     // to keep each submission well inside the driver's GPU timeout.  The
     // budget was sized for two marches; the hemispherical sky takes 32 and
     // emitter sampling 64 more, and it shrinks by the same factor (R4.14).
-    const uint64_t TexelBudget = 1'500'000ull * 2 / (2 + skySamples + (emitterCount > 0 ? 64 : 0));
+    const uint64_t TexelBudget = sunOnly ? 1'500'000ull
+        : 1'500'000ull * 2 / (2 + skySamples + (emitterCount > 0 ? 64 : 0));
     size_t next = 0;
     const auto& cards = _surfaceCache.cards;
     while (next < cards.size()) {
@@ -1011,7 +1025,7 @@ void VulkanEngine::light_surface_cache()
                 push.sunDirection = glm::vec4(sunDirection, _shadow.enabled ? 1.0f : 0.0f);
                 push.sunColor = glm::vec4(sunColor, skyIntensity);
                 push.fieldMin = glm::vec4(_sceneSdf.fieldMin, _sceneSdf.voxelSize);
-                push.fieldMax = glm::vec4(_sceneSdf.fieldMax, 0.0f);
+                push.fieldMax = glm::vec4(_sceneSdf.fieldMax, sunOnly ? 1.0f : 0.0f);
                 vkCmdPushConstants(cmd, _surfaceCache.directPipelineLayout,
                     VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
                 vkCmdDispatch(cmd, (card.rect.z + 7) / 8, (card.rect.w + 7) / 8, 1);
@@ -1031,12 +1045,13 @@ void VulkanEngine::light_surface_cache()
     destroy_buffer(placeholder);
 
     _surfaceCache.lightingHash = hash;
+    _surfaceCache.lightingRestHash = restHash;
     _surfaceCache.lightingValid = true;
     _surfaceCache.lightingMilliseconds = std::chrono::duration<float, std::milli>(
         std::chrono::steady_clock::now() - started).count();
-    fmt::print("Surface cache lit: {} cards, {} emitter triangles, {} sky in {:.0f} ms\n",
-        cards.size(), emitterCount, panoramaSky ? "panorama" : "gradient",
-        _surfaceCache.lightingMilliseconds);
+    fmt::print("Surface cache lit{}: {} cards, {} emitter triangles, {} sky in {:.1f} ms\n",
+        sunOnly ? " (sun only)" : "", cards.size(), emitterCount,
+        panoramaSky ? "panorama" : "gradient", _surfaceCache.lightingMilliseconds);
 }
 
 void VulkanEngine::measure_surface_cache_coverage()

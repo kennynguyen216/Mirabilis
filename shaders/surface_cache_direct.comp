@@ -71,7 +71,7 @@ layout(push_constant) uniform constants {
     vec4 sunColor;
     // xyz = scene field minimum corner, w = field voxel size.
     vec4 fieldMin;
-    // xyz = scene field maximum corner, w = unused.
+    // xyz = scene field maximum corner, w = 1 for a sun-only relight (IQ13).
     vec4 fieldMax;
 } PushConstants;
 
@@ -328,6 +328,13 @@ void main()
             visibility = sun_visibility(origin, lightDirection);
         }
         light = PushConstants.sunColor.rgb * noL * visibility;
+    }
+    // IQ13: only the sun moved since this texel's last full relight, whose
+    // sky and emitter light are still in their own pages.
+    if (PushConstants.fieldMax.w > 0.5) {
+        vec3 kept = imageLoad(skyPage, texel).rgb + imageLoad(emitterPage, texel).rgb;
+        imageStore(directPage, texel, vec4(light + kept, 1.0));
+        return;
     }
     // The sky over the whole hemisphere this texel faces: outdoors most of
     // it, indoors whatever reaches through the windows.

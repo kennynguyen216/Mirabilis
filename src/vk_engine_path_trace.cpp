@@ -124,6 +124,7 @@ void VulkanEngine::draw_path_trace(VkCommandBuffer cmd) {
     append(&pc.origin,64); append(&_drawExtent,sizeof(_drawExtent)); append(&renderScale,sizeof(renderScale));
     append(&pc.settings.w,sizeof(pc.settings.w));
     append(&pc.sampling,sizeof(pc.sampling)); append(&_traceSceneRevision,sizeof(_traceSceneRevision));
+    append(&_traceSettings.lighting,sizeof(TraceLighting));
     if(!_traceRuntime.wasActive||hash!=_traceRuntime.inputHash||_traceRuntime.samples>=16777216u) {
         _traceRuntime.samples=0; _traceRuntime.inputHash=hash;
         if(std::getenv("MIRABILIS_TEST_FRAMES")) fmt::print("GI accumulation reset: input hash={} revision={} extent={}x{}\n",hash,_traceSceneRevision,_drawExtent.width,_drawExtent.height);
@@ -393,10 +394,19 @@ void VulkanEngine::update_trace_scene() {
     addPortal(_bluePortal,_orangePortal.placed?&_orangePortal:nullptr);
     addPortal(_orangePortal,_bluePortal.placed?&_bluePortal:nullptr);
     for(const auto& pair:_authoredPortals.pairs) {addPortal(pair.first,&pair.second);addPortal(pair.second,&pair.first);}
+    // Lighting is not geometry (IQ13b).  Hashed with it, every step of the
+    // editor's sun slider recollected every triangle, rebuilt the BVH and the
+    // albedo volume and relit the whole surface cache.  It is rewritten on its
+    // own, and draw_path_trace's hash restarts accumulation when it changes.
+    _traceSettings.lighting.sunDirection=glm::vec4(glm::normalize(glm::dot(_shadow.sunlightDirection,_shadow.sunlightDirection)>1e-10f?_shadow.sunlightDirection:glm::vec3(0,1,0)),0);
+    auto uploadLighting=[&] {
+        if(std::memcmp(_traceLightBuffer.info.pMappedData,&_traceSettings.lighting,sizeof(TraceLighting))==0) return;
+        VK_CHECK(vkDeviceWaitIdle(_device)); // A path trace in flight may still read it.
+        std::memcpy(_traceLightBuffer.info.pMappedData,&_traceSettings.lighting,sizeof(TraceLighting));
+        vmaFlushAllocation(_allocator,_traceLightBuffer.allocation,0,VK_WHOLE_SIZE);
+    };
     uint64_t drawHash=1469598103934665603ull;
     auto append=[&](const void* data,size_t bytes) {auto p=static_cast<const uint8_t*>(data);for(size_t i=0;i<bytes;++i) {drawHash^=p[i];drawHash*=1099511628211ull;}};
-    append(&_shadow.sunlightDirection,sizeof(_shadow.sunlightDirection));
-    append(&_traceSettings.lighting.sunRadiance,2*sizeof(glm::vec4));
     append(portals.data(),portals.size()*sizeof(TracePortal));
     for(const auto& draw:worldDrawContext.OpaqueSurfaces) {
         append(&draw.transform,sizeof(draw.transform)); append(&draw.vertexBufferAddress,sizeof(draw.vertexBufferAddress));
@@ -407,7 +417,7 @@ void VulkanEngine::update_trace_scene() {
             const auto* texture=draw.material->traceTexture.get(); append(&texture,sizeof(texture));
         }
     }
-    if(_traceTriangleBuffer.buffer&&drawHash==_traceDrawHash) return;
+    if(_traceTriangleBuffer.buffer&&drawHash==_traceDrawHash) {uploadLighting(); return;}
     _traceDrawHash=drawHash;
     std::vector<TraceTriangle> triangles;
     std::vector<TraceMaterial> materials;
@@ -449,12 +459,10 @@ void VulkanEngine::update_trace_scene() {
     }
     uint64_t hash=1469598103934665603ull;
     const auto hashBytes=[&](const void* data,size_t size) { auto p=static_cast<const unsigned char*>(data); for(size_t i=0;i<size;++i) { hash^=p[i]; hash*=1099511628211ull; } };
-    _traceSettings.lighting.sunDirection=glm::vec4(glm::normalize(glm::dot(_shadow.sunlightDirection,_shadow.sunlightDirection)>1e-10f?_shadow.sunlightDirection:glm::vec3(0,1,0)),0);
-    hashBytes(&_traceSettings.lighting.sunDirection,3*sizeof(glm::vec4));
     hashBytes(triangles.data(),triangles.size()*sizeof(TraceTriangle)); hashBytes(materials.data(),materials.size()*sizeof(TraceMaterial));
     hashBytes(texels.data(),texels.size()*sizeof(uint32_t));
     hashBytes(portals.data(),portals.size()*sizeof(TracePortal));
-    if (_traceTriangleBuffer.buffer && hash==_traceSceneHash) return;
+    if (_traceTriangleBuffer.buffer && hash==_traceSceneHash) {uploadLighting(); return;}
     VK_CHECK(vkDeviceWaitIdle(_device)); // Rare scene edits retire all readers before replacing descriptors/buffers.
     _traceSceneHash=hash; ++_traceSceneRevision;
     _traceTriangles=std::move(triangles); _traceMaterials=std::move(materials);

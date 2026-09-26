@@ -1545,6 +1545,10 @@ class VulkanEngine{
             bool lightingValid{false};
             // Sun and field state the direct page was lit with.
             uint64_t lightingHash{0};
+            // The same without the sun (IQ13): unchanged, a sun-only relight
+            // suffices.  MIRABILIS_IQ13_SUN_ONLY_RELIGHT=0 always relights fully.
+            uint64_t lightingRestHash{0};
+            bool sunOnlyRelight{true};
             float lightingMilliseconds{0.0f};
             VkDescriptorSetLayout directLayout{};
             VkPipelineLayout directPipelineLayout{};
