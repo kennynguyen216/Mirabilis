@@ -64,6 +64,40 @@ class Q1Analyzer(unittest.TestCase):
         self.assertTrue(results["living-room"][0])
 
 
+    def test_every_violation_is_listed(self):
+        probe = readout(1.0)
+        probe[1, 2, 1] = 0.97
+        probe[3, 0, 1] = np.nan
+        probe[0, 0, 0] = 0.0          # not served: never a violation
+        probe[0, 0, 1] = 5.0
+        self.assertEqual([(y, x) for y, x, _ in iq4_q1.violations(probe)], [(1, 2), (3, 0)])
+
+    def test_fallback_count_comes_from_the_run_log(self):
+        log = "x\nSSGI screen trace: 4160 pixels traced, hit rate 0.3516, mean steps 4.88\n"
+        self.assertEqual(iq4_q1.fallback_pixels(log), 4160)
+        with self.assertRaises(ValueError):
+            iq4_q1.fallback_pixels("no trace line")
+
+
+class ProbeSampling(unittest.TestCase):
+    """Step 2c: uniform stratified rays and the normal-compatibility test."""
+
+    def setUp(self):
+        self.text = SSGI.read_text(encoding="utf-8")
+
+    def test_uniform_rays_weight_two_pi(self):
+        self.assertIn("vec3 weighted = incident * (2.0 * Pi);", self.text)
+        self.assertIn("float cosTheta = (float(lane) + randomFloat(state)) / 64.0;", self.text)
+        self.assertIn("bitfieldReverse(lane) >> 26", self.text)
+        self.assertNotIn("Pi / cosTheta", self.text)
+
+    def test_gather_drops_probes_below_the_normal_threshold(self):
+        self.assertRegex(self.text, r"const float ProbeNormalCos = 0\.98;")
+        self.assertRegex(self.text, r"if \(facing < ProbeNormalCos\) continue;")
+        # (1 + cos beta) / 2 at the threshold loses at most 1% of Q1's 2%.
+        self.assertAlmostEqual((1 + 0.98) / 2, 0.99)
+
+
 class UncoveredGatherClamp(unittest.TestCase):
     def setUp(self):
         self.text = SSGI.read_text(encoding="utf-8")

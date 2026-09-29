@@ -483,10 +483,10 @@ vec3 trace_incident(TraceOrigin o, vec3 direction, bool primarySkyCached,
 #ifdef LUMEN_LITE
 // Screen probes (IQ4, docs/screen_probe_proposal.md).  One probe per
 // ProbeTile x ProbeTile pixel tile, placed on a hashed pixel of its tile each
-// frame, traces 64 cosine-distributed rays over its hemisphere and keeps them
+// frame, traces 64 stratified uniform rays over its hemisphere and keeps them
 // as band-2 spherical harmonics.  Each pixel then reads irradiance for its own
-// normal from the four probes around it.  The existing temporal pass
-// accumulates across the jittered placements.
+// normal from the four probes around it, those facing within ProbeNormalCos of
+// it.  The existing temporal pass accumulates across the jittered placements.
 //
 // Rays the scene field saw leave the scene are kept in a second coefficient
 // set: a pixel the cache's primary sky covers takes its own cache sky instead
@@ -498,6 +498,11 @@ vec3 trace_incident(TraceOrigin o, vec3 direction, bool primarySkyCached,
 // serve fall back to their own rays.
 const int ProbeTile = 8;
 const int ProbeCoefficients = 18;
+// A probe's hemisphere misses part of a pixel's tilted beta from it: for
+// band-2 SH a probe of constant radiance reads (1 + cos beta) / 2 there.
+// 0.98 keeps that loss within 1%, half of Q1's tolerance; the other half is
+// the sampling error (IQ4 step 2c).
+const float ProbeNormalCos = 0.98;
 layout(rgba16f, set = 1, binding = 14) uniform image2D probeRadiance;
 
 bool probes_enabled()
@@ -581,12 +586,14 @@ void main()
     uint state = uint(probe.x) * 1973u ^ uint(probe.y) * 9277u ^ lane * 26699u ^
         PushConstants.control.w * 3079u ^ 0x68bc21ebu;
 
-    // Cosine-weighted (alpha = 1), stratified on an 8 x 8 grid over the unit
-    // square the cosine map takes, one jittered sample per cell.
-    float u1 = (float(lane % 8u) + randomFloat(state)) / 8.0;
-    float u2 = (float(lane / 8u) + randomFloat(state)) / 8.0;
-    float cosTheta = sqrt(max(1.0 - u1, 1e-8));
-    float radius = sqrt(u1);
+    // Uniform over the hemisphere (pdf 1 / 2pi), one jittered ray per row of
+    // 64 cos theta strata and per column of 64 phi strata, the columns in
+    // 6-bit reversed order.  Uniform keeps the projection's weight bounded,
+    // and the 64 rows keep a probe's constant-input error under 1% where an
+    // 8 x 8 grid reaches 4% (tmp/iq4-step2c/threshold_model.py).
+    float cosTheta = (float(lane) + randomFloat(state)) / 64.0;
+    float u2 = (float(bitfieldReverse(lane) >> 26) + randomFloat(state)) / 64.0;
+    float radius = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
     float phi = 2.0 * Pi * u2;
     vec3 direction = normalize(tangent * (radius * cos(phi)) +
         bitangent * (radius * sin(phi)) + o.normal * cosTheta);
@@ -596,8 +603,8 @@ void main()
     vec3 incident = trace_incident(o, direction, false, hit, portal, steps);
     float coefficients[9];
     sh_basis(normalize(transpose(mat3(sceneData.view)) * direction), coefficients);
-    // Monte Carlo projection: radiance x basis / pdf, pdf = cos theta / pi.
-    vec3 weighted = incident * (Pi / cosTheta);
+    // Monte Carlo projection: radiance x basis / pdf, pdf = 1 / 2pi.
+    vec3 weighted = incident * (2.0 * Pi);
     int exitSet = traceFieldExit ? 9 : 0;
     for (int i = 0; i < ProbeCoefficients; ++i) probeSum[lane][i] = vec3(0.0);
     for (int i = 0; i < 9; ++i) probeSum[lane][exitSet + i] = weighted * coefficients[i];
@@ -655,6 +662,7 @@ void main()
                 texture(prepassDepth, frame_uv(probeUV, prepassDepth)).r);
             float plane = abs(dot(o.worldNormal, p.worldPosition - o.worldPosition));
             float facing = max(dot(o.worldNormal, p.worldNormal), 0.0);
+            if (facing < ProbeNormalCos) continue;
             float bilinear = (corner.x == 1 ? t.x : 1.0 - t.x) *
                 (corner.y == 1 ? t.y : 1.0 - t.y);
             // A probe more than a few centimetres off this pixel's plane
