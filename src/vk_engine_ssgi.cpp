@@ -307,9 +307,10 @@ void VulkanEngine::init_ssgi_resources()
     _ssgi.filterScratchImage = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    // Nine SH coefficients per 8x8 tile, side by side.
+    // Eighteen SH coefficients per 8x8 tile, side by side: nine for the rays
+    // that stayed in the scene, nine for field exits (IQ4).
     _ssgi.probeImage = create_image(
-        VkExtent3D{(extent.width + 7u) / 8u * 9u, (extent.height + 7u) / 8u, 1u},
+        VkExtent3D{(extent.width + 7u) / 8u * 18u, (extent.height + 7u) / 8u, 1u},
         VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT);
     // Padded to a multiple of the coarsest cell, so every level is exactly
     // half the one below and each texel covers a whole 2x2.
