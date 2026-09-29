@@ -640,9 +640,9 @@ void main()
         ivec2 base = ivec2(floor(f));
         vec2 t = f - vec2(base);
         ivec2 probes = (extent + ProbeTile - 1) / ProbeTile;
+        // The rays that stayed in the scene, and both sets summed before the
+        // clamp: what the probes alone reconstruct (also Q1's readout).
         vec3 gathered = vec3(0.0);
-        vec3 gatheredExit = vec3(0.0);
-        // Q1's readout: both sets, what the probes alone reconstruct.
         vec3 gatheredAll = vec3(0.0);
         float weightSum = 0.0;
         for (int i = 0; i < 4; ++i) {
@@ -663,18 +663,22 @@ void main()
             float planeWeight = exp(-plane / (0.02 * max(-o.position.z, 1.0)));
             float weight = bilinear * planeWeight * pow(facing, 8.0);
             gathered += probe_incident(probe, o.worldNormal, 0) * weight;
-            gatheredExit += probe_incident(probe, o.worldNormal, 1) * weight;
             gatheredAll += probe_incident(probe, o.worldNormal, 2) * weight;
             weightSum += weight;
         }
         if (weightSum > 1e-3) {
-            vec3 indirect = gathered / weightSum + (primarySkyCached
-                ? r4_ray_value(RayPrimaryCacheSky, primarySky.sky)
-                : gatheredExit / weightSum);
+            // Covered: the scene set plus this pixel's own cache sky, which
+            // owns its field exits.  Uncovered: both sets combined before the
+            // clamp, as its own rays would sum them.
+            vec3 indirect = primarySkyCached
+                ? gathered / weightSum + r4_ray_value(RayPrimaryCacheSky, primarySky.sky)
+                : gatheredAll / weightSum;
             imageStore(rawIndirectImage, pixel, vec4(indirect, 1.0));
-            // r = 0.75 marks a probe-served pixel (g = b = 0 keeps it out of
-            // the traced-pixel statistics); a = what the probes alone read.
-            imageStore(diagnosticImage, pixel, vec4(0.75, 0.0, 0.0,
+            // r = 0.75 marks a probe-served pixel, b = -1 one the cache sky
+            // covers (g, b <= 0 keep it out of the traced-pixel statistics);
+            // a = what the probes alone read.
+            imageStore(diagnosticImage, pixel, vec4(0.75, 0.0,
+                primarySkyCached ? -1.0 : 0.0,
                 dot(gatheredAll / weightSum, vec3(1.0 / 3.0))));
             return;
         }

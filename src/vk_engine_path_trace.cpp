@@ -1029,16 +1029,18 @@ void VulkanEngine::capture_ssgi(const char* filename)
 
     // The trace's diagnostic image: g = steps taken / (steps x rays), b = 1 -
     // screen hit fraction.  Pixels that traced nothing (background, or read
-    // from screen probes) write both as 0 and are left out; a traced pixel
-    // has taken steps, missed, or both.
+    // from screen probes) write both as at most 0 and are left out; a traced
+    // pixel has taken steps, missed, or both.
     const auto diagnostic = read_ssgi_image(_ssgi.debugImage, extent);
     // IQ4 Q1: r = 1 where screen probes served the pixel, g = what the probes
-    // alone reconstruct there (every ray 1 under MIRABILIS_R4_RAY_COVERAGE).
+    // alone reconstruct there (every ray 1 under MIRABILIS_R4_RAY_COVERAGE),
+    // b = 1 where the pixel's own cache sky covers it.
     if (_ssgi.probesEnabled) {
         std::vector<glm::vec4> probe(diagnostic.size());
         for (size_t i = 0; i < diagnostic.size(); ++i) {
             const bool served = std::abs(diagnostic[i].r - 0.75f) < 1e-3f;
-            probe[i] = glm::vec4(served ? 1.0f : 0.0f, served ? diagnostic[i].a : 0.0f, 0.0f, 0.0f);
+            probe[i] = glm::vec4(served ? 1.0f : 0.0f, served ? diagnostic[i].a : 0.0f,
+                served && diagnostic[i].b < -0.5f ? 1.0f : 0.0f, 0.0f);
         }
         writePfm(std::string(filename) + ".probe.pfm", probe);
     }
