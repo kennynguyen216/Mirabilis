@@ -1346,6 +1346,13 @@ class VulkanEngine{
             bool probesEnabled{false};
             VkPipeline probePipeline{};
             AllocatedImage probeImage{};
+            // Adaptive probes (IQ4): placement and tracing passes, and the
+            // buffer they fill each frame -- request count, slot pixels and
+            // the per-4x4-sub-tile slot map.  GPU only; read back at capture.
+            VkPipeline probePlacePipeline{};
+            VkPipeline probeAdaptivePipeline{};
+            AllocatedBuffer adaptiveBuffer{};
+            VkDeviceSize adaptiveBufferSize{};
             // Hierarchical screen trace: a nearest-depth pyramid
             // (shaders/hzb_build.comp), one storage view and set per level.
             static constexpr uint32_t HzbLevels = 8;

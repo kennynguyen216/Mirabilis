@@ -45,7 +45,8 @@ endforeach(GLSL)
 # and IQ8's cache relight, loaded only on devices with VK_KHR_ray_query.  The
 # .spv builds above do not change.
 foreach(NAME mesh.frag mesh_mask.frag mesh_transparent.frag portal_view.frag
-        portal_view_mask.frag ssgi_lumen.comp ssgi_probe.comp surface_cache_direct.comp)
+        portal_view_mask.frag ssgi_lumen.comp ssgi_probe.comp ssgi_probe_place.comp
+        ssgi_probe_adaptive.comp surface_cache_direct.comp)
   set(GLSL "${PROJECT_SOURCE_DIR}/shaders/${NAME}")
   set(SPIRV "${PROJECT_SOURCE_DIR}/shaders/${NAME}.rt.spv")
   add_custom_command(

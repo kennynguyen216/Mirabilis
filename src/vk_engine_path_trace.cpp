@@ -1032,17 +1032,36 @@ void VulkanEngine::capture_ssgi(const char* filename)
     // from screen probes) write both as at most 0 and are left out; a traced
     // pixel has taken steps, missed, or both.
     const auto diagnostic = read_ssgi_image(_ssgi.debugImage, extent);
-    // IQ4 Q1: r = 1 where screen probes served the pixel, g = what the probes
-    // alone reconstruct there (every ray 1 under MIRABILIS_R4_RAY_COVERAGE),
-    // b = 1 where the pixel's own cache sky covers it.
+    // IQ4 Q1: r = 1 where uniform screen probes served the pixel, 2 where
+    // adaptive ones did, g = what the probes alone reconstruct there (every
+    // ray 1 under MIRABILIS_R4_RAY_COVERAGE), b = 1 where the pixel's own
+    // cache sky covers it.
+    uint32_t adaptiveRequested = 0;
     if (_ssgi.probesEnabled) {
         std::vector<glm::vec4> probe(diagnostic.size());
         for (size_t i = 0; i < diagnostic.size(); ++i) {
             const bool served = std::abs(diagnostic[i].r - 0.75f) < 1e-3f;
-            probe[i] = glm::vec4(served ? 1.0f : 0.0f, served ? diagnostic[i].a : 0.0f,
+            probe[i] = glm::vec4(served ? (diagnostic[i].g < -0.5f ? 2.0f : 1.0f) : 0.0f,
+                served ? diagnostic[i].a : 0.0f,
                 served && diagnostic[i].b < -0.5f ? 1.0f : 0.0f, 0.0f);
         }
         writePfm(std::string(filename) + ".probe.pfm", probe);
+        // The last frame's adaptive request count: the only readback of the
+        // adaptive buffer, and only here.
+        auto readback = create_buffer(sizeof(uint32_t), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VMA_MEMORY_USAGE_GPU_TO_CPU);
+        immediate_submit([&](VkCommandBuffer cmd) {
+            const VkBufferCopy copy{0, 0, sizeof(uint32_t)};
+            vkCmdCopyBuffer(cmd, _ssgi.adaptiveBuffer.buffer, readback.buffer, 1, &copy);
+        });
+        void* mapped = nullptr;
+        VK_CHECK(vmaMapMemory(_allocator, readback.allocation, &mapped));
+        vmaInvalidateAllocation(_allocator, readback.allocation, 0, VK_WHOLE_SIZE);
+        std::memcpy(&adaptiveRequested, mapped, sizeof(uint32_t));
+        vmaUnmapMemory(_allocator, readback.allocation);
+        destroy_buffer(readback);
+        fmt::print("SSGI adaptive probes: requested {}, placed {} (budget 1024)\n",
+            adaptiveRequested, std::min(adaptiveRequested, 1024u));
     }
     double hitSum = 0.0, stepSum = 0.0;
     size_t traced = 0;
@@ -1087,6 +1106,10 @@ void VulkanEngine::capture_ssgi(const char* filename)
         << render_camera().position.x << "," << render_camera().position.y
         << "," << render_camera().position.z << " pitch="
         << render_camera().pitch << " yaw=" << render_camera().yaw << "\n";
+    if (_ssgi.probesEnabled) {
+        metadata << "Adaptive probes requested: " << adaptiveRequested
+            << "\nAdaptive probes placed: " << std::min(adaptiveRequested, 1024u) << "\n";
+    }
     write_capture_lighting(metadata);
 
     if (const char* referencePath = std::getenv("MIRABILIS_SSGI_REFERENCE")) {

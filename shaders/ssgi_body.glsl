@@ -557,25 +557,122 @@ vec3 probe_incident(ivec2 probe, vec3 n, int set)
     }
     return max(e, vec3(0.0));
 }
+
+// Adaptive probes (IQ4 adaptive record): where the uniform probes leave more
+// than a quarter of a tile's surface pixels unserved, each 4 x 4 sub-tile with
+// an unserved pixel gets one extra probe at its first such pixel, up to
+// AdaptiveBudget a frame.  The placement pass fills this buffer every frame:
+// the requested count, each slot's pixel, and every sub-tile's slot (-1 for
+// none).  Their coefficients sit in the probe image's last rows,
+// AdaptiveColumns slots to a row.
+const uint AdaptiveBudget = 1024u;
+const int AdaptiveColumns = 32;
+const uint AdaptiveSalt = 0x9e3779b9u;
+layout(std430, set = 1, binding = 16) buffer AdaptiveProbes {
+    uint adaptiveRequested;
+    uint adaptivePadding[3];
+    ivec2 adaptivePixel[AdaptiveBudget];
+    int adaptiveSlot[];
+};
+
+ivec2 adaptive_storage(int slot)
+{
+    int firstRow = imageSize(probeRadiance).y - int(AdaptiveBudget) / AdaptiveColumns;
+    return ivec2(slot % AdaptiveColumns, firstRow + slot / AdaptiveColumns);
+}
+
+// The four uniform probes around this pixel, bilinear in tile space, each
+// kept only if it lies on this pixel's surface and faces its way.  Returns
+// the weight sum; gathered is the rays that stayed in the scene, gatheredAll
+// both sets summed before the clamp (what the probes alone reconstruct, also
+// Q1's readout).  The placement pass calls this too, so "unserved" means
+// exactly what the per-pixel pass does.
+float gather_uniform(ivec2 pixel, ivec2 extent, TraceOrigin o,
+    out vec3 gathered, out vec3 gatheredAll)
+{
+    vec2 f = (vec2(pixel) + 0.5) / float(ProbeTile) - 0.5;
+    ivec2 base = ivec2(floor(f));
+    vec2 t = f - vec2(base);
+    ivec2 probes = (extent + ProbeTile - 1) / ProbeTile;
+    gathered = vec3(0.0);
+    gatheredAll = vec3(0.0);
+    float weightSum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        ivec2 corner = ivec2(i & 1, i >> 1);
+        ivec2 probe = clamp(base + corner, ivec2(0), probes - 1);
+        if (imageLoad(probeRadiance, ivec2(probe.x * ProbeCoefficients, probe.y)).a < 0.5) continue;
+        ivec2 probePixel = probe_pixel(probe, extent);
+        vec2 probeUV = (vec2(probePixel) + 0.5) / vec2(extent);
+        TraceOrigin p = trace_origin(probeUV,
+            texture(prepassDepth, frame_uv(probeUV, prepassDepth)).r);
+        float plane = abs(dot(o.worldNormal, p.worldPosition - o.worldPosition));
+        float facing = max(dot(o.worldNormal, p.worldNormal), 0.0);
+        if (facing < ProbeNormalCos) continue;
+        float bilinear = (corner.x == 1 ? t.x : 1.0 - t.x) *
+            (corner.y == 1 ? t.y : 1.0 - t.y);
+        // A probe more than a few centimetres off this pixel's plane
+        // (scaled with distance, as depth precision is) is on another
+        // surface and saw a different hemisphere.
+        float planeWeight = exp(-plane / (0.02 * max(-o.position.z, 1.0)));
+        float weight = bilinear * planeWeight * pow(facing, 8.0);
+        gathered += probe_incident(probe, o.worldNormal, 0) * weight;
+        gatheredAll += probe_incident(probe, o.worldNormal, 2) * weight;
+        weightSum += weight;
+    }
+    return weightSum;
+}
+
+// The adaptive probes of this pixel's 4 x 4 sub-tile and its eight
+// neighbours, with the uniform gather's plane and normal tests and weights
+// but no bilinear term: they sit wherever the unserved pixels were.
+float gather_adaptive(ivec2 pixel, ivec2 extent, TraceOrigin o,
+    out vec3 gathered, out vec3 gatheredAll)
+{
+    ivec2 subtiles = (extent + 3) / 4;
+    ivec2 own = pixel / 4;
+    gathered = vec3(0.0);
+    gatheredAll = vec3(0.0);
+    float weightSum = 0.0;
+    for (int i = 0; i < 9; ++i) {
+        ivec2 subtile = own + ivec2(i % 3 - 1, i / 3 - 1);
+        if (any(lessThan(subtile, ivec2(0))) || any(greaterThanEqual(subtile, subtiles))) continue;
+        int slot = adaptiveSlot[subtile.y * subtiles.x + subtile.x];
+        if (slot < 0) continue;
+        vec2 probeUV = (vec2(adaptivePixel[slot]) + 0.5) / vec2(extent);
+        TraceOrigin p = trace_origin(probeUV,
+            texture(prepassDepth, frame_uv(probeUV, prepassDepth)).r);
+        float plane = abs(dot(o.worldNormal, p.worldPosition - o.worldPosition));
+        float facing = max(dot(o.worldNormal, p.worldNormal), 0.0);
+        if (facing < ProbeNormalCos) continue;
+        float weight = exp(-plane / (0.02 * max(-o.position.z, 1.0))) * pow(facing, 8.0);
+        ivec2 storage = adaptive_storage(slot);
+        gathered += probe_incident(storage, o.worldNormal, 0) * weight;
+        gatheredAll += probe_incident(storage, o.worldNormal, 2) * weight;
+        weightSum += weight;
+    }
+    return weightSum;
+}
 #endif
 
-#ifdef SSGI_PROBE_TRACE
+#if defined(SSGI_PROBE_TRACE) || defined(SSGI_PROBE_ADAPTIVE)
 // One workgroup per probe, one ray per invocation: 64 rays per probe
 // (proposal section 4), whatever the per-pixel ray count.
 shared vec3 probeSum[64][ProbeCoefficients];
 
-void main()
+// Traces one probe at pixel and stores its coefficients at storage.  Its rays
+// are seeded from seedCell and salt, never from where it is stored, so the
+// order adaptive probes take their slots in cannot change them.  Every
+// invocation of the workgroup must call it with the same arguments.
+void trace_probe(ivec2 pixel, ivec2 seedCell, uint salt, ivec2 storage)
 {
-    ivec2 probe = ivec2(gl_WorkGroupID.xy);
     uint lane = gl_LocalInvocationIndex;
     ivec2 extent = ivec2(PushConstants.control.xy);
-    ivec2 pixel = probe_pixel(probe, extent);
     vec2 screenUV = (vec2(pixel) + 0.5) / vec2(extent);
     float depth = texture(prepassDepth, frame_uv(screenUV, prepassDepth)).r;
     // Uniform across the workgroup, so no invocation is left at the barrier.
     if (depth <= BackgroundDepth) {
         if (lane < uint(ProbeCoefficients)) {
-            imageStore(probeRadiance, ivec2(probe.x * ProbeCoefficients + int(lane), probe.y), vec4(0.0));
+            imageStore(probeRadiance, ivec2(storage.x * ProbeCoefficients + int(lane), storage.y), vec4(0.0));
         }
         return;
     }
@@ -583,8 +680,8 @@ void main()
     vec3 helper = abs(o.normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
     vec3 tangent = normalize(cross(helper, o.normal));
     vec3 bitangent = cross(o.normal, tangent);
-    uint state = uint(probe.x) * 1973u ^ uint(probe.y) * 9277u ^ lane * 26699u ^
-        PushConstants.control.w * 3079u ^ 0x68bc21ebu;
+    uint state = uint(seedCell.x) * 1973u ^ uint(seedCell.y) * 9277u ^ lane * 26699u ^
+        PushConstants.control.w * 3079u ^ 0x68bc21ebu ^ salt;
 
     // Uniform over the hemisphere (pdf 1 / 2pi), one jittered ray per row of
     // 64 cos theta strata and per column of 64 phi strata, the columns in
@@ -595,8 +692,8 @@ void main()
     // over its whole cos theta band; without it the fixed pairing samples only
     // 64 of the 4096 (cos theta, phi) cells (IQ4 step 2d,
     // tests/test_iq4_probe_sampler.py).
-    uint rotationState = uint(probe.x) * 1973u ^ uint(probe.y) * 9277u ^
-        PushConstants.control.w * 3079u ^ 0x2545f491u;
+    uint rotationState = uint(seedCell.x) * 1973u ^ uint(seedCell.y) * 9277u ^
+        PushConstants.control.w * 3079u ^ 0x2545f491u ^ salt;
     float rotation = randomFloat(rotationState);
     float cosTheta = (float(lane) + randomFloat(state)) / 64.0;
     float u2 = fract((float(bitfieldReverse(lane) >> 26) + randomFloat(state)) / 64.0 +
@@ -620,8 +717,91 @@ void main()
     if (lane < uint(ProbeCoefficients)) {
         vec3 total = vec3(0.0);
         for (int j = 0; j < 64; ++j) total += probeSum[j][lane];
-        imageStore(probeRadiance, ivec2(probe.x * ProbeCoefficients + int(lane), probe.y),
+        imageStore(probeRadiance, ivec2(storage.x * ProbeCoefficients + int(lane), storage.y),
             vec4(total / 64.0, 1.0));
+    }
+}
+#endif
+
+#if defined(SSGI_PROBE_TRACE)
+// The uniform probes: one per tile.  Runs first each frame, so it also
+// clears the adaptive request counter for the placement pass after it.
+void main()
+{
+    ivec2 probe = ivec2(gl_WorkGroupID.xy);
+    if (probe == ivec2(0) && gl_LocalInvocationIndex == 0u) {
+        adaptiveRequested = 0u;
+    }
+    trace_probe(probe_pixel(probe, ivec2(PushConstants.control.xy)), probe, 0u, probe);
+}
+#elif defined(SSGI_PROBE_ADAPTIVE)
+// The adaptive probes: one workgroup per budget slot; a slot the placement
+// pass did not fill exits at once (the whole workgroup reads the same count).
+void main()
+{
+    uint slot = gl_WorkGroupID.x;
+    if (slot >= min(adaptiveRequested, AdaptiveBudget)) {
+        return;
+    }
+    ivec2 pixel = adaptivePixel[slot];
+    trace_probe(pixel, pixel / 4, AdaptiveSalt, adaptive_storage(int(slot)));
+}
+#elif defined(SSGI_PROBE_PLACE)
+// Placement: one workgroup per 8 x 8 tile, one invocation per pixel.  Counts
+// the tile's surface pixels and those the uniform probes leave unserved, and
+// finds each 4 x 4 sub-tile's first unserved pixel (row-major).  Every
+// in-extent sub-tile's map entry is written every frame.
+shared uint tileSurface;
+shared uint tileUnserved;
+shared uint firstUnserved[4];
+
+void main()
+{
+    ivec2 tile = ivec2(gl_WorkGroupID.xy);
+    ivec2 local = ivec2(gl_LocalInvocationID.xy);
+    uint lane = gl_LocalInvocationIndex;
+    ivec2 extent = ivec2(PushConstants.control.xy);
+    ivec2 pixel = tile * ProbeTile + local;
+    if (lane == 0u) {
+        tileSurface = 0u;
+        tileUnserved = 0u;
+    }
+    if (lane < 4u) {
+        firstUnserved[lane] = 0xffffffffu;
+    }
+    barrier();
+    if (all(lessThan(pixel, extent))) {
+        vec2 screenUV = (vec2(pixel) + 0.5) / vec2(extent);
+        float depth = texture(prepassDepth, frame_uv(screenUV, prepassDepth)).r;
+        if (depth > BackgroundDepth) {
+            atomicAdd(tileSurface, 1u);
+            vec3 gathered, gatheredAll;
+            if (gather_uniform(pixel, extent, trace_origin(screenUV, depth),
+                    gathered, gatheredAll) <= 1e-3) {
+                atomicAdd(tileUnserved, 1u);
+                atomicMin(firstUnserved[(local.y / 4) * 2 + local.x / 4],
+                    uint((local.y % 4) * 4 + local.x % 4));
+            }
+        }
+    }
+    barrier();
+    if (lane < 4u) {
+        ivec2 subtile = tile * 2 + ivec2(int(lane) & 1, int(lane) >> 1);
+        ivec2 subtiles = (extent + 3) / 4;
+        if (all(lessThan(subtile, subtiles))) {
+            int slot = -1;
+            uint first = firstUnserved[lane];
+            if (tileUnserved * 4u > tileSurface && first != 0xffffffffu) {
+                // Past the budget a request gets no probe; the count still
+                // grows, so saturation shows in the capture.
+                uint requested = atomicAdd(adaptiveRequested, 1u);
+                if (requested < AdaptiveBudget) {
+                    slot = int(requested);
+                    adaptivePixel[slot] = subtile * 4 + ivec2(int(first % 4u), int(first / 4u));
+                }
+            }
+            adaptiveSlot[subtile.y * subtiles.x + subtile.x] = slot;
+        }
     }
 }
 #else
@@ -649,38 +829,13 @@ void main()
         o.worldPosition, o.worldNormal, true, (PushConstants.quality.w & 64u) == 0u);
     bool primarySkyCached = primarySky.weight > 0.0;
     if (probes_enabled()) {
-        // The four probes around this pixel, bilinear in tile space, each
-        // kept only if it lies on this pixel's surface and faces its way.
-        vec2 f = (vec2(pixel) + 0.5) / float(ProbeTile) - 0.5;
-        ivec2 base = ivec2(floor(f));
-        vec2 t = f - vec2(base);
-        ivec2 probes = (extent + ProbeTile - 1) / ProbeTile;
-        // The rays that stayed in the scene, and both sets summed before the
-        // clamp: what the probes alone reconstruct (also Q1's readout).
-        vec3 gathered = vec3(0.0);
-        vec3 gatheredAll = vec3(0.0);
-        float weightSum = 0.0;
-        for (int i = 0; i < 4; ++i) {
-            ivec2 corner = ivec2(i & 1, i >> 1);
-            ivec2 probe = clamp(base + corner, ivec2(0), probes - 1);
-            if (imageLoad(probeRadiance, ivec2(probe.x * ProbeCoefficients, probe.y)).a < 0.5) continue;
-            ivec2 probePixel = probe_pixel(probe, extent);
-            vec2 probeUV = (vec2(probePixel) + 0.5) / vec2(extent);
-            TraceOrigin p = trace_origin(probeUV,
-                texture(prepassDepth, frame_uv(probeUV, prepassDepth)).r);
-            float plane = abs(dot(o.worldNormal, p.worldPosition - o.worldPosition));
-            float facing = max(dot(o.worldNormal, p.worldNormal), 0.0);
-            if (facing < ProbeNormalCos) continue;
-            float bilinear = (corner.x == 1 ? t.x : 1.0 - t.x) *
-                (corner.y == 1 ? t.y : 1.0 - t.y);
-            // A probe more than a few centimetres off this pixel's plane
-            // (scaled with distance, as depth precision is) is on another
-            // surface and saw a different hemisphere.
-            float planeWeight = exp(-plane / (0.02 * max(-o.position.z, 1.0)));
-            float weight = bilinear * planeWeight * pow(facing, 8.0);
-            gathered += probe_incident(probe, o.worldNormal, 0) * weight;
-            gatheredAll += probe_incident(probe, o.worldNormal, 2) * weight;
-            weightSum += weight;
+        vec3 gathered;
+        vec3 gatheredAll;
+        float weightSum = gather_uniform(pixel, extent, o, gathered, gatheredAll);
+        // Only a pixel the uniform probes leave unserved reads adaptive ones.
+        bool adaptive = weightSum <= 1e-3;
+        if (adaptive) {
+            weightSum = gather_adaptive(pixel, extent, o, gathered, gatheredAll);
         }
         if (weightSum > 1e-3) {
             // Covered: the scene set plus this pixel's own cache sky, which
@@ -690,10 +845,11 @@ void main()
                 ? gathered / weightSum + r4_ray_value(RayPrimaryCacheSky, primarySky.sky)
                 : gatheredAll / weightSum;
             imageStore(rawIndirectImage, pixel, vec4(indirect, 1.0));
-            // r = 0.75 marks a probe-served pixel, b = -1 one the cache sky
-            // covers (g, b <= 0 keep it out of the traced-pixel statistics);
-            // a = what the probes alone read.
-            imageStore(diagnosticImage, pixel, vec4(0.75, 0.0,
+            // r = 0.75 marks a probe-served pixel, g = -1 one an adaptive
+            // probe served, b = -1 one the cache sky covers (g, b <= 0 keep it
+            // out of the traced-pixel statistics); a = what the probes alone
+            // read.
+            imageStore(diagnosticImage, pixel, vec4(0.75, adaptive ? -1.0 : 0.0,
                 primarySkyCached ? -1.0 : 0.0,
                 dot(gatheredAll / weightSum, vec3(1.0 / 3.0))));
             return;

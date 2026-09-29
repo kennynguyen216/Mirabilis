@@ -2,8 +2,8 @@
 "IQ4 step 2 correction").
 
 Reads <scene>-L0-full-f300-ssgi.probe.pfm from a capture directory: r = 1 on a
-probe-served pixel, g = the probes' own reconstruction there, b = 1 where the
-pixel's cache sky covers it.  Q1 passes only if the served set is non-empty
+pixel uniform probes served (2 where adaptive probes did), g = the probes' own
+reconstruction there, b = 1 where the pixel's cache sky covers it.  Q1 passes only if the served set is non-empty
 and every served value is finite and within [0.98, 1.02].
 
 Also reports the served fraction of non-background pixels: served / (served +
@@ -36,7 +36,8 @@ def q1(probe):
     """(passed, stats) for one H x W x 3 probe readout."""
     served = probe[..., 0] > 0.5
     g = probe[..., 1][served]
-    stats = {"served": int(served.sum()), "pixels": int(served.size)}
+    stats = {"served": int(served.sum()), "pixels": int(served.size),
+             "adaptive_served": int((probe[..., 0] > 1.5).sum())}
     if g.size == 0:
         return False, {**stats, "reason": "no probe-served pixels"}
     finite = np.isfinite(g)
