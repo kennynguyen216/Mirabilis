@@ -590,9 +590,17 @@ void main()
     // 64 cos theta strata and per column of 64 phi strata, the columns in
     // 6-bit reversed order.  Uniform keeps the projection's weight bounded,
     // and the 64 rows keep a probe's constant-input error under 1% where an
-    // 8 x 8 grid reaches 4% (tmp/iq4-step2c/threshold_model.py).
+    // 8 x 8 grid reaches 4% (tmp/iq4-step2c/threshold_model.py).  One azimuth
+    // rotation per probe per frame, shared by its rays, makes each ray uniform
+    // over its whole cos theta band; without it the fixed pairing samples only
+    // 64 of the 4096 (cos theta, phi) cells (IQ4 step 2d,
+    // tests/test_iq4_probe_sampler.py).
+    uint rotationState = uint(probe.x) * 1973u ^ uint(probe.y) * 9277u ^
+        PushConstants.control.w * 3079u ^ 0x2545f491u;
+    float rotation = randomFloat(rotationState);
     float cosTheta = (float(lane) + randomFloat(state)) / 64.0;
-    float u2 = (float(bitfieldReverse(lane) >> 26) + randomFloat(state)) / 64.0;
+    float u2 = fract((float(bitfieldReverse(lane) >> 26) + randomFloat(state)) / 64.0 +
+        rotation);
     float radius = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
     float phi = 2.0 * Pi * u2;
     vec3 direction = normalize(tangent * (radius * cos(phi)) +
