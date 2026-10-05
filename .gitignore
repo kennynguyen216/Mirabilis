@@ -56,3 +56,6 @@ assets/sdf/
 
 # Scratch output from GI comparison runs
 tmp/
+
+# Local design docs, handoffs and session notes
+/docs/**/*.md
