@@ -577,7 +577,7 @@ class VulkanEngine{
     // and, once called after that frame's draw(), captures it. Returns false
     // once recording has finished.
     void apply_cinematic_camera_pose();
-    void capture_cinematic_frame();
+    void capture_cinematic_frame(const char* directory = nullptr, int frame = 0);
     // Reads a half-float colour image.  layout is the one the image was left
     // in, and it is restored afterwards.
     std::vector<glm::vec4> read_ssgi_image(
@@ -819,6 +819,7 @@ class VulkanEngine{
         uint32_t sampled_emitter_count() const;
         void write_emitter_descriptors(FrameData& frame);
         AllocatedBuffer _emitterBufferPlaceholder{};
+        AllocatedImage _portalGiPlaceholder{};
         // Diagnostic MIRABILIS_DIAG_VRAM_BALLAST_MB: device memory touched
         // every frame, so it stays resident and squeezes everything else.
         AllocatedBuffer _vramBallast{};
@@ -970,7 +971,8 @@ class VulkanEngine{
             VkCommandBuffer cmd,
             const GPUSceneData& skyCamera,
             uint32_t stencilReference,
-            uint32_t stencilCompareMask = 0xff);
+            uint32_t stencilCompareMask = 0xff,
+            const AllocatedImage* target = nullptr);
         void draw_collider_debug_bounds(VkCommandBuffer cmd);
         void draw_portal_views(VkCommandBuffer cmd);
         void draw_offscreen_portal_views(VkCommandBuffer cmd);
@@ -1110,7 +1112,6 @@ class VulkanEngine{
         };
         EditorGizmoState _editorGizmo;
         struct PhysicsStepState {
-            float portalTraversalCooldown{0.0f};
             float accumulator{0.0f};
             // Camera yaw is sampled once per rendered frame, but physics runs at a
             // fixed step that can tick up to MaxPhysicsSteps times for that one
@@ -1526,9 +1527,11 @@ class VulkanEngine{
             // static scene keeps converging; radiosityBlend is the floor that
             // keeps a changing one responsive.
             std::vector<uint32_t> cardUpdates;
+            std::vector<uint32_t> cardLastUpdate;
             uint32_t radiosityUpdate{0};
             // Texels traced per update; each traces raysPerTexel rays.
-            uint32_t radiosityTexelBudget{300000};
+            // Independent of SSGI presets, so editor tuning survives changes.
+            uint32_t radiosityTexelBudget{128000};
             uint32_t raysPerTexel{2};
             bool singleBounce{false};
             float radiosityBlend{0.02f};

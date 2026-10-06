@@ -1,6 +1,8 @@
 #include "vk_engine.h"
 
 #include <SDL.h>
+#include <fstream>
+#include <filesystem>
 
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
@@ -50,6 +52,42 @@ bool VulkanEngine::process_event(const SDL_Event& e)
             "MIRABILIS_TEST_CAMERA='{:.3f} {:.3f} {:.3f} {:.3f} {:.3f}'\n",
             view.position.x, view.position.y, view.position.z,
             view.pitch, view.yaw);
+        fmt::print("Portal state: scene={} noClip={} offscreen={} recursion={}\n",
+            _sceneDocument.activeFilename, _noClip.enabled,
+            _portalCameras.useOffscreen, _portalRender.recursionEnabled);
+        const auto printPortal = [](const char* name, const Portal& p) {
+            fmt::print("{} placed={} position={},{},{} normal={},{},{} half={}/{} host={}\n",
+                name, p.placed, p.position.x, p.position.y, p.position.z,
+                p.normal.x, p.normal.y, p.normal.z, p.halfWidth, p.halfHeight, p.hostWallObject);
+        };
+        printPortal("Blue", _bluePortal);
+        printPortal("Orange", _orangePortal);
+        const char* recording = SDL_getenv("MIRABILIS_PORTAL_RECORD");
+        const bool stop = recording && recording[0] == '1';
+        SDL_setenv("MIRABILIS_PORTAL_RECORD", stop ? "0" : "1", 1);
+        if (!stop) {
+            std::error_code error;
+            std::filesystem::create_directories("../../tmp/portal-live", error);
+            std::ofstream state("../../tmp/portal-live/state.txt");
+            state << fmt::format("Scene={} noClip={} offscreen={} recursion={}\nCamera={},{},{} pitch={} yaw={}\n",
+                _sceneDocument.activeFilename, _noClip.enabled, _portalCameras.useOffscreen,
+                _portalRender.recursionEnabled, view.position.x, view.position.y, view.position.z, view.pitch, view.yaw);
+            const auto save = [&](const char* name, const Portal& p) {
+                state << fmt::format("{} placed={} position={},{},{} normal={},{},{} half={}/{} host={}\n",
+                    name, p.placed, p.position.x, p.position.y, p.position.z,
+                    p.normal.x, p.normal.y, p.normal.z, p.halfWidth, p.halfHeight, p.hostWallObject);
+            };
+            save("Blue", _bluePortal); save("Orange", _orangePortal);
+            state << fmt::format("renderer={} debugView={} renderScale={} tonemap={} exposure={} autoExposure={} fxaa={}\n",
+                int(_rendererMode), int(_debugViews.view), renderScale, _postProcess.tonemapEnabled,
+                _postProcess.tonemapExposure, _autoExposure.enabled, _postProcess.fxaaEnabled);
+            for (const auto& pair : _authoredPortals.pairs) {save("Authored A", pair.first); save("Authored B", pair.second);}
+            write_capture_lighting(state);
+            if (!state || error) SDL_setenv("MIRABILIS_PORTAL_RECORD", "0", 1);
+        }
+        const char* active = SDL_getenv("MIRABILIS_PORTAL_RECORD");
+        fmt::print("Portal recording {}: ../../tmp/portal-live (F9 toggles; auto-stops after 600 frames)\n",
+            stop ? "stopped" : (active && active[0] == '1' ? "started" : "failed to start"));
     }
 
     // Handle this before the gameplay WASD code below.  Without

@@ -81,6 +81,15 @@ class CacheChannelContract(unittest.TestCase):
 
     SAMPLING = ROOT / "shaders" / "emitter_sampling.glsl"
 
+    def test_portal_unavailable_state_keeps_legacy_lighting(self):
+        text = (ROOT / "shaders" / "portal_view_shading.glsl").read_text(encoding="utf-8")
+        match = re.search(r"bool lumen = sceneData\.portalIndirectSettings\.y\s*(==|>)\s*([\d.]+);", text)
+        self.assertIsNotNone(match)
+        compare = (lambda y: y == float(match[2])) if match[1] == "==" else (lambda y: y > float(match[2]))
+        self.assertEqual([compare(y) for y in (0, 1, 2)], [False, True, False],
+                         "Unavailable portal GI must retain the legacy ambient path")
+        self.assertIn("vec3 indirect = lumen ?", text)
+
     def test_one_emitter_estimator_with_the_path_tracer_convention(self):
         shared = self.SAMPLING.read_text(encoding="utf-8")
         self.assertIn("authoredSideNormal(emitter,", shared)
@@ -119,7 +128,7 @@ class CacheChannelContract(unittest.TestCase):
         mesh = MESH.read_text(encoding="utf-8")
         self.assertIn("(emittersSampled ? vec3(0.0) : emission)", mesh)
         self.assertIn("(sceneData.emitterSettings.x > 0.5 ? vec3(0.0) : surface.emissive)",
-                      SSGI.read_text(encoding="utf-8"))
+                      (ROOT / "shaders" / "lumen_world_trace.glsl").read_text(encoding="utf-8"))
 
     def test_screen_hits_and_field_hits_share_the_cache_direct_source(self):
         ssgi = SSGI.read_text(encoding="utf-8")
@@ -152,7 +161,8 @@ class CacheChannelContract(unittest.TestCase):
         """R4.61: uncovered field hits are lit by the forward pass's own shadow test."""
         ssgi = SSGI.read_text(encoding="utf-8")
         self.assertIn('#include "sun_shadow.glsl"', ssgi)
-        self.assertIn("rayClass = RayFieldUncovered;\n            return lumen_hit_sun(p);", ssgi)
+        world = (ROOT / "shaders" / "lumen_world_trace.glsl").read_text(encoding="utf-8")
+        self.assertIn("rayClass = RayFieldUncovered;\n            return lumen_hit_sun(p);", world)
         structures = (ROOT / "shaders" / "input_structures.glsl").read_text(encoding="utf-8")
         self.assertIn('#include "sun_shadow.glsl"', structures)
         self.assertNotIn("float sunlight_visibility", structures, "shadow test copied, not shared")
@@ -168,6 +178,12 @@ class CacheChannelContract(unittest.TestCase):
                 if p.suffix in (".glsl", ".frag", ".vert", ".comp")}
         callers = {n for n, t in text.items()
                    if "sunlight_visibility(" in t and n != "sun_shadow.glsl"}
+        while True:
+            parents = {n for n, t in text.items() if n.endswith(".glsl") and
+                       any(f'#include "{c}"' in t for c in callers)}
+            if parents <= callers:
+                break
+            callers |= parents
         # ssgi_body.glsl includes the shadow test only for Lumen-lite.
         need = sorted(n for n, t in text.items() if not n.endswith(".glsl") and (
             n in callers or any(f'#include "{c}"' in t and (

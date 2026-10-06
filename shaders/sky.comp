@@ -30,7 +30,9 @@ float hash12(vec2 p)
 void main()
 {
     ivec2 texelCoord = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 size = imageSize(image);
+    // The HDR image stays allocated at window size while rendering may use
+    // only its top-left region. Directions must use the active viewport.
+    ivec2 size = ivec2(PushConstants.data2.w, PushConstants.data3.w);
 
     if (texelCoord.x < size.x && texelCoord.y < size.y)
     {

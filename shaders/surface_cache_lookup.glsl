@@ -126,7 +126,34 @@ vec3 surface_cache_sky_bilinear(SurfaceCacheCard card, vec2 cardUV, ivec2 centre
     return total > 1e-4 ? sum / total : SURFACE_CACHE_READ_SKY(centre);
 }
 
-SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky, bool bilinearSky)
+// Portal receivers have no screen-space denoiser. Filter their incoming light
+// in card space, rejecting other surfaces just as the bilinear sky read does.
+vec3 surface_cache_receiver_filtered(SurfaceCacheCard card, vec2 cardUV, ivec2 centre,
+    float margin, bool readSky)
+{
+    vec2 f = cardUV * vec2(card.rect.zw) - 0.5;
+    ivec2 base = ivec2(floor(f));
+    float centreDepth = texelFetch(cacheDepth, centre, 0).r;
+    vec3 sum = vec3(0.0);
+    float total = 0.0;
+    for (int y = -2; y <= 3; ++y) {
+        for (int x = -2; x <= 3; ++x) {
+            ivec2 local = base + ivec2(x, y);
+            ivec2 texel = ivec2(card.rect.xy) + clamp(local, ivec2(0), ivec2(card.rect.zw) - 1);
+            float stored = texelFetch(cacheDepth, texel, 0).r;
+            if (stored >= 1.0 || abs(stored - centreDepth) * card.direction.w > margin)
+                continue;
+            vec2 tent = max(vec2(0.0), 1.0 - abs(vec2(local) - f) / 3.0);
+            float weight = tent.x * tent.y;
+            sum += weight * (readSky ? SURFACE_CACHE_READ_SKY(texel) : SURFACE_CACHE_READ_INDIRECT(texel));
+            total += weight;
+        }
+    }
+    return total > 1e-4 ? sum / total :
+        (readSky ? SURFACE_CACHE_READ_SKY(centre) : SURFACE_CACHE_READ_INDIRECT(centre));
+}
+
+SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky, bool bilinearSky, bool readLighting)
 {
     SurfaceCacheSample result;
     result.weight = 0.0;
@@ -198,7 +225,10 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky, b
         }
         result.weight += weight;
         if (readSky) {
-            result.sky += weight * (bilinearSky
+            result.sky += weight * (readLighting && bilinearSky
+                ? surface_cache_receiver_filtered(cards[cardIndices[range.x + i]], cardUV, texel,
+                    sameSurfaceMargin, true)
+                : bilinearSky
                 ? surface_cache_sky_bilinear(cards[cardIndices[range.x + i]], cardUV, texel,
                     sameSurfaceMargin)
                 : SURFACE_CACHE_READ_SKY(texel));
@@ -206,10 +236,17 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky, b
         }
         result.albedo += weight * texelFetch(cacheAlbedo, texel, 0).rgb;
         result.emissive += weight * texelFetch(cacheEmissive, texel, 0).rgb;
+#ifdef SURFACE_CACHE_READ_DIRECT
+        vec4 direct = SURFACE_CACHE_READ_DIRECT(texel, readLighting);
+#else
         vec4 direct = texelFetch(cacheDirect, texel, 0);
+#endif
         result.direct += weight * direct.rgb;
         result.directAlpha += weight * direct.a;
-        result.indirect += weight * SURFACE_CACHE_READ_INDIRECT(texel);
+        result.indirect += weight * (bilinearSky
+            ? surface_cache_receiver_filtered(cards[cardIndices[range.x + i]], cardUV, texel,
+                sameSurfaceMargin, false)
+            : SURFACE_CACHE_READ_INDIRECT(texel));
     }
     if (result.weight > 0.0) {
         result.albedo /= result.weight;
@@ -220,6 +257,11 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky, b
         result.sky /= result.weight;
     }
     return result;
+}
+
+SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky, bool bilinearSky)
+{
+    return surface_cache_lookup(world, normal, readSky, bilinearSky, false);
 }
 
 SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal)

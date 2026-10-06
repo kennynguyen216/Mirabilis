@@ -441,9 +441,9 @@ void VulkanEngine::init_ssgi_pipelines()
         !compositeVertexShader.load("../../shaders/render_debug.vert.spv") ||
         !compositeFragmentShader.load(
             "../../shaders/ssgi_composite.frag.spv") ||
-        !meshVertexShader.load("../../shaders/mesh.vert.spv") ||
+        !meshVertexShader.load("../../shaders/portal_stencil.vert.spv") ||
         !maskFragmentShader.load(
-            "../../shaders/portal_mask_output.frag.spv")) {
+            "../../shaders/portal_stencil_output.frag.spv")) {
         fmt::print("Error loading SSGI shaders\n");
         return;
     }

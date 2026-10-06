@@ -821,6 +821,7 @@ void VulkanEngine::update_surface_cache()
     _surfaceCache.radiosityCursor = 0;
     _surfaceCache.radiosityUpdate = 0;
     _surfaceCache.cardUpdates.assign(_surfaceCache.cards.size(), 0);
+    _surfaceCache.cardLastUpdate.assign(_surfaceCache.cards.size(), 0);
     build_surface_cache_lookup();
     light_surface_cache();
 
@@ -1421,6 +1422,8 @@ void VulkanEngine::update_surface_cache_radiosity(VkCommandBuffer cmd)
         _surfaceCache.radiosityPipelineLayout, 0, 2, sets.data(), 0, nullptr);
     std::vector<VkImageCopy> regions;
     regions.reserve(batch.size());
+    const bool originalTiming = SDL_getenv("MIRABILIS_TEST_FRAMES") &&
+        SDL_getenv("MIRABILIS_R6_RADIOSITY_CONTROL");
     for (uint32_t index : batch) {
         const SurfaceCard& card = cards[index];
         SurfaceCacheRadiosityPushConstants push{};
@@ -1431,8 +1434,12 @@ void VulkanEngine::update_surface_cache_radiosity(VkCommandBuffer cmd)
         push.control = glm::uvec4(update, _surfaceCache.raysPerTexel,
             _surfaceCache.singleBounce ? 1u : 0u, 0);
         uint32_t& updates = _surfaceCache.cardUpdates[index];
+        const uint32_t gap = updates && !originalTiming ? update - _surfaceCache.cardLastUpdate[index] : 1u;
+        const float floor = gap > 1u ? 1.0f - std::pow(1.0f - _surfaceCache.radiosityBlend, float(gap))
+            : _surfaceCache.radiosityBlend;
         const float blend = std::max(
-            1.0f / float(updates + 1), _surfaceCache.radiosityBlend);
+            1.0f / float(updates + 1), floor);
+        _surfaceCache.cardLastUpdate[index] = update;
         ++updates;
         push.settings = glm::vec4(
             blend, _surfaceCache.radiosityMaxDistance, 0.0f, 0.0f);

@@ -57,9 +57,8 @@ void main()
     // Diffuse environment has one owner (docs/lumen_lite_design.md 4.2).
     // While SSGI runs it is the trace, which lights a ray from the sky only
     // when the ray demonstrably left the scene, so the diffuse ambient term
-    // here is zero.  Specular is not SSGI's and is never scaled.  Portal
-    // cameras clear the SSGI flag and keep the whole term until they receive
-    // their own screen-space pass.
+    // here is zero. Specular is not SSGI's and is never scaled. Lumen portal
+    // cameras use the shared world gather instead of this screen-space pass.
     float ambientScale = sceneData.screenSpaceSettings.z > 0.5 ? 0.0 : 1.0;
     vec3 ambientLight = sceneData.ambientColor.rgb * occlusion * ambientScale;
 

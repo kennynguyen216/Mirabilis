@@ -59,3 +59,8 @@ tmp/
 
 # Local design docs, handoffs and session notes
 /docs/**/*.md
+
+# Local Lumen/portal capture analysis and debug scripts
+/scripts/check_lumen_*.py
+/scripts/check_player_traversal.py
+/scripts/check_portal_*.py

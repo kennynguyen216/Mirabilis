@@ -38,7 +38,19 @@ layout(set = 0, binding = 12) uniform sampler2D cacheDirect;
 #define SURFACE_CACHE_BINDING_CARDS 13
 #define SURFACE_CACHE_BINDING_GRID 14
 #define SURFACE_CACHE_BINDING_INDICES 15
+#ifdef MIRABILIS_PORTAL_GI
+layout(set = 0, binding = 17) uniform sampler3D sceneField;
+layout(set = 0, binding = 18) uniform sampler2D portalCacheDirect;
+layout(set = 0, binding = 19) uniform sampler2D portalCacheIndirect;
+layout(set = 0, binding = 20) uniform sampler2D portalCacheSky;
+layout(set = 0, binding = 21) uniform sampler3D albedoVolume;
+#define SURFACE_CACHE_READ_DIRECT(texel, lighting) \
+    (lighting ? texelFetch(portalCacheDirect, texel, 0) : texelFetch(cacheDirect, texel, 0))
+#define SURFACE_CACHE_READ_INDIRECT(texel) texelFetch(portalCacheIndirect, texel, 0).rgb
+#define SURFACE_CACHE_READ_SKY(texel) texelFetch(portalCacheSky, texel, 0).rgb
+#else
 #define SURFACE_CACHE_READ_INDIRECT(texel) vec3(0.0)
+#endif
 #include "surface_cache_lookup.glsl"
 
 // How much of the surrounding hemisphere reaches this surface: 1 fully open,

@@ -135,6 +135,8 @@ class SsgiPresetDefault(unittest.TestCase):
             re.S,
         )
         assert body, "apply_ssgi_quality_preset not found in " + str(SSGI)
+        self.assertNotIn("_surfaceCache", body.group(1),
+                         "SSGI presets must preserve independent cache tuning")
         for field in PRESET_OWNED_FIELDS:
             self.assertIn(
                 f"_ssgi.{field}",

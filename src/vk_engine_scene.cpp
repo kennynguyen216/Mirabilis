@@ -87,10 +87,10 @@ void VulkanEngine::update_scene(float deltaTime)
         ComputeEffect& sky = backgroundEffects[1];
         sky.data.data2 = glm::vec4(
             glm::normalize(glm::vec3(rotation * glm::vec4(1.0f, 0.0f, 0.0f, 0.0f))),
-            0.0f);
+            static_cast<float>(_drawExtent.width));
         sky.data.data3 = glm::vec4(
             glm::normalize(glm::vec3(rotation * glm::vec4(0.0f, 1.0f, 0.0f, 0.0f))),
-            0.0f);
+            static_cast<float>(_drawExtent.height));
         sky.data.data4 = glm::vec4(
             glm::normalize(glm::vec3(rotation * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f))),
             0.0f);

@@ -175,6 +175,8 @@ void VulkanEngine::init_scene_descriptors()
         builder.add_binding(13, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         builder.add_binding(14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         builder.add_binding(15, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        for (uint32_t binding = 17; binding <= 21; ++binding)
+            builder.add_binding(binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         // IQ2: the sun casters' TLAS, only on the ray-query device, where
         // write_emitter_descriptors() binds it every frame.
         if (_rayQueryShadows) {
@@ -628,6 +630,12 @@ uint32_t VulkanEngine::sampled_emitter_count() const
 
 void VulkanEngine::write_emitter_descriptors(FrameData& frame)
 {
+    if (_portalGiPlaceholder.image == VK_NULL_HANDLE) {
+        uint32_t empty[2]{};
+        _portalGiPlaceholder = create_image(empty, {1, 1, 2},
+            VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT);
+        _mainDeletionQueue.push_function([this]() { destroy_image(_portalGiPlaceholder); });
+    }
     // Placeholders keep the set complete while emitter light is off; the
     // shader reads nothing through them then.
     if (_emitterBufferPlaceholder.buffer == VK_NULL_HANDLE) {
@@ -639,6 +647,10 @@ void VulkanEngine::write_emitter_descriptors(FrameData& frame)
     }
     const bool cache = _surfaceCache.valid && _surfaceCache.lightingValid &&
         _surfaceCache.lookupValid && _surfaceCache.emitter.image != VK_NULL_HANDLE;
+    const bool portalGi = cache && _ssgi.enabled && _ssgi.lumenEnabled &&
+        _sceneSdf.fieldValid && _surfaceCache.albedoVolume.image != VK_NULL_HANDLE;
+    const bool portalControl = SDL_getenv("MIRABILIS_TEST_FRAMES") &&
+        SDL_getenv("MIRABILIS_R6_PORTAL_GI_CONTROL");
     const auto buffer = [&](const AllocatedBuffer& source, bool usable) {
         return usable && source.buffer != VK_NULL_HANDLE
             ? source.buffer : _emitterBufferPlaceholder.buffer;
@@ -668,6 +680,14 @@ void VulkanEngine::write_emitter_descriptors(FrameData& frame)
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         writer.write_buffer(15, buffer(_surfaceCache.indexBuffer, cache), VK_WHOLE_SIZE, 0,
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        const std::array<VkImageView, 5> giPages{
+            portalGi ? _sceneSdf.field.imageView : _portalGiPlaceholder.imageView,
+            page(_surfaceCache.direct), page(_surfaceCache.indirect), page(_surfaceCache.sky),
+            portalGi ? _surfaceCache.albedoVolume.imageView : _portalGiPlaceholder.imageView};
+        for (uint32_t i = 0; i < giPages.size(); ++i) {
+            writer.write_image(17 + i, giPages[i], i == 0 || i == 4 ? _sdf.sampler : _prepass.sampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        }
         if (_rayQueryShadows) {
             writer.write_acceleration_structure(16, _sunCasters.tlas);
         }
@@ -685,6 +705,10 @@ void VulkanEngine::write_emitter_descriptors(FrameData& frame)
     sceneData.emitterSettings.x = emitterCount;
     std::memcpy(frame.sceneBuffer.info.pMappedData, &sceneData, sizeof(sceneData));
     for (size_t view = 0; view < frame.portalSceneBuffers.size(); ++view) {
+        _portalRender.sceneData[view].portalIndirectSettings.y =
+            _ssgi.enabled && _ssgi.lumenEnabled && !portalControl ? (portalGi ? 1.0f : 2.0f) : 0.0f;
+        _portalRender.sceneData[view].portalIndirectSettings.z = _ssgi.intensity;
+        _portalRender.sceneData[view].portalIndirectSettings.w = _surfaceCache.radiosityEnabled ? 1.0f : 0.0f;
         _portalRender.sceneData[view].emitterSettings.x = emitterCount;
         std::memcpy(frame.portalSceneBuffers[view].info.pMappedData,
             &_portalRender.sceneData[view], sizeof(GPUSceneData));

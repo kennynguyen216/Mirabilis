@@ -598,8 +598,10 @@ std::vector<glm::vec4> VulkanEngine::read_ssgi_image(
 {
     VK_CHECK(vkDeviceWaitIdle(_device));
     const size_t pixels = size_t(extent.width) * extent.height;
+    const bool rgba8 = image.imageFormat == VK_FORMAT_R8G8B8A8_UNORM || image.imageFormat == VK_FORMAT_R8G8B8A8_SRGB;
+    const bool bgra8 = image.imageFormat == VK_FORMAT_B8G8R8A8_UNORM || image.imageFormat == VK_FORMAT_B8G8R8A8_SRGB;
     auto buffer = create_buffer(
-        pixels * 4 * sizeof(uint16_t), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        pixels * (rgba8 || bgra8 ? 4 : 8), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VMA_MEMORY_USAGE_GPU_TO_CPU);
     immediate_submit([&](VkCommandBuffer cmd) {
         vkutil::transition_image(cmd, image.image, layout,
@@ -618,6 +620,11 @@ std::vector<glm::vec4> VulkanEngine::read_ssgi_image(
     const auto* packed = static_cast<const uint16_t*>(mapped);
     std::vector<glm::vec4> values(pixels);
     for (size_t pixel = 0; pixel < pixels; ++pixel) {
+        if (rgba8 || bgra8) {
+            const auto* bytes = static_cast<const uint8_t*>(mapped) + pixel * 4;
+            values[pixel] = glm::vec4(bytes[bgra8 ? 2 : 0], bytes[1], bytes[bgra8 ? 0 : 2], bytes[3]) / 255.0f;
+            continue;
+        }
         values[pixel] = glm::vec4(
             glm::unpackHalf1x16(packed[pixel * 4 + 0]),
             glm::unpackHalf1x16(packed[pixel * 4 + 1]),
@@ -641,6 +648,7 @@ void VulkanEngine::write_capture_lighting(std::ostream& out) const
         << "\nEnvironment intensity: " << d.ssgiFallbackSettings.x
         << " black=" << (d.ssgiFallbackSettings.y > 0.5f)
         << "\nSSGI intensity: " << _ssgi.intensity
+        << "\nSSAO active: " << ssao_active()
         << "\nImage-based lighting: " << (d.iblSettings.x > 0.5f)
         << "\nNormal maps: " << (d.materialSettings.x > 0.5f)
         << "\nMetal/rough textures: " << (d.materialSettings.y > 0.5f)
@@ -651,6 +659,7 @@ void VulkanEngine::write_capture_lighting(std::ostream& out) const
         << "\nHZB: " << _ssgi.hzbEnabled
         << "\nRay-query sun shadows: " << _rayQueryShadows
         << "\nSurface-cache radiosity: " << _surfaceCache.radiosityEnabled
+        << "\nRadiosity texel budget: " << _surfaceCache.radiosityTexelBudget
         << " single-bounce=" << _surfaceCache.singleBounce
         << "\nR4 contributions:";
     // Named, not a bit pattern, so the record reads without the header.
@@ -926,6 +935,38 @@ float smooth_step(float t) { return t * t * (3.0f - 2.0f * t); }
 
 void VulkanEngine::apply_cinematic_camera_pose()
 {
+    // Bounded visual regression only; ordinary editor recordings keep their path.
+    const char* sequence = SDL_getenv("MIRABILIS_TEST_VISUAL_SEQUENCE");
+    const std::string test = sequence ? sequence : "";
+    if (!test.empty() && SDL_getenv("MIRABILIS_TEST_FRAMES")) {
+        const int frame = _cinematic.frameIndex;
+        _editorCamera.pitch = _cinematic.basePitch;
+        _editorCamera.yaw = _cinematic.baseYaw;
+        _editorCamera.position = _cinematic.basePosition;
+        if (std::string_view(test) == "living") {
+            const float slow = smooth_step(std::clamp(float(frame - 120) / 180.0f, 0.0f, 1.0f));
+            const float fast = smooth_step(std::clamp(float(frame - 300) / 12.0f, 0.0f, 1.0f));
+            _editorCamera.yaw += glm::radians(20.0f) * slow - glm::radians(40.0f) * fast;
+        } else if (std::string_view(test) == "portal" && !_authoredPortals.pairs.empty()) {
+            const auto& pair = _authoredPortals.pairs.front();
+            const float travel = smooth_step(std::clamp(float(frame - 120) / 180.0f, 0.0f, 1.0f));
+            const float distance = 2.5f - 3.0f * travel;
+            const glm::vec3 position = pair.first.position + pair.first.normal * distance;
+            _editorCamera.position = distance >= 0.0f ? position :
+                transform_position_through_portal(pair.first, pair.second, position);
+            if (distance < 0.0f) {
+                const glm::vec3 forward = transform_direction_through_portal(
+                    pair.first, pair.second, -pair.first.normal);
+                _editorCamera.yaw = std::atan2(forward.x, -forward.z);
+                _editorCamera.pitch = std::asin(std::clamp(forward.y, -1.0f, 1.0f));
+            }
+        } else {
+            fmt::print("GI TEST FAIL: unknown visual sequence or missing portal pair\n");
+            std::abort();
+        }
+        _editorCamera.velocity = glm::vec3(0.0f);
+        return;
+    }
     const float t = _cinematic.totalFrames > 1
         ? float(_cinematic.frameIndex) / float(_cinematic.totalFrames - 1)
         : 0.0f;
@@ -944,24 +985,44 @@ void VulkanEngine::apply_cinematic_camera_pose()
     _editorCamera.velocity = glm::vec3(0.0f);
 }
 
-void VulkanEngine::capture_cinematic_frame()
+void VulkanEngine::capture_cinematic_frame(const char* directory, int frameIndex)
 {
-    if (SDL_getenv("MIRABILIS_R4_NO_CINEMATIC_CAPTURE")) return;
+    if (!directory && SDL_getenv("MIRABILIS_R4_NO_CINEMATIC_CAPTURE")) return;
+    if (!directory && SDL_getenv("MIRABILIS_TEST_VISUAL_SEQUENCE") && SDL_getenv("MIRABILIS_TEST_FRAMES")) {
+        // One snapshot per second, with denser samples around the turn/crossing.
+        const int frame = _cinematic.frameIndex;
+        const std::string test = SDL_getenv("MIRABILIS_TEST_VISUAL_SEQUENCE");
+        const bool transition = test == "living" ? frame >= 300 && frame <= 330 && frame % 3 == 0
+            : frame >= 240 && frame <= 270 && frame % 2 == 0;
+        if (frame % 30 == 0 || transition) {
+            const std::string path = fmt::format("{}/frame_{:04}",
+                _cinematic.outputDirectory, _cinematic.frameIndex);
+            capture_raster(path.c_str());
+        }
+        return;
+    }
     const bool tonemapped = _postProcess.tonemapEnabled &&
         _debugViews.view == RenderDebugView::None &&
         _postProcess.tonemapPipeline.pipeline != VK_NULL_HANDLE;
-    const VkImageLayout layout = tonemapped
+    const bool presented = directory && tonemapped && _rendererMode == RendererMode::Raster;
+    const bool fxaa = _postProcess.fxaaEnabled && _postProcess.fxaaPipeline.pipeline != VK_NULL_HANDLE;
+    const AllocatedImage& source = presented ? (fxaa ? _postProcess.image : _postProcess.tonemapImage) : _drawImage;
+    const VkImageLayout layout = presented ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : tonemapped
         ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
         : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     const VkExtent2D extent = _drawExtent;
-    const auto values = read_ssgi_image(_drawImage, extent, layout);
+    const auto values = read_ssgi_image(source, extent, layout);
+    const uint32_t width = directory ? std::min(960u, extent.width) : extent.width;
+    const uint32_t height = std::max(1u, extent.height * width / extent.width);
 
     // A fixed Reinhard-and-sRGB tonemap independent of the engine's own
     // configurable tonemap pass: the goal here is a consistently viewable
     // sequence, not matching whatever tonemap settings happen to be active.
-    std::vector<unsigned char> pixels(size_t(extent.width) * extent.height * 3);
-    for (size_t i = 0; i < size_t(extent.width) * extent.height; ++i) {
-        glm::vec3 linear = glm::vec3(values[i]);
+    std::vector<unsigned char> pixels(size_t(width) * height * 3);
+    for (size_t i = 0; i < size_t(width) * height; ++i) {
+        const size_t sourcePixel = (i / width * extent.height / height) * extent.width +
+            (i % width * extent.width / width);
+        glm::vec3 linear = glm::vec3(values[sourcePixel]);
         if (!std::isfinite(linear.x) || !std::isfinite(linear.y) ||
             !std::isfinite(linear.z)) {
             linear = glm::vec3(0.0f);
@@ -969,7 +1030,7 @@ void VulkanEngine::capture_cinematic_frame()
         const glm::vec3 mapped = linear / (linear + glm::vec3(1.0f));
         for (int c = 0; c < 3; ++c) {
             const float channel = mapped[c];
-            const float srgb = channel <= 0.0031308f
+            const float srgb = presented ? linear[c] : channel <= 0.0031308f
                 ? channel * 12.92f
                 : 1.055f * std::pow(channel, 1.0f / 2.4f) - 0.055f;
             pixels[i * 3 + c] = static_cast<unsigned char>(
@@ -978,12 +1039,17 @@ void VulkanEngine::capture_cinematic_frame()
     }
 
     const std::string path = fmt::format(
-        "{}/frame_{:04}.ppm", _cinematic.outputDirectory, _cinematic.frameIndex);
+        "{}/frame_{:04}.ppm", directory ? directory : _cinematic.outputDirectory.c_str(),
+        directory ? frameIndex : _cinematic.frameIndex);
     std::ofstream file(path, std::ios::binary);
-    file << "P6\n" << extent.width << " " << extent.height << "\n255\n";
+    file << "P6\n" << width << " " << height << "\n255\n";
     file.write(reinterpret_cast<const char*>(pixels.data()), pixels.size());
     if (!file) {
         fmt::print("Cinematic frame write failed: {}\n", path);
+        if (directory) {
+            SDL_setenv("MIRABILIS_PORTAL_RECORD", "0", 1);
+            return;
+        }
         std::abort();
     }
 }
