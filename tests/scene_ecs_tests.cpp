@@ -189,6 +189,7 @@ TEST_CASE("snapshot restore preserves authored state runtime survivors order and
     REQUIRE(scene.destroy_object(b)); scene.drain_destruction();
     const auto spawned = scene.create_object("play-created"), runtimeSpawn = scene.create_object("runtime-created");
     REQUIRE(scene.set(runtimeSpawn,RuntimeOnly{}));
+    REQUIRE(scene.destroy_object(spawned));
     REQUIRE(scene.enqueue_command(a,[](auto& s,auto r) { s.set(r,Name{"obsolete"}); }));
     const auto high = scene.next_persistent_id();
     REQUIRE(scene.restore_snapshot(snapshot));
@@ -196,6 +197,10 @@ TEST_CASE("snapshot restore preserves authored state runtime survivors order and
     CHECK_FALSE(scene.get(spawned.persistentId)); CHECK_FALSE(scene.get(runtimeSpawn.persistentId));
     CHECK(scene.get(a.persistentId).entity == oldAHandle); CHECK(scene.get(runtime.persistentId).entity == runtimeHandle);
     CHECK(scene.next_persistent_id() == high); CHECK(scene.queued_command_count() == 0);
+    CHECK(scene.drain_destruction() == 0);
+    const auto dirty = ids(scene.consume_transform_dirty());
+    CHECK(std::find(dirty.begin(),dirty.end(),a.persistentId) != dirty.end());
+    CHECK(std::find(dirty.begin(),dirty.end(),b.persistentId) != dirty.end());
     check_snapshot(snapshot,scene.take_snapshot()); CHECK(ids(scene_emission_order(scene)) == emission);
     const auto next = scene.create_object("after restore"); CHECK(next.persistentId >= high);
 }
