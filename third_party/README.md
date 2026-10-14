@@ -1,4 +1,4 @@
-# Vendored ECS foundation dependencies
+# Vendored core dependencies
 
 These sources are committed; configuration performs no network downloads.
 
@@ -17,4 +17,9 @@ Sources: https://github.com/skypjack/entt/releases/tag/v3.15.0,
 https://github.com/doctest/doctest/releases/tag/v2.4.12,
 https://github.com/simdjson/simdjson/tree/v3.3.0.
 
-Jolt and .NET are outside Milestone 1 and are not introduced here.
+Jolt Physics **v5.6.0** (MIT), tag commit `e77f175595e64cb44218cc9d9d56fc365ad0e36a`, is vendored from
+https://github.com/jrouwe/JoltPhysics/releases/tag/v5.6.0 (Jolt/, Build/, LICENSE).
+It is statically linked with CPU rigid-body simulation, shared MSVC runtime,
+no renderer/profiler/compute backends and no additional runtime files.
+The engine uses its existing SDL/runtime DLL deployment. .NET remains outside Milestone 2.
+

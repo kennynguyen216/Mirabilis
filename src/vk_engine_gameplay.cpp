@@ -259,7 +259,7 @@ void VulkanEngine::place_portal(Portal& portal, const Portal& otherPortal)
     AABB closestWall{};
     SceneObjectID closestWallObject = InvalidSceneObject;
     for (const EntityRef object : _scene.creation_order()) {
-        if (!_scene.has<PortalPlaceable>(object)) continue;
+        if (!_scene.has<PortalPlaceable>(object) || _scene.dynamic_ancestor(object)) continue;
         const AABB wall = collider_from_object(_scene, object);
         const std::optional<RaycastHit> hit = raycast_aabb(rayOrigin, rayDirection, wall);
         if (hit.has_value() &&
@@ -342,6 +342,7 @@ void VulkanEngine::clear_authored_portals()
 {
     _authoredPortals.pairs.clear();
     _authoredPortals.draft.reset();
+    _scene.set_authored_portal_hosts({});
     _sceneDocument.dirty = true;
     rebuild_collision_from_scene();
 }
@@ -423,6 +424,7 @@ bool VulkanEngine::create_three_room_pole_chain()
     const Opening thirdOpening = openingForRoom(rooms[2]);
     _authoredPortals.pairs.clear();
     _authoredPortals.draft.reset();
+    _scene.set_authored_portal_hosts({});
     _authoredPortals.pairs.push_back(AuthoredPortalPair{
         makeEndpoint(firstOpening.leftCenter, glm::vec3(0, 0, -1),
                      firstOpening.leftHalfWidth),
@@ -448,7 +450,14 @@ void VulkanEngine::cleanup_scene_entity(EntityRef object)
         return hosts(pair.first) || hosts(pair.second);
     });
     if (_authoredPortals.draft && hosts(*_authoredPortals.draft)) _authoredPortals.draft.reset();
+    std::vector<PersistentID> authoredHosts;
+    for (const AuthoredPortalPair& pair : _authoredPortals.pairs) {
+        if (pair.first.hostWallObject) authoredHosts.push_back(*pair.first.hostWallObject);
+        if (pair.second.hostWallObject) authoredHosts.push_back(*pair.second.hostWallObject);
+    }
+    _scene.set_authored_portal_hosts(std::move(authoredHosts));
     _previousSceneObjectTransforms.erase(id);
+    _previousSceneModelTransforms.erase(id);
     if (const auto material = _sceneMaterialRuntimes.find(id);
         material != _sceneMaterialRuntimes.end()) {
         if (material->second.constantsBuffer.buffer != VK_NULL_HANDLE) {

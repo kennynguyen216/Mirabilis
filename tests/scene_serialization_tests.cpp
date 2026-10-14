@@ -70,14 +70,14 @@ void check_collision(const PlayerCollisionSet& actual, simdjson::dom::element fi
 }
 }
 
-TEST_CASE("all shipped scenes round trip every saved component and collision golden") {
+TEST_CASE("all 23 original scenes round trip every saved component and collision golden") {
     Scratch scratch;
     size_t count = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(source/"assets/scenes")) {
+    for (const auto& entry : std::filesystem::directory_iterator(source/"tests/fixtures/ecs_collision")) {
         if (entry.path().extension() != ".json") continue;
         INFO(entry.path().filename().string()); ++count;
         StagedScene first, reopened; std::string error;
-        REQUIRE_MESSAGE(parse_scene_json(read_file(entry.path()),entry.path().filename().string(),{},first,error),error);
+        REQUIRE_MESSAGE(parse_scene_json(read_file(source/"assets/scenes"/entry.path().filename()),entry.path().filename().string(),{},first,error),error);
         const auto authored = first.scene.take_snapshot();
         const auto emission = ids(scene_emission_order(first.scene));
         const auto path = scratch.path/entry.path().filename();

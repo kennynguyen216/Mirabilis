@@ -101,6 +101,31 @@ VulkanEngine* loadedEngine = nullptr;
 
 VulkanEngine& VulkanEngine::Get() {return *loadedEngine;}
 
+void VulkanEngine::reset_physics_render_history()
+{
+    for (const auto id : _physicsWorld.consume_history_resets()) {
+        ++_physicsHistoryResetCount;
+        _previousSceneObjectTransforms.erase(id);
+        _previousSceneModelTransforms.erase(id);
+    }
+}
+
+void VulkanEngine::sync_physics_world()
+{
+    std::vector<PersistentID> hosts;
+    for (const auto& pair : _authoredPortals.pairs) {
+        if (pair.first.hostWallObject) hosts.push_back(*pair.first.hostWallObject);
+        if (pair.second.hostWallObject) hosts.push_back(*pair.second.hostWallObject);
+    }
+    _scene.set_authored_portal_hosts(std::move(hosts));
+    if (!_physicsWorld.synchronize(_scene, _editorMode)) {
+        fmt::print("Physics synchronization failed; see diagnostics\n");
+        if (SDL_getenv("MIRABILIS_TEST_FRAMES")) std::abort();
+    }
+    stats.physics_body_count = static_cast<uint32_t>(_physicsWorld.body_count());
+    reset_physics_render_history();
+}
+
 void VulkanEngine::take_play_snapshot()
 {
     _playSnapshot = SceneDocumentSnapshot{_scene.take_snapshot(), capture_scene_settings(), _authoredPortals.pairs};
@@ -117,6 +142,7 @@ void VulkanEngine::drain_scene_destruction()
         const auto render = _sceneRenderRuntimes.find(ref.persistentId);
         _sceneResourcesRetired |= (material != _sceneMaterialRuntimes.end() && material->second.initialized) ||
             (render != _sceneRenderRuntimes.end() && render->second.model && render->second.model.use_count() == 1);
+        _physicsWorld.remove(ref);
         cleanup_scene_entity(ref);
         _sceneRenderRuntimes.erase(ref.persistentId);
     });
@@ -147,12 +173,15 @@ bool VulkanEngine::install_staged_scene(StagedScene&& staging)
     }
     VK_CHECK(vkDeviceWaitIdle(_device));
     _scene.replace(std::move(staging.scene), [&](EntityRef ref) {
+        _physicsWorld.remove(ref);
         cleanup_scene_entity(ref);
         _sceneRenderRuntimes.erase(ref.persistentId);
     });
+    _physicsWorld.clear();
     _sceneRenderRuntimes.clear();
     clear_scene_material_resources();
     _previousSceneObjectTransforms.clear();
+    _previousSceneModelTransforms.clear();
     _selectedSceneObject = _materialEditor.object = InvalidSceneObject;
     _sandboxRoot = _floorObject = _playerObject = _playerModelObject = _bluePortalObject = _orangePortalObject = InvalidSceneObject;
     _bluePortal = {}; _orangePortal = {};
@@ -180,6 +209,7 @@ bool VulkanEngine::install_staged_scene(StagedScene&& staging)
     _previousMainViewProjectionValid = false;
     _autoExposure.snap = true;
     respawn_player();
+    sync_physics_world();
     rebuild_collision_from_scene();
     return true;
 }
@@ -193,9 +223,11 @@ bool VulkanEngine::restore_play_snapshot()
         const auto render = _sceneRenderRuntimes.find(ref.persistentId);
         _sceneResourcesRetired |= (material != _sceneMaterialRuntimes.end() && material->second.initialized) ||
             (render != _sceneRenderRuntimes.end() && render->second.model && render->second.model.use_count() == 1);
+        _physicsWorld.remove(ref);
         cleanup_scene_entity(ref);
         _sceneRenderRuntimes.erase(ref.persistentId);
     })) return false;
+    _physicsWorld.clear();
     _authoredPortals.pairs = _playSnapshot->authoredPortals;
     _authoredPortals.draft.reset();
     apply_scene_settings(_playSnapshot->settings);
@@ -216,6 +248,7 @@ bool VulkanEngine::restore_play_snapshot()
         _sunCasters.hash = 0;
     }
     _previousSceneObjectTransforms.clear();
+    _previousSceneModelTransforms.clear();
     for (auto& [id, runtime] : _sceneRenderRuntimes) {
         (void)id;
         if (runtime.model) for (auto& [name, node] : runtime.model->nodes) { (void)name; node->hasPreviousDrawTransform = false; }
@@ -226,6 +259,7 @@ bool VulkanEngine::restore_play_snapshot()
     rebind(_bluePortalObject); rebind(_orangePortalObject);
     _ssgi.historyValid = false;
     _previousMainViewProjectionValid = false;
+    sync_physics_world();
     rebuild_collision_from_scene();
     return true;
 }
@@ -536,6 +570,7 @@ void VulkanEngine::set_editor_mode(bool enabled)
         _playSnapshot.reset();
     } else take_play_snapshot();
     _editorMode = enabled;
+    sync_physics_world();
     if (enabled) {
         _noClip.enabled = false;
         _noClip.up = false;
@@ -823,6 +858,7 @@ void VulkanEngine::cleanup()
         // Scene objects can hold the last reference to a loaded glTF, so
         // they must release it while the device is still alive.
         _sceneRenderRuntimes.clear();
+        _physicsWorld.clear();
         _scene.clear();
         loadedScenes.clear();
         _playerModel.reset();
@@ -1548,6 +1584,32 @@ void VulkanEngine::run(){
         if (!r4FrameTimes) std::abort();
         r4FrameTimes << "frame,ms,radiosity_gpu_ms,ssgi_gpu_ms,radiosity_texels\n";
     }
+    const bool testPhysics = frameLimit && SDL_getenv("MIRABILIS_TEST_PHYSICS_LIFECYCLE");
+    const bool testPhysicsTrace = testPhysics && _rendererMode == RendererMode::SoftwarePathTrace;
+    const bool testPhysicsShortTrace = testPhysicsTrace && frameLimit <= 200;
+    SceneDocumentSnapshot physicsAuthored;
+    Camera physicsCamera;
+    PersistentID physicsBox = InvalidSceneObject;
+    std::string physicsPhase;
+    const auto physicsRequire = [](bool condition, const char* reason) {
+        if (!condition) { fmt::print("PHYSICS FAIL: {}\n", reason); std::abort(); }
+    };
+    std::string physicsCaptureDirectory;
+    if (testPhysics) {
+        if (const char* path = SDL_getenv("MIRABILIS_TEST_PHYSICS_CAPTURE_DIRECTORY")) physicsCaptureDirectory = path;
+        physicsCamera = _editorCamera;
+        set_editor_mode(true);
+        _editorCamera = physicsCamera;
+        physicsAuthored = {_scene.take_snapshot(), capture_scene_settings(), _authoredPortals.pairs};
+        for (const auto ref : _scene.hierarchy_order()) {
+            const auto* body = _scene.read<RigidBody>(ref);
+            if (body && body->motion == BodyMotion::Dynamic) physicsBox = ref.persistentId;
+        }
+        physicsRequire(physicsBox != InvalidSceneObject, "demo has no Dynamic body");
+        set_editor_mode(false);
+        set_mouse_capture(false);
+        physicsPhase = "awake";
+    }
     auto previousTime = std::chrono::steady_clock::now();
 
     //main loop
@@ -1565,6 +1627,9 @@ void VulkanEngine::run(){
 
         //handle events on queue
         while (SDL_PollEvent(&e) != 0) {
+            if (testPhysics && e.type == SDL_KEYDOWN) {
+                fmt::print("PHYSICS interactive key event: key={} repeat={}\n",int(e.key.keysym.sym),int(e.key.repeat));
+            }
             bQuit = process_event(e) || bQuit;
         }
         // do not draw if we are minimized
@@ -1597,6 +1662,61 @@ void VulkanEngine::run(){
             const bool testMoving = _frameNumber >= 120 && !testTraversed && (!testRepeat || testTraversalCount < 12);
             _playerInput.forward = testMoving && !testBacking;
             _playerInput.backward = testMoving && testBacking;
+        }
+        _physicsHistoryResetCount = 0;
+        if (testPhysics) {
+            deltaTime = PlayerMovementDt;
+            _noClip.enabled = true;
+            _playerInput = {};
+            mainCamera = physicsCamera;
+            _editorCamera = physicsCamera;
+            _playerMovement.position = physicsCamera.position - glm::vec3(0,1.7f,0);
+            _playerMovement.previousPosition = _playerMovement.position;
+            _playerMovement.velocity = glm::vec3(0);
+            auto ref = _scene.get(physicsBox);
+            if (!testPhysicsShortTrace) {
+                if (_frameNumber == 900) {
+                    physicsRequire(_physicsWorld.sleeping(ref), "drop did not settle and sleep");
+                    physicsRequire(_physicsWorld.queue_impulse(_scene,ref,{0,3,0}), "wake impulse refused");
+                    physicsPhase = "wake";
+                }
+                if (_frameNumber == 930) {
+                    auto body = *_scene.read<RigidBody>(ref); body.gravityFactor = 0;
+                    physicsRequire(_scene.set(ref,body,true), "zero gravity refused");
+                    sync_physics_world();
+                    physicsRequire(_physicsWorld.queue_velocity(_scene,ref,{}), "zero velocity refused");
+                    auto target = *_scene.read<Transform>(ref); target.position = {-.5f,2,0}; target.rotation = {0,.4f,0};
+                    physicsRequire(_physicsWorld.queue_teleport(_scene,ref,target), "teleport refused");
+                    physicsPhase = "teleport";
+                }
+                if (_frameNumber == 960) { reset_play(); physicsPhase = "restore"; }
+                if (_frameNumber == 980) { set_editor_mode(true); physicsPhase = "edit-restore"; }
+                if (_frameNumber == 990) {
+                    _playSnapshot = physicsAuthored;
+                    physicsRequire(restore_play_snapshot(), "unchanged restore failed");
+                    _playSnapshot.reset(); physicsPhase = "unchanged-restore";
+                }
+                if (_frameNumber == 1020) {
+                    auto body = *_scene.read<RigidBody>(_scene.get(physicsBox)); body.mass = 3;
+                    physicsRequire(_scene.set(_scene.get(physicsBox),body), "editor mass edit refused");
+                    physicsRequire(SDL_getenv("MIRABILIS_TEST_SCENE_DIRECTORY") != nullptr, "scratch directory required");
+                    physicsRequire(save_editor_scene_as("physics_gate_saved.json"), "scratch save failed");
+                    physicsRequire(load_editor_scene(), "scratch reopen failed");
+                    physicsRequire(_scene.read<RigidBody>(_scene.get(physicsBox))->mass == 3, "saved mass lost");
+                    physicsPhase = "reopened";
+                }
+                if (_frameNumber == 1050) {
+                    _sceneDocument.activeFilename = "sandbox.json";
+                    physicsRequire(load_editor_scene(), "sandbox replacement failed");
+                    size_t expected = 0;
+                    for (const auto object : _scene.hierarchy_order()) {
+                        const auto* collider = _scene.read<Collider>(object);
+                        if (collider && collider->hasCollision && !_scene.dynamic_ancestor(object)) ++expected;
+                    }
+                    physicsRequire(_physicsWorld.body_count() == expected, "sandbox static body count mismatch");
+                    physicsPhase = "sandbox";
+                }
+            }
         }
         if (_editorMode) {
             if (_cinematic.recording) {
@@ -1635,6 +1755,8 @@ void VulkanEngine::run(){
                         static_cast<float>(stepCount));
                 _scene.apply_commands();
                 update_player_movement(PlayerMovementDt);
+                sync_physics_world();
+                _physicsWorld.step(_scene, PlayerMovementDt);
                 drain_scene_destruction();
                 _playerStep.accumulator -= PlayerMovementDt;
             }
@@ -1760,13 +1882,64 @@ void VulkanEngine::run(){
             fmt::print("Color settings scene roundtrip PASS\n");
         }
         drain_scene_destruction();
-        _scene.consume_transform_dirty();
+        sync_physics_world();
+        _physicsInterpolation = _editorMode ? 1.0f : _playerStep.accumulator / PlayerMovementDt;
         if (_sceneResourcesRetired) {
             _sceneSdf.rebuildRequested = _surfaceCache.rebuildRequested = true;
             _traceDrawHash = _sunCasters.hash = 0;
             _sceneResourcesRetired = false;
         }
         draw(deltaTime);
+        if (testPhysics) {
+            const auto ref = _scene.get(physicsBox);
+            if (_frameNumber < 900) physicsPhase = _physicsWorld.sleeping(ref) ? "sleep" : "awake";
+            size_t eligible = 0, dynamicDraws = 0;
+            for (const auto& draw : worldDrawContext.OpaqueSurfaces) if (draw.contributesToStaticCaches) ++eligible;
+            for (const auto& draw : worldDrawContext.TransparentSurfaces) if (draw.contributesToStaticCaches) ++eligible;
+            for (const auto object : _scene.hierarchy_order()) {
+                if (!_scene.dynamic_ancestor(object)) continue;
+                const auto* visible = _scene.read<Visibility>(object);
+                if (!visible || !visible->visible || visible->layer != RenderLayer::World) continue;
+                const auto runtime = _sceneRenderRuntimes.find(object.persistentId);
+                if (runtime == _sceneRenderRuntimes.end()) continue;
+                if (runtime->second.model) dynamicDraws += _previousSceneModelTransforms[object.persistentId].size();
+                else if (runtime->second.primitive.valid()) ++dynamicDraws;
+            }
+            const bool lumen = _ssgi.lumenEnabled && _ssgi.enabled;
+            fmt::print("PHYSICS phase={} frame={} bodies={} sdf={} surface={} trace={} ray-shadow={} eligible={} dynamic-draws={} history-reset={} sdf-enabled={} surface-enabled={} ray-shadow-enabled={} trace-enabled={} sdf-placed={} sdf-instances={} editor-mode={} body-sleep={} ecs-sleep={}\n",
+                physicsPhase,_frameNumber,_physicsWorld.body_count(),stats.sdf_rebuild_count,stats.surface_cache_rebuild_count,
+                stats.trace_rebuild_count,stats.sun_shadow_rebuild_count,eligible,dynamicDraws,_physicsHistoryResetCount,
+                int(lumen),int(lumen),int(_rayQueryShadows),int(_traceSupported),_sceneSdf.placedCount,_sceneSdf.instanceCount,int(_editorMode),int(_physicsWorld.sleeping(ref)),
+                int(_scene.read<PhysicsState>(ref) && _scene.read<PhysicsState>(ref)->sleeping));
+            if (physicsPhase == "teleport") {
+                const auto pose = _scene.world_matrix(ref);
+                physicsRequire(glm::length(glm::vec3(pose[3])-glm::vec3(-.5f,2,0)) < 1e-4f, "teleport target pose drifted");
+                if (_frameNumber == 931) {
+                    for (const auto& draw : worldDrawContext.OpaqueSurfaces) if (!draw.contributesToStaticCaches) {
+                        for (int c=0;c<4;++c) for(int r=0;r<4;++r)
+                            physicsRequire(std::abs(draw.previousTransform[c][r]-draw.transform[c][r]) < 1e-5f, "teleport retained old motion history");
+                    }
+                    fmt::print("PHYSICS teleport pose/history PASS\n");
+                }
+            }
+            if (!physicsCaptureDirectory.empty() && (_frameNumber == 30 || (!testPhysicsShortTrace && _frameNumber == 850))) {
+                std::filesystem::create_directories(physicsCaptureDirectory);
+                const auto path = (std::filesystem::path(physicsCaptureDirectory) / physicsPhase).string();
+                if (testPhysicsTrace) capture_path_trace(path.c_str());
+                else { capture_raster(path.c_str()); capture_ssgi(path.c_str()); capture_cinematic_frame(physicsCaptureDirectory.c_str(),_frameNumber); }
+            }
+            if (_frameNumber+1 >= frameLimit) {
+                if (testPhysicsTrace) {
+                    physicsRequire(_traceSupported && !_traceTriangles.empty() && (!testPhysicsShortTrace || dynamicDraws > 0), "path trace lost dynamic geometry");
+                    if (!testPhysicsShortTrace) physicsRequire(physicsPhase == "sandbox", "trace lifecycle ended too early");
+                    fmt::print("PHYSICS trace PASS\n");
+                    if (!testPhysicsShortTrace) fmt::print("PHYSICS lifecycle PASS\n");
+                } else {
+                    physicsRequire(physicsPhase == "sandbox", "lifecycle run ended too early");
+                    fmt::print("PHYSICS lifecycle PASS\n");
+                }
+            }
+        }
         if (placementFrame) {
             if (!_bluePortal.placed || (_frameNumber > 160 && !_orangePortal.placed) ||
                 placementRevision != _traceSceneRevision || placementAlbedoHash != _surfaceCache.albedoVolumeHash ||

@@ -1740,6 +1740,7 @@ class VulkanEngine{
         Scene _scene;
         mirabilis::PhysicsWorld _physicsWorld;
         float _physicsInterpolation{0};
+        uint32_t _physicsHistoryResetCount{0};
         void sync_physics_world();
         void reset_physics_render_history();
         std::optional<SceneDocumentSnapshot> _playSnapshot;
@@ -1759,6 +1760,7 @@ class VulkanEngine{
         std::vector<SurfRamp> _activeSurfRamps;
         std::unordered_map<PersistentID, SceneMaterialRuntime> _sceneMaterialRuntimes;
         std::unordered_map<PersistentID, glm::mat4> _previousSceneObjectTransforms;
+        std::unordered_map<PersistentID, std::vector<glm::mat4>> _previousSceneModelTransforms;
         std::unordered_map<std::string, AllocatedImage> _sceneTextureCache;
         std::unordered_set<std::string> _failedSceneTextures;
     };

@@ -24,6 +24,7 @@ Invalid parents and cycles are rejected.
 | `mesh` | `{asset: empty/floor/cube/ramp/gltf, modelPath: string}` |
 | `material` | `{enabled, baseColorTexture, normalTexture, metallicRoughnessTexture, tint: vec4, uvScale: vec2, metallic, roughness, debugChecker, emissionColor: vec3, emissionStrength, transmission, ior}` |
 | `collider` | `{enabled: bool, shape: 0/1/2, center: vec3, halfExtents: vec3}` |
+| `rigidBody` | `{motion: Static/Dynamic, mass: float, friction: float, restitution: float, gravityFactor: float}` (optional) |
 | `timeTrialRole` | `{role: none/spawn/start/finish}` |
 | `portalPlaceable` | `{}` |
 | `transformDrivenExternally` | `{}` |
@@ -32,9 +33,33 @@ Vectors are JSON arrays. Transform rotation uses Euler radians in Y * X * Z
 order. Collider shapes are Box, GroundPlane and SurfRamp respectively. Basic
 value components include disabled/default values. Missing component blocks use
 defaults. Unknown component blocks retain their JSON values and are written in
-name order; this preserves future rigid-body or script data without executing it.
+name order; this preserves future component data, including scripts, without executing it.
 GPU resources are reconstructed separately; unavailable assets retain their
 authored paths.
+
+Rigid-body defaults are Static motion, mass 1, friction 0.5, restitution 0 and
+gravity factor 1. Every numeric value must be finite. Friction must be
+nonnegative and restitution must be in [0, 1]; gravity factor may be negative.
+Dynamic mass and collider half extents must be positive, and Dynamic bodies
+require an enabled Box collider and nonzero scale. Static settings persist when
+collision is disabled. Enabled colliders without a rigid-body block use default
+Static settings. Transient sleeping state and native body IDs are never saved.
+
+Dynamic entities are roots. When a file contains a parented Dynamic entity,
+staging captures its original world matrix before any detachment, rejects a
+matrix that cannot be represented exactly as TRS, then detaches the entity and
+appends it to the ordered roots with a warning. World position, rotation and
+scale are preserved; descendants retain their local transforms. The detached
+root order follows the original hierarchy traversal. Saving uses the same
+physics validation as the loader and rejects invalid Dynamic parenting.
+
+Collider and Static rigid-body settings on descendants of a Dynamic entity are
+retained and saved but dormant: descendants are visual-only and create no
+independent body or player collider. Static sheared colliders outside Dynamic
+subtrees use the best-fit oriented shape, with inspector and load warnings.
+Authored portal hosts must be enabled, placeable Box colliders outside every
+Dynamic subtree; invalid references fail transactionally. Editor parenting and
+body-motion changes enforce this restriction before changing authored state.
 
 Version 1 uses the existing flat object fields. Its saved IDs become persistent
 IDs, file order determines sibling order, negative parents mean no parent, and

@@ -51,11 +51,22 @@ public:
     template<class T> bool set(EntityRef ref, const T& value, bool owner = false) {
         static_assert(!std::is_same_v<T, Hierarchy> && !std::is_same_v<T, PersistentIdentity> && !std::is_same_v<T, CreationOrder> && !std::is_same_v<T, PendingDestroy>);
         if (!mutable_ref(ref, owner) || !valid_component(value)) return fail("Invalid component mutation");
+        if constexpr (std::is_same_v<T, RigidBody>) {
+            if (!validate_physics_edit(ref, &value, read<Collider>(ref), read<Transform>(ref))) return false;
+        } else if constexpr (std::is_same_v<T, Collider>) {
+            if (!validate_physics_edit(ref, read<RigidBody>(ref), &value, read<Transform>(ref))) return false;
+        } else if constexpr (std::is_same_v<T, Transform>) {
+            if (!validate_physics_edit(ref, read<RigidBody>(ref), read<Collider>(ref), &value)) return false;
+            const auto* body = read<RigidBody>(ref);
+            if (!owner && _physicsPlay && body && body->motion == BodyMotion::Dynamic) {
+                return _teleportHandler ? _teleportHandler(ref, value) : fail("Physics teleport handler unavailable");
+            }
+        }
         if (_inDestroyCallback) {
             return enqueue_command(ref, [value, owner](Scene& scene, EntityRef target) { scene.set<T>(target, value, owner); });
         }
         _registry.emplace_or_replace<T>(ref.entity, value);
-        if constexpr (std::is_same_v<T, Transform> || std::is_same_v<T, Collider>) mark_transform_dirty(ref);
+        if constexpr (std::is_same_v<T, Transform> || std::is_same_v<T, Collider> || std::is_same_v<T, RigidBody>) mark_transform_dirty(ref);
         return true;
     }
     template<class T> bool remove(EntityRef ref, bool owner = false) {
@@ -68,7 +79,7 @@ public:
         }
         if (_inDestroyCallback) return enqueue_command(ref, [owner](Scene& scene, EntityRef target) { scene.remove<T>(target, owner); });
         _registry.remove<T>(ref.entity);
-        if constexpr (std::is_same_v<T, Collider>) mark_transform_dirty(ref);
+        if constexpr (std::is_same_v<T, Collider> || std::is_same_v<T, RigidBody>) mark_transform_dirty(ref);
         return true;
     }
 

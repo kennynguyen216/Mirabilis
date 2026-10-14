@@ -40,6 +40,14 @@ bool valid_component(const Collider& value) {
 }
 bool valid_component(const TimeTrial& value) { return value.role <= TimeTrialRole::FinishTrigger; }
 
+bool valid_component(const RigidBody& value) {
+    return value.motion <= BodyMotion::Dynamic && std::isfinite(value.mass) &&
+        (value.motion != BodyMotion::Dynamic || value.mass > 0) &&
+        std::isfinite(value.friction) && value.friction >= 0 &&
+        std::isfinite(value.restitution) && value.restitution >= 0 && value.restitution <= 1 &&
+        std::isfinite(value.gravityFactor);
+}
+
 namespace mirabilis {
 bool Scene::fail(std::string message) const {
     _lastError = std::move(message);
@@ -69,6 +77,56 @@ bool Scene::runtime_only(EntityRef ref) const {
         ref = get(*hierarchy->parent);
     }
     return false;
+}
+EntityRef Scene::dynamic_ancestor(EntityRef ref) const {
+    while (valid(ref)) {
+        if (const auto* body = read<RigidBody>(ref); body && body->motion == BodyMotion::Dynamic) return ref;
+        const auto* hierarchy = read<Hierarchy>(ref);
+        if (!hierarchy || !hierarchy->parent) break;
+        ref = get(*hierarchy->parent);
+    }
+    return {};
+}
+void Scene::set_authored_portal_hosts(std::vector<PersistentID> hosts) { _authoredPortalHosts = std::move(hosts); }
+bool Scene::validate_physics_edit(EntityRef ref, const RigidBody* body, const Collider* collider, const Transform* transform) const {
+    if (body && !valid_component(*body)) return fail("Invalid rigid-body settings");
+    const bool dynamic = body && body->motion == BodyMotion::Dynamic;
+    if (dynamic) {
+        if (read<Hierarchy>(ref)->parent) return fail("Dynamic bodies must be root-level");
+        if (!collider || !collider->hasCollision || collider->collisionShape != CollisionShape::Box)
+            return fail("Dynamic bodies require an enabled Box collider");
+        for (const auto hostId : _authoredPortalHosts) {
+            auto host = get(hostId);
+            while (valid(host)) {
+                if (host.persistentId == ref.persistentId) return fail("Authored portal hosts cannot enter a dynamic subtree");
+                const auto& hierarchy = *read<Hierarchy>(host);
+                if (!hierarchy.parent) break;
+                host = get(*hierarchy.parent);
+            }
+        }
+    }
+    const auto nonzero = [](glm::vec3 scale) { return glm::all(glm::greaterThan(glm::abs(scale),glm::vec3(0))); };
+    if (transform && !nonzero(transform->scale)) {
+        std::vector<EntityRef> stack{ref};
+        while (!stack.empty()) {
+            const auto target = stack.back(); stack.pop_back();
+            const auto* childCollider = target == ref ? collider : read<Collider>(target);
+            if (childCollider && childCollider->hasCollision) return fail("Colliders and their ancestors require nonzero scale");
+            for (const auto id : read<Hierarchy>(target)->children) stack.push_back(get(id));
+        }
+    }
+    if (collider && collider->hasCollision) {
+        auto parent = read<Hierarchy>(ref)->parent;
+        while (parent) {
+            const auto ancestor = get(*parent);
+            if (!nonzero(read<Transform>(ancestor)->scale)) return fail("Collider ancestor has zero scale");
+            parent = read<Hierarchy>(ancestor)->parent;
+        }
+        const auto ownWorld = (read<Hierarchy>(ref)->parent ? world_matrix(*read<Hierarchy>(ref)->parent) : glm::mat4(1)) *
+            to_matrix(transform ? *transform : *read<Transform>(ref));
+        if (!finite_matrix(ownWorld)) return fail("Collider world transform is not finite");
+    }
+    return true;
 }
 bool Scene::mutable_ref(EntityRef ref, bool owner) const {
     if (!valid(ref)) return fail("Stale entity reference");
@@ -136,6 +194,19 @@ std::vector<EntityRef> Scene::hierarchy_order() const {
 }
 bool Scene::set_parent(EntityRef child, std::optional<EntityRef> parent, bool owner) {
     if (!mutable_ref(child, owner) || (parent && !mutable_ref(*parent, owner))) return false;
+    if (parent && read<RigidBody>(child) && read<RigidBody>(child)->motion == BodyMotion::Dynamic)
+        return fail("Dynamic bodies must be root-level");
+    if (parent && dynamic_ancestor(*parent)) {
+        for (const auto hostId : _authoredPortalHosts) {
+            auto host = get(hostId);
+            while (valid(host)) {
+                if (host.persistentId == child.persistentId) return fail("Authored portal hosts cannot enter a dynamic subtree");
+                const auto& hierarchy = *read<Hierarchy>(host);
+                if (!hierarchy.parent) break;
+                host = get(*hierarchy.parent);
+            }
+        }
+    }
     for (auto ancestor = parent; ancestor;) {
         if (ancestor->persistentId == child.persistentId) return fail("Hierarchy cycle rejected");
         const auto& hierarchy = *read<Hierarchy>(*ancestor);
@@ -280,7 +351,8 @@ EntityState Scene::capture_entity(EntityRef ref) const {
         read<Collider>(ref) ? *read<Collider>(ref) : Collider{},
         read<TimeTrial>(ref) ? *read<TimeTrial>(ref) : TimeTrial{},
         has<PortalPlaceable>(ref), has<TransformDrivenExternally>(ref),
-        read<UnknownComponents>(ref) ? *read<UnknownComponents>(ref) : UnknownComponents{}};
+        read<UnknownComponents>(ref) ? *read<UnknownComponents>(ref) : UnknownComponents{},
+        read<RigidBody>(ref) ? std::optional(*read<RigidBody>(ref)) : std::nullopt};
 }
 void Scene::restore_entity(const EntityState& state) {
     auto ref = get(state.id);
@@ -295,6 +367,9 @@ void Scene::restore_entity(const EntityState& state) {
     _registry.emplace_or_replace<Collider>(ref.entity, state.collider);
     _registry.emplace_or_replace<TimeTrial>(ref.entity, state.timeTrial);
     _registry.emplace_or_replace<UnknownComponents>(ref.entity, state.unknown);
+    if (state.rigidBody) _registry.emplace_or_replace<RigidBody>(ref.entity, *state.rigidBody);
+    else _registry.remove<RigidBody>(ref.entity);
+    _registry.remove<PhysicsState>(ref.entity);
     if (state.portalPlaceable) _registry.emplace_or_replace<PortalPlaceable>(ref.entity);
     else _registry.remove<PortalPlaceable>(ref.entity);
     if (state.transformDrivenExternally) _registry.emplace_or_replace<TransformDrivenExternally>(ref.entity);
@@ -350,7 +425,7 @@ bool Scene::restore_snapshot(const SceneSnapshot& snapshot, const DestroyCallbac
     std::unordered_set<PersistentID> saved;
     for (const auto& state : snapshot.entities) {
         if (state.id == UINT64_MAX || !saved.insert(state.id).second ||
-            !valid_component(state.transform) || !valid_component(state.mesh) || !valid_component(state.material) || !valid_component(state.collider)) {
+            !valid_component(state.transform) || !valid_component(state.mesh) || !valid_component(state.material) || !valid_component(state.collider) || (state.rigidBody && !valid_component(*state.rigidBody))) {
             return fail("Invalid scene snapshot");
         }
     }

@@ -54,6 +54,14 @@ inline void check_state(const EntityState& a, const EntityState& b) {
     CHECK(a.portalPlaceable == b.portalPlaceable);
     CHECK(a.transformDrivenExternally == b.transformDrivenExternally);
     CHECK(a.unknown.blocks == b.unknown.blocks);
+    REQUIRE(a.rigidBody.has_value() == b.rigidBody.has_value());
+    if (a.rigidBody) {
+        CHECK(a.rigidBody->motion == b.rigidBody->motion);
+        CHECK(near_float(a.rigidBody->mass,b.rigidBody->mass));
+        CHECK(near_float(a.rigidBody->friction,b.rigidBody->friction));
+        CHECK(near_float(a.rigidBody->restitution,b.rigidBody->restitution));
+        CHECK(near_float(a.rigidBody->gravityFactor,b.rigidBody->gravityFactor));
+    }
 }
 inline void check_snapshot(const SceneSnapshot& a, const SceneSnapshot& b) {
     CHECK(a.roots == b.roots);

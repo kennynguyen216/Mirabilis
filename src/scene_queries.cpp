@@ -84,7 +84,7 @@ void collect_player_collision(const mirabilis::Scene& scene, std::span<const Por
 
     for (const EntityRef object : objects) {
         const Collider* collider = scene.read<Collider>(object);
-        if (collider == nullptr || !collider->hasCollision) {
+        if (collider == nullptr || !collider->hasCollision || scene.dynamic_ancestor(object)) {
             continue;
         }
 
@@ -150,9 +150,13 @@ TimeTrialOverlap collect_time_trial_overlaps(const mirabilis::Scene& scene, cons
     return result;
 }
 
-bool contributes_to_static_caches(const mirabilis::Scene& scene, EntityRef ref, bool)
+bool contributes_to_static_caches(const mirabilis::Scene& scene, EntityRef ref, bool editorMode)
 {
-    return scene.valid(ref);
+    if (!scene.valid(ref)) return false;
+    const EntityRef dynamic = scene.dynamic_ancestor(ref);
+    if (editorMode || !dynamic) return true;
+    const PhysicsState* state = scene.read<PhysicsState>(dynamic);
+    return state != nullptr && state->sleeping;
 }
 
 std::vector<EntityRef> scene_emission_order(const mirabilis::Scene& scene)
