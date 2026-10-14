@@ -209,6 +209,12 @@ TEST_CASE("sleeping dynamic wakes and falls when static support changes or is re
         CHECK_FALSE(scene.valid(support)); CHECK_FALSE(physics.has_body(support));
         REQUIRE(physics.synchronize(scene,false));
     }
+    CHECK(physics.sleeping(distant)); REQUIRE(scene.read<PhysicsState>(distant));
+    CHECK(scene.read<PhysicsState>(distant)->sleeping);
+    if (!nativeRemovalOnly) {
+        CHECK_FALSE(physics.sleeping(moving)); REQUIRE(scene.read<PhysicsState>(moving));
+        CHECK_FALSE(scene.read<PhysicsState>(moving)->sleeping);
+    }
     for (int i=0;i<120;++i) {
         if (nativeRemovalOnly) physics.step(scene,dt);
         else tick(physics,scene);
