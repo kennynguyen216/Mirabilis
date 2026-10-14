@@ -191,6 +191,7 @@ TEST_CASE("snapshot reset rebinds bodies restores deleted entities removes play 
     REQUIRE(scene.destroy_object(erased)); scene.drain_destruction([&](EntityRef ref) { physics.remove(ref); });
     const auto spawned = box(scene,{8,3,0},true); tick(physics,scene); CHECK(physics.has_body(spawned));
     REQUIRE(scene.restore_snapshot(snapshot,[&](EntityRef ref) { physics.remove(ref); }));
+    ecs_test::check_snapshot(snapshot,scene.take_snapshot());
     REQUIRE(physics.synchronize(scene,false));
     CHECK_FALSE(physics.has_body(moving)); CHECK_FALSE(physics.has_body(spawned)); CHECK_FALSE(scene.valid(spawned));
     CHECK(scene.next_persistent_id() > high); CHECK(scene.queued_command_count() == 0);
@@ -236,7 +237,7 @@ TEST_CASE("loader detaches representable parented dynamics preserves world pose 
     const auto childTransform = R"({"position":[1,2,3],"rotation":[0.2,0,0],"scale":[1,2,3]})";
     StagedScene staged; std::string error;
     REQUIRE_MESSAGE(parse_scene_json(document(object_json(1,"null",parentTransform)+","+
-        object_json(2,"1",childTransform,dynamic)+","+object_json(3,"2",identity)),"scratch.json",{},staged,error),error);
+        object_json(2,"1",childTransform,dynamic)+","+object_json(3,"2",identity,R"({"motion":"Static","mass":7,"friction":0.8})")),"scratch.json",{},staged,error),error);
     Transform parent; parent.position={3,4,5}; parent.rotation={0,.6f,0}; parent.scale={2,2,2};
     Transform child; child.position={1,2,3}; child.rotation={.2f,0,0}; child.scale={1,2,3};
     const auto ref = staged.scene.get(2); REQUIRE(ref);
@@ -249,6 +250,46 @@ TEST_CASE("loader detaches representable parented dynamics preserves world pose 
     const auto* body = reopened.scene.read<RigidBody>(reopened.scene.get(2)); REQUIRE(body);
     CHECK(body->motion == BodyMotion::Dynamic); CHECK(body->mass == doctest::Approx(2));
     CHECK(body->friction == doctest::Approx(.3)); CHECK(body->restitution == doctest::Approx(.2)); CHECK(body->gravityFactor == 1);
+    const auto* dormant = reopened.scene.read<RigidBody>(reopened.scene.get(3)); REQUIRE(dormant);
+    CHECK(dormant->motion == BodyMotion::Static); CHECK(dormant->mass == 7);
+    CHECK(dormant->friction == doctest::Approx(.8));
+}
+
+TEST_CASE("duplicated dynamic subtree creates one fresh native body and preserves saved fields") {
+    Scene scene; PhysicsWorld physics; const auto moving = box(scene,{3,4,5},true);
+    const auto child = box(scene,{1,0,0},false,moving); REQUIRE(scene.set(child,RigidBody{}));
+    auto authored = *scene.read<RigidBody>(moving); authored.mass = 3; authored.gravityFactor = -.5f;
+    REQUIRE(scene.set(moving,authored)); const auto copy = scene.duplicate_subtree(moving); REQUIRE(copy);
+    REQUIRE(scene.read<RigidBody>(copy)); CHECK(scene.read<RigidBody>(copy)->mass == 3);
+    CHECK(scene.read<RigidBody>(copy)->gravityFactor == -.5f);
+    REQUIRE(scene.read<Hierarchy>(copy)->children.size() == 1);
+    const auto copiedChild = scene.get(scene.read<Hierarchy>(copy)->children.front());
+    REQUIRE(copiedChild); CHECK(copiedChild.persistentId != child.persistentId);
+    REQUIRE(physics.synchronize(scene,true)); CHECK(physics.body_count() == 2); CHECK_FALSE(physics.has_body(copiedChild));
+    REQUIRE(scene.destroy_object(copy)); scene.drain_destruction([&](EntityRef ref) { physics.remove(ref); });
+    CHECK(physics.body_count() == 1); CHECK_FALSE(scene.valid(copiedChild));
+}
+
+TEST_CASE("queued physics commands reject invalid refs and finite input violations") {
+    Scene scene; PhysicsWorld physics; const auto moving = box(scene,{},true); REQUIRE(physics.synchronize(scene,false));
+    const glm::vec3 invalid(std::numeric_limits<float>::infinity(),0,0);
+    CHECK_FALSE(physics.queue_force(scene,moving,invalid)); CHECK_FALSE(physics.queue_impulse(scene,moving,invalid));
+    CHECK_FALSE(physics.queue_velocity(scene,moving,invalid));
+    Transform invalidTransform; invalidTransform.position.x = std::numeric_limits<float>::quiet_NaN();
+    CHECK_FALSE(physics.queue_teleport(scene,moving,invalidTransform)); CHECK(scene.queued_command_count() == 0);
+    auto stale = moving; ++stale.epoch; CHECK_FALSE(physics.queue_force(scene,stale,{1,0,0}));
+    stale = moving; ++stale.persistentId; CHECK_FALSE(physics.queue_velocity(scene,stale,{1,0,0}));
+    REQUIRE(physics.queue_force(scene,moving,{120,0,0})); tick(physics,scene); CHECK(physics.velocity(moving).x > .5f);
+}
+
+TEST_CASE("saved authored portal host in dynamic subtree is rejected before replacement") {
+    auto input = document(object_json(1,"null",identity,dynamic)+","+object_json(2,"1",identity));
+    const auto portal = R"({"position":[0,0,0],"normal":[0,0,1],"up":[0,1,0],"halfWidth":0.8,"halfHeight":1.2,"hostWallObject":2})";
+    const auto at = input.find("\"authoredPortals\":[]"); REQUIRE(at != std::string::npos);
+    input.replace(at,std::string("\"authoredPortals\":[]").size(),"\"authoredPortals\":["+std::string(portal)+","+portal+"]");
+    StagedScene live; const auto old = live.scene.create_object("unchanged"); const auto epoch = live.scene.epoch();
+    std::string error; CHECK_FALSE(parse_scene_json(input,"bad-host.json",{},live,error)); CHECK_FALSE(error.empty());
+    CHECK(live.scene.valid(old)); CHECK(live.scene.epoch() == epoch);
 }
 
 TEST_CASE("invalid known rigid bodies and sheared dynamic loads fail transactionally") {
