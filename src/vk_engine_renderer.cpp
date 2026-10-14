@@ -101,6 +101,9 @@ void VulkanEngine::init_descriptor_pools()
         // image-based lighting images.
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 6 }
     };
+    if (_rayQueryShadows) {
+        sizes.push_back({ VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 });
+    }
 
     globalDescriptorAllocator.init(_device, 10, sizes);
 
@@ -157,6 +160,28 @@ void VulkanEngine::init_scene_descriptors()
         // split-sum BRDF table, also written by update_skybox_descriptors().
         builder.add_binding(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        // Emitter light at the visible surface (R4.9, R4.12): the path
+        // tracer's triangles, materials and emitter list (7-9), and the
+        // surface cache's albedo, emissive, depth and emitter pages (6,
+        // 10-12) with its lookup buffers (13-15).  Written every frame by
+        // write_emitter_descriptors().
+        builder.add_binding(6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        builder.add_binding(8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        builder.add_binding(9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        builder.add_binding(10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(13, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        builder.add_binding(14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        builder.add_binding(15, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        for (uint32_t binding = 17; binding <= 21; ++binding)
+            builder.add_binding(binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        // IQ2: the sun casters' TLAS, only on the ray-query device, where
+        // write_emitter_descriptors() binds it every frame.
+        if (_rayQueryShadows) {
+            builder.add_binding(16, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
+        }
         // Compute is here because both occlusion passes bind this same set
         // for the projection and its inverse rather than duplicating them.
         _gpuSceneDataDescriptorLayout = builder.build(
@@ -285,6 +310,7 @@ void VulkanEngine::init_pipelines()
     // metalRoughMaterial.materialLayout, which build_pipelines() creates.
     init_render_debug_pipeline();
     init_tonemap_pipeline();
+    init_auto_exposure();
     init_fxaa_pipeline();
     init_ssao_pipelines();
     metalRoughMaterial.build_pipelines(this);
@@ -500,17 +526,28 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
     data.ambientColor = glm::vec4(0.28f);
     data.sunlightDirection = glm::vec4(
         normalized_sun_direction(_shadow.sunlightDirection), 1.0f);
-    data.sunlightColor = glm::vec4(1.0f);
+    // One sun for both renderers.  Raster diffuse is baseColor * cos * S and
+    // the path tracer's is albedo / pi * cos * E, so S = E / pi, with E the
+    // scene's referenceLighting.sunRadiance (docs/lumen_lite_design.md R4.3).
+    constexpr float Pi = 3.14159265358979323846f;
+    data.sunlightColor = glm::vec4(
+        glm::vec3(_traceSettings.lighting.sunRadiance) / Pi, 1.0f);
     // update_scene() settles this before any camera's buffer is filled, so
     // the portal views inherit exactly the main camera's shadow map.
     data.sunViewProjection = _shadow.sunViewProjection;
+    const float shadowTexelWorld = 2.0f * _shadow.radius / float(ShadowMapResolution);
+    const bool authoredShadowControl = SDL_getenv("MIRABILIS_R4_AUTHORED_SHADOW_CONTROL") != nullptr;
     data.shadowSettings = glm::vec4(
-        _shadow.depthBias,
-        _shadow.normalBias,
+        authoredShadowControl ? _shadow.depthBias
+            : shadowTexelWorld / (2.0f * (_shadow.radius + _shadow.depthMargin)),
+        authoredShadowControl ? _shadow.normalBias : shadowTexelWorld,
         1.0f / static_cast<float>(ShadowMapResolution),
         _shadow.enabled ? 1.0f : 0.0f);
+    // z: IQ1 diagnostic bitmask for sun_shadow.glsl, unset in normal use.
+    const char* shadowDiagnostic = SDL_getenv("MIRABILIS_IQ_SHADOW_DIAG");
     data.shadowFilterSettings = glm::vec4(
-        _shadow.filterRadius, 0.0f, 0.0f, 0.0f);
+        _shadow.filterRadius, authoredShadowControl ? 1.0f : 0.0f,
+        shadowDiagnostic ? float(std::atoi(shadowDiagnostic) & 7) : 0.0f, 0.0f);
     // Screen-space passes get a depth buffer rather than a position per
     // fragment; these are what turn one back into the other.
     data.inverseProjection = glm::inverse(data.proj);
@@ -541,10 +578,11 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
         occlusionFraction.x - 0.5f / occlusionAllocation.x,
         occlusionFraction.y - 0.5f / occlusionAllocation.y);
     data.ssgiFallbackSettings = _traceSettings.lighting.environment;
-    // Ambient and SSGI are two answers to one question, so how they divide it
-    // travels with every camera rather than being decided in the shader.
+    data.environmentTint = _traceSettings.lighting.environmentTint;
+    data.environmentTint.w = _ssgi.colorSaturation;
+    // x is unused since R4: SSGI owns diffuse environment outright.
     data.indirectSettings = glm::vec4(
-        _ssgi.ambientRetention,
+        0.0f,
         _ssgi.traceEnvironmentMap ? 1.0f : 0.0f,
         _skyboxEnvironmentLod,
         _skyboxIndirectClamp);
@@ -560,6 +598,9 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
     data.materialDebug.x = is_forward_material_debug_view(_debugViews.view)
         ? static_cast<float>(static_cast<int>(_debugViews.view))
         : 0.0f;
+    // R4 forward owners kept in the final image (src/r4_contributions.h);
+    // exact in a float, and all six unless an R4 capture removed some.
+    data.materialDebug.y = static_cast<float>(_r4Contributions.forward);
     data.iblSettings = glm::vec4(
         _materialShading.imageBasedLighting ? 1.0f : 0.0f,
         static_cast<float>(IblPrefilterLevels - 1),
@@ -568,7 +609,112 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
     for (size_t i = 0; i < _ibl.environmentSH.size(); ++i) {
         data.environmentSH[i] = _ibl.environmentSH[i];
     }
+    // R4.12: cached emitter diffuse, and four unshadowed specular samples
+    // per pixel per frame, rotated by the frame.
+    data.emitterSettings = glm::vec4(
+        static_cast<float>(sampled_emitter_count()),
+        static_cast<float>(_frameNumber % 16777216u),
+        4.0f,
+        _r4Contributions.rayCoverage ? 1.0f : 0.0f);
     return data;
+}
+
+uint32_t VulkanEngine::sampled_emitter_count() const
+{
+    // The shadowed term comes from the surface cache, which only Lumen-lite
+    // builds, and the emitters from the software trace scene.  Plain SSGI
+    // therefore samples none, and its Cornell result stays blocked (R4.3).
+    const bool available = _ssgi.enabled && _ssgi.lumenEnabled &&
+        _surfaceCache.valid && _surfaceCache.lightingValid && _surfaceCache.lookupValid &&
+        _traceSupported && _traceEmitterBuffer.buffer != VK_NULL_HANDLE;
+    return available ? static_cast<uint32_t>(_traceEmitters.size()) : 0u;
+}
+
+void VulkanEngine::write_emitter_descriptors(FrameData& frame)
+{
+    if (_portalGiPlaceholder.image == VK_NULL_HANDLE) {
+        uint32_t empty[2]{};
+        _portalGiPlaceholder = create_image(empty, {1, 1, 2},
+            VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT);
+        _mainDeletionQueue.push_function([this]() { destroy_image(_portalGiPlaceholder); });
+    }
+    // Placeholders keep the set complete while emitter light is off; the
+    // shader reads nothing through them then.
+    if (_emitterBufferPlaceholder.buffer == VK_NULL_HANDLE) {
+        _emitterBufferPlaceholder = create_buffer(sizeof(glm::vec4) * 16,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        _mainDeletionQueue.push_function([this]() {
+            destroy_buffer(_emitterBufferPlaceholder);
+        });
+    }
+    const bool cache = _surfaceCache.valid && _surfaceCache.lightingValid &&
+        _surfaceCache.lookupValid && _surfaceCache.emitter.image != VK_NULL_HANDLE;
+    const bool portalGi = cache && _ssgi.enabled && _ssgi.lumenEnabled &&
+        _sceneSdf.fieldValid && _surfaceCache.albedoVolume.image != VK_NULL_HANDLE;
+    const bool portalControl = SDL_getenv("MIRABILIS_TEST_FRAMES") &&
+        SDL_getenv("MIRABILIS_R6_PORTAL_GI_CONTROL");
+    const auto buffer = [&](const AllocatedBuffer& source, bool usable) {
+        return usable && source.buffer != VK_NULL_HANDLE
+            ? source.buffer : _emitterBufferPlaceholder.buffer;
+    };
+    const auto page = [&](const AllocatedImage& image) {
+        return cache ? image.imageView : _whiteImage.imageView;
+    };
+    const auto write = [&](VkDescriptorSet set) {
+        DescriptorWriter writer;
+        const std::array<std::pair<uint32_t, VkImageView>, 4> pages{{
+            {6, page(_surfaceCache.albedo)}, {10, page(_surfaceCache.emissive)},
+            {11, page(_surfaceCache.depth)}, {12, page(_surfaceCache.emitter)}}};
+        for (const auto& [binding, view] : pages) {
+            writer.write_image(binding, view, _prepass.sampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        }
+        writer.write_buffer(7, buffer(_traceTriangleBuffer, _traceSupported), VK_WHOLE_SIZE, 0,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(8, buffer(_traceMaterialBuffer, _traceSupported), VK_WHOLE_SIZE, 0,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(9, buffer(_traceEmitterBuffer, _traceSupported), VK_WHOLE_SIZE, 0,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(13, buffer(_surfaceCache.cardBuffer, cache), VK_WHOLE_SIZE, 0,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(14, buffer(_surfaceCache.gridBuffer, cache), VK_WHOLE_SIZE, 0,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_buffer(15, buffer(_surfaceCache.indexBuffer, cache), VK_WHOLE_SIZE, 0,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        const std::array<VkImageView, 5> giPages{
+            portalGi ? _sceneSdf.field.imageView : _portalGiPlaceholder.imageView,
+            page(_surfaceCache.direct), page(_surfaceCache.indirect), page(_surfaceCache.sky),
+            portalGi ? _surfaceCache.albedoVolume.imageView : _portalGiPlaceholder.imageView};
+        for (uint32_t i = 0; i < giPages.size(); ++i) {
+            writer.write_image(17 + i, giPages[i], i == 0 || i == 4 ? _sdf.sampler : _prepass.sampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        }
+        if (_rayQueryShadows) {
+            writer.write_acceleration_structure(16, _sunCasters.tlas);
+        }
+        writer.update_set(_device, set);
+    };
+    write(frame.sceneDescriptor);
+    for (VkDescriptorSet portalSet : frame.portalSceneDescriptors) {
+        write(portalSet);
+    }
+
+    // update_scene() counted the emitters before this frame's cache update,
+    // which can rebuild the emitter list or invalidate the cache.  Count again
+    // against the buffers just bound, so no camera indexes past them.
+    const float emitterCount = static_cast<float>(sampled_emitter_count());
+    sceneData.emitterSettings.x = emitterCount;
+    std::memcpy(frame.sceneBuffer.info.pMappedData, &sceneData, sizeof(sceneData));
+    for (size_t view = 0; view < frame.portalSceneBuffers.size(); ++view) {
+        _portalRender.sceneData[view].portalIndirectSettings.y =
+            _ssgi.enabled && _ssgi.lumenEnabled && !portalControl ? (portalGi ? 1.0f : 2.0f) : 0.0f;
+        _portalRender.sceneData[view].portalIndirectSettings.z = _ssgi.intensity;
+        _portalRender.sceneData[view].portalIndirectSettings.w = _surfaceCache.radiosityEnabled ? 1.0f : 0.0f;
+        _portalRender.sceneData[view].emitterSettings.x = emitterCount;
+        std::memcpy(frame.portalSceneBuffers[view].info.pMappedData,
+            &_portalRender.sceneData[view], sizeof(GPUSceneData));
+    }
 }
 
 void VulkanEngine::init_background_pipelines()

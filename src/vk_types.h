@@ -198,6 +198,12 @@ struct GPUSceneData {
     // Irradiance from the panorama as band-2 spherical harmonics, already
     // convolved with the clamped cosine and sun-clamped.
     glm::vec4 environmentSH[9]{};
+    // Emitter light at the visible surface (R4.9, R4.12), mirrored in
+    // scene_data.glsl.  x = emitter triangles sampled (0 = off), y = frame
+    // index, z = specular samples per pixel, w = 1 while measuring coverage.
+    glm::vec4 emitterSettings{0.0f};
+    // rgb = environment multiplier, w = final GI color saturation.
+    glm::vec4 environmentTint{1.0f};
 };
 
 // Sixteen visible surfaces (the player pair plus seven authored links), with

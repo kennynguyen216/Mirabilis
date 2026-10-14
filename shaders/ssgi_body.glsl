@@ -28,9 +28,37 @@ layout(push_constant) uniform constants {
     // z = normal dot threshold, w = velocity rejection threshold.
     vec4 temporal;
     // x = rays per pixel, yz = live draw extent, w = bit 0 screen probes,
-    // bit 1 hierarchical screen trace.
+    // bit 1 hierarchical screen trace, bit 7 disables screen tracing in Lumen.
     uvec4 quality;
 } PushConstants;
+
+// R4 ray classes (src/r4_contributions.h).  Every ray ends in exactly one;
+// quality.w bits 8.. say which classes the image keeps, and bit 2 replaces a
+// kept class's radiance with 1 so a capture measures its coverage.
+const uint RayScreenHit = 1u << 0;
+const uint RayScreenHitCache = 1u << 1;
+const uint RayExit = 1u << 2;
+const uint RayExhausted = 1u << 3;
+const uint RayUnusableHit = 1u << 4;
+const uint RayPortal = 1u << 5;
+const uint RayFieldCache = 1u << 6;
+const uint RayFieldUncovered = 1u << 7;
+const uint RayFieldExit = 1u << 8;
+const uint RayFieldExhausted = 1u << 9;
+const uint RayScreenHitUncached = 1u << 10;
+const uint RayPrimaryCacheSky = 1u << 11;
+
+// What one class of ray adds: its radiance, nothing if the class was
+// removed, or 1 while coverage is being measured.  With every class kept and
+// coverage off this is the radiance unchanged.
+vec3 r4_ray_value(uint rayClass, vec3 radiance)
+{
+    bool kept = ((PushConstants.quality.w >> 8) & rayClass) != 0u;
+    if ((PushConstants.quality.w & 4u) != 0u) {
+        return kept ? vec3(1.0) : vec3(0.0);
+    }
+    return kept ? radiance : vec3(0.0);
+}
 
 // The sky every miss ray is filled from, and the policy that decides how
 // much of it a miss is worth.  Shared with the portal cameras, which have
@@ -46,61 +74,22 @@ layout(set = 2, binding = 2) uniform sampler2D cacheEmissive;
 layout(set = 2, binding = 3) uniform sampler2D cacheDepth;
 layout(set = 2, binding = 4) uniform sampler2D cacheDirect;
 layout(set = 2, binding = 5) uniform sampler2D cacheIndirect;
+layout(set = 2, binding = 9) uniform sampler2D cacheSky;
 #define SURFACE_CACHE_SET 2
 #define SURFACE_CACHE_BINDING_CARDS 6
 #define SURFACE_CACHE_BINDING_GRID 7
 #define SURFACE_CACHE_BINDING_INDICES 8
 #define SURFACE_CACHE_READ_INDIRECT(texel) texelFetch(cacheIndirect, texel, 0).rgb
+#define SURFACE_CACHE_READ_SKY(texel) texelFetch(cacheSky, texel, 0).rgb
 #include "surface_cache_lookup.glsl"
+// Mean albedo of the surfaces in each voxel of the field's box, premultiplied
+// by presence (a = 1 where a surface is), for hits no card holds (R4.61).
+layout(set = 2, binding = 10) uniform sampler3D albedoVolume;
+#include "sun_shadow.glsl"
 
-float lumen_field_distance(vec3 world)
-{
-    return textureLod(sceneField,
-        (world - fieldMin.xyz) / (fieldMax.xyz - fieldMin.xyz), 0.0).r;
-}
-
-vec3 lumen_field_normal(vec3 p)
-{
-    float h = fieldMin.w;
-    vec3 gradient = vec3(
-        lumen_field_distance(p + vec3(h, 0, 0)) - lumen_field_distance(p - vec3(h, 0, 0)),
-        lumen_field_distance(p + vec3(0, h, 0)) - lumen_field_distance(p - vec3(0, h, 0)),
-        lumen_field_distance(p + vec3(0, 0, h)) - lumen_field_distance(p - vec3(0, 0, h)));
-    return normalize(gradient + vec3(1e-8));
-}
-
-// Light arriving along one ray the screen could not answer: the surface the
-// scene field hits, read from the surface cache, or the sky for a ray that
-// leaves the scene.
-vec3 lumen_trace(vec3 worldPosition, vec3 worldNormal, vec3 worldDirection)
-{
-    float voxel = fieldMin.w;
-    vec3 origin = worldPosition + worldNormal * (2.5 * voxel);
-    vec3 inverse = 1.0 / worldDirection;
-    vec3 t0 = (fieldMin.xyz - origin) * inverse;
-    vec3 t1 = (fieldMax.xyz - origin) * inverse;
-    float tExit = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
-    float t = 0.0;
-    for (int step = 0; step < 192 && t < tExit; ++step) {
-        float d = lumen_field_distance(origin + worldDirection * t);
-        if (d < 0.25 * voxel) {
-            vec3 p = origin + worldDirection * t;
-            SurfaceCacheSample surface = surface_cache_lookup(p, lumen_field_normal(p));
-            if (surface.weight > 0.0) {
-                return surface.albedo * (surface.direct + surface.indirect) +
-                    surface.emissive;
-            }
-            // A surface no card saw: its light is unknown.  The sky is the
-            // same guess plain SSGI makes for every miss.
-            return environment_radiance(worldDirection);
-        }
-        t += max(d, 0.5 * voxel);
-    }
-    // Left the field: the sky.  Ran out of steps while still inside: no
-    // estimate rather than the sky, which would let daylight into a sealed
-    // room (the same rule the cache's radiosity follows).
-    return t >= tExit ? environment_radiance(worldDirection) : vec3(0.0);
-}
+#define LUMEN_HIT_LIGHTING_ENABLED ((PushConstants.quality.w & 8u) != 0u)
+#define LUMEN_SURFACE_LOOKUP(p, n) surface_cache_lookup(p, n, false, true, true)
+#include "lumen_world_trace.glsl"
 #endif
 
 const float Pi = 3.14159265359;
@@ -116,7 +105,8 @@ float randomFloat(inout uint state)
 
 vec2 frame_uv(vec2 screenUV, sampler2D source)
 {
-    return live_uv(screenUV, source, vec2(PushConstants.quality.yz));
+    vec2 extent = vec2(PushConstants.quality.yz);
+    return live_uv(ssgi_geometry_uv(screenUV, extent), source, extent);
 }
 
 vec3 view_position(vec2 screenUV, float depth)
@@ -126,10 +116,10 @@ vec3 view_position(vec2 screenUV, float depth)
     return view.xyz / view.w;
 }
 
-vec3 cosine_direction(vec3 normal, inout uint state)
+vec3 cosine_direction(vec3 normal, vec2 xi)
 {
-    float u1 = randomFloat(state);
-    float u2 = randomFloat(state);
+    float u1 = xi.x;
+    float u2 = xi.y;
     float radius = sqrt(u1);
     float angle = 2.0 * Pi * u2;
     vec3 local = vec3(radius * cos(angle), radius * sin(angle), sqrt(1.0 - u1));
@@ -276,6 +266,7 @@ struct TraceOrigin {
 
 TraceOrigin trace_origin(vec2 screenUV, float depth)
 {
+    screenUV = ssgi_geometry_uv(screenUV, vec2(PushConstants.quality.yz));
     TraceOrigin o;
     o.position = view_position(screenUV, depth);
     o.normal = normalize(texture(prepassNormal,
@@ -287,9 +278,14 @@ TraceOrigin trace_origin(vec2 screenUV, float depth)
     return o;
 }
 
+// Set by trace_incident when the scene field saw its ray leave the scene, so
+// a screen probe can keep that sky apart from the rest (IQ4): a pixel whose
+// own cache sky owns its first sky bounce must not take it twice.
+bool traceFieldExit;
+
 // Radiance arriving at o along one view-space direction: the screen march
 // first, then the scene field for what the screen cannot answer.
-vec3 trace_incident(TraceOrigin o, vec3 direction,
+vec3 trace_incident(TraceOrigin o, vec3 direction, bool primarySkyCached,
     out bool hit, out bool portalTermination, out int stepsTaken)
 {
     vec3 origin = o.position + o.normal * PushConstants.settings.z;
@@ -300,19 +296,31 @@ vec3 trace_incident(TraceOrigin o, vec3 direction,
     vec2 hitUV = vec2(0.0);
     float hitDepth = 0.0;
     stepsTaken = 0;
-    if (hzb_enabled()) {
+    // R4: a plain miss is either a ray that left what the screen covers or
+    // one that used every step on screen.  HZB misses are not split and all
+    // read as exhausted; HZB is outside the R4 contract and must be off.
+    bool leftScreen = false;
+    traceFieldExit = false;
+    bool screenTrace = (PushConstants.quality.w & 128u) == 0u;
+    if (screenTrace && hzb_enabled()) {
         hit = hzb_march(origin, direction, hitUV, hitDepth,
             portalTermination, stepsTaken);
-    } else for (int stepIndex = 1; stepIndex <= stepCount; ++stepIndex) {
+    } else if (screenTrace) for (int stepIndex = 1; stepIndex <= stepCount; ++stepIndex) {
         stepsTaken = stepIndex;
         vec3 rayPoint = origin + direction * (stride * float(stepIndex));
         vec4 clip = sceneData.proj * vec4(rayPoint, 1.0);
-        if (clip.w <= 0.0) break;
+        if (clip.w <= 0.0) {
+            leftScreen = true;
+            break;
+        }
         vec3 ndc = clip.xyz / clip.w;
         vec2 rayUV = ndc.xy * 0.5 + 0.5;
         if (any(lessThan(rayUV, vec2(0.0))) ||
             any(greaterThanEqual(rayUV, vec2(1.0))) ||
-            ndc.z < 0.0 || ndc.z > 1.0) break;
+            ndc.z < 0.0 || ndc.z > 1.0) {
+            leftScreen = true;
+            break;
+        }
         if (texture(portalMask, frame_uv(rayUV, portalMask)).r > 0.5) {
             portalTermination = true;
             break;
@@ -320,72 +328,110 @@ vec3 trace_incident(TraceOrigin o, vec3 direction,
         float surfaceDepth = texture(
             prepassDepth, frame_uv(rayUV, prepassDepth)).r;
         if (surfaceDepth <= BackgroundDepth) continue;
-        vec3 surfacePosition = view_position(rayUV, surfaceDepth);
+        vec2 surfaceUV = ssgi_geometry_uv(rayUV, vec2(PushConstants.quality.yz));
+        vec3 surfacePosition = view_position(surfaceUV, surfaceDepth);
         float separation = (-rayPoint.z) - (-surfacePosition.z);
         float allowedThickness = PushConstants.settings.y *
             (1.0 + 0.01 * max(-surfacePosition.z, 0.0));
         if (separation >= 0.0 && separation <= allowedThickness) {
             hit = true;
-            hitUV = rayUV;
+            hitUV = surfaceUV;
             hitDepth = surfaceDepth;
             break;
         }
     }
 
     vec3 incident = vec3(0.0);
+    // Set when a screen hit could not be used, so the miss path below knows
+    // it is standing in for a hit rather than for a genuine miss.
+    bool unusableHit = false;
+#ifdef LUMEN_LITE
+    if (hit) {
+        // Cache lighting is current and world-space; it needs no screen history.
+        vec4 hitWorld = sceneData.inverseViewProjection *
+            vec4(hitUV * 2.0 - 1.0, hitDepth, 1.0);
+        vec3 hitNormal = normalize(transpose(mat3(sceneData.view)) *
+            texture(prepassNormal, frame_uv(hitUV, prepassNormal)).xyz);
+        SurfaceCacheSample hitSurface = LUMEN_SURFACE_LOOKUP(hitWorld.xyz / hitWorld.w, hitNormal);
+        if (hitSurface.weight > 0.0) {
+            incident = r4_ray_value(RayScreenHit,
+                hitSurface.albedo * hitSurface.direct +
+                (sceneData.emitterSettings.x > 0.5 ? vec3(0.0) : hitSurface.emissive));
+            incident += r4_ray_value(RayScreenHitCache, hitSurface.albedo * hitSurface.indirect);
+        } else {
+            // Resolve coverage gaps through the same world path as a screen miss.
+            hit = false;
+            unusableHit = true;
+        }
+    }
+#else
+    unusableHit = hit && PushConstants.control.z == 0u;
     if (hit && PushConstants.control.z != 0u) {
         vec2 hitVelocity = texture(
             gbufferVelocity, frame_uv(hitUV, gbufferVelocity)).xy;
         vec2 previousHitUV = hitUV + hitVelocity;
         if (all(greaterThanEqual(previousHitUV, vec2(0.0))) &&
             all(lessThan(previousHitUV, vec2(1.0)))) {
-            incident = texture(previousDirectLighting,
+            vec3 screenDirect = texture(previousDirectLighting,
                 frame_uv(previousHitUV, previousDirectLighting)).rgb;
-#ifdef LUMEN_LITE
-            // The screen knows only the direct light leaving what it hit.
-            // The cache knows that surface's bounce light too; adding it
-            // gives screen hits the same bounces as world-traced misses,
-            // which in a closed room are most rays.
-            vec4 hitWorld = sceneData.inverseViewProjection *
-                vec4(hitUV * 2.0 - 1.0, hitDepth, 1.0);
-            vec3 hitNormal = normalize(transpose(mat3(sceneData.view)) *
-                texture(prepassNormal, frame_uv(hitUV, prepassNormal)).xyz);
-            SurfaceCacheSample hitSurface =
-                surface_cache_lookup(hitWorld.xyz / hitWorld.w, hitNormal);
-            if (hitSurface.weight > 0.0) {
-                incident += hitSurface.albedo * hitSurface.indirect;
-            }
-#endif
+            incident = r4_ray_value(RayScreenHit, screenDirect);
         } else {
             hit = false;
+            unusableHit = true;
         }
     }
-    if (!hit || PushConstants.control.z == 0u) {
-        vec3 worldDirection = normalize(
-            transpose(mat3(sceneData.view)) * direction);
-#ifdef LUMEN_LITE
-        incident = portalTermination
-            ? environment_radiance(worldDirection)
-            : lumen_trace(o.worldPosition, o.worldNormal, worldDirection);
-#else
-        incident = environment_radiance(worldDirection);
 #endif
+    // Section 4.3: only a ray that demonstrably left the scene is lit from the
+    // sky, and only the scene field can show that.  Every other ray the screen
+    // could not answer -- off screen, out of steps, stopped at a portal, or a
+    // hit that cannot be reprojected -- is "no estimate" and adds nothing.
+    // SSGI owns diffuse environment light, so nothing else adds it back.
+    if (!hit || unusableHit) {
+#ifdef LUMEN_LITE
+        uint rayClass = RayPortal;
+        incident = portalTermination
+            ? vec3(0.0)
+            : lumen_trace(o.worldPosition, o.worldNormal,
+                normalize(transpose(mat3(sceneData.view)) * direction),
+                rayClass);
+        traceFieldExit = rayClass == RayFieldExit;
+#else
+        uint rayClass = portalTermination ? RayPortal
+            : (unusableHit ? RayUnusableHit
+            : (leftScreen ? RayExit : RayExhausted));
+        incident = vec3(0.0);
+#endif
+        // The exact cache sky already supplies this origin's first sky
+        // bounce. Uncovered origins still use the field exit as before.
+        incident = primarySkyCached && rayClass == RayFieldExit
+            ? vec3(0.0) : r4_ray_value(rayClass, incident);
     }
     return incident;
 }
 
 #ifdef LUMEN_LITE
-// Screen probes.  One probe per ProbeTile x ProbeTile pixel tile, placed on a
-// different pixel of its tile every frame, traces the rays its tile's pixels
-// would have traced (the same budget) over its hemisphere and keeps them as
-// band-2 spherical harmonics.  Each pixel then reads irradiance for its own
-// normal from the probes around it, so it is estimated from every ray in
-// several tiles rather than the handful it traced itself.  The existing
-// temporal pass accumulates across the jittered placements.
+// Screen probes (IQ4, docs/screen_probe_proposal.md).  One probe per
+// ProbeTile x ProbeTile pixel tile, placed on a hashed pixel of its tile each
+// frame, traces 64 stratified uniform rays over its hemisphere and keeps them
+// as band-2 spherical harmonics.  Each pixel then reads irradiance for its own
+// normal from the four probes around it, those facing within ProbeNormalCos of
+// it.  The existing temporal pass accumulates across the jittered placements.
 //
-// ponytail: no importance sampling, probe-space filtering or adaptive
-// placement yet; pixels no probe can serve fall back to their own rays.
+// Rays the scene field saw leave the scene are kept in a second coefficient
+// set: a pixel the cache's primary sky covers takes its own cache sky instead
+// of them, exactly as its own rays would (R4.26), and one it does not cover
+// takes them.
+//
+// ponytail: build step 2 only -- no importance sampling, octahedral texel
+// map, probe-space filtering or adaptive placement yet; pixels no probe can
+// serve fall back to their own rays.
 const int ProbeTile = 8;
+const int ProbeCoefficients = 18;
+// A probe's hemisphere misses part of a pixel's tilted beta from it: for
+// band-2 SH a probe of constant radiance reads (1 + cos beta) / 2 there.
+// 0.98 keeps that loss within 1%, half of Q1's tolerance; the other half is
+// the sampling error (IQ4 step 2c).
+const float ProbeNormalCos = 0.98;
 layout(rgba16f, set = 1, binding = 14) uniform image2D probeRadiance;
 
 bool probes_enabled()
@@ -424,7 +470,8 @@ void sh_basis(vec3 n, out float y[9])
 // Mean cosine-weighted incident radiance around n (irradiance / pi, what the
 // per-pixel trace averages to) from a probe's radiance coefficients: the
 // clamped-cosine convolution, bands scaled by pi, 2pi/3 and pi/4, over pi.
-vec3 probe_incident(ivec2 probe, vec3 n)
+// Set 0 is the rays that stayed in the scene, 1 the field exits, 2 both.
+vec3 probe_incident(ivec2 probe, vec3 n, int set)
 {
     float y[9];
     sh_basis(n, y);
@@ -432,30 +479,129 @@ vec3 probe_incident(ivec2 probe, vec3 n)
         0.25, 0.25, 0.25, 0.25, 0.25);
     vec3 e = vec3(0.0);
     for (int i = 0; i < 9; ++i) {
-        e += imageLoad(probeRadiance, ivec2(probe.x * 9 + i, probe.y)).rgb *
-            band[i] * y[i];
+        vec3 c = vec3(0.0);
+        if (set != 1) c += imageLoad(probeRadiance, ivec2(probe.x * ProbeCoefficients + i, probe.y)).rgb;
+        if (set != 0) c += imageLoad(probeRadiance, ivec2(probe.x * ProbeCoefficients + 9 + i, probe.y)).rgb;
+        e += c * band[i] * y[i];
     }
     return max(e, vec3(0.0));
 }
+
+// Adaptive probes (IQ4 adaptive record): where the uniform probes leave more
+// than a quarter of a tile's surface pixels unserved, each 4 x 4 sub-tile with
+// an unserved pixel gets one extra probe at its first such pixel, up to
+// AdaptiveBudget a frame.  The placement pass fills this buffer every frame:
+// the requested count, each slot's pixel, and every sub-tile's slot (-1 for
+// none).  Their coefficients sit in the probe image's last rows,
+// AdaptiveColumns slots to a row.
+const uint AdaptiveBudget = 1024u;
+const int AdaptiveColumns = 32;
+const uint AdaptiveSalt = 0x9e3779b9u;
+layout(std430, set = 1, binding = 16) buffer AdaptiveProbes {
+    uint adaptiveRequested;
+    uint adaptivePadding[3];
+    ivec2 adaptivePixel[AdaptiveBudget];
+    int adaptiveSlot[];
+};
+
+ivec2 adaptive_storage(int slot)
+{
+    int firstRow = imageSize(probeRadiance).y - int(AdaptiveBudget) / AdaptiveColumns;
+    return ivec2(slot % AdaptiveColumns, firstRow + slot / AdaptiveColumns);
+}
+
+// The four uniform probes around this pixel, bilinear in tile space, each
+// kept only if it lies on this pixel's surface and faces its way.  Returns
+// the weight sum; gathered is the rays that stayed in the scene, gatheredAll
+// both sets summed before the clamp (what the probes alone reconstruct, also
+// Q1's readout).  The placement pass calls this too, so "unserved" means
+// exactly what the per-pixel pass does.
+float gather_uniform(ivec2 pixel, ivec2 extent, TraceOrigin o,
+    out vec3 gathered, out vec3 gatheredAll)
+{
+    vec2 f = (vec2(pixel) + 0.5) / float(ProbeTile) - 0.5;
+    ivec2 base = ivec2(floor(f));
+    vec2 t = f - vec2(base);
+    ivec2 probes = (extent + ProbeTile - 1) / ProbeTile;
+    gathered = vec3(0.0);
+    gatheredAll = vec3(0.0);
+    float weightSum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        ivec2 corner = ivec2(i & 1, i >> 1);
+        ivec2 probe = clamp(base + corner, ivec2(0), probes - 1);
+        if (imageLoad(probeRadiance, ivec2(probe.x * ProbeCoefficients, probe.y)).a < 0.5) continue;
+        ivec2 probePixel = probe_pixel(probe, extent);
+        vec2 probeUV = (vec2(probePixel) + 0.5) / vec2(extent);
+        TraceOrigin p = trace_origin(probeUV,
+            texture(prepassDepth, frame_uv(probeUV, prepassDepth)).r);
+        float plane = abs(dot(o.worldNormal, p.worldPosition - o.worldPosition));
+        float facing = max(dot(o.worldNormal, p.worldNormal), 0.0);
+        if (facing < ProbeNormalCos) continue;
+        float bilinear = (corner.x == 1 ? t.x : 1.0 - t.x) *
+            (corner.y == 1 ? t.y : 1.0 - t.y);
+        // A probe more than a few centimetres off this pixel's plane
+        // (scaled with distance, as depth precision is) is on another
+        // surface and saw a different hemisphere.
+        float planeWeight = exp(-plane / (0.02 * max(-o.position.z, 1.0)));
+        float weight = bilinear * planeWeight * pow(facing, 8.0);
+        gathered += probe_incident(probe, o.worldNormal, 0) * weight;
+        gatheredAll += probe_incident(probe, o.worldNormal, 2) * weight;
+        weightSum += weight;
+    }
+    return weightSum;
+}
+
+// The adaptive probes of this pixel's 4 x 4 sub-tile and its eight
+// neighbours, with the uniform gather's plane and normal tests and weights
+// but no bilinear term: they sit wherever the unserved pixels were.
+float gather_adaptive(ivec2 pixel, ivec2 extent, TraceOrigin o,
+    out vec3 gathered, out vec3 gatheredAll)
+{
+    ivec2 subtiles = (extent + 3) / 4;
+    ivec2 own = pixel / 4;
+    gathered = vec3(0.0);
+    gatheredAll = vec3(0.0);
+    float weightSum = 0.0;
+    for (int i = 0; i < 9; ++i) {
+        ivec2 subtile = own + ivec2(i % 3 - 1, i / 3 - 1);
+        if (any(lessThan(subtile, ivec2(0))) || any(greaterThanEqual(subtile, subtiles))) continue;
+        int slot = adaptiveSlot[subtile.y * subtiles.x + subtile.x];
+        if (slot < 0) continue;
+        vec2 probeUV = (vec2(adaptivePixel[slot]) + 0.5) / vec2(extent);
+        TraceOrigin p = trace_origin(probeUV,
+            texture(prepassDepth, frame_uv(probeUV, prepassDepth)).r);
+        float plane = abs(dot(o.worldNormal, p.worldPosition - o.worldPosition));
+        float facing = max(dot(o.worldNormal, p.worldNormal), 0.0);
+        if (facing < ProbeNormalCos) continue;
+        float weight = exp(-plane / (0.02 * max(-o.position.z, 1.0))) * pow(facing, 8.0);
+        ivec2 storage = adaptive_storage(slot);
+        gathered += probe_incident(storage, o.worldNormal, 0) * weight;
+        gatheredAll += probe_incident(storage, o.worldNormal, 2) * weight;
+        weightSum += weight;
+    }
+    return weightSum;
+}
 #endif
 
-#ifdef SSGI_PROBE_TRACE
-// One workgroup per probe; each invocation traces raysPerPixel rays, so a
-// probe traces exactly what its tile's pixels would have.
-shared vec3 probeSum[64][9];
+#if defined(SSGI_PROBE_TRACE) || defined(SSGI_PROBE_ADAPTIVE)
+// One workgroup per probe, one ray per invocation: 64 rays per probe
+// (proposal section 4), whatever the per-pixel ray count.
+shared vec3 probeSum[64][ProbeCoefficients];
 
-void main()
+// Traces one probe at pixel and stores its coefficients at storage.  Its rays
+// are seeded from seedCell and salt, never from where it is stored, so the
+// order adaptive probes take their slots in cannot change them.  Every
+// invocation of the workgroup must call it with the same arguments.
+void trace_probe(ivec2 pixel, ivec2 seedCell, uint salt, ivec2 storage)
 {
-    ivec2 probe = ivec2(gl_WorkGroupID.xy);
     uint lane = gl_LocalInvocationIndex;
     ivec2 extent = ivec2(PushConstants.control.xy);
-    ivec2 pixel = probe_pixel(probe, extent);
     vec2 screenUV = (vec2(pixel) + 0.5) / vec2(extent);
     float depth = texture(prepassDepth, frame_uv(screenUV, prepassDepth)).r;
     // Uniform across the workgroup, so no invocation is left at the barrier.
     if (depth <= BackgroundDepth) {
-        if (lane < 9u) {
-            imageStore(probeRadiance, ivec2(probe.x * 9 + int(lane), probe.y), vec4(0.0));
+        if (lane < uint(ProbeCoefficients)) {
+            imageStore(probeRadiance, ivec2(storage.x * ProbeCoefficients + int(lane), storage.y), vec4(0.0));
         }
         return;
     }
@@ -463,38 +609,128 @@ void main()
     vec3 helper = abs(o.normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
     vec3 tangent = normalize(cross(helper, o.normal));
     vec3 bitangent = cross(o.normal, tangent);
-    uint state = uint(probe.x) * 1973u ^ uint(probe.y) * 9277u ^ lane * 26699u ^
-        PushConstants.control.w * 3079u ^ 0x68bc21ebu;
+    uint state = uint(seedCell.x) * 1973u ^ uint(seedCell.y) * 9277u ^ lane * 26699u ^
+        PushConstants.control.w * 3079u ^ 0x68bc21ebu ^ salt;
 
-    // Stratified uniform hemisphere: an 8 x (8 * rays) grid over (cos theta,
-    // phi), one jittered sample per cell.  Uniform rather than cosine, so the
-    // projection's weight stays finite at the horizon.
-    int rays = clamp(int(PushConstants.quality.x), 1, 8);
+    // Uniform over the hemisphere (pdf 1 / 2pi), one jittered ray per row of
+    // 64 cos theta strata and per column of 64 phi strata, the columns in
+    // 6-bit reversed order.  Uniform keeps the projection's weight bounded,
+    // and the 64 rows keep a probe's constant-input error under 1% where an
+    // 8 x 8 grid reaches 4% (tmp/iq4-step2c/threshold_model.py).  One azimuth
+    // rotation per probe per frame, shared by its rays, makes each ray uniform
+    // over its whole cos theta band; without it the fixed pairing samples only
+    // 64 of the 4096 (cos theta, phi) cells (IQ4 step 2d,
+    // tests/test_iq4_probe_sampler.py).
+    uint rotationState = uint(seedCell.x) * 1973u ^ uint(seedCell.y) * 9277u ^
+        PushConstants.control.w * 3079u ^ 0x2545f491u ^ salt;
+    float rotation = randomFloat(rotationState);
+    float cosTheta = (float(lane) + randomFloat(state)) / 64.0;
+    float u2 = fract((float(bitfieldReverse(lane) >> 26) + randomFloat(state)) / 64.0 +
+        rotation);
+    float radius = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
+    float phi = 2.0 * Pi * u2;
+    vec3 direction = normalize(tangent * (radius * cos(phi)) +
+        bitangent * (radius * sin(phi)) + o.normal * cosTheta);
+    bool hit, portal;
+    int steps;
+    // Exits keep their sky here; the gather decides who owns it.
+    vec3 incident = trace_incident(o, direction, false, hit, portal, steps);
     float coefficients[9];
-    vec3 sum[9];
-    for (int i = 0; i < 9; ++i) sum[i] = vec3(0.0);
-    for (int k = 0; k < rays; ++k) {
-        float u1 = (float(lane % 8u) + randomFloat(state)) / 8.0;
-        float u2 = (float(lane / 8u + 8u * uint(k)) + randomFloat(state)) /
-            float(8 * rays);
-        float r = sqrt(max(1.0 - u1 * u1, 0.0));
-        float phi = 2.0 * Pi * u2;
-        vec3 direction = normalize(tangent * (r * cos(phi)) +
-            bitangent * (r * sin(phi)) + o.normal * u1);
-        bool hit, portal;
-        int steps;
-        vec3 incident = trace_incident(o, direction, hit, portal, steps);
-        sh_basis(normalize(transpose(mat3(sceneData.view)) * direction), coefficients);
-        for (int i = 0; i < 9; ++i) sum[i] += incident * coefficients[i];
-    }
-    for (int i = 0; i < 9; ++i) probeSum[lane][i] = sum[i];
+    sh_basis(normalize(transpose(mat3(sceneData.view)) * direction), coefficients);
+    // Monte Carlo projection: radiance x basis / pdf, pdf = 1 / 2pi.
+    vec3 weighted = incident * (2.0 * Pi);
+    int exitSet = traceFieldExit ? 9 : 0;
+    for (int i = 0; i < ProbeCoefficients; ++i) probeSum[lane][i] = vec3(0.0);
+    for (int i = 0; i < 9; ++i) probeSum[lane][exitSet + i] = weighted * coefficients[i];
     barrier();
-    if (lane < 9u) {
+    if (lane < uint(ProbeCoefficients)) {
         vec3 total = vec3(0.0);
         for (int j = 0; j < 64; ++j) total += probeSum[j][lane];
-        // Uniform hemisphere pdf is 1 / 2pi.
-        total *= 2.0 * Pi / float(64 * rays);
-        imageStore(probeRadiance, ivec2(probe.x * 9 + int(lane), probe.y), vec4(total, 1.0));
+        imageStore(probeRadiance, ivec2(storage.x * ProbeCoefficients + int(lane), storage.y),
+            vec4(total / 64.0, 1.0));
+    }
+}
+#endif
+
+#if defined(SSGI_PROBE_TRACE)
+// The uniform probes: one per tile.  Runs first each frame, so it also
+// clears the adaptive request counter for the placement pass after it.
+void main()
+{
+    ivec2 probe = ivec2(gl_WorkGroupID.xy);
+    if (probe == ivec2(0) && gl_LocalInvocationIndex == 0u) {
+        adaptiveRequested = 0u;
+    }
+    trace_probe(probe_pixel(probe, ivec2(PushConstants.control.xy)), probe, 0u, probe);
+}
+#elif defined(SSGI_PROBE_ADAPTIVE)
+// The adaptive probes: one workgroup per budget slot; a slot the placement
+// pass did not fill exits at once (the whole workgroup reads the same count).
+void main()
+{
+    uint slot = gl_WorkGroupID.x;
+    if (slot >= min(adaptiveRequested, AdaptiveBudget)) {
+        return;
+    }
+    ivec2 pixel = adaptivePixel[slot];
+    trace_probe(pixel, pixel / 4, AdaptiveSalt, adaptive_storage(int(slot)));
+}
+#elif defined(SSGI_PROBE_PLACE)
+// Placement: one workgroup per 8 x 8 tile, one invocation per pixel.  Counts
+// the tile's surface pixels and those the uniform probes leave unserved, and
+// finds each 4 x 4 sub-tile's first unserved pixel (row-major).  Every
+// in-extent sub-tile's map entry is written every frame.
+shared uint tileSurface;
+shared uint tileUnserved;
+shared uint firstUnserved[4];
+
+void main()
+{
+    ivec2 tile = ivec2(gl_WorkGroupID.xy);
+    ivec2 local = ivec2(gl_LocalInvocationID.xy);
+    uint lane = gl_LocalInvocationIndex;
+    ivec2 extent = ivec2(PushConstants.control.xy);
+    ivec2 pixel = tile * ProbeTile + local;
+    if (lane == 0u) {
+        tileSurface = 0u;
+        tileUnserved = 0u;
+    }
+    if (lane < 4u) {
+        firstUnserved[lane] = 0xffffffffu;
+    }
+    barrier();
+    if (all(lessThan(pixel, extent))) {
+        vec2 screenUV = (vec2(pixel) + 0.5) / vec2(extent);
+        float depth = texture(prepassDepth, frame_uv(screenUV, prepassDepth)).r;
+        if (depth > BackgroundDepth) {
+            atomicAdd(tileSurface, 1u);
+            vec3 gathered, gatheredAll;
+            if (gather_uniform(pixel, extent, trace_origin(screenUV, depth),
+                    gathered, gatheredAll) <= 1e-3) {
+                atomicAdd(tileUnserved, 1u);
+                atomicMin(firstUnserved[(local.y / 4) * 2 + local.x / 4],
+                    uint((local.y % 4) * 4 + local.x % 4));
+            }
+        }
+    }
+    barrier();
+    if (lane < 4u) {
+        ivec2 subtile = tile * 2 + ivec2(int(lane) & 1, int(lane) >> 1);
+        ivec2 subtiles = (extent + 3) / 4;
+        if (all(lessThan(subtile, subtiles))) {
+            int slot = -1;
+            uint first = firstUnserved[lane];
+            if (tileUnserved * 4u > tileSurface && first != 0xffffffffu) {
+                // Past the budget a request gets no probe; the count still
+                // grows, so saturation shows in the capture.
+                uint requested = atomicAdd(adaptiveRequested, 1u);
+                if (requested < AdaptiveBudget) {
+                    slot = int(requested);
+                    adaptivePixel[slot] = subtile * 4 + ivec2(int(first % 4u), int(first / 4u));
+                }
+            }
+            adaptiveSlot[subtile.y * subtiles.x + subtile.x] = slot;
+        }
     }
 }
 #else
@@ -517,55 +753,60 @@ void main()
 
     TraceOrigin o = trace_origin(screenUV, depth);
 #ifdef LUMEN_LITE
+    // quality.w bit 6: IQ10's control, the nearest-texel sky read.
+    SurfaceCacheSample primarySky = surface_cache_lookup(
+        o.worldPosition, o.worldNormal, true, (PushConstants.quality.w & 64u) == 0u, true);
+    bool primarySkyCached = primarySky.weight > 0.0;
     if (probes_enabled()) {
-        // The four probes around this pixel, bilinear in tile space, each
-        // kept only if it lies on this pixel's surface and faces its way.
-        vec2 f = (vec2(pixel) + 0.5) / float(ProbeTile) - 0.5;
-        ivec2 base = ivec2(floor(f));
-        vec2 t = f - vec2(base);
-        ivec2 probes = (extent + ProbeTile - 1) / ProbeTile;
-        vec3 gathered = vec3(0.0);
-        float weightSum = 0.0;
-        for (int i = 0; i < 4; ++i) {
-            ivec2 corner = ivec2(i & 1, i >> 1);
-            ivec2 probe = clamp(base + corner, ivec2(0), probes - 1);
-            if (imageLoad(probeRadiance, ivec2(probe.x * 9, probe.y)).a < 0.5) continue;
-            ivec2 probePixel = probe_pixel(probe, extent);
-            vec2 probeUV = (vec2(probePixel) + 0.5) / vec2(extent);
-            TraceOrigin p = trace_origin(probeUV,
-                texture(prepassDepth, frame_uv(probeUV, prepassDepth)).r);
-            float plane = abs(dot(o.worldNormal, p.worldPosition - o.worldPosition));
-            float facing = max(dot(o.worldNormal, p.worldNormal), 0.0);
-            float bilinear = (corner.x == 1 ? t.x : 1.0 - t.x) *
-                (corner.y == 1 ? t.y : 1.0 - t.y);
-            // A probe more than a few centimetres off this pixel's plane
-            // (scaled with distance, as depth precision is) is on another
-            // surface and saw a different hemisphere.
-            float planeWeight = exp(-plane / (0.02 * max(-o.position.z, 1.0)));
-            float weight = bilinear * planeWeight * pow(facing, 8.0);
-            gathered += probe_incident(probe, o.worldNormal) * weight;
-            weightSum += weight;
+        vec3 gathered;
+        vec3 gatheredAll;
+        float weightSum = gather_uniform(pixel, extent, o, gathered, gatheredAll);
+        // Only a pixel the uniform probes leave unserved reads adaptive ones.
+        bool adaptive = weightSum <= 1e-3;
+        if (adaptive) {
+            weightSum = gather_adaptive(pixel, extent, o, gathered, gatheredAll);
         }
         if (weightSum > 1e-3) {
-            imageStore(rawIndirectImage, pixel, vec4(gathered / weightSum, 1.0));
-            imageStore(diagnosticImage, pixel, vec4(0.75, 0.0, 0.0, 0.0));
+            // Covered: the scene set plus this pixel's own cache sky, which
+            // owns its field exits.  Uncovered: both sets combined before the
+            // clamp, as its own rays would sum them.
+            vec3 indirect = primarySkyCached
+                ? gathered / weightSum + r4_ray_value(RayPrimaryCacheSky, primarySky.sky)
+                : gatheredAll / weightSum;
+            imageStore(rawIndirectImage, pixel, vec4(indirect, 1.0));
+            // r = 0.75 marks a probe-served pixel, g = -1 one an adaptive
+            // probe served, b = -1 one the cache sky covers (g, b <= 0 keep it
+            // out of the traced-pixel statistics); a = what the probes alone
+            // read.
+            imageStore(diagnosticImage, pixel, vec4(0.75, adaptive ? -1.0 : 0.0,
+                primarySkyCached ? -1.0 : 0.0,
+                dot(gatheredAll / weightSum, vec3(1.0 / 3.0))));
             return;
         }
     }
 #endif
     uint state = uint(pixel.x) * 1973u ^ uint(pixel.y) * 9277u ^
         PushConstants.control.w * 26699u ^ 0x68bc21ebu;
+#ifndef LUMEN_LITE
+    bool primarySkyCached = false;
+#endif
     int stepCount = max(1, int(PushConstants.settings.w + 0.5));
     int rayCount = clamp(int(PushConstants.quality.x), 1, 8);
     vec3 indirect = vec3(0.0);
     int hitSamples = 0;
     int portalSamples = 0;
     int totalSteps = 0;
+    // Cover radial and azimuth strata instead of letting two independent
+    // rays cluster. A shared random rotation keeps every stratum unbiased.
+    float rotation = randomFloat(state);
     for (int rayIndex = 0; rayIndex < rayCount; ++rayIndex) {
-        vec3 direction = cosine_direction(o.normal, state);
+        vec2 xi = vec2((float(rayIndex) + randomFloat(state)) / float(rayCount),
+            fract((float(rayCount - 1 - rayIndex) + randomFloat(state)) / float(rayCount) + rotation));
+        vec3 direction = cosine_direction(o.normal, xi);
         bool hit, portalTermination;
         int stepsTaken;
-        indirect += trace_incident(o, direction, hit, portalTermination, stepsTaken);
+        indirect += trace_incident(o, direction, primarySkyCached,
+            hit, portalTermination, stepsTaken);
         hitSamples += hit ? 1 : 0;
         portalSamples += portalTermination ? 1 : 0;
         totalSteps += stepsTaken;
@@ -573,6 +814,11 @@ void main()
     // Incident radiance, not reflected colour: the composite multiplies by
     // the receiver's albedo after the temporal and spatial filters have run.
     indirect /= float(rayCount);
+#ifdef LUMEN_LITE
+    if (primarySkyCached) {
+        indirect += r4_ray_value(RayPrimaryCacheSky, primarySky.sky);
+    }
+#endif
     imageStore(rawIndirectImage, pixel, vec4(indirect, 1.0));
     float hitFraction = float(hitSamples) / float(rayCount);
     float portalFraction = float(portalSamples) / float(rayCount);

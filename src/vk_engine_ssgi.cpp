@@ -1,5 +1,7 @@
 #include "vk_engine.h"
 #include "vk_engine_render_helpers.h"
+#include "r4_contributions.h"
+#include "env_flags.h"
 
 #include <algorithm>
 #include <array>
@@ -29,7 +31,7 @@ struct SSGIPreset {
 constexpr std::array<SSGIPreset, 5> SSGIPresets{{
     {false, 4, 32, 12.0f, 0.35f, 0.08f, 3, 800.0f, 32.0f, 0.92f},
     {true,  4, 48, 16.0f, 0.30f, 0.06f, 4, 700.0f, 28.0f, 0.94f},
-    {true,  2, 32, 12.0f, 0.35f, 0.08f, 3, 800.0f, 32.0f, 0.92f},
+    {true,  2, 32, 12.0f, 0.35f, 0.08f, 5, 800.0f, 32.0f, 0.92f},
     {true,  1, 16,  8.0f, 0.45f, 0.10f, 2, 900.0f, 36.0f, 0.90f},
     {false, 8, 96, 20.0f, 0.25f, 0.05f, 5, 800.0f, 32.0f, 0.96f}}};
 }
@@ -48,6 +50,12 @@ void VulkanEngine::apply_ssgi_quality_preset(int preset)
     _ssgi.filterDepthFalloff = chosen.filterDepthFalloff;
     _ssgi.filterNormalPower = chosen.filterNormalPower;
     _ssgi.historyWeight = chosen.historyWeight;
+    // IQ4 step 0 diagnostic (docs/screen_probe_proposal.md): a longer temporal
+    // accumulation, which tells blotch variance from cache bias.  Unset changes
+    // nothing; the temporal shader caps the weight at 0.99.
+    if (const char* weight = SDL_getenv("MIRABILIS_IQ4_HISTORY_WEIGHT")) {
+        _ssgi.historyWeight = std::clamp(static_cast<float>(std::atof(weight)), 0.0f, 0.99f);
+    }
     _ssgi.spatialFilterEnabled = true;
     _ssgi.historyValid = false;
 }
@@ -68,6 +76,7 @@ void VulkanEngine::init_ssgi_descriptors()
         builder.add_binding(13, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         builder.add_binding(14, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         builder.add_binding(15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         _ssgi.descriptorLayout = builder.build(
             _device, VK_SHADER_STAGE_COMPUTE_BIT);
         for (VkDescriptorSet& set : _ssgi.descriptors) {
@@ -254,7 +263,8 @@ void VulkanEngine::init_ssgi_resources()
     const VkExtent3D extent = _drawImage.imageExtent;
     _sceneTargets.gbufferAlbedo = create_image(
         extent, VK_FORMAT_R8G8B8A8_UNORM,
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     _sceneTargets.gbufferVelocity = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
@@ -265,16 +275,26 @@ void VulkanEngine::init_ssgi_resources()
     _sceneTargets.portalMask = create_image(
         extent, VK_FORMAT_R8_UNORM,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    // Transfer source for the raw capture (R4.5), which copies it out.
     _ssgi.rawImage = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     _ssgi.debugImage = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    const char* staticAccumulation = SDL_getenv("MIRABILIS_IQ9_STATIC_ACCUMULATION");
+    if (parse_env_bool(staticAccumulation) == EnvBool::Invalid) {
+        fmt::print("MIRABILIS_IQ9_STATIC_ACCUMULATION='{}' is not a boolean\n", staticAccumulation);
+        abort();
+    }
+    _ssgi.staticAccumulation = !staticAccumulation || parse_env_bool(staticAccumulation) == EnvBool::On;
+    // Full precision for long accumulation: at weight 0.98 each frame moves the
+    // history by 2%, below half-float resolution for most differences (IQ9).
     for (AllocatedImage& history : _ssgi.temporalHistory) {
-        history = create_image(
-            extent, VK_FORMAT_R16G16B16A16_SFLOAT,
+        history = create_image(extent,
+            _ssgi.staticAccumulation ? VK_FORMAT_R32G32B32A32_SFLOAT : VK_FORMAT_R16G16B16A16_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     }
     for (AllocatedImage& history : _ssgi.metadataHistory) {
@@ -288,10 +308,21 @@ void VulkanEngine::init_ssgi_resources()
     _ssgi.filterScratchImage = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    // Nine SH coefficients per 8x8 tile, side by side.
+    // Eighteen SH coefficients per 8x8 tile, side by side: nine for the rays
+    // that stayed in the scene, nine for field exits (IQ4).  The last 32 rows
+    // hold the 1,024 adaptive probes, 32 to a row (shaders/ssgi_body.glsl).
+    constexpr uint32_t AdaptiveBudget = 1024u, AdaptiveColumns = 32u;
     _ssgi.probeImage = create_image(
-        VkExtent3D{(extent.width + 7u) / 8u * 9u, (extent.height + 7u) / 8u, 1u},
+        VkExtent3D{std::max((extent.width + 7u) / 8u, AdaptiveColumns) * 18u,
+            (extent.height + 7u) / 8u + AdaptiveBudget / AdaptiveColumns, 1u},
         VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_STORAGE_BIT);
+    // Request count (padded to 16 bytes), slot pixels, and one slot per 4x4
+    // sub-tile of the full extent; transfer source for the capture readback.
+    _ssgi.adaptiveBufferSize = 16u + AdaptiveBudget * 2u * sizeof(int32_t) +
+        size_t((extent.width + 3u) / 4u) * ((extent.height + 3u) / 4u) * sizeof(int32_t);
+    _ssgi.adaptiveBuffer = create_buffer(_ssgi.adaptiveBufferSize,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY);
     // Padded to a multiple of the coarsest cell, so every level is exactly
     // half the one below and each texel covers a whole 2x2.
     constexpr uint32_t HzbCell = 1u << (SSGIState::HzbLevels - 1);
@@ -384,6 +415,7 @@ void VulkanEngine::init_ssgi_resources()
         destroy_image(_ssgi.filterScratchImage);
         destroy_image(_ssgi.filteredImage);
         destroy_image(_ssgi.probeImage);
+        destroy_buffer(_ssgi.adaptiveBuffer);
         for (VkImageView view : _ssgi.hzbLevelViews) {
             vkDestroyImageView(_device, view, nullptr);
         }
@@ -409,9 +441,9 @@ void VulkanEngine::init_ssgi_pipelines()
         !compositeVertexShader.load("../../shaders/render_debug.vert.spv") ||
         !compositeFragmentShader.load(
             "../../shaders/ssgi_composite.frag.spv") ||
-        !meshVertexShader.load("../../shaders/mesh.vert.spv") ||
+        !meshVertexShader.load("../../shaders/portal_stencil.vert.spv") ||
         !maskFragmentShader.load(
-            "../../shaders/portal_mask_output.frag.spv")) {
+            "../../shaders/portal_stencil_output.frag.spv")) {
         fmt::print("Error loading SSGI shaders\n");
         return;
     }
@@ -441,6 +473,9 @@ void VulkanEngine::init_ssgi_pipelines()
         for (uint32_t binding = 6; binding <= 8; ++binding) {
             builder.add_binding(binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         }
+        builder.add_binding(9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        // The albedo volume, for field hits no card holds (R4.61).
+        builder.add_binding(10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         _ssgi.lumenLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
         const std::array<VkDescriptorSetLayout, 3> lumenLayouts{
             _gpuSceneDataDescriptorLayout, _ssgi.descriptorLayout, _ssgi.lumenLayout};
@@ -452,7 +487,7 @@ void VulkanEngine::init_ssgi_pipelines()
         VK_CHECK(vkCreatePipelineLayout(
             _device, &lumenInfo, nullptr, &_ssgi.lumenPipelineLayout));
         ScopedShaderModule lumenShader(_device);
-        if (lumenShader.load("../../shaders/ssgi_lumen.comp.spv")) {
+        if (lumenShader.load(ray_query_shader("ssgi_lumen.comp").c_str())) {
             VkComputePipelineCreateInfo lumenCreate{
                 .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             lumenCreate.layout = _ssgi.lumenPipelineLayout;
@@ -464,7 +499,7 @@ void VulkanEngine::init_ssgi_pipelines()
             fmt::print("Error loading ssgi_lumen.comp.spv; Lumen-lite fallback unavailable\n");
         }
         ScopedShaderModule probeShader(_device);
-        if (probeShader.load("../../shaders/ssgi_probe.comp.spv")) {
+        if (probeShader.load(ray_query_shader("ssgi_probe.comp").c_str())) {
             VkComputePipelineCreateInfo probeCreate{
                 .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             probeCreate.layout = _ssgi.lumenPipelineLayout;
@@ -475,9 +510,30 @@ void VulkanEngine::init_ssgi_pipelines()
         } else {
             fmt::print("Error loading ssgi_probe.comp.spv; screen probes unavailable\n");
         }
+        // Adaptive probes: without both passes the slot map is never
+        // written, so probes stay off (see the dispatch).
+        const std::array<std::pair<const char*, VkPipeline*>, 2> adaptiveStages{{
+            {"ssgi_probe_place.comp", &_ssgi.probePlacePipeline},
+            {"ssgi_probe_adaptive.comp", &_ssgi.probeAdaptivePipeline}}};
+        for (const auto& [name, pipeline] : adaptiveStages) {
+            ScopedShaderModule shader(_device);
+            if (!shader.load(ray_query_shader(name).c_str())) {
+                fmt::print("Error loading {}; screen probes unavailable\n", name);
+                continue;
+            }
+            VkComputePipelineCreateInfo create{
+                .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+            create.layout = _ssgi.lumenPipelineLayout;
+            create.stage = vkinit::pipeline_shader_stage_create_info(
+                VK_SHADER_STAGE_COMPUTE_BIT, shader.get());
+            VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1,
+                &create, nullptr, pipeline));
+        }
         _mainDeletionQueue.push_function([this]() {
             vkDestroyPipeline(_device, _ssgi.lumenPipeline, nullptr);
             vkDestroyPipeline(_device, _ssgi.probePipeline, nullptr);
+            vkDestroyPipeline(_device, _ssgi.probePlacePipeline, nullptr);
+            vkDestroyPipeline(_device, _ssgi.probeAdaptivePipeline, nullptr);
             vkDestroyPipelineLayout(_device, _ssgi.lumenPipelineLayout, nullptr);
             vkDestroyDescriptorSetLayout(_device, _ssgi.lumenLayout, nullptr);
         });
@@ -717,6 +773,12 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
             writer.write_buffer(8, _surfaceCache.indexBuffer.buffer, VK_WHOLE_SIZE, 0,
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+            writer.write_image(9, _surfaceCache.sky.imageView, _prepass.sampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            writer.write_image(10, _surfaceCache.albedoVolume.imageView, _sdf.sampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             writer.update_set(_device, lumenSet);
             traceLayout = _ssgi.lumenPipelineLayout;
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.lumenPipeline);
@@ -731,11 +793,15 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
                 0, static_cast<uint32_t>(sets.size()), sets.data(), 0, nullptr);
         }
         SSGIPushConstants pushConstants{};
+        // IQ9 diagnostic: an SSGI seed offset gives an independent noise
+        // realisation of the same frame; unset changes nothing.
+        const char* seedOffset = SDL_getenv("MIRABILIS_IQ9_SSGI_SEED");
         pushConstants.control = glm::uvec4(
             ssgiExtent.width,
             ssgiExtent.height,
             _ssgi.historyValid ? 1u : 0u,
-            static_cast<uint32_t>(_frameNumber));
+            static_cast<uint32_t>(_frameNumber) +
+                (seedOffset ? static_cast<uint32_t>(std::atoi(seedOffset)) * 7919u : 0u));
         pushConstants.settings = glm::vec4(
             _ssgi.rayLength,
             _ssgi.thickness,
@@ -747,11 +813,25 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             _ssgi.normalRejection,
             _ssgi.velocityRejection);
         const bool probes = lumen && _ssgi.probesEnabled &&
-            _ssgi.probePipeline != VK_NULL_HANDLE;
+            _ssgi.probePipeline != VK_NULL_HANDLE &&
+            _ssgi.probePlacePipeline != VK_NULL_HANDLE &&
+            _ssgi.probeAdaptivePipeline != VK_NULL_HANDLE;
         pushConstants.quality = glm::uvec4(
             static_cast<uint32_t>(std::clamp(_ssgi.raysPerPixel, 1, 8)),
             _drawExtent.width, _drawExtent.height,
-            (probes ? 1u : 0u) | (hzb ? 2u : 0u));
+            (probes ? 1u : 0u) | (hzb ? 2u : 0u) |
+                (_r4Contributions.rayCoverage ? 4u : 0u) |
+                (_ssgi.staticAccumulation ? 32u : 0u) |
+                // IQ10 control: the nearest-texel primary cache-sky read.
+                (SDL_getenv("MIRABILIS_IQ10_NEAREST_SKY") ? 64u : 0u) |
+                (lumen && !_ssgi.screenTraceEnabled ? 128u : 0u) |
+                // Hit-lit sun at uncovered field hits follows the cache's
+                // own sun source (R4.61).
+                ((_r4Contributions.cacheSources & r4::LightSun) != 0u ? 8u : 0u) |
+                // R4.64 same-build control: the temporal clamp at full
+                // strength, as before the motion-scaled clamp.
+                (_ssgi.fullClampControl ? 16u : 0u) |
+                (_r4Contributions.ray << 8));
         vkCmdPushConstants(
             cmd, traceLayout, VK_SHADER_STAGE_COMPUTE_BIT,
             0, sizeof(pushConstants), &pushConstants);
@@ -761,6 +841,15 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.probePipeline);
             vkCmdDispatch(cmd, (ssgiExtent.width + 7u) / 8u,
                 (ssgiExtent.height + 7u) / 8u, 1);
+            vkutil::memory_barrier(cmd);
+            // Adaptive probes: placement per tile, then one workgroup per
+            // budget slot (unused slots exit at once).  No readback.
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.probePlacePipeline);
+            vkCmdDispatch(cmd, (ssgiExtent.width + 7u) / 8u,
+                (ssgiExtent.height + 7u) / 8u, 1);
+            vkutil::memory_barrier(cmd);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.probeAdaptivePipeline);
+            vkCmdDispatch(cmd, 1024u, 1, 1);
             vkutil::memory_barrier(cmd);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.lumenPipeline);
         }
@@ -801,6 +890,8 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkCmdBindPipeline(
                 cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.filterPipeline);
             SSGIFilterPushConstants filterPush{};
+            filterPush.projection = glm::vec4(sceneData.proj[0][0], sceneData.proj[1][1],
+                sceneData.proj[2][2], sceneData.proj[3][2]);
             filterPush.settings = glm::vec4(
                 static_cast<float>(_ssgi.filterRadius),
                 _ssgi.filterDepthFalloff,
@@ -870,6 +961,9 @@ void VulkanEngine::draw_ssgi_composite(VkCommandBuffer cmd)
         _ssgi.compositePipeline.layout, 0, 1,
         &_ssgi.compositeDescriptors[1u - _ssgi.historyWriteIndex], 0, nullptr);
     SSGICompositePushConstants push{};
+    push.projection = glm::vec4(sceneData.proj[0][0], sceneData.proj[1][1],
+        sceneData.proj[2][2], sceneData.proj[3][2]);
+    push.colorSettings.x = _ssgi.colorSaturation;
     const VkExtent2D ssgiExtent = active_ssgi_extent();
     push.extents = glm::vec4(
         static_cast<float>(_drawExtent.width),
@@ -955,6 +1049,8 @@ void VulkanEngine::write_ssgi_trace_descriptors()
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         ssgiWriter.write_image(15, _ssgi.hzbImage.imageView, _prepass.sampler,
             VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        ssgiWriter.write_buffer(16, _ssgi.adaptiveBuffer.buffer, _ssgi.adaptiveBufferSize, 0,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         ssgiWriter.update_set(_device, _ssgi.descriptors[writeIndex]);
     }
 }

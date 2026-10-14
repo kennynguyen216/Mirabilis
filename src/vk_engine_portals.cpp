@@ -300,7 +300,7 @@ void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
         // view. Two high stencil bits keep the recursive aperture constrained
         // to its parent without consuming a stencil value per scene portal.
         uint32_t parentStencil = primaryStencil;
-        for (uint32_t level = 1; level < PortalRecursionDepth; ++level) {
+        for (uint32_t level = 1; level < (_portalRender.recursionEnabled ? PortalRecursionDepth : 1u); ++level) {
             const uint32_t recursionBit = 1u << (4u + level);
             const uint32_t recursiveStencil = parentStencil | recursionBit;
             draw_recursive_portal_mask(
@@ -455,6 +455,7 @@ void VulkanEngine::draw_offscreen_portal_views(VkCommandBuffer cmd)
             _portalRender.sceneData[viewIndex].viewproj,
             frame.portalSceneDescriptors[viewIndex],
             target);
+        draw_portal_sky(cmd, _portalRender.sceneData[viewIndex], 0, 0xff, &target);
         vkutil::transition_image(
             cmd,
             target.image,
@@ -464,8 +465,8 @@ void VulkanEngine::draw_offscreen_portal_views(VkCommandBuffer cmd)
 
     // This experiment deliberately renders only one virtual view per portal.
     // The normal stencil mode below remains the recursive reference path.
-    renderCamera(0, BluePortalView);
-    renderCamera(1, OrangePortalView);
+    renderCamera(0, BluePortalView * PortalRecursionDepth);
+    renderCamera(1, OrangePortalView * PortalRecursionDepth);
 
     DrawContext blueComposite{};
     blueComposite.OpaqueSurfaces.push_back(make_portal_render_object(
@@ -502,27 +503,32 @@ void VulkanEngine::draw_portal_sky(
     VkCommandBuffer cmd,
     const GPUSceneData& skyCamera,
     uint32_t stencilReference,
-    uint32_t stencilCompareMask)
+    uint32_t stencilCompareMask,
+    const AllocatedImage* target)
 {
+    const AllocatedImage& color = target ? *target : _drawImage;
+    const AllocatedImage& depth = target ? _portalCameras.depthImage : _depthImage;
+    const VkExtent2D extent = target
+        ? VkExtent2D{target->imageExtent.width, target->imageExtent.height} : _drawExtent;
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
-        _drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        color.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
-        _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        depth.imageView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     VkRenderingAttachmentInfo stencilAttachment = depthAttachment;
     VkRenderingInfo renderInfo = vkinit::rendering_info(
-        _drawExtent, &colorAttachment, &depthAttachment);
+        extent, &colorAttachment, &depthAttachment);
     renderInfo.pStencilAttachment = &stencilAttachment;
 
     vkCmdBeginRendering(cmd, &renderInfo);
     VkViewport viewport{};
-    viewport.width = static_cast<float>(_drawExtent.width);
-    viewport.height = static_cast<float>(_drawExtent.height);
+    viewport.width = static_cast<float>(extent.width);
+    viewport.height = static_cast<float>(extent.height);
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     VkRect2D scissor{};
-    scissor.extent = _drawExtent;
+    scissor.extent = extent;
     vkCmdSetScissor(cmd, 0, 1, &scissor);
     vkCmdSetStencilReference(
         cmd, VK_STENCIL_FACE_FRONT_AND_BACK, stencilReference);
@@ -541,20 +547,24 @@ void VulkanEngine::draw_portal_sky(
         &_skyboxDescriptor,
         0,
         nullptr);
-    const ComputePushConstants& backgroundData =
-        backgroundEffects[currentBackgroundEffect].data;
     PortalSkyPushConstants pushConstants{};
-    pushConstants.data1 = backgroundData.data1;
-    pushConstants.data2 = backgroundData.data2;
+    pushConstants.environmentTint = _traceSettings.lighting.environmentTint;
+    const bool lumen = _ssgi.enabled && _ssgi.lumenEnabled &&
+        !(SDL_getenv("MIRABILIS_TEST_FRAMES") && SDL_getenv("MIRABILIS_R6_PORTAL_GI_CONTROL"));
+    const ComputePushConstants& background = backgroundEffects[currentBackgroundEffect].data;
+    pushConstants.data1 = lumen ? glm::vec4(_traceSettings.lighting.environment.y) : background.data1;
+    pushConstants.data2 = background.data2;
     pushConstants.settings = glm::vec4(
-        static_cast<float>(currentBackgroundEffect),
-        static_cast<float>(_drawExtent.width),
-        static_cast<float>(_drawExtent.height),
-        0.0f);
+        lumen ? (_ssgi.traceEnvironmentMap ? 1.0f : 0.0f) : float(currentBackgroundEffect),
+        static_cast<float>(extent.width),
+        static_cast<float>(extent.height),
+        lumen ? _traceSettings.lighting.environment.x : -1.0f);
     // The inverse view matrix is the camera's world transform.  Its first
     // two columns are right/up; local -Z is the camera's forward direction.
     const glm::mat4 cameraWorld = glm::inverse(skyCamera.view);
-    pushConstants.cameraRight = glm::vec4(glm::normalize(glm::vec3(cameraWorld[0])), 0.0f);
+    // A fixed-size offscreen target can have a different aspect than the view.
+    pushConstants.cameraRight = glm::vec4(glm::normalize(glm::vec3(cameraWorld[0])),
+        std::abs(skyCamera.proj[1][1] / skyCamera.proj[0][0]));
     pushConstants.cameraUp = glm::vec4(glm::normalize(glm::vec3(cameraWorld[1])), 0.0f);
     pushConstants.cameraForward = glm::vec4(
         glm::normalize(-glm::vec3(cameraWorld[2])), 0.0f);

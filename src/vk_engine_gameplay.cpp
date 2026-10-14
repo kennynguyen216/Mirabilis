@@ -80,6 +80,7 @@ void VulkanEngine::update_physics(float deltaTime)
     // Keep the respawn target scene-authored. This happens before integrate()
     // because integrate() owns the fall-reset check.
     apply_scene_spawn_point();
+    const glm::vec3 previousPosition = _playerMovement.position;
 
     if (_noClip.enabled) {
         _playerMovement.previousPosition = _playerMovement.position;
@@ -100,15 +101,11 @@ void VulkanEngine::update_physics(float deltaTime)
         _playerMovement.position += _playerMovement.velocity * deltaTime;
         _playerMovement.grounded = false;
         _playerInput.jumpPressed = false;
-        return;
+    } else {
+        _playerMovement.integrate(_playerInput, deltaTime);
     }
 
-    const glm::vec3 previousPosition = _playerMovement.position;
-    _playerMovement.integrate(_playerInput, deltaTime);
-
-    _physicsStep.portalTraversalCooldown = std::max(
-        0.0f, _physicsStep.portalTraversalCooldown - deltaTime);
-    if (_physicsStep.portalTraversalCooldown <= 0.0f) {
+    {
         bool traversed = false;
         const auto tryBidirectionalPair = [&](const Portal& first,
                                                const Portal& second) {
@@ -139,10 +136,12 @@ void VulkanEngine::update_physics(float deltaTime)
         }
     }
 
-    rebuild_collision_from_scene();
-    _playerMovement.resolve_world_collision(
-        _activeWallColliders, _activeGroundPlanes, _activeSurfRamps);
-    update_time_trial(deltaTime);
+    if (!_noClip.enabled) {
+        rebuild_collision_from_scene();
+        _playerMovement.resolve_world_collision(
+            _activeWallColliders, _activeGroundPlanes, _activeSurfRamps);
+        update_time_trial(deltaTime);
+    }
     _playerInput.jumpPressed = false;
 }
 
@@ -171,7 +170,6 @@ void VulkanEngine::respawn_player()
     mainCamera.position = _playerMovement.position + glm::vec3(0.0f, 1.7f, 0.0f);
     mainCamera.velocity = glm::vec3(0.0f);
     _playerMovement.jumpBufferRemaining = 0.0f;
-    _physicsStep.portalTraversalCooldown = 0.0f;
     reset_time_trial();
 }
 
@@ -247,31 +245,24 @@ bool VulkanEngine::try_traverse_portal(
     const glm::vec3& previousPosition)
 {
     const float playerHalfWidth = _playerMovement.settings.playerHalfWidth;
-    // position is the feet point, but it is also the collider's X/Z center.
-    // A rendered portal cannot safely occupy the main camera's near plane.
-    // Traverse just before that happens, while preserving the matching offset
-    // behind the exit portal.  The real camera then lands at the exact virtual
-    // camera location that was visible through the portal on the prior frame.
+    // Near-plane-safe aperture shaders keep the view live until the actual
+    // crossing. An early transfer band loses entries that start inside it.
     const float previousDistance = portal_signed_distance(source, previousPosition);
     const float currentDistance = portal_signed_distance(
         source, _playerMovement.position);
-    constexpr float MinimumEntrySpeed = 0.01f;
-    constexpr float PortalTraversalDistance = 0.12f;
-    const float entrySpeed = glm::dot(_playerMovement.velocity, source.normal);
-    const bool movingThroughPlane = entrySpeed < -MinimumEntrySpeed;
-    const bool reachedPortalNearPlane =
-        previousDistance > PortalTraversalDistance &&
-        currentDistance <= PortalTraversalDistance &&
+    const bool crossedPortalPlane =
+        previousDistance > 0.0f &&
+        currentDistance <= 0.0f &&
         previousDistance - currentDistance > 0.000001f;
 
-    if (!movingThroughPlane || !reachedPortalNearPlane) {
+    if (!crossedPortalPlane) {
         return false;
     }
 
     const float distanceDelta = previousDistance - currentDistance;
     const float crossingFraction = distanceDelta > 0.000001f
         ? std::clamp(
-            (previousDistance - PortalTraversalDistance) / distanceDelta,
+            previousDistance / distanceDelta,
             0.0f,
             1.0f)
         : 1.0f;
@@ -299,8 +290,7 @@ bool VulkanEngine::try_traverse_portal(
         source, destination, _playerMovement.velocity);
 
     // Our physics collider has a portal-shaped gap, but the visible host wall
-    // is still one solid cube. The early near-plane transfer maps the player
-    // just behind the exit plane, so move them to the room-facing side before
+    // is still one solid cube. Keep the player on the room-facing side before
     // the main camera renders and cannot end up inside that opaque cube.
     constexpr float ExitEpsilon = 0.02f;
     const float exitDistance = portal_signed_distance(
@@ -328,8 +318,13 @@ bool VulkanEngine::try_traverse_portal(
     _physicsStep.previousPlayerYaw = mainCamera.yaw;
     _physicsStep.targetPlayerYaw = mainCamera.yaw;
 
-    // Prevent the next fixed tick from immediately re-entering the exit.
-    _physicsStep.portalTraversalCooldown = 0.15f;
+    // Teleporting is a camera cut: screen-space history belongs to the old
+    // room, and reprojecting it across the link can flash its lighting.
+    _ssgi.historyValid = false;
+    _previousMainViewProjectionValid = false;
+
+    // The signed plane crossing rejects outward motion at the exit naturally.
+    // A timed cooldown instead lets quick re-entry pass through the host wall.
     return true;
 }
 
@@ -442,7 +437,6 @@ void VulkanEngine::retract_portals()
     // stale portal opening if its former wall is edited after retraction.
     _bluePortal = Portal{};
     _orangePortal = Portal{};
-    _physicsStep.portalTraversalCooldown = 0.0f;
     rebuild_collision_from_scene();
 }
 

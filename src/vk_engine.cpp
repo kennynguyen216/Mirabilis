@@ -8,6 +8,7 @@
 #include <vk_images.h>
 
 #include "env_flags.h"
+#include "r4_contributions.h"
 
 #include <algorithm>
 #include <array>
@@ -15,6 +16,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <fstream>
 #include <thread>
 
 #define VMA_IMPLEMENTATION
@@ -36,6 +38,18 @@ constexpr bool bUseValidationLayers = true;
 #endif
 
 namespace {
+
+// A pending fence is not a Vulkan failure. Keep servicing the native window
+// while waiting; reset/reuse GPU resources only after the fence is signaled.
+void wait_for_gpu_fence(VkDevice device, VkFence fence)
+{
+    VkResult result;
+    do {
+        SDL_PumpEvents();
+        result = vkWaitForFences(device, 1, &fence, VK_TRUE, 100'000'000ull);
+    } while (result == VK_TIMEOUT);
+    VK_CHECK(result);
+}
 
 // Applies a boolean environment variable to a feature flag.  Absent, empty and
 // any false spelling all disable, so no way of saying "off" -- removing the
@@ -213,6 +227,11 @@ void VulkanEngine::init()
     if (SDL_getenv("MIRABILIS_MAX_FIDELITY")) {
         apply_max_fidelity_settings();
     }
+    // R6 original cache budget is a startup-only test control, not an SSGI preset.
+    if (SDL_getenv("MIRABILIS_TEST_FRAMES") && SDL_getenv("MIRABILIS_R6_RADIOSITY_CONTROL"))
+        _surfaceCache.radiosityTexelBudget = 300000u;
+    // R4.64 same-build control for the motion-scaled temporal clamp.
+    _ssgi.fullClampControl = SDL_getenv("MIRABILIS_R4_FULL_CLAMP_CONTROL") != nullptr;
     if (const char* sdfPath = SDL_getenv("MIRABILIS_VALIDATE_SDF")) {
         validate_sdf_bake(sdfPath);
     }
@@ -223,11 +242,74 @@ void VulkanEngine::init()
         // fast for comparison purposes rather than reading as "capped at 60".
         _frameRateCapEnabled = false;
     }
+    if (SDL_getenv("MIRABILIS_R4_UNCAP_FRAMES")) {
+        _frameRateCapEnabled = false;
+    }
     // After the presets, so a capture run can compare against the frame
     // without screen-space GI whatever else it asked for.
     apply_env_flag("MIRABILIS_LUMEN_LITE", _ssgi.lumenEnabled);
     apply_env_flag("MIRABILIS_SSGI_PROBES", _ssgi.probesEnabled);
     apply_env_flag("MIRABILIS_SSGI_HZB", _ssgi.hzbEnabled);
+    // Exact world hits avoid the screen march's camera-dependent visibility
+    // approximation. Keep it available as a comparison or software shortcut.
+    _ssgi.screenTraceEnabled = !_rayQueryShadows;
+    apply_env_flag("MIRABILIS_SSGI_SCREEN_TRACE", _ssgi.screenTraceEnabled);
+    if (SDL_getenv("MIRABILIS_SSAO"))
+        apply_env_flag("MIRABILIS_SSAO", _ssao.globalEnabled);
+    // R3.1 environment parity: a candidate compared against a path-traced
+    // reference must light ray misses from the analytic gradient, as the
+    // reference does.  Absent keeps the skybox default; an unreadable value
+    // stops the run rather than rendering a comparison that cannot be valid.
+    {
+        const EnvBoolOverride traceEnvironmentMap = parse_env_bool_override(
+            SDL_getenv("MIRABILIS_SSGI_TRACE_ENVIRONMENT_MAP"),
+            _ssgi.traceEnvironmentMap);
+        if (!traceEnvironmentMap.valid) {
+            fmt::print("GI TEST FAIL: MIRABILIS_SSGI_TRACE_ENVIRONMENT_MAP is not a boolean "
+                "(use 0/1, false/true, off/on, no/yes)\n");
+            std::abort();
+        }
+        _ssgi.traceEnvironmentMap = traceEnvironmentMap.value;
+    }
+    // R4.1 instrumentation.  Test-only, and inert while unset; a value that
+    // does not parse stops the run, because a capture labelled with owners it
+    // did not isolate would be read as evidence.
+    {
+        const r4::Contributions contributions =
+            r4::parse_contributions(SDL_getenv("MIRABILIS_R4_CONTRIBUTIONS"));
+        if (!contributions.valid) {
+            fmt::print("GI TEST FAIL: MIRABILIS_R4_CONTRIBUTIONS must list owner names "
+                "from src/r4_contributions.h, separated by commas\n");
+            std::abort();
+        }
+        _r4Contributions.forward = contributions.forward;
+        _r4Contributions.ray = contributions.ray;
+        const EnvBool coverage = parse_env_bool(SDL_getenv("MIRABILIS_R4_RAY_COVERAGE"));
+        if (coverage == EnvBool::Invalid) {
+            fmt::print("GI TEST FAIL: MIRABILIS_R4_RAY_COVERAGE is not a boolean\n");
+            std::abort();
+        }
+        _r4Contributions.rayCoverage = coverage == EnvBool::On;
+        const r4::CacheSources sources =
+            r4::parse_cache_sources(SDL_getenv("MIRABILIS_R4_CACHE_SOURCES"));
+        if (!sources.valid) {
+            fmt::print("GI TEST FAIL: MIRABILIS_R4_CACHE_SOURCES must list sun, sky or emitter, "
+                "separated by commas\n");
+            std::abort();
+        }
+        _r4Contributions.cacheSources = sources.mask;
+        const r4::CacheSources lights =
+            r4::parse_light_sources(SDL_getenv("MIRABILIS_R4_LIGHT_SOURCES"));
+        if (!lights.valid) {
+            fmt::print("GI TEST FAIL: MIRABILIS_R4_LIGHT_SOURCES must list sun or sky, "
+                "separated by commas\n");
+            std::abort();
+        }
+        _r4Contributions.lightSources = lights.mask;
+        _r4Contributions.sunVisibilityCheck = SDL_getenv("MIRABILIS_R4_SUN_VISIBILITY_CHECK") != nullptr;
+        // The startup scene was loaded before this ran.
+        apply_r4_light_sources();
+    }
     if (SDL_getenv("MIRABILIS_SSGI_DISABLE")) {
         _ssgi.enabled = false;
     }
@@ -388,6 +470,32 @@ void VulkanEngine::init_vulkan()
     anisotropyFeature.samplerAnisotropy = VK_TRUE;
     _samplerAnisotropySupported =
         physicalDevice.enable_features_if_present(anisotropyFeature);
+    _conservativeRasterSupported = physicalDevice.enable_extension_if_present(
+        VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
+    // IQ2 ray-query sun shadows, optional.  Device extensions are fixed here,
+    // so the MIRABILIS_IQ_RT_SHADOWS=0 control leaves them off as well and
+    // runs on the same device as a machine without ray tracing.
+    const char* rtShadowsValue = SDL_getenv("MIRABILIS_IQ_RT_SHADOWS");
+    const EnvBool rtShadows = rtShadowsValue ? parse_env_bool(rtShadowsValue) : EnvBool::On;
+    if (rtShadows == EnvBool::Invalid) {
+        fmt::print("MIRABILIS_IQ_RT_SHADOWS='{}' is not 0/1/true/false/on/off/yes/no\n",
+            rtShadowsValue);
+        abort();
+    }
+    if (rtShadows == EnvBool::On) {
+        VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
+        accelerationFeatures.accelerationStructure = VK_TRUE;
+        VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+        rayQueryFeatures.rayQuery = VK_TRUE;
+        _rayQueryShadows = physicalDevice.enable_extensions_if_present({
+                VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+                VK_KHR_RAY_QUERY_EXTENSION_NAME,
+                VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME}) &&
+            physicalDevice.enable_extension_features_if_present(accelerationFeatures) &&
+            physicalDevice.enable_extension_features_if_present(rayQueryFeatures);
+    }
 
     // create the vulkan device now
 
@@ -399,6 +507,33 @@ void VulkanEngine::init_vulkan()
     _chosenGPU = physicalDevice.physical_device;
     _graphicsQueue = vkbDevice.get_queue(vkb::QueueType::graphics).value();
     _graphicsQueueFamily = vkbDevice.get_queue_index(vkb::QueueType::graphics).value();
+
+    if (_rayQueryShadows) {
+        // Extension entry points are not exported by the loader library.
+        const auto load = [&](auto& function, const char* name) {
+            function = reinterpret_cast<std::remove_reference_t<decltype(function)>>(
+                vkGetDeviceProcAddr(_device, name));
+            return function != nullptr;
+        };
+        _rayQueryShadows =
+            load(_sunCasters.create, "vkCreateAccelerationStructureKHR") &&
+            load(_sunCasters.destroy, "vkDestroyAccelerationStructureKHR") &&
+            load(_sunCasters.buildSizes, "vkGetAccelerationStructureBuildSizesKHR") &&
+            load(_sunCasters.build, "vkCmdBuildAccelerationStructuresKHR") &&
+            load(_sunCasters.address, "vkGetAccelerationStructureDeviceAddressKHR") &&
+            load(_sunCasters.writeProperties, "vkCmdWriteAccelerationStructuresPropertiesKHR") &&
+            load(_sunCasters.copy, "vkCmdCopyAccelerationStructureKHR");
+        VkPhysicalDeviceAccelerationStructurePropertiesKHR accelerationProperties{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};
+        VkPhysicalDeviceProperties2 properties{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            .pNext = &accelerationProperties};
+        vkGetPhysicalDeviceProperties2(_chosenGPU, &properties);
+        _sunCasters.scratchAlignment = std::max<VkDeviceSize>(
+            accelerationProperties.minAccelerationStructureScratchOffsetAlignment, 1);
+    }
+    fmt::print("IQ2 ray-query sun shadows: {}\n", _rayQueryShadows ? "on"
+        : rtShadows == EnvBool::Off ? "off (MIRABILIS_IQ_RT_SHADOWS=0)" : "unsupported");
 
     // maxSamplerAnisotropy is only meaningful once the feature is on; a device
     // that reports 16 while the feature is off still rejects any sampler that
@@ -498,6 +633,7 @@ void VulkanEngine::cleanup()
     if(_isInitialized) {
         vkDeviceWaitIdle(_device);
         destroy_path_trace();
+        destroy_sun_casters();
 
         // The explicit File > Save Scene command is still useful for named
         // checkpoints, but closing the editor should not discard unsaved
@@ -549,11 +685,11 @@ void VulkanEngine::cleanup()
 void VulkanEngine::draw(float deltaTime)
 {
 
-    //wait until the gpu has finished rendering the last frame. timeout of 1 second
-    VK_CHECK(vkWaitForFences(_device, 1, &get_current_frame()._renderFence, true, 1000000000));
+    wait_for_gpu_fence(_device, get_current_frame()._renderFence);
     // The fence has passed, so any timestamps this slot recorded belong to a
     // submission that has finished and can be read without stalling.
     read_gpu_timestamps(_frameNumber % FRAME_OVERLAP);
+    update_auto_exposure(deltaTime);
     get_current_frame()._deletionQueue.flush();
     get_current_frame()._frameDescriptors.clear_pools(_device);
     //request image from the swapchain 
@@ -569,6 +705,7 @@ void VulkanEngine::draw(float deltaTime)
         resize_requested = true;
         return;
     }
+    if (acquireResult == VK_TIMEOUT || acquireResult == VK_NOT_READY) return;
     // SUBOPTIMAL still acquires an image and signals the semaphore. Consume
     // it in this submission before rebuilding; returning would reuse a
     // signaled acquire semaphore on the next frame.
@@ -608,6 +745,9 @@ void VulkanEngine::draw(float deltaTime)
     }
 
     update_scene(deltaTime);
+    // Before the surface cache: a relight traces this TLAS (IQ8).  A rebuild
+    // waits for the GPU too, and the descriptors below bind it.
+    update_sun_casters();
     // Before recording starts: a rebuild waits for the GPU and runs its own
     // submissions, which must not happen in the middle of this frame's.
     if ((_debugViews.view == RenderDebugView::SDFTrace && _sdf.source == 1) ||
@@ -615,13 +755,28 @@ void VulkanEngine::draw(float deltaTime)
         (_ssgi.lumenEnabled && _ssgi.enabled)) {
         update_scene_sdf();
     }
-    if (_debugViews.view == RenderDebugView::SurfaceCache ||
-        (_ssgi.lumenEnabled && _ssgi.enabled)) {
+    const bool surfaceCacheActive = _debugViews.view == RenderDebugView::SurfaceCache ||
+        (_ssgi.lumenEnabled && _ssgi.enabled);
+    if (surfaceCacheActive) {
         update_surface_cache();
-        update_surface_cache_radiosity();
     }
+    // After the field and the trace scene are current, before recording.
+    write_emitter_descriptors(get_current_frame());
 
     VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
+
+    // Diagnostic VRAM pressure: a buffer referenced by every frame stays
+    // resident, so the rest of the working set has that much less room.
+    if (const char* ballast = SDL_getenv("MIRABILIS_DIAG_VRAM_BALLAST_MB");
+            ballast && _vramBallast.buffer == VK_NULL_HANDLE) {
+        _vramBallast = create_buffer(size_t(std::max(std::atoi(ballast), 1)) << 20,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+        _mainDeletionQueue.push_function([this]() { destroy_buffer(_vramBallast); });
+        fmt::print("Diagnostic VRAM ballast: {} MiB\n", std::atoi(ballast));
+    }
+    if (_vramBallast.buffer != VK_NULL_HANDLE) {
+        vkCmdFillBuffer(cmd, _vramBallast.buffer, 0, 4, 0);
+    }
 
 	// Timestamps have to be reset before they are written again, and this
 	// slot's results were read above.
@@ -638,6 +793,11 @@ void VulkanEngine::draw(float deltaTime)
 			SSGITimestampsPerFrame);
 		_ssgi.timingWritten[_frameNumber % FRAME_OVERLAP] = false;
 	}
+    // First in the frame, where the blocking submission used to run, so every
+    // later pass sees this update's page.
+    if (surfaceCacheActive) {
+        update_surface_cache_radiosity(cmd);
+    }
 
 	// The shadow and prepass counters are recorded before the main pass
 	// resets its own, so they are cleared here instead.
@@ -688,6 +848,13 @@ void VulkanEngine::draw(float deltaTime)
 
 	ComputeEffect& effect = backgroundEffects[currentBackgroundEffect];
 
+	if ((_r4Contributions.forward & r4::Background) == 0u) {
+		// R4: the background owner removed, so sky pixels hold nothing.
+		const VkClearColorValue black{{0.0f, 0.0f, 0.0f, 1.0f}};
+		const VkImageSubresourceRange range =
+			vkinit::image_subresource_range(VK_IMAGE_ASPECT_COLOR_BIT);
+		vkCmdClearColorImage(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &range);
+	} else {
 	// bind the selected background compute pipeline
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, effect.pipeline);
 
@@ -701,6 +868,7 @@ void VulkanEngine::draw(float deltaTime)
 	vkCmdDispatch(cmd,
 		static_cast<uint32_t>(std::ceil(_drawExtent.width / 16.0)),
 		static_cast<uint32_t>(std::ceil(_drawExtent.height / 16.0)), 1);
+	}
 
 	vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 	vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -871,11 +1039,34 @@ void VulkanEngine::run(){
     double benchmarkMilliseconds = 0.0;
     double benchmarkSsgiMilliseconds = 0.0;
     double benchmarkTraceMilliseconds = 0.0;
+    double benchmarkRadiosityMilliseconds = 0.0;
+    double benchmarkExposureMilliseconds = 0.0;
     uint32_t benchmarkFrames = 0;
+    uint32_t benchmarkFocusedFrames = 0;
+    const char* warmupText = SDL_getenv("MIRABILIS_BENCHMARK_WARMUP_FRAMES");
+    const uint32_t benchmarkWarmupFrames = warmupText ? std::max(5, std::atoi(warmupText)) : 5;
+    if (SDL_getenv("MIRABILIS_SSGI_BENCHMARK"))
+        fmt::print("GI benchmark warmup: {} frames\n", benchmarkWarmupFrames);
     // Opt-in unattended validation; ordinary interactive sessions are unchanged.
     const char* frameLimitText = std::getenv("MIRABILIS_TEST_FRAMES");
     const int frameLimit = frameLimitText ? std::max(1, std::atoi(frameLimitText)) : 0;
+    const bool testTraversal = frameLimit && SDL_getenv("MIRABILIS_TEST_PORTAL_TRAVERSAL");
+    bool testTraversed = false;
+    int testCrossingFrame = 0;
+    Portal testTraversalSource;
+    Portal testTraversalDestination;
+    glm::vec3 testLastPosition{};
+    int testTraversalCount = 0;
+    const bool testRepeat = testTraversal && SDL_getenv("MIRABILIS_TEST_PORTAL_REPEAT");
+    const bool testBackAndForth = testRepeat && SDL_getenv("MIRABILIS_TEST_PORTAL_WS");
+    bool testBacking = false;
+    const bool testPlacement = frameLimit && SDL_getenv("MIRABILIS_TEST_PORTAL_PLACEMENT");
+    uint64_t placementRevision = 0, placementAlbedoHash = 0, placementLightingHash = 0;
     if (frameLimit) {
+        if (SDL_getenv("MIRABILIS_TEST_NO_PORTALS")) {
+            _authoredPortals.pairs.clear();
+            _bluePortal.placed = _orangePortal.placed = false;
+        }
         if (SDL_getenv("MIRABILIS_TEST_EDITOR_RESUME")) {
             const auto require = [](bool condition, const char* message) {
                 if (!condition) {fmt::print("GI TEST FAIL: {}\n", message); std::abort();}
@@ -981,6 +1172,58 @@ void VulkanEngine::run(){
         begin_cinematic_recording(
             cinematicFrames, outputDirectory, /*quitWhenDone=*/true);
     }
+    if (testTraversal) {
+        if (_authoredPortals.pairs.empty() || _cinematic.recording) std::abort();
+        set_editor_mode(false);
+        set_mouse_capture(false);
+        _noClip.enabled = SDL_getenv("MIRABILIS_TEST_PORTAL_NOCLIP") != nullptr;
+        _portalCameras.useOffscreen = SDL_getenv("MIRABILIS_TEST_PORTAL_OFFSCREEN") != nullptr;
+        _portalRender.recursionEnabled = SDL_getenv("MIRABILIS_TEST_PORTAL_NO_RECURSION") == nullptr;
+        if (SDL_getenv("MIRABILIS_TEST_PORTAL_RESIZE")) SDL_SetWindowSize(_window, 1024, 768);
+        if (SDL_getenv("MIRABILIS_TEST_PORTAL_SHOTS")) {
+            const auto pair = _authoredPortals.pairs.front();
+            const auto shoot = [&](const Portal& target, Portal& portal, const Portal& other) {
+                mainCamera.position = target.position + target.normal * 2.5f;
+                mainCamera.position.y = target.position.y + 0.5f;
+                mainCamera.yaw = std::atan2(-target.normal.x, target.normal.z);
+                mainCamera.pitch = 0;
+                place_portal(portal, other);
+            };
+            shoot(pair.first, _bluePortal, _orangePortal);
+            shoot(pair.second, _orangePortal, _bluePortal);
+            if (!_bluePortal.placed || !_orangePortal.placed) std::abort();
+            testTraversalSource = SDL_getenv("MIRABILIS_TEST_PORTAL_ENTER_ORANGE") ? _orangePortal : _bluePortal;
+            testTraversalDestination = SDL_getenv("MIRABILIS_TEST_PORTAL_ENTER_ORANGE") ? _bluePortal : _orangePortal;
+            _authoredPortals.pairs.clear();
+        } else {
+            testTraversalSource = _authoredPortals.pairs.front().first;
+            testTraversalDestination = _authoredPortals.pairs.front().second;
+        }
+        const Portal& source = testTraversalSource;
+        _playerMovement.position = source.position + source.normal * 2.5f - glm::vec3(0, 1.7f, 0);
+        _playerMovement.position.y = source.position.y - source.halfHeight;
+        _playerMovement.previousPosition = _playerMovement.position;
+        testLastPosition = _playerMovement.position;
+        _playerMovement.velocity = glm::vec3(0);
+        mainCamera.yaw = std::atan2(-source.normal.x, source.normal.z);
+        mainCamera.pitch = 0.0f;
+        if (const char* pose = SDL_getenv("MIRABILIS_TEST_PORTAL_CAMERA")) {
+            if (std::sscanf(pose, "%f %f %f %f %f", &mainCamera.position.x, &mainCamera.position.y,
+                    &mainCamera.position.z, &mainCamera.pitch, &mainCamera.yaw) != 5) std::abort();
+            _playerMovement.position = mainCamera.position - glm::vec3(0, 1.7f, 0);
+            _playerMovement.previousPosition = _playerMovement.position;
+            testLastPosition = _playerMovement.position;
+        }
+        _physicsStep.previousPlayerYaw = mainCamera.yaw;
+    }
+    std::ofstream r4FrameTimes;
+    std::ofstream portalLiveLog;
+    int portalLiveFrames = 0;
+    if (const char* path = SDL_getenv("MIRABILIS_R4_FRAME_TIME_LOG")) {
+        r4FrameTimes.open(path);
+        if (!r4FrameTimes) std::abort();
+        r4FrameTimes << "frame,ms,radiosity_gpu_ms,ssgi_gpu_ms,radiosity_texels\n";
+    }
     auto previousTime = std::chrono::steady_clock::now();
 
     //main loop
@@ -989,7 +1232,12 @@ void VulkanEngine::run(){
         float deltaTime = std::chrono::duration<float>(currentTime - previousTime).count();
         previousTime = currentTime;
         // Avoid a large movement jump after dragging/resuming the window.
+        const float wallDeltaTime = deltaTime;
         deltaTime = std::min(deltaTime, 0.1f);
+        if (frameLimit && SDL_getenv("MIRABILIS_SSGI_BENCHMARK") && _frameNumber == 5) {
+            SDL_SetHint(SDL_HINT_FORCE_RAISEWINDOW, "1");
+            SDL_RaiseWindow(_window);
+        }
 
         //handle events on queue
         while (SDL_PollEvent(&e) != 0) {
@@ -1012,6 +1260,20 @@ void VulkanEngine::run(){
             }
         }
 
+        if (testTraversal) {
+            const int returnDelay = SDL_getenv("MIRABILIS_TEST_PORTAL_SLOW_RETURN") ? 30 : 2;
+            if (testRepeat && testTraversalCount < 12 && testCrossingFrame && _frameNumber == testCrossingFrame + returnDelay) {
+                std::swap(testTraversalSource, testTraversalDestination);
+                testTraversed = false;
+                if (testBackAndForth) testBacking = !testBacking;
+                else mainCamera.yaw += glm::pi<float>();
+                _physicsStep.previousPlayerYaw = mainCamera.yaw;
+            }
+            deltaTime = SDL_getenv("MIRABILIS_TEST_PORTAL_HIGH_FPS") ? 1.0f / 120.0f : 1.0f / 30.0f;
+            const bool testMoving = _frameNumber >= 120 && !testTraversed && (!testRepeat || testTraversalCount < 12);
+            _playerInput.forward = testMoving && !testBacking;
+            _playerInput.backward = testMoving && testBacking;
+        }
         if (_editorMode) {
             if (_cinematic.recording) {
                 // Live mouse-look input is ignored while recording: the pose
@@ -1057,15 +1319,31 @@ void VulkanEngine::run(){
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
         ImGuizmo::BeginFrame();
-        draw_frame_ui(deltaTime);
+        draw_frame_ui(wallDeltaTime);
 
         ImGui::Render();
+        // Exercise the editor's scene replacement path, not only cold startup.
+        if (frameLimit && _frameNumber == 20) {
+            if (const char* scene = SDL_getenv("MIRABILIS_TEST_SCENE_SWITCH")) {
+                const std::string sceneName = scene;
+                if (!load_editor_scene_named(sceneName)) {
+                    fmt::print(stderr, "GI TEST FAIL: scene switch to {} failed\n", sceneName);
+                    std::abort();
+                }
+                fmt::print("GI scene switch loaded: {}\n", sceneName);
+            }
+        }
         if (frameLimit && std::getenv("MIRABILIS_TEST_CYCLE")) {
             if (_frameNumber == 4) _rendererMode = RendererMode::Raster;
             if (_frameNumber == 8) _rendererMode = RendererMode::SoftwarePathTrace;
             if (_frameNumber == 10) SDL_SetWindowSize(_window, 803, 457);
             if (_frameNumber == 12) renderScale = 0.7f;
             if (_frameNumber >= 14&&!testMinimized) {SDL_MinimizeWindow(_window);testMinimized=true;}
+        }
+        // IQ13 test hook: frames 100-129 move the sun as a slider drag would.
+        if (frameLimit && SDL_getenv("MIRABILIS_TEST_SUN_DRAG") &&
+            _frameNumber >= 100 && _frameNumber < 130) {
+            _shadow.sunlightDirection.x += 0.005f;
         }
         const bool testInvalidation=frameLimit&&SDL_getenv("MIRABILIS_TEST_INVALIDATION");
         const int testFrame=_frameNumber;
@@ -1097,7 +1375,132 @@ void VulkanEngine::run(){
             }
             if(testFrame==17&&!_authoredPortals.pairs.empty()) _authoredPortals.pairs[0].first.position.x+=0.125f;
         }
+        const bool referencePortalTest = testPlacement && SDL_getenv("MIRABILIS_TEST_PORTAL_REFERENCE_UPDATE");
+        if (referencePortalTest && _frameNumber == 260) {
+            if (!_traceSupported) std::abort();
+            _rendererMode = RendererMode::SoftwarePathTrace;
+        }
+        const bool placementFrame = testPlacement && (_frameNumber == 100 || _frameNumber == 160 || _frameNumber == 220 ||
+            (referencePortalTest && _frameNumber == 265));
+        if (placementFrame) {
+            placementRevision = _traceSceneRevision;
+            placementAlbedoHash = _surfaceCache.albedoVolumeHash;
+            placementLightingHash = _surfaceCache.lightingHash;
+            const Camera original = mainCamera;
+            if (_frameNumber == 160) {
+                mainCamera.position = glm::vec3(47, 1.7f, -20);
+                mainCamera.yaw = glm::half_pi<float>(); mainCamera.pitch = 0;
+                place_portal(_orangePortal, _bluePortal);
+            } else {
+                mainCamera.position = glm::vec3(_frameNumber == 100 ? 10 : (_frameNumber == 265 ? 20 : 15), 1.7f, -33);
+                mainCamera.yaw = 0; mainCamera.pitch = 0;
+                place_portal(_bluePortal, _orangePortal);
+            }
+            mainCamera = original;
+        }
+        const float testJumpDistance = std::min(10.0f, 0.5f * glm::length(testTraversalSource.position - testTraversalDestination.position));
+        const bool testTransfer = testTraversal && glm::length(_playerMovement.position - testLastPosition) > testJumpDistance;
+        if (testTransfer &&
+            (_ssgi.historyValid || _previousMainViewProjectionValid)) {
+            fmt::print("GI TEST FAIL: traversal retained old camera history\n");
+            std::abort();
+        }
+        if (frameLimit && _frameNumber == 250 && SDL_getenv("MIRABILIS_TEST_COLOR_ROUNDTRIP")) {
+            const Camera camera = _editorCamera;
+            const auto tint = _traceSettings.lighting.environmentTint;
+            const auto balance = _postProcess.whiteBalance;
+            const float saturation = _ssgi.colorSaturation;
+            const std::string scene = _sceneDocument.activeFilename;
+            if (!save_editor_scene() || !load_editor_scene_named(scene) ||
+                glm::length(tint - _traceSettings.lighting.environmentTint) > 1e-5f ||
+                glm::length(balance - _postProcess.whiteBalance) > 1e-5f ||
+                std::abs(saturation - _ssgi.colorSaturation) > 1e-5f) {
+                fmt::print("GI TEST FAIL: color settings did not survive scene save/load\n"); std::abort();
+            }
+            _editorCamera = camera;
+            fmt::print("Color settings scene roundtrip PASS\n");
+        }
         draw(deltaTime);
+        if (placementFrame) {
+            if (!_bluePortal.placed || (_frameNumber > 160 && !_orangePortal.placed) ||
+                placementRevision != _traceSceneRevision || placementAlbedoHash != _surfaceCache.albedoVolumeHash ||
+                placementLightingHash != _surfaceCache.lightingHash) {
+                fmt::print("GI TEST FAIL: portal placement rebuilt world geometry or lighting\n"); std::abort();
+            }
+            fmt::print("Portal placement frame={} PASS: world revision={} albedo/lighting unchanged\n", _frameNumber, _traceSceneRevision);
+            if (_rendererMode == RendererMode::SoftwarePathTrace &&
+                (_tracePortalBufferDirty || _traceSettings.lighting.counts.y != 2 || _traceRuntime.samples != 1)) {
+                fmt::print("GI TEST FAIL: reference portal buffer or accumulation stale\n"); std::abort();
+            }
+        }
+        if (testTraversal && SDL_getenv("MIRABILIS_TEST_PORTAL_RECORD") &&
+            (_frameNumber == 120 || _frameNumber == 180)) {
+            SDL_Event key{}; key.type = SDL_KEYDOWN; key.key.keysym.sym = SDLK_F9;
+            process_event(key);
+        }
+        const char* portalRecording = SDL_getenv("MIRABILIS_PORTAL_RECORD");
+        if (portalRecording && portalRecording[0] == '1' && !_cinematic.recording) {
+            if (!portalLiveFrames) {
+                portalLiveLog.open("../../tmp/portal-live/frames.csv", std::ios::trunc);
+                portalLiveLog << "frame,slot,x,y,z,pitch,yaw,blue_distance,orange_distance,portal_gi_state,vx,vy,vz,forward,backward,exposure\n";
+            }
+            if (portalLiveLog) {
+                const Camera& c = render_camera();
+                const int slot = portalLiveFrames % 16;
+                capture_cinematic_frame("../../tmp/portal-live", slot);
+                portalLiveLog << _frameNumber << ',' << slot << ',' << c.position.x << ',' << c.position.y << ','
+                    << c.position.z << ',' << c.pitch << ',' << c.yaw << ','
+                    << portal_signed_distance(_bluePortal, c.position) << ','
+                    << portal_signed_distance(_orangePortal, c.position) << ','
+                    << _portalRender.sceneData[0].portalIndirectSettings.y << ','
+                    << _playerMovement.velocity.x << ',' << _playerMovement.velocity.y << ',' << _playerMovement.velocity.z << ','
+                    << _playerInput.forward << ',' << _playerInput.backward << ',' << _postProcess.tonemapExposure << '\n';
+                portalLiveLog.flush();
+            }
+            if (!portalLiveLog || ++portalLiveFrames >= 600) SDL_setenv("MIRABILIS_PORTAL_RECORD", "0", 1);
+        } else if (portalLiveFrames) {
+            portalLiveLog.close();
+            portalLiveFrames = 0;
+        }
+        if (testTraversal) {
+            if (testTransfer) {
+                testCrossingFrame = _frameNumber;
+                ++testTraversalCount;
+            }
+            testTraversed |= testTransfer;
+            const auto& p = _playerMovement.position;
+            const auto& c = mainCamera.position;
+            testLastPosition = p;
+            fmt::print("Traversal frame={} player={},{},{} camera={},{},{} crossed={}\n",
+                _frameNumber, p.x, p.y, p.z, c.x, c.y, c.z, testTraversed);
+            if (glm::length(c - p - glm::vec3(0, 1.7f, 0)) > 1e-4f || glm::length(p) < 1.0f ||
+                (_frameNumber == frameLimit && !testTraversed)) {
+                fmt::print("GI TEST FAIL: traversal camera detached/reset or player did not traverse\n");
+                std::abort();
+            }
+            const float sourceDistance = portal_signed_distance(testTraversalSource, p);
+            const bool missedReentry = testRepeat && !testTraversed && sourceDistance < -0.02f;
+            const bool captureTransition = testRepeat ? testTransfer || _frameNumber == testCrossingFrame + 1 :
+                (!testTraversed && sourceDistance < 0.8f && _frameNumber >= 110) ||
+                (testTraversed && _frameNumber <= testCrossingFrame + 3);
+            if (missedReentry || captureTransition) {
+                if (const char* output = SDL_getenv("MIRABILIS_RASTER_CAPTURE"))
+                    capture_raster(fmt::format("{}-{:04}", output, _frameNumber).c_str());
+            }
+            if (missedReentry || (testRepeat && _frameNumber == frameLimit && testTraversalCount < 10)) {
+                fmt::print("GI TEST FAIL: repeated entry missed; distance={} transfers={}\n",
+                    sourceDistance, testTraversalCount);
+                std::abort();
+            }
+        }
+        if (r4FrameTimes && (_cinematic.recording || frameLimit)) {
+            const double elapsedMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - currentTime).count();
+            // GPU times are the latest read back, from this slot's previous use.
+            r4FrameTimes << (_cinematic.recording ? _cinematic.frameIndex : _frameNumber) << ',' << elapsedMs << ','
+                << _surfaceCache.radiosityMilliseconds << ',' << stats.ssgi_total_time << ','
+                << _surfaceCache.radiosityBatchTexels << '\n';
+        }
         if (_cinematic.recording) {
             capture_cinematic_frame();
             ++_cinematic.frameIndex;
@@ -1128,11 +1531,15 @@ void VulkanEngine::run(){
             }
         }
         if (frameLimit && SDL_getenv("MIRABILIS_SSGI_BENCHMARK") &&
-            _frameNumber > 5) {
-            benchmarkMilliseconds += static_cast<double>(deltaTime) * 1000.0;
+            _frameNumber > benchmarkWarmupFrames) {
+            benchmarkMilliseconds += static_cast<double>(wallDeltaTime) * 1000.0;
             benchmarkSsgiMilliseconds += stats.ssgi_total_time;
             benchmarkTraceMilliseconds += stats.ssgi_raw_time;
+            benchmarkRadiosityMilliseconds += _surfaceCache.radiosityMilliseconds;
+            benchmarkExposureMilliseconds += _autoExposure.gpuMilliseconds;
             ++benchmarkFrames;
+            if (SDL_GetWindowFlags(_window) & SDL_WINDOW_INPUT_FOCUS)
+                ++benchmarkFocusedFrames;
         }
         if(testInvalidation&&testFrame>=2&&testFrame<=17) {
             const uint32_t expected=testFrame==2?3:1;
@@ -1140,19 +1547,50 @@ void VulkanEngine::run(){
             if(_traceRuntime.samples!=expected) std::abort();
         }
         if (frameLimit && _frameNumber >= frameLimit) {
+            if ((_bluePortal.placed && _orangePortal.placed || !_authoredPortals.pairs.empty()) &&
+                _portalRender.sceneData[0].portalIndirectSettings.y == 2.0f) {
+                fmt::print("GI TEST FAIL: requested portal GI cache unavailable\n");
+                std::abort();
+            }
+            if (r4FrameTimes) {
+                VmaTotalStatistics memory{};
+                vmaCalculateStatistics(_allocator, &memory);
+                VkPhysicalDeviceMemoryProperties properties{};
+                vkGetPhysicalDeviceMemoryProperties(_chosenGPU, &properties);
+                VkDeviceSize deviceBytes = 0;
+                for (uint32_t heap = 0; heap < properties.memoryHeapCount; ++heap) {
+                    if (properties.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+                        deviceBytes += memory.memoryHeap[heap].statistics.allocationBytes;
+                }
+                fmt::print("GI memory: allocation-bytes={} block-bytes={} allocations={}\n",
+                    memory.total.statistics.allocationBytes,
+                    memory.total.statistics.blockBytes,
+                    memory.total.statistics.allocationCount);
+                fmt::print("GI device-local allocation-bytes={}\n", deviceBytes);
+            }
             if (benchmarkFrames > 0) {
+                fmt::print("GI benchmark focused samples: {}/{}\n", benchmarkFocusedFrames, benchmarkFrames);
                 const VkExtent2D extent = active_ssgi_extent();
                 fmt::print(
-                    "SSGI benchmark: preset={} extent={}x{} average-frame-ms={:.3f} average-ssgi-gpu-ms={:.3f} average-trace-gpu-ms={:.3f} samples={}\n",
+                    "SSGI benchmark: preset={} extent={}x{} trace-environment-map={} average-frame-ms={:.3f} average-ssgi-gpu-ms={:.3f} average-trace-gpu-ms={:.3f} average-radiosity-gpu-ms={:.3f} average-exposure-gpu-ms={:.3f} samples={}\n",
                     _ssgi.qualityPreset, extent.width, extent.height,
+                    _ssgi.traceEnvironmentMap,
                     benchmarkMilliseconds / benchmarkFrames,
                     benchmarkSsgiMilliseconds / benchmarkFrames,
                     benchmarkTraceMilliseconds / benchmarkFrames,
+                    benchmarkRadiosityMilliseconds / benchmarkFrames,
+                    benchmarkExposureMilliseconds / benchmarkFrames,
                     benchmarkFrames);
             }
             if (const char* capture=SDL_getenv("MIRABILIS_CAPTURE")) capture_path_trace(capture);
             if (const char* capture=SDL_getenv("MIRABILIS_SSGI_CAPTURE")) capture_ssgi(capture);
             if (const char* capture=SDL_getenv("MIRABILIS_RASTER_CAPTURE")) capture_raster(capture);
+            if (const char* directory = SDL_getenv("MIRABILIS_TEST_COLOR_CAPTURE")) {
+                std::filesystem::create_directories(directory);
+                capture_cinematic_frame(directory, 0);
+            }
+            if (const char* path=SDL_getenv("MIRABILIS_R4_SOURCE_IMPORTANCE_CSV"))
+                measure_cache_source_importance(path);
             fmt::print("GI bounded run complete: frames={} renderer={}\n",_frameNumber,
                 _rendererMode==RendererMode::SoftwarePathTrace&&_traceSupported?"software":"raster");
             bQuit = true;
@@ -1438,5 +1876,5 @@ void VulkanEngine::immediate_submit(std::function<void(VkCommandBuffer cmd)>&& f
 	//  _renderFence will now block until the graphic commands finish execution
 	VK_CHECK(vkQueueSubmit2(_graphicsQueue, 1, &submit, _immFence));
 
-	VK_CHECK(vkWaitForFences(_device, 1, &_immFence, true, 9999999999));
+    wait_for_gpu_fence(_device, _immFence);
 }

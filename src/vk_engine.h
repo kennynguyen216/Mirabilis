@@ -52,6 +52,7 @@ struct ComputePushConstants {
 	glm::vec4 data2;
 	glm::vec4 data3;
 	glm::vec4 data4;
+    glm::vec4 environmentTint{1,1,1,0};
 };
 
 struct ComputeEffect {
@@ -75,6 +76,7 @@ struct PortalSkyPushConstants {
     glm::vec4 cameraRight;
     glm::vec4 cameraUp;
     glm::vec4 cameraForward;
+    glm::vec4 environmentTint{1,1,1,0};
 };
 
 // The sunlight depth pass binds no descriptor sets.  Folding the light's
@@ -98,6 +100,7 @@ struct TonemapPushConstants {
     // (0 ACES, 1 Reinhard), z = 1 while the curve is bypassed and only the
     // sRGB encode runs.
     glm::vec4 settings{1.0f, 0.0f, 0.0f, 0.0f};
+    glm::vec4 whiteBalanceGain{1,1,1,0};
 };
 
 struct FXAAPushConstants {
@@ -140,6 +143,7 @@ struct SSGIFilterPushConstants {
     glm::vec4 settings{0.0f};
     // xy = live draw extent, for the full-size depth and normal inputs.
     glm::ivec4 frame{0};
+    glm::vec4 projection{0.0f};
 };
 
 struct SSGICompositePushConstants {
@@ -147,6 +151,8 @@ struct SSGICompositePushConstants {
     glm::vec4 extents{0.0f};
     // x = indirect intensity, y = half-resolution flag.
     glm::vec4 settings{0.0f};
+    glm::vec4 colorSettings{1,0,0,0};
+    glm::vec4 projection{0.0f};
 };
 
 // Field meanings are documented in shaders/sdf_debug.comp.  128 bytes, the
@@ -364,6 +370,8 @@ struct SurfaceCacheRadiosityPushConstants {
     glm::uvec4 rect{0};
     glm::uvec4 control{0};
     glm::vec4 settings{0.0f};
+    // xy = local card offset, zw = dispatch size. rect stays the full card.
+    glm::uvec4 tile{0};
 };
 
 // Field meanings are documented in shaders/surface_cache_direct.comp.
@@ -535,6 +543,10 @@ class VulkanEngine{
     void capture_path_trace(const char* filename);
     void capture_ssgi(const char* filename);
     void capture_raster(const char* filename);
+    // The lighting, material and R4 instrumentation state a raster or SSGI
+    // capture was taken under, read from the main camera's uploaded scene
+    // data, so a comparison can be checked for parity after the fact.
+    void write_capture_lighting(std::ostream& out) const;
     // A slow yaw sweep and push-in from one known-clear vantage, not a
     // multi-point path: finding even one camera position inside Sponza that
     // does not clip through a wall took several tries, so a scripted path
@@ -573,7 +585,7 @@ class VulkanEngine{
     // and, once called after that frame's draw(), captures it. Returns false
     // once recording has finished.
     void apply_cinematic_camera_pose();
-    void capture_cinematic_frame();
+    void capture_cinematic_frame(const char* directory = nullptr, int frame = 0);
     // Reads a half-float colour image.  layout is the one the image was left
     // in, and it is restored afterwards.
     std::vector<glm::vec4> read_ssgi_image(
@@ -597,6 +609,7 @@ class VulkanEngine{
     uint64_t _traceDrawHash{0};
     std::vector<TracePortal> _tracePortals;
     AllocatedBuffer _tracePortalBuffer{};
+    bool _tracePortalBufferDirty{false};
     VkExtent2D _windowExtent{1280, 720};
 
     FrameData _frames[FRAME_OVERLAP];
@@ -680,6 +693,21 @@ class VulkanEngine{
     // device's ceiling.  _textureAnisotropy is the preset's requested level;
     // material_anisotropy() is what a sampler is actually allowed to ask for.
     bool _samplerAnisotropySupported{false};
+    // Surface cards rasterize conservatively where the device can, so
+    // geometry thinner than a card texel is still captured (R4.60).
+    bool _conservativeRasterSupported{false};
+    // IQ2 (docs/lumen_lite_design.md): sun visibility by ray query against the
+    // trace scene's opaque casters, on devices with VK_KHR_ray_query unless
+    // MIRABILIS_IQ_RT_SHADOWS=0.  While it is off nothing IQ2 adds is created
+    // or loaded, and the shadow map works exactly as before.
+    bool _rayQueryShadows{false};
+    // The build of a shader to load: its ray-query build (*.rt.spv, IQ2/IQ8)
+    // while _rayQueryShadows is on.
+    std::string ray_query_shader(const char* name) const
+    {
+        return std::string("../../shaders/") + name +
+            (_rayQueryShadows ? ".rt.spv" : ".spv");
+    }
     float _maxSamplerAnisotropy{1.0f};
     float _textureAnisotropy{16.0f};
     // Clamped to the device limit and to 1 when the feature is missing, so a
@@ -793,6 +821,17 @@ class VulkanEngine{
         void init_default_data();
         bool set_skybox(int selection);
         void update_skybox_descriptors();
+        // Explicit emitter sampling in the forward pass (R4.9): how many
+        // emitter triangles it samples this frame (0 = off), and the scene-set
+        // bindings it reads, rewritten each frame because the scene field and
+        // the trace buffers are rebuilt at runtime.
+        uint32_t sampled_emitter_count() const;
+        void write_emitter_descriptors(FrameData& frame);
+        AllocatedBuffer _emitterBufferPlaceholder{};
+        AllocatedImage _portalGiPlaceholder{};
+        // Diagnostic MIRABILIS_DIAG_VRAM_BALLAST_MB: device memory touched
+        // every frame, so it stays resident and squeezes everything else.
+        AllocatedBuffer _vramBallast{};
         void init_image_based_lighting();
         // radiance(x, y) returns the linear, sun-clamped radiance of a texel.
         void project_environment_sh(
@@ -838,6 +877,30 @@ class VulkanEngine{
         // change.
         void update_surface_cache();
         void measure_surface_cache_shadows();
+        void measure_cache_sun_visibility(const char* csvPath);
+        void measure_cache_source_importance(const char* csvPath);
+        // A trace triangle's linear base colour at barycentric (u, v): the
+        // material factor, vertex colour and bilinear texture, as the path
+        // tracer reads it.
+        glm::vec3 trace_albedo(const TraceTriangle& triangle, glm::vec2 bary) const;
+        // R4.61: area-weighted albedo per voxel of a dims-sized grid from lo,
+        // over every opaque, non-emissive, non-transmissive trace triangle.
+        std::vector<glm::vec4> build_albedo_volume(glm::vec3 lo, glm::vec3 voxel,
+            glm::uvec3 dims) const;
+        // R4.61: (re)builds _surfaceCache.albedoVolume when the trace scene
+        // or the field box changes.
+        void update_albedo_volume();
+        void measure_emitter_visibility();
+        void measure_sky_visibility(const char* csvPath);
+        // A shader-read image's texels, copied to the CPU for a diagnostic.
+        std::vector<uint8_t> read_image_bytes(const AllocatedImage& image, VkExtent3D extent,
+            size_t bytesPerTexel, VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT);
+        // Removes the scene light sources MIRABILIS_R4_LIGHT_SOURCES leaves
+        // out, after every scene load (R4.13).
+        void apply_r4_light_sources();
+        // R4.15: shadow-map sun visibility (the coverage-mode raster image)
+        // against the path tracer's BVH for the same visible points.
+        void measure_sun_visibility(const std::vector<glm::vec4>& rasterVisibility, VkExtent2D extent);
         void draw_surface_cache_debug(VkCommandBuffer cmd);
         void draw_surface_cache_settings();
         // Reads back the card depth page and reports what fraction of each
@@ -851,7 +914,8 @@ class VulkanEngine{
         void build_surface_cache_lookup();
         // One budgeted radiosity update: the next cards in round-robin order
         // trace bounce rays and blend the result into the indirect page.
-        void update_surface_cache_radiosity();
+        // Recorded into the frame's command buffer; nothing waits on it.
+        void update_surface_cache_radiosity(VkCommandBuffer cmd);
         // True when the scene field and a lit surface cache are ready for
         // the SSGI world fallback.
         bool lumen_lite_ready() const;
@@ -916,7 +980,8 @@ class VulkanEngine{
             VkCommandBuffer cmd,
             const GPUSceneData& skyCamera,
             uint32_t stencilReference,
-            uint32_t stencilCompareMask = 0xff);
+            uint32_t stencilCompareMask = 0xff,
+            const AllocatedImage* target = nullptr);
         void draw_collider_debug_bounds(VkCommandBuffer cmd);
         void draw_portal_views(VkCommandBuffer cmd);
         void draw_offscreen_portal_views(VkCommandBuffer cmd);
@@ -1056,7 +1121,6 @@ class VulkanEngine{
         };
         EditorGizmoState _editorGizmo;
         struct PhysicsStepState {
-            float portalTraversalCooldown{0.0f};
             float accumulator{0.0f};
             // Camera yaw is sampled once per rendered frame, but physics runs at a
             // fixed step that can tick up to MaxPhysicsSteps times for that one
@@ -1180,6 +1244,28 @@ class VulkanEngine{
             const char* formatName{"none"};
         };
         ShadowState _shadow;
+        // IQ2: the ray-query half of sun visibility.  One BLAS holds the
+        // trace scene's opaque casters in world space and one TLAS instance
+        // points at it; both are rebuilt when that draw list changes.  The
+        // shadow map keeps only the casters left out of it.
+        struct SunCasterScene {
+            PFN_vkCreateAccelerationStructureKHR create{};
+            PFN_vkDestroyAccelerationStructureKHR destroy{};
+            PFN_vkGetAccelerationStructureBuildSizesKHR buildSizes{};
+            PFN_vkCmdBuildAccelerationStructuresKHR build{};
+            PFN_vkGetAccelerationStructureDeviceAddressKHR address{};
+            // IQ11 compaction.
+            PFN_vkCmdWriteAccelerationStructuresPropertiesKHR writeProperties{};
+            PFN_vkCmdCopyAccelerationStructureKHR copy{};
+            VkDeviceSize scratchAlignment{256};
+            VkAccelerationStructureKHR blas{}, tlas{};
+            AllocatedBuffer blasBuffer{}, tlasBuffer{};
+            uint64_t hash{0};
+        };
+        SunCasterScene _sunCasters;
+        bool ray_query_caster(const RenderObject& object) const;
+        void update_sun_casters();
+        void destroy_sun_casters();
         glm::mat4 _previousMainViewProjection{1.0f};
         bool _previousMainViewProjectionValid{false};
         struct PrepassState {
@@ -1214,6 +1300,10 @@ class VulkanEngine{
         struct SSGIState {
             AllocatedImage rawImage;
             AllocatedImage debugImage;
+            // IQ9: still pixels accumulate towards weight 0.98, in full-precision
+            // history.  MIRABILIS_IQ9_STATIC_ACCUMULATION=0 restores half
+            // precision and the preset weight everywhere.
+            bool staticAccumulation{true};
             std::array<AllocatedImage, 2> temporalHistory{};
             std::array<AllocatedImage, 2> metadataHistory{};
             AllocatedImage temporalDiagnosticImage;
@@ -1249,6 +1339,8 @@ class VulkanEngine{
             float thickness{};
             float startOffset{};
             float historyWeight{};
+            // R4.64 control: clamp temporal history at full strength.
+            bool fullClampControl{false};
             float depthRejection{0.003f};
             float normalRejection{0.85f};
             float velocityRejection{0.10f};
@@ -1256,6 +1348,7 @@ class VulkanEngine{
             // Lumen-lite: screen misses trace the scene distance field and
             // read the surface cache instead of the environment.
             bool lumenEnabled{false};
+            bool screenTraceEnabled{true};
             VkDescriptorSetLayout lumenLayout{};
             VkPipelineLayout lumenPipelineLayout{};
             VkPipeline lumenPipeline{};
@@ -1264,6 +1357,13 @@ class VulkanEngine{
             bool probesEnabled{false};
             VkPipeline probePipeline{};
             AllocatedImage probeImage{};
+            // Adaptive probes (IQ4): placement and tracing passes, and the
+            // buffer they fill each frame -- request count, slot pixels and
+            // the per-4x4-sub-tile slot map.  GPU only; read back at capture.
+            VkPipeline probePlacePipeline{};
+            VkPipeline probeAdaptivePipeline{};
+            AllocatedBuffer adaptiveBuffer{};
+            VkDeviceSize adaptiveBufferSize{};
             // Hierarchical screen trace: a nearest-depth pyramid
             // (shaders/hzb_build.comp), one storage view and set per level.
             static constexpr uint32_t HzbLevels = 8;
@@ -1279,17 +1379,7 @@ class VulkanEngine{
             float filterDepthFalloff{};
             float filterNormalPower{};
             float intensity{1.0f};
-            // How much of the flat ambient term survives while SSGI is on.
-            // Zero is the coherent setting in the sense that nothing is
-            // counted twice, but it is not the honest one yet: the bounce this
-            // renderer gathers comes from a direct-lighting buffer that
-            // excludes ambient, so stone out of the sun contributes nothing
-            // at all to it, and an arcade lit only by what the sun reaches
-            // reads far darker than the same geometry in life.  Half is a
-            // starting point to tune by eye, not a derived value, and it is a
-            // slider because the right answer depends on how enclosed the
-            // scene is.
-            float ambientRetention{0.5f};
+            float colorSaturation{1.0f};
             // Fill ray misses from the selected skybox rather than the
             // analytic gradient.  Turning this off restores parity with the
             // software path tracer, which still lights its misses from the
@@ -1302,6 +1392,19 @@ class VulkanEngine{
             std::array<bool, FRAME_OVERLAP> timingWritten{};
         };
         SSGIState _ssgi;
+        // R4 ownership instrumentation (src/r4_contributions.h).  All set
+        // unless MIRABILIS_R4_CONTRIBUTIONS names a subset.
+        struct R4ContributionState {
+            uint32_t forward{0xffu};
+            uint32_t ray{0xfffu};
+            bool rayCoverage{false};
+            // Direct sources the cache keeps (bit 0 sun, 1 sky, 2 emitters);
+            // a diagnostic mask, all three by default (R4.13).
+            uint32_t cacheSources{0x7u};
+            // Scene light sources kept (bit 0 sun, 1 sky), R4.13.
+            uint32_t lightSources{0x3u};
+            bool sunVisibilityCheck{false};
+        } _r4Contributions;
         struct SdfVolumeState {
             AllocatedImage volume{};
             // Chosen at load: the 32-bit float is exact, but linear filtering
@@ -1385,12 +1488,26 @@ class VulkanEngine{
             AllocatedImage captureDepth{};
             // Light arriving at each captured texel, without albedo.
             AllocatedImage direct{};
+            // The exact sky share of direct, for covered primary SSGI origins.
+            AllocatedImage sky{};
+            // The emitter share of `direct` alone, with its visible fraction
+            // in alpha (R4.12), for the forward pass.
+            AllocatedImage emitter{};
             // Bounce light arriving at each texel, in the same convention.
             AllocatedImage indirect{};
             // indirect as it stood before this radiosity update.  Bounces read
             // it, never the page being written, so the result does not depend
-            // on the order the GPU runs texels in.
+            // on the order the GPU runs texels in.  Radiosity's alone: between
+            // updates it equals indirect bit for bit (R5.1).
             AllocatedImage indirectPrevious{};
+            // Coarse albedo of the opaque trace triangles over the scene
+            // field's box, weighted by the surface area in each voxel (rgb =
+            // albedo x area, a = area), for field hits no card captured
+            // (R4.61).  Premultiplied, so a filtered read divides by a.
+            AllocatedImage albedoVolume{};
+            glm::uvec3 albedoVolumeSize{0};
+            float albedoVolumeVoxel{0.0f};
+            uint64_t albedoVolumeHash{0};
             glm::uvec2 atlasSize{0};
             // Target world size of one atlas texel; the build coarsens it when
             // the scene does not fit the largest atlas.
@@ -1413,8 +1530,11 @@ class VulkanEngine{
             int debugPage{0};
             bool measureCoverage{false};
             bool measureShadows{false};
+            bool measureEmitterVisibility{false};
             bool radiosityEnabled{true};
             uint32_t radiosityCursor{0};
+            uint32_t radiosityRow{0};
+            float radiosityPendingBlend{1.0f};
             // Per card: how many radiosity updates it has had since the last
             // capture.  The first updates average progressively (1/n) so a
             // static scene keeps converging; radiosityBlend is the floor that
@@ -1422,12 +1542,18 @@ class VulkanEngine{
             std::vector<uint32_t> cardUpdates;
             uint32_t radiosityUpdate{0};
             // Texels traced per update; each traces raysPerTexel rays.
-            uint32_t radiosityTexelBudget{300000};
+            // Independent of SSGI presets, so editor tuning survives changes.
+            uint32_t radiosityTexelBudget{128000};
             uint32_t raysPerTexel{2};
             bool singleBounce{false};
             float radiosityBlend{0.02f};
             float radiosityMaxDistance{40.0f};
+            // GPU time of the last timed update, two timestamps per frame slot.
             float radiosityMilliseconds{0.0f};
+            VkQueryPool radiosityTimestampPool{};
+            // Texels in this frame's batch, for the frame-time log.
+            uint64_t radiosityBatchTexels{0};
+            std::array<bool, FRAME_OVERLAP> radiosityTimingWritten{};
             VkDescriptorSetLayout radiosityLayout{};
             VkPipelineLayout radiosityPipelineLayout{};
             VkPipeline radiosityPipeline{};
@@ -1441,6 +1567,10 @@ class VulkanEngine{
             bool lightingValid{false};
             // Sun and field state the direct page was lit with.
             uint64_t lightingHash{0};
+            // The same without the sun (IQ13): unchanged, a sun-only relight
+            // suffices.  MIRABILIS_IQ13_SUN_ONLY_RELIGHT=0 always relights fully.
+            uint64_t lightingRestHash{0};
+            bool sunOnlyRelight{true};
             float lightingMilliseconds{0.0f};
             VkDescriptorSetLayout directLayout{};
             VkPipelineLayout directPipelineLayout{};
@@ -1539,6 +1669,7 @@ class VulkanEngine{
             // Stops in photographic terms would be friendlier, but every other
             // exposure-like control in this engine is a plain multiplier.
             float tonemapExposure{1.0f};
+            glm::vec2 whiteBalance{0.0f}; // warmth, green/magenta tint
             // 0 = ACES filmic, 1 = Reinhard.
             int tonemapOperator{0};
             // Runs the sRGB encode without the curve, so the curve's
@@ -1558,6 +1689,37 @@ class VulkanEngine{
             bool fxaaShowEdges{false};
         };
         PostProcessState _postProcess;
+        // IQ3 auto-exposure (docs/lumen_lite_design.md): a log2 luminance
+        // histogram of the linear frame, read back once the frame slot's fence
+        // has passed, sets _postProcess.tonemapExposure.  Off in bounded runs
+        // unless MIRABILIS_AUTO_EXPOSURE=1, and then nothing here runs.
+        struct AutoExposureState {
+            bool enabled{false};
+            // Jump straight to the metered exposure instead of adapting: set
+            // when the feature turns on and when a scene loads.
+            bool snap{true};
+            // Bounded runs that enable it log every frame's EV.
+            bool logFrames{false};
+            float compensation{0.0f};
+            float minEv{-4.0f};
+            float maxEv{8.0f};
+            // Exponential adaptation rate, per second.
+            float speed{1.5f};
+            float ev{0.0f};
+            float gpuMilliseconds{0.0f};
+            std::array<bool, FRAME_OVERLAP> written{};
+            VkDescriptorSetLayout setLayout{};
+            VkDescriptorSet set{};
+            MaterialPipeline pipeline;
+            // FRAME_OVERLAP slots of 256 bins each, on the device and readable
+            // by the host.
+            AllocatedBuffer histogram{}, readback{};
+            VkQueryPool timestampPool{VK_NULL_HANDLE};
+        };
+        AutoExposureState _autoExposure;
+        void init_auto_exposure();
+        void update_auto_exposure(float deltaTime);
+        void record_auto_exposure(VkCommandBuffer cmd);
         // The sandbox level lives here: the floor, the boundary walls, the
         // portal test panels, and the player body all render and collide from
         // these objects.  Nothing about the level is hard-coded twice.

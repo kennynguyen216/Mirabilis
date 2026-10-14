@@ -365,7 +365,12 @@ bool VulkanEngine::save_editor_scene()
     file << ",\n  \"referenceLighting\": {\"sunRadiance\": ";
     writeVec3(glm::vec3(_traceSettings.lighting.sunRadiance));
     file << ", \"environmentIntensity\": " << _traceSettings.lighting.environment.x
-         << ", \"blackEnvironment\": " << (_traceSettings.lighting.environment.y>0.5f?"true":"false") << '}';
+         << ", \"blackEnvironment\": " << (_traceSettings.lighting.environment.y>0.5f?"true":"false")
+         << ", \"environmentTint\": ";
+    writeVec3(glm::vec3(_traceSettings.lighting.environmentTint)); file << '}';
+    file << ",\n  \"colorGrading\": {\"warmth\": " << _postProcess.whiteBalance.x
+         << ", \"tint\": " << _postProcess.whiteBalance.y
+         << ", \"giSaturation\": " << _ssgi.colorSaturation << '}';
     const int savedSkybox = std::clamp(
         _skyboxSelection, 0, static_cast<int>(SkyboxIds.size()) - 1);
     file << ",\n  \"lighting\": {\"skybox\": \""
@@ -654,10 +659,24 @@ bool VulkanEngine::load_editor_scene()
         double value=1;
         if(reference["environmentIntensity"].get_double().get(value)==simdjson::SUCCESS&&std::isfinite(value))
             pendingReference.environment.x=float(std::clamp(value,0.0,10000.0));
+        if(reference["environmentTint"].get(color)==simdjson::SUCCESS&&read_json_vec3(color,radiance))
+            pendingReference.environmentTint=glm::vec4(glm::clamp(radiance,glm::vec3(0),glm::vec3(4)),0);
         bool black=false;
         if(reference["blackEnvironment"].get_bool().get(black)==simdjson::SUCCESS) pendingReference.environment.y=black?1.f:0.f;
     }
     SSAOSettings pendingSSAO{};
+    glm::vec2 pendingBalance(0);
+    float pendingGiSaturation = 1.0f;
+    simdjson::dom::object grading;
+    if (document["colorGrading"].get_object().get(grading) == simdjson::SUCCESS) {
+        double value = 0;
+        if (grading["warmth"].get_double().get(value) == simdjson::SUCCESS && std::isfinite(value))
+            pendingBalance.x = float(std::clamp(value, -1.0, 1.0));
+        if (grading["tint"].get_double().get(value) == simdjson::SUCCESS && std::isfinite(value))
+            pendingBalance.y = float(std::clamp(value, -1.0, 1.0));
+        if (grading["giSaturation"].get_double().get(value) == simdjson::SUCCESS && std::isfinite(value))
+            pendingGiSaturation = float(std::clamp(value, 0.0, 1.0));
+    }
     bool pendingSSAOOverride = false;
     simdjson::dom::object jsonSSAO;
     if (document["ssao"].get_object().get(jsonSSAO) == simdjson::SUCCESS) {
@@ -956,6 +975,9 @@ bool VulkanEngine::load_editor_scene()
     _ssao.settings = pendingSSAO;
     _ssao.sceneOverride = pendingSSAOOverride;
     _traceSettings.lighting = pendingReference;
+    _postProcess.whiteBalance = pendingBalance;
+    _ssgi.colorSaturation = pendingGiSaturation;
+    apply_r4_light_sources();
     _shadow.sunlightDirection = pendingLighting.sunlightDirection;
     _shadow.enabled = pendingLighting.shadowsEnabled;
     _shadow.radius = pendingLighting.shadowRadius;
@@ -976,6 +998,8 @@ bool VulkanEngine::load_editor_scene()
         if (lastSceneFile) lastSceneFile << _sceneDocument.activeFilename << '\n';
     }
     rebuild_collision_from_scene();
+    // A new scene is a cut, not a change of light to adapt to.
+    _autoExposure.snap = true;
     fmt::print("Loaded editor scene: {}\n", scenePath.string());
     return true;
 }

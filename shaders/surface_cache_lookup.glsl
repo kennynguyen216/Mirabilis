@@ -7,6 +7,7 @@
 //   sampler2D cacheAlbedo, cacheEmissive, cacheDepth, cacheDirect
 //   SURFACE_CACHE_READ_INDIRECT(ivec2 texel) -> vec3, reading the indirect
 //     page (the radiosity pass reads the storage image it is writing)
+//   SURFACE_CACHE_READ_SKY(ivec2 texel) -> vec3 only for primary sky lookups
 //   the three SSBOs below at SURFACE_CACHE_SET / SURFACE_CACHE_BINDING_*
 
 struct SurfaceCacheCard {
@@ -60,15 +61,23 @@ struct SurfaceCacheSample {
     vec3 emissive;
     // Light arriving at the surface (no albedo), as in the direct page.
     vec3 direct;
+    // The direct page's alpha, blended the same way (the emitter page keeps
+    // its visible fraction there, R4.12).
+    float directAlpha;
     // Bounce light arriving at the surface, in the same convention.
     vec3 indirect;
+    vec3 sky;
 };
+
+#ifndef SURFACE_CACHE_READ_SKY
+#define SURFACE_CACHE_READ_SKY(texel) vec3(0.0)
+#endif
 
 // Where a card sees a world point, if it sees it at all: the atlas texel, how
 // far behind the point the captured surface lies along the card's viewing
 // direction (negative in front), and how squarely the surface faces the card.
 bool card_probe(uint cardIndex, vec4 p, vec3 normal, float minimumFacing,
-    out ivec2 texel, out float behind, out float facing)
+    out ivec2 texel, out float behind, out float facing, out vec2 cardUV)
 {
     SurfaceCacheCard card = cards[cardIndex];
     facing = dot(normal, card.direction.xyz);
@@ -80,6 +89,7 @@ bool card_probe(uint cardIndex, vec4 p, vec3 normal, float minimumFacing,
     if (any(lessThan(c.xy, vec2(0.0))) || any(greaterThan(c.xy, vec2(1.0)))) {
         return false;
     }
+    cardUV = c.xy;
     texel = ivec2(card.rect.xy) + min(
         ivec2(c.xy * vec2(card.rect.zw)), ivec2(card.rect.zw) - 1);
     float stored = texelFetch(cacheDepth, texel, 0).r;
@@ -90,14 +100,83 @@ bool card_probe(uint cardIndex, vec4 p, vec3 normal, float minimumFacing,
     return true;
 }
 
-SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal)
+// IQ10: the sky page read bilinearly inside one card, over the texels that
+// captured the same surface as the centre texel; the nearest read turned each
+// 5 cm texel into a flat square wherever the cache is seen directly.
+vec3 surface_cache_sky_bilinear(SurfaceCacheCard card, vec2 cardUV, ivec2 centre, float margin)
+{
+    vec2 f = cardUV * vec2(card.rect.zw) - 0.5;
+    ivec2 base = ivec2(floor(f));
+    vec2 t = f - vec2(base);
+    float centreDepth = texelFetch(cacheDepth, centre, 0).r;
+    vec3 sum = vec3(0.0);
+    float total = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        ivec2 corner = ivec2(i & 1, i >> 1);
+        ivec2 texel = ivec2(card.rect.xy) +
+            clamp(base + corner, ivec2(0), ivec2(card.rect.zw) - 1);
+        float stored = texelFetch(cacheDepth, texel, 0).r;
+        float weight = (corner.x == 1 ? t.x : 1.0 - t.x) * (corner.y == 1 ? t.y : 1.0 - t.y);
+        if (stored >= 1.0 || abs(stored - centreDepth) * card.direction.w > margin) {
+            weight = 0.0;
+        }
+        sum += weight * SURFACE_CACHE_READ_SKY(texel);
+        total += weight;
+    }
+    return total > 1e-4 ? sum / total : SURFACE_CACHE_READ_SKY(centre);
+}
+
+// The cache's fixed sky noise needs a spatial filter even at the main camera.
+// Portal receivers have no screen-space denoiser. Filter their incoming light
+// in card space, rejecting other surfaces just as the bilinear sky read does.
+// page: 0 sky, 1 indirect, 2 direct lighting used by GI transport.
+vec3 surface_cache_light(ivec2 texel, int page)
+{
+    if (page == 0) return SURFACE_CACHE_READ_SKY(texel);
+    if (page == 1) return SURFACE_CACHE_READ_INDIRECT(texel);
+#ifdef SURFACE_CACHE_READ_DIRECT
+    return SURFACE_CACHE_READ_DIRECT(texel, true).rgb;
+#else
+    return texelFetch(cacheDirect, texel, 0).rgb;
+#endif
+}
+
+vec3 surface_cache_receiver_filtered(SurfaceCacheCard card, vec2 cardUV, ivec2 centre,
+    float margin, int page, int radius)
+{
+    vec2 f = cardUV * vec2(card.rect.zw) - 0.5;
+    ivec2 base = ivec2(floor(f));
+    float centreDepth = texelFetch(cacheDepth, centre, 0).r;
+    vec3 sum = vec3(0.0);
+    float total = 0.0;
+    for (int y = 1 - radius; y <= radius; ++y) {
+        for (int x = 1 - radius; x <= radius; ++x) {
+            ivec2 local = base + ivec2(x, y);
+            ivec2 texel = ivec2(card.rect.xy) + clamp(local, ivec2(0), ivec2(card.rect.zw) - 1);
+            float stored = texelFetch(cacheDepth, texel, 0).r;
+            if (stored >= 1.0 || abs(stored - centreDepth) * card.direction.w > margin)
+                continue;
+            vec2 tent = max(vec2(0.0), 1.0 - abs(vec2(local) - f) / float(radius));
+            float weight = tent.x * tent.y;
+            sum += weight * surface_cache_light(texel, page);
+            total += weight;
+        }
+    }
+    return total > 1e-4 ? sum / total :
+        surface_cache_light(centre, page);
+}
+
+SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky, bool bilinearSky,
+    bool readLighting, int lightingRadius)
 {
     SurfaceCacheSample result;
     result.weight = 0.0;
     result.albedo = vec3(0.0);
     result.emissive = vec3(0.0);
     result.direct = vec3(0.0);
+    result.directAlpha = 0.0;
     result.indirect = vec3(0.0);
+    result.sky = vec3(0.0);
 
     vec3 cellCoord = (world - gridMin.xyz) / gridMin.w;
     ivec3 cell = ivec3(floor(cellCoord));
@@ -128,8 +207,9 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal)
         ivec2 texel;
         float behind;
         float facing;
+        vec2 cardUV;
         if (!card_probe(cardIndices[range.x + i], p, normal, minimumFacing,
-                texel, behind, facing) ||
+                texel, behind, facing, cardUV) ||
             behind < -frontTolerance || behind > depthTolerance) {
             continue;
         }
@@ -143,8 +223,9 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal)
         ivec2 texel;
         float behind;
         float facing;
+        vec2 cardUV;
         if (!card_probe(cardIndices[range.x + i], p, normal, minimumFacing,
-                texel, behind, facing) || behind < -frontTolerance) {
+                texel, behind, facing, cardUV) || behind < -frontTolerance) {
             continue;
         }
         // Full weight for the nearest surface and any other card that
@@ -157,16 +238,61 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal)
             continue;
         }
         result.weight += weight;
+        if (readSky) {
+            result.sky += weight * (readLighting && bilinearSky
+                ? surface_cache_receiver_filtered(cards[cardIndices[range.x + i]], cardUV, texel,
+                    sameSurfaceMargin, 0, 3)
+                : bilinearSky
+                ? surface_cache_sky_bilinear(cards[cardIndices[range.x + i]], cardUV, texel,
+                    sameSurfaceMargin)
+                : SURFACE_CACHE_READ_SKY(texel));
+            continue;
+        }
         result.albedo += weight * texelFetch(cacheAlbedo, texel, 0).rgb;
         result.emissive += weight * texelFetch(cacheEmissive, texel, 0).rgb;
-        result.direct += weight * texelFetch(cacheDirect, texel, 0).rgb;
-        result.indirect += weight * SURFACE_CACHE_READ_INDIRECT(texel);
+#ifdef SURFACE_CACHE_READ_DIRECT
+        vec4 direct = SURFACE_CACHE_READ_DIRECT(texel, readLighting);
+#else
+        vec4 direct = texelFetch(cacheDirect, texel, 0);
+#endif
+        // GI integrates reflected radiance over a footprint. A nearest sun
+        // shadow or noisy bounce texel otherwise prints a grid on the receiver.
+        // The forward sun shadow remains evaluated at the actual surface.
+        if (readLighting) {
+            direct.rgb = surface_cache_receiver_filtered(cards[cardIndices[range.x + i]],
+                cardUV, texel, sameSurfaceMargin, 2, lightingRadius);
+        }
+        result.direct += weight * direct.rgb;
+        result.directAlpha += weight * direct.a;
+        result.indirect += weight * (bilinearSky
+            ? surface_cache_receiver_filtered(cards[cardIndices[range.x + i]], cardUV, texel,
+                sameSurfaceMargin, 1, lightingRadius)
+            : SURFACE_CACHE_READ_INDIRECT(texel));
     }
     if (result.weight > 0.0) {
         result.albedo /= result.weight;
         result.emissive /= result.weight;
         result.direct /= result.weight;
+        result.directAlpha /= result.weight;
         result.indirect /= result.weight;
+        result.sky /= result.weight;
     }
     return result;
+}
+
+SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky, bool bilinearSky, bool readLighting)
+{
+    // Ray hits get bilinear interpolation; portal receivers explicitly ask
+    // for the wider filter because they have no screen-space denoiser.
+    return surface_cache_lookup(world, normal, readSky, bilinearSky, readLighting, 1);
+}
+
+SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky, bool bilinearSky)
+{
+    return surface_cache_lookup(world, normal, readSky, bilinearSky, false);
+}
+
+SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal)
+{
+    return surface_cache_lookup(world, normal, false, false);
 }

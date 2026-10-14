@@ -10,29 +10,35 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     ScopedShaderModule fragmentShader(engine->_device);
     ScopedShaderModule vertexShader(engine->_device);
     ScopedShaderModule portalMaskVertexShader(engine->_device);
+    ScopedShaderModule portalStencilVertexShader(engine->_device);
+    ScopedShaderModule portalStencilFragmentShader(engine->_device);
     ScopedShaderModule portalViewVertexShader(engine->_device);
     ScopedShaderModule maskFragmentShader(engine->_device);
     ScopedShaderModule portalViewFragmentShader(engine->_device);
     ScopedShaderModule portalViewMaskFragmentShader(engine->_device);
     ScopedShaderModule portalCompositeFragmentShader(engine->_device);
+    ScopedShaderModule portalCompositeVertexShader(engine->_device);
     ScopedShaderModule portalMaskFragmentShader(engine->_device);
     ScopedShaderModule portalSkyVertexShader(engine->_device);
     ScopedShaderModule portalSkyFragmentShader(engine->_device);
     ScopedShaderModule transparentFragmentShader(engine->_device);
     ScopedShaderModule colliderDebugVertexShader(engine->_device);
     ScopedShaderModule colliderDebugFragmentShader(engine->_device);
-    if (!fragmentShader.load("../../shaders/mesh.frag.spv") ||
+    if (!fragmentShader.load(engine->ray_query_shader("mesh.frag").c_str()) ||
         !vertexShader.load("../../shaders/mesh.vert.spv") ||
         !portalMaskVertexShader.load("../../shaders/portal_mask.vert.spv") ||
+        !portalStencilVertexShader.load("../../shaders/portal_stencil.vert.spv") ||
+        !portalStencilFragmentShader.load("../../shaders/portal_stencil_output.frag.spv") ||
         !portalViewVertexShader.load("../../shaders/portal_view.vert.spv") ||
-        !maskFragmentShader.load("../../shaders/mesh_mask.frag.spv") ||
+        !maskFragmentShader.load(engine->ray_query_shader("mesh_mask.frag").c_str()) ||
         !transparentFragmentShader.load(
-            "../../shaders/mesh_transparent.frag.spv") ||
-        !portalViewFragmentShader.load("../../shaders/portal_view.frag.spv") ||
+            engine->ray_query_shader("mesh_transparent.frag").c_str()) ||
+        !portalViewFragmentShader.load(engine->ray_query_shader("portal_view.frag").c_str()) ||
         !portalViewMaskFragmentShader.load(
-            "../../shaders/portal_view_mask.frag.spv") ||
+            engine->ray_query_shader("portal_view_mask.frag").c_str()) ||
         !portalCompositeFragmentShader.load(
             "../../shaders/portal_composite.frag.spv") ||
+        !portalCompositeVertexShader.load("../../shaders/portal_composite.vert.spv") ||
         !portalMaskFragmentShader.load(
             "../../shaders/portal_mask_output.frag.spv") ||
         !portalSkyVertexShader.load("../../shaders/portal_sky.vert.spv") ||
@@ -123,7 +129,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     builder.set_color_attachment_format(engine->_drawImage.imageFormat);
     builder.disable_blending();
     builder.enable_stenciltest(VK_COMPARE_OP_EQUAL, VK_STENCIL_OP_KEEP);
-    builder.set_shaders(vertexShader, portalCompositeFragmentShader);
+    builder.set_shaders(portalCompositeVertexShader, portalCompositeFragmentShader);
     portalCompositePipeline.pipeline = builder.build_pipeline(engine->_device);
 
     // Mark a portal in stencil only where its real, slightly front-offset
@@ -133,7 +139,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     builder.set_color_write_mask(0);
     builder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
     builder.enable_stenciltest(VK_COMPARE_OP_ALWAYS, VK_STENCIL_OP_REPLACE);
-    builder.set_shaders(vertexShader, portalMaskFragmentShader);
+    builder.set_shaders(portalStencilVertexShader, portalStencilFragmentShader);
     portalStencilPipeline.pipeline = builder.build_pipeline(engine->_device);
 
     // A recursive portal mask must already be inside its parent portal's
@@ -193,7 +199,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     skyBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
     skyBuilder.set_multisampling_none();
     skyBuilder.disable_blending();
-    skyBuilder.disable_depthtest();
+    skyBuilder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
     skyBuilder.enable_stenciltest(VK_COMPARE_OP_EQUAL, VK_STENCIL_OP_KEEP);
     skyBuilder.set_color_attachment_format(engine->_drawImage.imageFormat);
     skyBuilder.set_depth_format(engine->_depthImage.imageFormat);

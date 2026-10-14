@@ -1,4 +1,5 @@
 #include "vk_engine.h"
+#include "r4_contributions.h"
 #include "vk_engine_render_helpers.h"
 #include "vk_images.h"
 #include "vk_pipelines.h"
@@ -12,6 +13,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
 
 namespace {
 struct TracePush {
@@ -113,11 +115,17 @@ void VulkanEngine::draw_path_trace(VkCommandBuffer cmd) {
     update_trace_scene();
     auto pc=camera_push(render_camera(),_drawExtent);
     pc.settings.y=float(_traceTriangles.size()); pc.settings.z=float(_traceSettings.debugView);
+    if (const char* filter = SDL_getenv("MIRABILIS_R4_TRACE_FIRST_LOBE_FILTER")) {
+        pc.settings.w = float(std::clamp(std::atoi(filter), 0, 2));
+    }
     pc.sampling=glm::uvec4(_traceSettings.maxDepth,_traceSettings.baseSeed,_traceSettings.materialModel,_traceSettings.portalLimit);
     uint64_t hash=1469598103934665603ull;
     auto append=[&](const void* data,size_t bytes) {auto p=static_cast<const uint8_t*>(data); for(size_t i=0;i<bytes;++i) {hash^=p[i];hash*=1099511628211ull;}};
     append(&pc.origin,64); append(&_drawExtent,sizeof(_drawExtent)); append(&renderScale,sizeof(renderScale));
+    append(&pc.settings.w,sizeof(pc.settings.w));
     append(&pc.sampling,sizeof(pc.sampling)); append(&_traceSceneRevision,sizeof(_traceSceneRevision));
+    append(_tracePortals.data(), _tracePortals.size() * sizeof(TracePortal));
+    append(&_traceSettings.lighting,sizeof(TraceLighting));
     if(!_traceRuntime.wasActive||hash!=_traceRuntime.inputHash||_traceRuntime.samples>=16777216u) {
         _traceRuntime.samples=0; _traceRuntime.inputHash=hash;
         if(std::getenv("MIRABILIS_TEST_FRAMES")) fmt::print("GI accumulation reset: input hash={} revision={} extent={}x{}\n",hash,_traceSceneRevision,_drawExtent.width,_drawExtent.height);
@@ -158,17 +166,28 @@ void VulkanEngine::draw_path_trace_ui() {
     if (ImGui::Combo("Renderer",&mode,"Raster\0Path Traced Reference (Software)\0"))
         _rendererMode=(_traceSupported&&mode==1)?RendererMode::SoftwarePathTrace:RendererMode::Raster;
     ImGui::TextWrapped("%s",_traceStatus.c_str());
+    if (ImGui::CollapsingHeader("Scene lighting")) {
+        bool edited = ImGui::ColorEdit3("Sun light (HDR)", &_traceSettings.lighting.sunRadiance.x,
+            ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+        edited |= ImGui::SliderFloat("Sky intensity", &_traceSettings.lighting.environment.x, 0, 4);
+        edited |= ImGui::ColorEdit3("Sky color multiplier", &_traceSettings.lighting.environmentTint.x,
+            ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+        bool black = _traceSettings.lighting.environment.y > .5f;
+        if (ImGui::Checkbox("Black environment", &black)) {
+            edited = true; _traceSettings.lighting.environment.y = black ? 1.f : 0.f;
+        }
+        if (edited) {
+            _traceSettings.lighting.environmentTint = glm::clamp(_traceSettings.lighting.environmentTint, glm::vec4(0), glm::vec4(4));
+            _sceneDocument.dirty = true;
+        }
+        ImGui::TextWrapped("Balance neutral or warm sunlight against sky fill. These settings are saved with the scene.");
+    }
     if(_rendererMode==RendererMode::SoftwarePathTrace) {
         ImGui::Combo("Trace view",&_traceSettings.debugView,"Geometric normal\0Shading normal\0Distance\0Albedo\0Material ID\0Node visits\0Triangle tests\0One noisy sample\0Accumulated radiance\0Nonfinite / traversal errors\0Direct radiance\0Indirect radiance\0Portal traversals\0Portal limit\0");
         ImGui::SliderInt("Surface scattering events",&_traceSettings.maxDepth,1,4);
         ImGui::InputInt("Base seed",&_traceSettings.baseSeed);
         ImGui::Combo("Material model",&_traceSettings.materialModel,"Lambertian reference\0GGX + dielectric\0");
         ImGui::SliderFloat("Exposure (EV)",&_traceSettings.exposure,-6,6);
-        bool edited=ImGui::ColorEdit3("Reference sun radiance",&_traceSettings.lighting.sunRadiance.x,ImGuiColorEditFlags_Float|ImGuiColorEditFlags_HDR);
-        edited|=ImGui::SliderFloat("Environment intensity",&_traceSettings.lighting.environment.x,0,4);
-        bool black=_traceSettings.lighting.environment.y>0.5f;
-        if(ImGui::Checkbox("Black environment",&black)) {edited=true;_traceSettings.lighting.environment.y=black?1.f:0.f;}
-        if(edited) _sceneDocument.dirty=true;
         if(ImGui::Button("Reset accumulation")) _traceRuntime.wasActive=false;
         ImGui::Text("Samples %u | GPU %.2f ms (max %.2f)",_traceRuntime.samples,_traceRuntime.gpuMs,_traceRuntime.maxGpuMs);
         ImGui::Text("Triangles %zu | BVH nodes %zu | revision %llu",_traceTriangles.size(),_traceNodes.size(),_traceSceneRevision);
@@ -387,11 +406,37 @@ void VulkanEngine::update_trace_scene() {
     addPortal(_bluePortal,_orangePortal.placed?&_orangePortal:nullptr);
     addPortal(_orangePortal,_bluePortal.placed?&_bluePortal:nullptr);
     for(const auto& pair:_authoredPortals.pairs) {addPortal(pair.first,&pair.second);addPortal(pair.second,&pair.first);}
+    if (portals.size() != _tracePortals.size() ||
+        (!portals.empty() && std::memcmp(portals.data(), _tracePortals.data(), portals.size() * sizeof(TracePortal)) != 0)) {
+        _tracePortals = std::move(portals);
+        _tracePortalBufferDirty = true;
+    }
+    // Raster GI reads world triangles, not path-tracer portal records. Keep
+    // their CPU snapshot current, and defer GPU writes until the reference
+    // renderer needs them. Portal edits must not rebuild geometry or relight.
+    const auto uploadPortals = [&] {
+        if (_rendererMode != RendererMode::SoftwarePathTrace || !_tracePortalBufferDirty) return;
+        VK_CHECK(vkDeviceWaitIdle(_device));
+        if (_tracePortals.size() > MaxPortalSurfaces) std::abort();
+        if (!_tracePortals.empty()) std::memcpy(_tracePortalBuffer.info.pMappedData,
+            _tracePortals.data(), _tracePortals.size() * sizeof(TracePortal));
+        vmaFlushAllocation(_allocator, _tracePortalBuffer.allocation, 0, VK_WHOLE_SIZE);
+        _traceSettings.lighting.counts.y = uint32_t(_tracePortals.size());
+        _tracePortalBufferDirty = false;
+    };
+    // Lighting is not geometry (IQ13b).  Hashed with it, every step of the
+    // editor's sun slider recollected every triangle, rebuilt the BVH and the
+    // albedo volume and relit the whole surface cache.  It is rewritten on its
+    // own, and draw_path_trace's hash restarts accumulation when it changes.
+    _traceSettings.lighting.sunDirection=glm::vec4(glm::normalize(glm::dot(_shadow.sunlightDirection,_shadow.sunlightDirection)>1e-10f?_shadow.sunlightDirection:glm::vec3(0,1,0)),0);
+    auto uploadLighting=[&] {
+        if(std::memcmp(_traceLightBuffer.info.pMappedData,&_traceSettings.lighting,sizeof(TraceLighting))==0) return;
+        VK_CHECK(vkDeviceWaitIdle(_device)); // A path trace in flight may still read it.
+        std::memcpy(_traceLightBuffer.info.pMappedData,&_traceSettings.lighting,sizeof(TraceLighting));
+        vmaFlushAllocation(_allocator,_traceLightBuffer.allocation,0,VK_WHOLE_SIZE);
+    };
     uint64_t drawHash=1469598103934665603ull;
     auto append=[&](const void* data,size_t bytes) {auto p=static_cast<const uint8_t*>(data);for(size_t i=0;i<bytes;++i) {drawHash^=p[i];drawHash*=1099511628211ull;}};
-    append(&_shadow.sunlightDirection,sizeof(_shadow.sunlightDirection));
-    append(&_traceSettings.lighting.sunRadiance,2*sizeof(glm::vec4));
-    append(portals.data(),portals.size()*sizeof(TracePortal));
     for(const auto& draw:worldDrawContext.OpaqueSurfaces) {
         append(&draw.transform,sizeof(draw.transform)); append(&draw.vertexBufferAddress,sizeof(draw.vertexBufferAddress));
         append(&draw.firstIndex,sizeof(draw.firstIndex)); append(&draw.indexCount,sizeof(draw.indexCount));
@@ -401,13 +446,34 @@ void VulkanEngine::update_trace_scene() {
             const auto* texture=draw.material->traceTexture.get(); append(&texture,sizeof(texture));
         }
     }
-    if(_traceTriangleBuffer.buffer&&drawHash==_traceDrawHash) return;
+    if(_traceTriangleBuffer.buffer&&drawHash==_traceDrawHash) {uploadPortals(); uploadLighting(); return;}
     _traceDrawHash=drawHash;
     std::vector<TraceTriangle> triangles;
     std::vector<TraceMaterial> materials;
     std::vector<uint32_t> texels;
     std::unordered_map<const TraceTextureSource*,glm::uvec4> textures;
     std::unordered_map<const MaterialInstance*,uint32_t> materialIds;
+    // Reserve once: growing the ~630 MiB Sponza triangle vector otherwise
+    // temporarily keeps both the old and new allocations during a scene switch.
+    size_t triangleCapacity = 0, texelCapacity = 0;
+    for (const auto& draw : worldDrawContext.OpaqueSurfaces) {
+        auto found = _traceMeshSources.find(draw.vertexBufferAddress);
+        auto source = found == _traceMeshSources.end() ? nullptr : found->second.lock();
+        if (!source || !draw.material || draw.material->passType != MaterialPass::MainColor) continue;
+        const size_t first = std::min<size_t>(draw.firstIndex, source->indices.size());
+        const size_t end = std::min(source->indices.size(), first + draw.indexCount);
+        triangleCapacity += (end - first) / 3;
+        if (auto texture = draw.material->traceTexture;
+            texture && textures.emplace(texture.get(), glm::uvec4(0)).second) {
+            texelCapacity += texture->rgba.size();
+        }
+    }
+    textures.clear();
+    fmt::print("GI scene packing: {} triangles, {} texture texels ({:.1f} MiB)\n",
+        triangleCapacity, texelCapacity,
+        double(triangleCapacity * sizeof(TraceTriangle) + texelCapacity * sizeof(uint32_t)) / (1024.0 * 1024.0));
+    triangles.reserve(triangleCapacity);
+    texels.reserve(texelCapacity);
     for (const auto& draw : worldDrawContext.OpaqueSurfaces) {
         auto found=_traceMeshSources.find(draw.vertexBufferAddress);
         auto source=found==_traceMeshSources.end()?nullptr:found->second.lock();
@@ -443,17 +509,13 @@ void VulkanEngine::update_trace_scene() {
     }
     uint64_t hash=1469598103934665603ull;
     const auto hashBytes=[&](const void* data,size_t size) { auto p=static_cast<const unsigned char*>(data); for(size_t i=0;i<size;++i) { hash^=p[i]; hash*=1099511628211ull; } };
-    _traceSettings.lighting.sunDirection=glm::vec4(glm::normalize(glm::dot(_shadow.sunlightDirection,_shadow.sunlightDirection)>1e-10f?_shadow.sunlightDirection:glm::vec3(0,1,0)),0);
-    hashBytes(&_traceSettings.lighting.sunDirection,3*sizeof(glm::vec4));
     hashBytes(triangles.data(),triangles.size()*sizeof(TraceTriangle)); hashBytes(materials.data(),materials.size()*sizeof(TraceMaterial));
     hashBytes(texels.data(),texels.size()*sizeof(uint32_t));
-    hashBytes(portals.data(),portals.size()*sizeof(TracePortal));
-    if (_traceTriangleBuffer.buffer && hash==_traceSceneHash) return;
+    if (_traceTriangleBuffer.buffer && hash==_traceSceneHash) {uploadPortals(); uploadLighting(); return;}
     VK_CHECK(vkDeviceWaitIdle(_device)); // Rare scene edits retire all readers before replacing descriptors/buffers.
     _traceSceneHash=hash; ++_traceSceneRevision;
     _traceTriangles=std::move(triangles); _traceMaterials=std::move(materials);
     _traceTexels=std::move(texels);
-    _tracePortals=std::move(portals);
     _traceSettings.lighting.counts.y=uint32_t(_tracePortals.size());
     _traceNodes=build_trace_bvh(_traceTriangles);
     _traceEmitters.clear();
@@ -474,7 +536,9 @@ void VulkanEngine::update_trace_scene() {
     upload(_traceNodeBuffer,_traceNodes.data(),_traceNodes.size()*sizeof(TraceBVHNode),sizeof(TraceBVHNode));
     upload(_traceEmitterBuffer,_traceEmitters.data(),_traceEmitters.size()*sizeof(uint32_t),sizeof(uint32_t));
     upload(_traceTexelBuffer,_traceTexels.data(),_traceTexels.size()*sizeof(uint32_t),sizeof(uint32_t));
-    upload(_tracePortalBuffer,_tracePortals.data(),_tracePortals.size()*sizeof(TracePortal),sizeof(TracePortal));
+    if (_tracePortals.size() > MaxPortalSurfaces) std::abort();
+    upload(_tracePortalBuffer,_tracePortals.data(),_tracePortals.size()*sizeof(TracePortal),MaxPortalSurfaces*sizeof(TracePortal));
+    _tracePortalBufferDirty = false;
     destroy_buffer(_traceLightBuffer);
     _traceLightBuffer=create_buffer(sizeof(TraceLighting),VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
     std::memcpy(_traceLightBuffer.info.pMappedData,&_traceSettings.lighting,sizeof(_traceSettings.lighting));
@@ -584,8 +648,10 @@ std::vector<glm::vec4> VulkanEngine::read_ssgi_image(
 {
     VK_CHECK(vkDeviceWaitIdle(_device));
     const size_t pixels = size_t(extent.width) * extent.height;
+    const bool rgba8 = image.imageFormat == VK_FORMAT_R8G8B8A8_UNORM || image.imageFormat == VK_FORMAT_R8G8B8A8_SRGB;
+    const bool bgra8 = image.imageFormat == VK_FORMAT_B8G8R8A8_UNORM || image.imageFormat == VK_FORMAT_B8G8R8A8_SRGB;
     auto buffer = create_buffer(
-        pixels * 4 * sizeof(uint16_t), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        pixels * (rgba8 || bgra8 ? 4 : 8), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VMA_MEMORY_USAGE_GPU_TO_CPU);
     immediate_submit([&](VkCommandBuffer cmd) {
         vkutil::transition_image(cmd, image.image, layout,
@@ -604,6 +670,11 @@ std::vector<glm::vec4> VulkanEngine::read_ssgi_image(
     const auto* packed = static_cast<const uint16_t*>(mapped);
     std::vector<glm::vec4> values(pixels);
     for (size_t pixel = 0; pixel < pixels; ++pixel) {
+        if (rgba8 || bgra8) {
+            const auto* bytes = static_cast<const uint8_t*>(mapped) + pixel * 4;
+            values[pixel] = glm::vec4(bytes[bgra8 ? 2 : 0], bytes[1], bytes[bgra8 ? 0 : 2], bytes[3]) / 255.0f;
+            continue;
+        }
         values[pixel] = glm::vec4(
             glm::unpackHalf1x16(packed[pixel * 4 + 0]),
             glm::unpackHalf1x16(packed[pixel * 4 + 1]),
@@ -613,6 +684,198 @@ std::vector<glm::vec4> VulkanEngine::read_ssgi_image(
     vmaUnmapMemory(_allocator, buffer.allocation);
     destroy_buffer(buffer);
     return values;
+}
+
+void VulkanEngine::write_capture_lighting(std::ostream& out) const
+{
+    const GPUSceneData& d = sceneData;
+    out << "Raster sun colour: " << d.sunlightColor.r << "," << d.sunlightColor.g
+        << "," << d.sunlightColor.b
+        << "\nRaster sun direction: " << d.sunlightDirection.x << ","
+        << d.sunlightDirection.y << "," << d.sunlightDirection.z
+        << "\nRaster ambient colour: " << d.ambientColor.r << "," << d.ambientColor.g
+        << "," << d.ambientColor.b
+        << "\nEnvironment intensity: " << d.ssgiFallbackSettings.x
+        << "\nEnvironment tint: " << d.environmentTint.x << ',' << d.environmentTint.y << ',' << d.environmentTint.z
+        << " black=" << (d.ssgiFallbackSettings.y > 0.5f)
+        << "\nSSGI intensity: " << _ssgi.intensity
+        << "\nGI color saturation: " << _ssgi.colorSaturation
+        << "\nSSAO active: " << ssao_active()
+        << "\nImage-based lighting: " << (d.iblSettings.x > 0.5f)
+        << "\nNormal maps: " << (d.materialSettings.x > 0.5f)
+        << "\nMetal/rough textures: " << (d.materialSettings.y > 0.5f)
+        << "\nSpecular anti-aliasing: " << (d.materialSettings.z > 0.5f)
+        << "\nSpecular: " << (d.materialSettings.w > 0.5f)
+        << "\nLumen-lite: " << _ssgi.lumenEnabled
+        << "\nScreen probes: " << _ssgi.probesEnabled
+        << "\nHZB: " << _ssgi.hzbEnabled
+        << "\nRay-query sun shadows: " << _rayQueryShadows
+        << "\nSurface-cache radiosity: " << _surfaceCache.radiosityEnabled
+        << "\nRadiosity texel budget: " << _surfaceCache.radiosityTexelBudget
+        << " single-bounce=" << _surfaceCache.singleBounce
+        << "\nR4 contributions:";
+    // Named, not a bit pattern, so the record reads without the header.
+    const uint32_t forward = static_cast<uint32_t>(d.materialDebug.y + 0.5f);
+    if (forward == r4::AllForward && _r4Contributions.ray == r4::AllRays) {
+        out << " all";
+    } else {
+        for (const r4::Owner& owner : r4::Owners) {
+            if ((owner.forward & forward) != 0u || (owner.ray & _r4Contributions.ray) != 0u) {
+                out << " " << owner.name;
+            }
+        }
+    }
+    out << "\nR4 ray coverage: " << _r4Contributions.rayCoverage << "\n";
+}
+
+void VulkanEngine::measure_sun_visibility(
+    const std::vector<glm::vec4>& rasterVisibility, VkExtent2D extent)
+{
+    update_trace_scene();
+    if (_traceNodes.empty()) {
+        fmt::print("Sun visibility check skipped: no CPU trace scene\n");
+        return;
+    }
+    VK_CHECK(vkDeviceWaitIdle(_device));
+    // The prepass depth, as stored (reversed depth: 0 is the far plane).
+    const bool depth32 = _prepass.depthImage.imageFormat == VK_FORMAT_D32_SFLOAT;
+    const size_t pixels = size_t(extent.width) * extent.height;
+    const size_t depthBytes = depth32 ? 4 : 2;
+    AllocatedBuffer buffer = create_buffer(pixels * depthBytes,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
+    immediate_submit([&](VkCommandBuffer cmd) {
+        vkutil::transition_image(cmd, _prepass.depthImage.image,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_IMAGE_ASPECT_DEPTH_BIT);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+        copy.imageExtent = {extent.width, extent.height, 1};
+        vkCmdCopyImageToBuffer(cmd, _prepass.depthImage.image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer.buffer, 1, &copy);
+        vkutil::transition_image(cmd, _prepass.depthImage.image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_IMAGE_ASPECT_DEPTH_BIT);
+    });
+    std::vector<uint8_t> depthData(pixels * depthBytes);
+    void* mapped = nullptr;
+    VK_CHECK(vmaMapMemory(_allocator, buffer.allocation, &mapped));
+    vmaInvalidateAllocation(_allocator, buffer.allocation, 0, VK_WHOLE_SIZE);
+    std::memcpy(depthData.data(), mapped, depthData.size());
+    vmaUnmapMemory(_allocator, buffer.allocation);
+    destroy_buffer(buffer);
+    const std::vector<glm::vec4> normals = read_ssgi_image(
+        _prepass.normalImage, extent, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    const glm::vec3 sun = normalized_sun_direction(_shadow.sunlightDirection);
+    const glm::mat4 inverseViewProjection = sceneData.inverseViewProjection;
+    const glm::mat3 viewToWorld = glm::transpose(glm::mat3(sceneData.view));
+    const char* exactMaskPath = SDL_getenv("MIRABILIS_R4_SUN_VISIBILITY_PFM");
+    std::vector<glm::vec3> exactMask;
+    if (exactMaskPath) exactMask.assign(pixels, glm::vec3(-1.0f, 0.0f, -1.0f));
+    size_t facing = 0, bothLit = 0, bothShadowed = 0, rasterOnlyLit = 0, exactOnlyLit = 0;
+    struct Blocker { size_t count = 0; glm::vec3 low{1e30f}, high{-1e30f}; };
+    std::map<uint32_t, Blocker> blockers;   // raster lit, BVH blocked: first blocker's material
+    std::map<uint32_t, size_t> allBlockers; // every BVH-shadowed point
+    // Where a raster-lit, BVH-shadowed point falls in the shadow map: past its
+    // depth range or outside its footprint (both read as lit), or inside it.
+    size_t outsideDepth = 0, outsideFootprint = 0, insideMap = 0;
+    double blockerDistance = 0.0;
+    // Mirrors sunlight_visibility()'s receiver offset.
+    for (uint32_t y = 0; y < extent.height; ++y) {
+        for (uint32_t x = 0; x < extent.width; ++x) {
+            const size_t i = size_t(y) * extent.width + x;
+            float depth = 0.0f;
+            if (depth32) {
+                std::memcpy(&depth, depthData.data() + i * 4, 4);
+            } else {
+                uint16_t d16 = 0;
+                std::memcpy(&d16, depthData.data() + i * 2, 2);
+                depth = float(d16) / 65535.0f;
+            }
+            if (depth <= 1e-6f) continue;
+            const glm::vec3 viewNormal(normals[i]);
+            if (glm::dot(viewNormal, viewNormal) < 0.5f) continue;
+            const glm::vec3 normal = glm::normalize(viewToWorld * viewNormal);
+            if (glm::dot(normal, sun) <= 0.05f) continue;
+            const float shadowTexelWorld = 2.0f * _shadow.radius / float(ShadowMapResolution);
+            const float normalBias = std::max(shadowTexelWorld, 0.001f) /
+                std::max(std::abs(glm::dot(normal, sun)), 1.0f / 3.0f);
+            const glm::vec2 uv((float(x) + 0.5f) / float(extent.width),
+                (float(y) + 0.5f) / float(extent.height));
+            const glm::vec4 world4 = inverseViewProjection * glm::vec4(uv * 2.0f - 1.0f, depth, 1.0f);
+            const glm::vec3 world = glm::vec3(world4) / world4.w;
+            const float epsilon = std::max(0.0002f,
+                std::max({std::abs(world.x), std::abs(world.y), std::abs(world.z)}) * 0.000002f);
+            const TraceCPUHit hit = trace_cpu_intersect(_traceTriangles, _traceNodes,
+                world + normal * epsilon, sun, false);
+            const bool exactLit = hit.triangle < 0;
+            if (exactMaskPath) exactMask[i] = glm::vec3(exactLit ? 1.0f : 0.0f,
+                glm::dot(normal, sun), exactLit ? -1.0f : hit.t);
+            const bool rasterLit = rasterVisibility[i].r > 0.5f;
+            ++facing;
+            bothLit += exactLit && rasterLit;
+            bothShadowed += !exactLit && !rasterLit;
+            rasterOnlyLit += rasterLit && !exactLit;
+            exactOnlyLit += exactLit && !rasterLit;
+            if (!exactLit) {
+                const uint32_t material = _traceTriangles[hit.triangle].meta.x;
+                ++allBlockers[material];
+                if (rasterLit) {
+                    const glm::vec4 clip = _shadow.sunViewProjection * glm::vec4(world + normal * normalBias, 1.0f);
+                    const glm::vec3 projected = glm::vec3(clip) / clip.w;
+                    if (projected.z < 0.0f || projected.z > 1.0f) ++outsideDepth;
+                    else if (std::abs(projected.x) > 1.0f || std::abs(projected.y) > 1.0f) ++outsideFootprint;
+                    else ++insideMap;
+                    blockerDistance += hit.t;
+                    Blocker& b = blockers[material];
+                    ++b.count;
+                    b.low = glm::min(b.low, world);
+                    b.high = glm::max(b.high, world);
+                }
+            }
+        }
+    }
+    const auto pct = [&](size_t n) { return facing ? 100.0 * double(n) / double(facing) : 0.0; };
+    fmt::print("Sun visibility check: {} sun-facing pixels; both lit {:.2f}%, both shadowed {:.2f}%, "
+        "raster lit only {:.2f}%, BVH lit only {:.2f}%\n",
+        facing, pct(bothLit), pct(bothShadowed), pct(rasterOnlyLit), pct(exactOnlyLit));
+    if (rasterOnlyLit > 0) {
+        fmt::print("  raster lit, BVH shadowed: {} outside the shadow map's depth range, {} outside its "
+            "footprint, {} inside it; mean distance to the BVH blocker {:.2f} m\n",
+            outsideDepth, outsideFootprint, insideMap, blockerDistance / double(rasterOnlyLit));
+    }
+    const auto describe = [&](uint32_t material) {
+        const TraceMaterial& m = _traceMaterials[material];
+        return fmt::format("material {} base ({:.2f},{:.2f},{:.2f},{:.2f}) transmission {:.2f} metallic {:.2f}",
+            material, m.baseColor.x, m.baseColor.y, m.baseColor.z, m.baseColor.w,
+            m.parameters.z, m.parameters.x);
+    };
+    for (const auto& [material, b] : blockers) {
+        fmt::print("  raster lit, BVH first blocker {}: {} pixels, points ({:.2f},{:.2f},{:.2f})..({:.2f},{:.2f},{:.2f})\n",
+            describe(material), b.count, b.low.x, b.low.y, b.low.z, b.high.x, b.high.y, b.high.z);
+    }
+    for (const auto& [material, n] : allBlockers) {
+        fmt::print("  every BVH-shadowed point, first blocker {}: {} pixels\n", describe(material), n);
+    }
+    // Draws the raster renders but the trace scene leaves out.
+    size_t excludedOpaque = 0;
+    for (const auto& draw : worldDrawContext.OpaqueSurfaces) {
+        if (draw.material && draw.material->passType != MaterialPass::MainColor) ++excludedOpaque;
+    }
+    fmt::print("  trace scene excludes {} non-MainColor opaque draws and all {} transparent draws\n",
+        excludedOpaque, worldDrawContext.TransparentSurfaces.size());
+    if (exactMaskPath) {
+        std::ofstream file(exactMaskPath, std::ios::binary);
+        file << "PF\n" << extent.width << " " << extent.height << "\n-1.0\n";
+        for (int y = int(extent.height) - 1; y >= 0; --y) {
+            for (uint32_t x = 0; x < extent.width; ++x) {
+                const glm::vec3& value = exactMask[size_t(y) * extent.width + x];
+                file.write(reinterpret_cast<const char*>(&value), 3 * sizeof(float));
+            }
+        }
+        if (!file) std::abort();
+        fmt::print("Sun visibility exact receiver mask: {}\n", exactMaskPath);
+    }
 }
 
 void VulkanEngine::capture_raster(const char* filename)
@@ -663,6 +926,7 @@ void VulkanEngine::capture_raster(const char* filename)
         << "\nRender scale: " << renderScale
         << "\nSSGI enabled: " << _ssgi.enabled
         << "\nSSGI preset: " << _ssgi.qualityPreset
+        << "\nTrace environment map: " << _ssgi.traceEnvironmentMap
         << "\nDebug view: " << static_cast<int>(_debugViews.view)
         << "\nFrames: " << _frameNumber
         << "\nLinear mean: " << sum / pixels
@@ -670,6 +934,10 @@ void VulkanEngine::capture_raster(const char* filename)
         << render_camera().position.x << "," << render_camera().position.y
         << "," << render_camera().position.z << " pitch="
         << render_camera().pitch << " yaw=" << render_camera().yaw << "\n";
+    write_capture_lighting(metadata);
+    if (_r4Contributions.sunVisibilityCheck) {
+        measure_sun_visibility(values, extent);
+    }
     fmt::print("Raster capture {}: {}x{}, ssgi={}, linear mean={}, nonfinite={}\n",
         filename, extent.width, extent.height, _ssgi.enabled, sum / pixels, invalid);
     if (!file || !metadata) std::abort();
@@ -701,6 +969,10 @@ void VulkanEngine::begin_cinematic_recording(
     _cinematic.basePosition = _editorCamera.position;
     _cinematic.baseYaw = _editorCamera.yaw;
     _cinematic.basePitch = _editorCamera.pitch;
+    if (SDL_getenv("MIRABILIS_R4_INDOOR_SWEEP")) {
+        _cinematic.yawSweepRadians = glm::radians(20.0f);
+        _cinematic.pushInDistance = 0.25f;
+    }
     fmt::print(
         "Cinematic recording started: {} frames to '{}'\n",
         _cinematic.totalFrames, outputDirectory);
@@ -715,6 +987,38 @@ float smooth_step(float t) { return t * t * (3.0f - 2.0f * t); }
 
 void VulkanEngine::apply_cinematic_camera_pose()
 {
+    // Bounded visual regression only; ordinary editor recordings keep their path.
+    const char* sequence = SDL_getenv("MIRABILIS_TEST_VISUAL_SEQUENCE");
+    const std::string test = sequence ? sequence : "";
+    if (!test.empty() && SDL_getenv("MIRABILIS_TEST_FRAMES")) {
+        const int frame = _cinematic.frameIndex;
+        _editorCamera.pitch = _cinematic.basePitch;
+        _editorCamera.yaw = _cinematic.baseYaw;
+        _editorCamera.position = _cinematic.basePosition;
+        if (std::string_view(test) == "living") {
+            const float slow = smooth_step(std::clamp(float(frame - 120) / 180.0f, 0.0f, 1.0f));
+            const float fast = smooth_step(std::clamp(float(frame - 300) / 12.0f, 0.0f, 1.0f));
+            _editorCamera.yaw += glm::radians(20.0f) * slow - glm::radians(40.0f) * fast;
+        } else if (std::string_view(test) == "portal" && !_authoredPortals.pairs.empty()) {
+            const auto& pair = _authoredPortals.pairs.front();
+            const float travel = smooth_step(std::clamp(float(frame - 120) / 180.0f, 0.0f, 1.0f));
+            const float distance = 2.5f - 3.0f * travel;
+            const glm::vec3 position = pair.first.position + pair.first.normal * distance;
+            _editorCamera.position = distance >= 0.0f ? position :
+                transform_position_through_portal(pair.first, pair.second, position);
+            if (distance < 0.0f) {
+                const glm::vec3 forward = transform_direction_through_portal(
+                    pair.first, pair.second, -pair.first.normal);
+                _editorCamera.yaw = std::atan2(forward.x, -forward.z);
+                _editorCamera.pitch = std::asin(std::clamp(forward.y, -1.0f, 1.0f));
+            }
+        } else {
+            fmt::print("GI TEST FAIL: unknown visual sequence or missing portal pair\n");
+            std::abort();
+        }
+        _editorCamera.velocity = glm::vec3(0.0f);
+        return;
+    }
     const float t = _cinematic.totalFrames > 1
         ? float(_cinematic.frameIndex) / float(_cinematic.totalFrames - 1)
         : 0.0f;
@@ -733,23 +1037,44 @@ void VulkanEngine::apply_cinematic_camera_pose()
     _editorCamera.velocity = glm::vec3(0.0f);
 }
 
-void VulkanEngine::capture_cinematic_frame()
+void VulkanEngine::capture_cinematic_frame(const char* directory, int frameIndex)
 {
+    if (!directory && SDL_getenv("MIRABILIS_R4_NO_CINEMATIC_CAPTURE")) return;
+    if (!directory && SDL_getenv("MIRABILIS_TEST_VISUAL_SEQUENCE") && SDL_getenv("MIRABILIS_TEST_FRAMES")) {
+        // One snapshot per second, with denser samples around the turn/crossing.
+        const int frame = _cinematic.frameIndex;
+        const std::string test = SDL_getenv("MIRABILIS_TEST_VISUAL_SEQUENCE");
+        const bool transition = test == "living" ? frame >= 300 && frame <= 330 && frame % 3 == 0
+            : frame >= 240 && frame <= 270 && frame % 2 == 0;
+        if (frame % 30 == 0 || transition) {
+            const std::string path = fmt::format("{}/frame_{:04}",
+                _cinematic.outputDirectory, _cinematic.frameIndex);
+            capture_raster(path.c_str());
+        }
+        return;
+    }
     const bool tonemapped = _postProcess.tonemapEnabled &&
         _debugViews.view == RenderDebugView::None &&
         _postProcess.tonemapPipeline.pipeline != VK_NULL_HANDLE;
-    const VkImageLayout layout = tonemapped
+    const bool presented = directory && tonemapped && _rendererMode == RendererMode::Raster;
+    const bool fxaa = _postProcess.fxaaEnabled && _postProcess.fxaaPipeline.pipeline != VK_NULL_HANDLE;
+    const AllocatedImage& source = presented ? (fxaa ? _postProcess.image : _postProcess.tonemapImage) : _drawImage;
+    const VkImageLayout layout = presented ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : tonemapped
         ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
         : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     const VkExtent2D extent = _drawExtent;
-    const auto values = read_ssgi_image(_drawImage, extent, layout);
+    const auto values = read_ssgi_image(source, extent, layout);
+    const uint32_t width = directory ? std::min(960u, extent.width) : extent.width;
+    const uint32_t height = std::max(1u, extent.height * width / extent.width);
 
     // A fixed Reinhard-and-sRGB tonemap independent of the engine's own
     // configurable tonemap pass: the goal here is a consistently viewable
     // sequence, not matching whatever tonemap settings happen to be active.
-    std::vector<unsigned char> pixels(size_t(extent.width) * extent.height * 3);
-    for (size_t i = 0; i < size_t(extent.width) * extent.height; ++i) {
-        glm::vec3 linear = glm::vec3(values[i]);
+    std::vector<unsigned char> pixels(size_t(width) * height * 3);
+    for (size_t i = 0; i < size_t(width) * height; ++i) {
+        const size_t sourcePixel = (i / width * extent.height / height) * extent.width +
+            (i % width * extent.width / width);
+        glm::vec3 linear = glm::vec3(values[sourcePixel]);
         if (!std::isfinite(linear.x) || !std::isfinite(linear.y) ||
             !std::isfinite(linear.z)) {
             linear = glm::vec3(0.0f);
@@ -757,7 +1082,7 @@ void VulkanEngine::capture_cinematic_frame()
         const glm::vec3 mapped = linear / (linear + glm::vec3(1.0f));
         for (int c = 0; c < 3; ++c) {
             const float channel = mapped[c];
-            const float srgb = channel <= 0.0031308f
+            const float srgb = presented ? linear[c] : channel <= 0.0031308f
                 ? channel * 12.92f
                 : 1.055f * std::pow(channel, 1.0f / 2.4f) - 0.055f;
             pixels[i * 3 + c] = static_cast<unsigned char>(
@@ -766,12 +1091,17 @@ void VulkanEngine::capture_cinematic_frame()
     }
 
     const std::string path = fmt::format(
-        "{}/frame_{:04}.ppm", _cinematic.outputDirectory, _cinematic.frameIndex);
+        "{}/frame_{:04}.ppm", directory ? directory : _cinematic.outputDirectory.c_str(),
+        directory ? frameIndex : _cinematic.frameIndex);
     std::ofstream file(path, std::ios::binary);
-    file << "P6\n" << extent.width << " " << extent.height << "\n255\n";
+    file << "P6\n" << width << " " << height << "\n255\n";
     file.write(reinterpret_cast<const char*>(pixels.data()), pixels.size());
     if (!file) {
         fmt::print("Cinematic frame write failed: {}\n", path);
+        if (directory) {
+            SDL_setenv("MIRABILIS_PORTAL_RECORD", "0", 1);
+            return;
+        }
         std::abort();
     }
 }
@@ -810,12 +1140,47 @@ void VulkanEngine::capture_ssgi(const char* filename)
         if (!file) std::abort();
     };
     writePfm(std::string(filename) + ".indirect.pfm", values);
+    // The trace's own output, before the temporal clamp and the spatial
+    // filter: every ray lands in exactly one R4 class here, so ray-owner
+    // removal and closure are tested on this image (R4.5).
+    writePfm(std::string(filename) + ".raw.pfm", read_ssgi_image(_ssgi.rawImage, extent));
 
     // The trace's diagnostic image: g = steps taken / (steps x rays), b = 1 -
     // screen hit fraction.  Pixels that traced nothing (background, or read
-    // from screen probes) write both as 0 and are left out; a traced pixel
-    // has taken steps, missed, or both.
+    // from screen probes) write both as at most 0 and are left out; a traced
+    // pixel has taken steps, missed, or both.
     const auto diagnostic = read_ssgi_image(_ssgi.debugImage, extent);
+    // IQ4 Q1: r = 1 where uniform screen probes served the pixel, 2 where
+    // adaptive ones did, g = what the probes alone reconstruct there (every
+    // ray 1 under MIRABILIS_R4_RAY_COVERAGE), b = 1 where the pixel's own
+    // cache sky covers it.
+    uint32_t adaptiveRequested = 0;
+    if (_ssgi.probesEnabled) {
+        std::vector<glm::vec4> probe(diagnostic.size());
+        for (size_t i = 0; i < diagnostic.size(); ++i) {
+            const bool served = std::abs(diagnostic[i].r - 0.75f) < 1e-3f;
+            probe[i] = glm::vec4(served ? (diagnostic[i].g < -0.5f ? 2.0f : 1.0f) : 0.0f,
+                served ? diagnostic[i].a : 0.0f,
+                served && diagnostic[i].b < -0.5f ? 1.0f : 0.0f, 0.0f);
+        }
+        writePfm(std::string(filename) + ".probe.pfm", probe);
+        // The last frame's adaptive request count: the only readback of the
+        // adaptive buffer, and only here.
+        auto readback = create_buffer(sizeof(uint32_t), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VMA_MEMORY_USAGE_GPU_TO_CPU);
+        immediate_submit([&](VkCommandBuffer cmd) {
+            const VkBufferCopy copy{0, 0, sizeof(uint32_t)};
+            vkCmdCopyBuffer(cmd, _ssgi.adaptiveBuffer.buffer, readback.buffer, 1, &copy);
+        });
+        void* mapped = nullptr;
+        VK_CHECK(vmaMapMemory(_allocator, readback.allocation, &mapped));
+        vmaInvalidateAllocation(_allocator, readback.allocation, 0, VK_WHOLE_SIZE);
+        std::memcpy(&adaptiveRequested, mapped, sizeof(uint32_t));
+        vmaUnmapMemory(_allocator, readback.allocation);
+        destroy_buffer(readback);
+        fmt::print("SSGI adaptive probes: requested {}, placed {} (budget 1024)\n",
+            adaptiveRequested, std::min(adaptiveRequested, 1024u));
+    }
     double hitSum = 0.0, stepSum = 0.0;
     size_t traced = 0;
     for (const glm::vec4& value : diagnostic) {
@@ -842,9 +1207,9 @@ void VulkanEngine::capture_ssgi(const char* filename)
         << "\nFilter enabled: " << _ssgi.spatialFilterEnabled
         << "\nFilter radius: " << _ssgi.filterRadius
         << "\nIntensity: " << _ssgi.intensity
-        << "\nAmbient retention: " << _ssgi.ambientRetention
         << "\nMiss fill: "
         << (_ssgi.traceEnvironmentMap ? "environment map" : "analytic gradient")
+        << "\nTrace environment map: " << _ssgi.traceEnvironmentMap
         << "\nEnvironment mip: " << _skyboxEnvironmentLod
         << "\nIndirect sky/sun split: " << _skyboxIndirectClamp
         // Captures taken before the albedo multiply moved to the
@@ -859,6 +1224,11 @@ void VulkanEngine::capture_ssgi(const char* filename)
         << render_camera().position.x << "," << render_camera().position.y
         << "," << render_camera().position.z << " pitch="
         << render_camera().pitch << " yaw=" << render_camera().yaw << "\n";
+    if (_ssgi.probesEnabled) {
+        metadata << "Adaptive probes requested: " << adaptiveRequested
+            << "\nAdaptive probes placed: " << std::min(adaptiveRequested, 1024u) << "\n";
+    }
+    write_capture_lighting(metadata);
 
     if (const char* referencePath = std::getenv("MIRABILIS_SSGI_REFERENCE")) {
         std::ifstream referenceFile(referencePath, std::ios::binary);

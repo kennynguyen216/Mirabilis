@@ -12,6 +12,7 @@ layout(push_constant) uniform TonemapSettings {
     // x = exposure multiplier, y = operator (0 ACES, 1 Reinhard),
     // z = 1 while the tonemap is bypassed and only the encode runs.
     vec4 settings;
+    vec4 whiteBalanceGain;
 } push;
 
 layout(location = 0) out vec4 outFragColor;
@@ -56,7 +57,7 @@ void main()
     // read against the region the current render scale actually filled.
     vec4 hdr = texelFetch(hdrImage, ivec2(gl_FragCoord.xy), 0);
 
-    vec3 exposed = max(hdr.rgb * push.settings.x, vec3(0.0));
+    vec3 exposed = max(hdr.rgb * push.whiteBalanceGain.rgb * push.settings.x, vec3(0.0));
     vec3 mapped;
     if (push.settings.z > 0.5) {
         // Bypass: encode only.  Lets the tonemap curve be compared against the

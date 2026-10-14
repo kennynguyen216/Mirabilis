@@ -1,0 +1,46 @@
+#version 450
+
+// IQ3 auto-exposure metering (docs/lumen_lite_design.md): a 256-bin log2
+// luminance histogram of the linear frame.  The CPU reads it back two frames
+// later and picks the tonemap exposure from it (vk_engine_post_process.cpp),
+// so the constants here must match auto_exposure_mean_log2() there.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) uniform sampler2D hdrImage;
+layout(std430, set = 0, binding = 1) buffer Histogram { uint bins[]; };
+
+layout(push_constant) uniform Metering {
+    // xy = the rendered extent, z = this frame slot's first bin.
+    uvec4 extentAndBase;
+} push;
+
+// Bin 0 holds black, zero, negative and non-finite values; bins 1-255 span
+// log2 luminance [-16, 8).
+const float MinLog2 = -16.0;
+const float Log2Range = 24.0;
+
+shared uint localBins[256];
+
+void main()
+{
+    uint index = gl_LocalInvocationIndex;
+    localBins[index] = 0u;
+    barrier();
+
+    uvec2 pixel = gl_GlobalInvocationID.xy;
+    if (all(lessThan(pixel, push.extentAndBase.xy))) {
+        vec3 color = texelFetch(hdrImage, ivec2(pixel), 0).rgb;
+        float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        uint bin = 0u;
+        if (luminance > exp2(MinLog2) && !isinf(luminance)) {
+            float t = (log2(luminance) - MinLog2) / Log2Range;
+            bin = 1u + min(uint(t * 255.0), 254u);
+        }
+        atomicAdd(localBins[bin], 1u);
+    }
+    barrier();
+
+    if (localBins[index] != 0u) {
+        atomicAdd(bins[push.extentAndBase.z + index], localBins[index]);
+    }
+}

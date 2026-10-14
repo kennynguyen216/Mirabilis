@@ -20,14 +20,14 @@ HEADER = ROOT / "src" / "vk_engine.h"
 ENGINE = ROOT / "src" / "vk_engine.cpp"
 SSGI = ROOT / "src" / "vk_engine_ssgi.cpp"
 
-# The table as the design document records it, in the order
+# The current quality table, in the order
 # apply_ssgi_quality_preset() assigns: halfResolution, raysPerPixel, stepCount,
 # rayLength, thickness, startOffset, filterRadius, filterDepthFalloff,
 # filterNormalPower, historyWeight.
 EXPECTED_PRESETS = [
     ("false", "4", "32", "12.0f", "0.35f", "0.08f", "3", "800.0f", "32.0f", "0.92f"),
     ("true", "4", "48", "16.0f", "0.30f", "0.06f", "4", "700.0f", "28.0f", "0.94f"),
-    ("true", "2", "32", "12.0f", "0.35f", "0.08f", "3", "800.0f", "32.0f", "0.92f"),
+    ("true", "2", "32", "12.0f", "0.35f", "0.08f", "5", "800.0f", "32.0f", "0.92f"),
     ("true", "1", "16", "8.0f", "0.45f", "0.10f", "2", "900.0f", "36.0f", "0.90f"),
     ("false", "8", "96", "20.0f", "0.25f", "0.05f", "5", "800.0f", "32.0f", "0.96f"),
 ]
@@ -104,7 +104,7 @@ class SsgiPresetDefault(unittest.TestCase):
         )
 
     def test_presets_zero_to_four_keep_their_table_entries(self):
-        """R2 changes which preset starts, never what any preset means."""
+        """Preset selection applies the documented quality settings."""
         table = preset_table()
         self.assertEqual(len(table), len(EXPECTED_PRESETS))
         for index, (actual, expected) in enumerate(zip(table, EXPECTED_PRESETS)):
@@ -135,6 +135,8 @@ class SsgiPresetDefault(unittest.TestCase):
             re.S,
         )
         assert body, "apply_ssgi_quality_preset not found in " + str(SSGI)
+        self.assertNotIn("_surfaceCache", body.group(1),
+                         "SSGI presets must preserve independent cache tuning")
         for field in PRESET_OWNED_FIELDS:
             self.assertIn(
                 f"_ssgi.{field}",

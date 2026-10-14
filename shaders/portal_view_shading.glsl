@@ -3,10 +3,17 @@
 // differ only by MIRABILIS_ALPHA_MASK.  Its material response comes from the
 // same material_brdf.glsl as the main camera's, so the two views differ only
 // in their outputs and ambient policy, never in the BRDF.
+#define MIRABILIS_PORTAL_GI 1
 #include "input_structures.glsl"
 #include "alpha_mask.glsl"
 #include "environment.glsl"
 #include "material_brdf.glsl"
+#include "portal_indirect.glsl"
+#include "indirect_color.glsl"
+
+#ifndef MIRABILIS_ALPHA_MASK
+layout(early_fragment_tests) in;
+#endif
 
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec4 inColor;
@@ -38,30 +45,13 @@ void main()
     vec3 normal = material_shading_normal(geometricNormal, inTangent, inUV);
     MaterialSurface surface = material_surface(
         baseColor.rgb, inUV, geometricNormal, normal, inWorldPosition);
-    // Ambient light is deliberately left unshadowed; without it an occluded
-    // surface would be pure black rather than merely out of the sun.  What it
-    // does get is ambient occlusion, which asks the different question of how
-    // much of the surrounding hemisphere nearby geometry blocks.
     float visibility = sunlight_visibility(inWorldPosition, geometricNormal);
-    float occlusion = ambient_occlusion(gl_FragCoord.xy);
-    // A portal camera cannot run SSGI: every screen-space buffer in the frame
-    // describes the room in front of the player, not the one through the
-    // opening.  What it must not do is carry on spending the whole flat
-    // ambient term while the main camera has handed most of that job to SSGI,
-    // because then the same wall is lit two ways and changes colour the
-    // instant the player steps through.  So this camera divides the work the
-    // same way the main one does, and stands the missing screen-space
-    // estimate up with the environment SSGI itself falls back to whenever a
-    // ray leaves the depth buffer -- evaluated over the whole hemisphere at
-    // once, since there are no rays here to average.
-    //
-    // It is an approximation and not portal SSGI: it carries no colour
-    // bleeding, no local indirect shadowing, and no light from surfaces the
-    // portal camera cannot see.  It only stops the two cameras disagreeing
-    // about how much indirect light there is.
-    float substitute = sceneData.portalIndirectSettings.x;
-    float ambientScale = mix(
-        1.0, clamp(sceneData.indirectSettings.x, 0.0, 1.0), substitute);
+    // Lumen portals gather scene lighting; plain SSGI keeps its legacy stand-in.
+    bool lumen = sceneData.portalIndirectSettings.y == 1.0;
+    // The main camera's AO coordinates do not describe this virtual camera.
+    float occlusion = lumen ? 1.0 : ambient_occlusion(gl_FragCoord.xy);
+    float substitute = lumen ? 0.0 : sceneData.portalIndirectSettings.x;
+    float ambientScale = lumen ? 0.0 : 1.0 - substitute;
     vec3 ambientLight = sceneData.ambientColor.rgb * occlusion * ambientScale +
         substitute * environment_irradiance(normal) * occlusion;
 
@@ -81,12 +71,26 @@ void main()
     } else {
         material_ambient(surface, ambientLight, ambientDiffuse, ambientSpecular);
     }
+    if (!lumen && substitute > 0.0 && sceneData.environmentTint.w < 1.0) {
+        vec3 standIn = (sceneData.iblSettings.x > 0.5
+            ? material_ibl_diffuse_light(surface.normal) : environment_irradiance(normal)) * occlusion * substitute;
+        ambientDiffuse += material_diffuse_albedo(surface) *
+            (indirect_color(standIn, sceneData.environmentTint.w) - standIn);
+    }
 
     vec3 emission = material_emission(geometricNormal, inWorldPosition);
+    vec3 emitterDiffuse = vec3(0.0);
+    vec3 emitterSpecular = vec3(0.0);
+    if (lumen)
+        material_emitters(surface, inWorldPosition, geometricNormal, gl_FragCoord.xy,
+            emitterDiffuse, emitterSpecular);
+    vec3 indirect = lumen ? material_diffuse_albedo(surface) *
+        indirect_color(portal_indirect(inWorldPosition, geometricNormal), sceneData.environmentTint.w) * sceneData.portalIndirectSettings.z
+        : vec3(0.0);
 
     outFragColor = vec4(
         directDiffuse + directSpecular + ambientDiffuse + ambientSpecular +
-            emission,
+            emission + emitterDiffuse + emitterSpecular + indirect,
         1.0);
     vec3 debugColor;
     if (material_debug_color(

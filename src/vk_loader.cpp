@@ -257,6 +257,7 @@ std::vector<std::shared_ptr<MeshAsset>> build_gltf_meshes(
     std::vector<Vertex> vertices;
 
     for (size_t meshIndex = 0; meshIndex < gltf.meshes.size(); ++meshIndex) {
+        SDL_PumpEvents();
         const fastgltf::Mesh& mesh = gltf.meshes[meshIndex];
         auto newMesh = std::make_shared<MeshAsset>();
         newMesh->name = object_name(mesh.name, "mesh_", meshIndex);
@@ -477,6 +478,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
     // decodes them on sample.
     auto loadImage = [&](fastgltf::Image& source, VkFormat format)
         -> std::optional<AllocatedImage> {
+        SDL_PumpEvents();
         int width = 0;
         int height = 0;
         int channels = 0;

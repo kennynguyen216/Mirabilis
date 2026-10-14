@@ -69,13 +69,16 @@ void VulkanEngine::init_depth_normal_resources()
     _prepass.depthImage = create_image(
         prepassExtent,
         prepassDepthFormat,
-        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        // Transfer source for the R4.15 sun-visibility check's readback.
+        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     // Wider than normals need, but trivial to read in the debug views. Two
     // signed 16-bit channels with octahedral encoding is the later saving.
     _prepass.normalImage = create_image(
         prepassExtent,
         VK_FORMAT_R16G16B16A16_SFLOAT,
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
 
     // Nearest and clamped: these buffers are read per pixel, and filtering
     // across a silhouette would blend two unrelated surfaces into a position

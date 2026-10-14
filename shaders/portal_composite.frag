@@ -3,9 +3,7 @@
 
 #include "input_structures.glsl"
 
-layout(location = 0) in vec3 inNormal;
-layout(location = 1) in vec4 inColor;
-layout(location = 2) in vec2 inUV;
+layout(location = 0) in vec4 inClip;
 layout(location = 0) out vec4 outFragColor;
 
 // The offscreen-camera experiment has already lit the destination scene.
@@ -13,7 +11,10 @@ layout(location = 0) out vec4 outFragColor;
 // view and make the A/B comparison misleading.
 void main()
 {
-    // A Vulkan render target's vertical orientation is opposite the portal
-    // quad's mesh UV convention, so flip V while sampling the camera image.
-    outFragColor = texture(colorTex, vec2(inUV.x, 1.0 - inUV.y));
+    if (inClip.z < 0.0 || inClip.w <= 0.0) discard;
+    gl_FragDepth = clamp(inClip.z / inClip.w, 0.0, 1.0);
+    // This camera image already uses the main view's projection. Mesh UVs
+    // zoom into one sky texel as the aperture approaches the eye.
+    vec2 screenUV = inClip.xy / inClip.w * 0.5 + 0.5;
+    outFragColor = texture(colorTex, screenUV);
 }

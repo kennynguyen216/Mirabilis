@@ -213,10 +213,27 @@
         writes.push_back(write);
     }
 
+    void DescriptorWriter::write_acceleration_structure(
+        int binding, const VkAccelerationStructureKHR& structure)
+    {
+        VkWriteDescriptorSetAccelerationStructureKHR& info =
+            accelerationStructureInfos.emplace_back(VkWriteDescriptorSetAccelerationStructureKHR{
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+                .accelerationStructureCount = 1,
+                .pAccelerationStructures = &structure});
+        VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.pNext = &info;
+        write.dstBinding = static_cast<uint32_t>(binding);
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        writes.push_back(write);
+    }
+
     void DescriptorWriter::clear()
     {
         imageInfos.clear();
         bufferInfos.clear();
+        accelerationStructureInfos.clear();
         writes.clear();
     }
 
