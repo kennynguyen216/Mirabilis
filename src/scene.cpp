@@ -15,6 +15,32 @@ bool finite_matrix(const glm::mat4& value) {
     for (int i = 0; i < 4; ++i) if (!finite_vector(value[i])) return false;
     return true;
 }
+bool collider_subtree_valid(const mirabilis::Scene& scene, EntityRef root,
+    std::optional<EntityRef> parent, const Transform* transform, const Collider* collider) {
+    bool nonzero = true;
+    for (auto ancestor = parent; ancestor;) {
+        nonzero &= glm::all(glm::notEqual(scene.read<Transform>(*ancestor)->scale,glm::vec3(0)));
+        const auto id = scene.read<Hierarchy>(*ancestor)->parent;
+        ancestor = id ? std::optional(scene.get(*id)) : std::nullopt;
+    }
+    struct Visit { EntityRef ref; glm::mat4 parentWorld; bool nonzero; };
+    std::vector<Visit> stack{{root,parent ? scene.world_matrix(*parent) : glm::mat4(1),nonzero}};
+    while (!stack.empty()) {
+        const auto visit = stack.back(); stack.pop_back();
+        const auto& local = visit.ref == root && transform ? *transform : *scene.read<Transform>(visit.ref);
+        const auto world = visit.parentWorld * to_matrix(local);
+        const bool validScale = visit.nonzero && glm::all(glm::notEqual(local.scale,glm::vec3(0)));
+        const auto* shape = visit.ref == root ? collider : scene.read<Collider>(visit.ref);
+        if (shape && shape->hasCollision) {
+            if (!validScale || !finite_matrix(world)) return false;
+            for (int column=0; column<3; ++column)
+                if (glm::length(glm::dvec3(world[column])) == 0) return false;
+        }
+        for (const auto id : scene.read<Hierarchy>(visit.ref)->children)
+            stack.push_back({scene.get(id),world,validScale});
+    }
+    return true;
+}
 }
 bool valid_component(const Transform& value) {
     return finite_vector(value.position) && finite_vector(value.rotation) && finite_vector(value.scale);
@@ -105,27 +131,9 @@ bool Scene::validate_physics_edit(EntityRef ref, const RigidBody* body, const Co
             }
         }
     }
-    const auto nonzero = [](glm::vec3 scale) { return glm::all(glm::greaterThan(glm::abs(scale),glm::vec3(0))); };
-    if (transform && !nonzero(transform->scale)) {
-        std::vector<EntityRef> stack{ref};
-        while (!stack.empty()) {
-            const auto target = stack.back(); stack.pop_back();
-            const auto* childCollider = target == ref ? collider : read<Collider>(target);
-            if (childCollider && childCollider->hasCollision) return fail("Colliders and their ancestors require nonzero scale");
-            for (const auto id : read<Hierarchy>(target)->children) stack.push_back(get(id));
-        }
-    }
-    if (collider && collider->hasCollision) {
-        auto parent = read<Hierarchy>(ref)->parent;
-        while (parent) {
-            const auto ancestor = get(*parent);
-            if (!nonzero(read<Transform>(ancestor)->scale)) return fail("Collider ancestor has zero scale");
-            parent = read<Hierarchy>(ancestor)->parent;
-        }
-        const auto ownWorld = (read<Hierarchy>(ref)->parent ? world_matrix(*read<Hierarchy>(ref)->parent) : glm::mat4(1)) *
-            to_matrix(transform ? *transform : *read<Transform>(ref));
-        if (!finite_matrix(ownWorld)) return fail("Collider world transform is not finite");
-    }
+    const auto parentId = read<Hierarchy>(ref)->parent;
+    if (!collider_subtree_valid(*this,ref,parentId ? std::optional(get(*parentId)) : std::nullopt,transform,collider))
+        return fail("Collider subtree requires finite world transforms and nonzero ancestor scale");
     return true;
 }
 bool Scene::mutable_ref(EntityRef ref, bool owner) const {
@@ -212,6 +220,8 @@ bool Scene::set_parent(EntityRef child, std::optional<EntityRef> parent, bool ow
         const auto& hierarchy = *read<Hierarchy>(*ancestor);
         ancestor = hierarchy.parent ? std::optional(get(*hierarchy.parent)) : std::nullopt;
     }
+    if (!collider_subtree_valid(*this,child,parent,read<Transform>(child),read<Collider>(child)))
+        return fail("Collider subtree requires finite world transforms and nonzero ancestor scale");
     if (_inDestroyCallback) return enqueue_command(child, [parent, owner](Scene& scene, EntityRef target) { scene.set_parent(target, parent, owner); });
     auto& hierarchy = _registry.get<Hierarchy>(child.entity);
     if (hierarchy.parent) {
