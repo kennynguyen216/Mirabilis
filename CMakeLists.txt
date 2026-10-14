@@ -1,12 +1,16 @@
 ﻿# CMakeList.txt : CMake project for vulkan_guide, include source and define
 # project specific logic here.
 #
-cmake_minimum_required (VERSION 3.12)
+cmake_minimum_required (VERSION 3.21)
 
 project ("vulkan_guide")
 
 
-find_package(Vulkan REQUIRED)
+option(MIRABILIS_BUILD_ENGINE "Build the Vulkan editor" ON)
+include(CTest)
+if(MIRABILIS_BUILD_ENGINE)
+  find_package(Vulkan REQUIRED)
+endif()
 
 add_subdirectory(third_party)
 
@@ -14,6 +18,7 @@ set (CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin")
 set (CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin")
 
 add_subdirectory(src)
+if(MIRABILIS_BUILD_ENGINE)
 
 find_program(GLSL_VALIDATOR glslangValidator HINTS /usr/bin /usr/local/bin $ENV{VULKAN_SDK}/Bin/ $ENV{VULKAN_SDK}/Bin32/)
 
@@ -64,3 +69,5 @@ add_custom_target(
     )
 
 add_dependencies(engine Shaders)
+
+endif()

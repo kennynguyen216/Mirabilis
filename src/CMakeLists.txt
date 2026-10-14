@@ -1,3 +1,14 @@
+add_library(mirabilis_core STATIC scene.cpp scene_queries.cpp player_movement.cpp)
+target_compile_features(mirabilis_core PUBLIC cxx_std_20)
+target_compile_definitions(mirabilis_core PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
+target_include_directories(mirabilis_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(mirabilis_core PUBLIC glm fastgltf_simdjson)
+if(BUILD_TESTING)
+  add_executable(mirabilis_core_tests ../tests/core_smoke.cpp)
+  target_link_libraries(mirabilis_core_tests PRIVATE mirabilis_core doctest::doctest)
+  add_test(NAME mirabilis_core_tests COMMAND mirabilis_core_tests)
+endif()
+if(MIRABILIS_BUILD_ENGINE)
 
 # Add source to this project's executable.
 add_executable (engine 
@@ -46,17 +57,15 @@ add_executable (engine
   camera.cpp
   world.h
   scene.h
-  scene.cpp
   portal.h
   player_movement.h
-  player_movement.cpp
 )
 
 set_property(TARGET engine PROPERTY CXX_STANDARD 20)
 target_compile_definitions(engine PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_include_directories(engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
-target_link_libraries(engine PUBLIC vma glm Vulkan::Vulkan fmt::fmt stb_image SDL2::SDL2 vkbootstrap imgui imguizmo fastgltf::fastgltf fastgltf_simdjson)
+target_link_libraries(engine PUBLIC mirabilis_core vma glm Vulkan::Vulkan fmt::fmt stb_image SDL2::SDL2 vkbootstrap imgui imguizmo fastgltf::fastgltf fastgltf_simdjson)
 
 target_precompile_headers(engine PUBLIC <optional> <vector> <memory> <string> <vector> <unordered_map> <glm/mat4x4.hpp>  <glm/vec4.hpp> <vulkan/vulkan.h>)
 
@@ -65,4 +74,6 @@ if(WIN32)
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_RUNTIME_DLLS:engine> $<TARGET_FILE_DIR:engine>
     COMMAND_EXPAND_LISTS
     )
+endif()
+
 endif()

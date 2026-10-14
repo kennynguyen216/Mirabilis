@@ -671,6 +671,7 @@ void VulkanEngine::cleanup()
     }
         // Scene objects can hold the last reference to a loaded glTF, so
         // they must release it while the device is still alive.
+        _sceneRenderRuntimes.clear();
         _scene.objects.clear();
         loadedScenes.clear();
         _playerModel.reset();

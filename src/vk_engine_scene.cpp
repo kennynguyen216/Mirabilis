@@ -44,22 +44,22 @@ void VulkanEngine::emit_scene_render_objects(
         }
 
         const glm::mat4 world = _scene.world_matrix(object.id);
-        if (object.model != nullptr) {
-            object.model->Draw(world, drawContext);
+        if (_sceneRenderRuntimes[object.id].model != nullptr) {
+            _sceneRenderRuntimes[object.id].model->Draw(world, drawContext);
             continue;
         }
-        if (!object.primitive.valid()) {
+        if (!_sceneRenderRuntimes[object.id].primitive.valid()) {
             continue;
         }
 
         RenderObject renderObject{};
-        renderObject.indexCount = object.primitive.indexCount;
-        renderObject.firstIndex = object.primitive.firstIndex;
-        renderObject.indexBuffer = object.primitive.indexBuffer;
+        renderObject.indexCount = _sceneRenderRuntimes[object.id].primitive.indexCount;
+        renderObject.firstIndex = _sceneRenderRuntimes[object.id].primitive.firstIndex;
+        renderObject.indexBuffer = _sceneRenderRuntimes[object.id].primitive.indexBuffer;
         renderObject.material = object.material.enabled
             ? resolve_scene_material(object)
-            : object.primitive.material;
-        renderObject.bounds = object.primitive.bounds;
+            : _sceneRenderRuntimes[object.id].primitive.material;
+        renderObject.bounds = _sceneRenderRuntimes[object.id].primitive.bounds;
         renderObject.transform = world;
         if (const auto previous = _previousSceneObjectTransforms.find(object.id);
             previous != _previousSceneObjectTransforms.end()) {
@@ -68,7 +68,7 @@ void VulkanEngine::emit_scene_render_objects(
             renderObject.previousTransform = world;
         }
         _previousSceneObjectTransforms[object.id] = world;
-        renderObject.vertexBufferAddress = object.primitive.vertexBufferAddress;
+        renderObject.vertexBufferAddress = _sceneRenderRuntimes[object.id].primitive.vertexBufferAddress;
         drawContext.OpaqueSurfaces.push_back(renderObject);
     }
 }

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <memory>
 #include <string>
 #include <vector>
 
@@ -10,8 +9,6 @@
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 
-#include <vk_loader.h>
-#include <vk_types.h>
 #include <world.h>
 
 // Stable handle for a scene object.  Parent/child links use these instead of
@@ -28,22 +25,7 @@ struct Transform {
 };
 
 glm::mat4 to_matrix(const Transform& transform);
-
-// A GPU primitive owned by the engine (the unit cube and the floor quad).
-// Imported assets use SceneObject::model instead.
-struct MeshPrimitive {
-    uint32_t indexCount{0};
-    uint32_t firstIndex{0};
-    VkBuffer indexBuffer{VK_NULL_HANDLE};
-    VkDeviceAddress vertexBufferAddress{0};
-    Bounds bounds{};
-    MaterialInstance* material{nullptr};
-
-    bool valid() const
-    {
-        return indexBuffer != VK_NULL_HANDLE && material != nullptr;
-    }
-};
+Transform transform_from_matrix(const glm::mat4& matrix);
 
 // Which draw context an object feeds.  The player body must not be drawn for
 // the first-person camera, only for the virtual cameras behind portals.
@@ -130,13 +112,10 @@ struct SceneObject {
     // system (physics, portal placement).  The inspector shows them read-only.
     bool transformDrivenExternally{false};
 
-    MeshPrimitive primitive{};
     // Relative or absolute source path for an ImportedGLTF. The GPU resource
     // itself is reconstructed through loadGltf when a scene is opened.
     std::string modelPath;
-    std::shared_ptr<LoadedGLTF> model;
 
-    bool renderable() const { return primitive.valid() || model != nullptr; }
 };
 
 struct Scene {

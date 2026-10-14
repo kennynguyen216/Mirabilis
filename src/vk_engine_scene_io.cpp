@@ -206,14 +206,14 @@ void VulkanEngine::create_runtime_scene_objects()
     if (SceneObject* playerModel = _scene.get(_playerModelObject)) {
         playerModel->layer = RenderLayer::PortalViewOnly;
         if (_playerModel) {
-            playerModel->model = _playerModel;
+            _sceneRenderRuntimes[playerModel->id].model = _playerModel;
             // The source glTF is about 14 units tall at scale 1.0.
             playerModel->localTransform.scale = glm::vec3(0.12f);
         } else {
             const PlayerMovementSettings& settings = _playerMovement.settings;
             assign_scene_asset(*playerModel, SceneAssetKind::UnitCube);
-            playerModel->primitive.material = &_playerMaterial;
-            playerModel->primitive.bounds = _playerBounds;
+            _sceneRenderRuntimes[playerModel->id].primitive.material = &_playerMaterial;
+            _sceneRenderRuntimes[playerModel->id].primitive.bounds = _playerBounds;
             playerModel->localTransform.position = glm::vec3(
                 0.0f, settings.playerHeight * 0.5f, 0.0f);
             playerModel->localTransform.scale = glm::vec3(
@@ -929,6 +929,8 @@ bool VulkanEngine::load_editor_scene()
         return false;
     }
 
+    VK_CHECK(vkDeviceWaitIdle(_device));
+    _sceneRenderRuntimes.clear();
     _scene = std::move(restoredScene);
     _sandboxRoot = restoredRoot;
     _floorObject = restoredFloor;
@@ -1042,7 +1044,7 @@ void VulkanEngine::build_sandbox_scene()
     _floorObject = _scene.create_object("Floor", _sandboxRoot);
     if (SceneObject* floor = _scene.get(_floorObject)) {
         floor->localTransform.scale = glm::vec3(50.0f, 1.0f, 50.0f);
-        floor->primitive = floorPrimitive;
+        _sceneRenderRuntimes[floor->id].primitive = floorPrimitive;
         floor->assetKind = SceneAssetKind::FloorQuad;
         floor->hasCollision = true;
         floor->collisionShape = CollisionShape::GroundPlane;
@@ -1073,7 +1075,7 @@ void VulkanEngine::build_sandbox_scene()
         }
         wall->localTransform.position = description.position;
         wall->localTransform.scale = description.scale;
-        wall->primitive = cubePrimitive;
+        _sceneRenderRuntimes[wall->id].primitive = cubePrimitive;
         wall->assetKind = SceneAssetKind::UnitCube;
         wall->hasCollision = true;
         wall->portalPlaceable = true;
@@ -1091,7 +1093,7 @@ void VulkanEngine::build_sandbox_scene()
     if (SceneObject* playerModel = _scene.get(_playerModelObject)) {
         playerModel->layer = RenderLayer::PortalViewOnly;
         if (_playerModel) {
-            playerModel->model = _playerModel;
+            _sceneRenderRuntimes[playerModel->id].model = _playerModel;
             // The imported model has a large internal glTF scale (about 14
             // world units tall at 1.0), while the player is roughly 1.8 tall.
             playerModel->localTransform.scale = glm::vec3(0.12f);
@@ -1099,9 +1101,9 @@ void VulkanEngine::build_sandbox_scene()
             // Keep the collision-sized box as a visible fallback if the asset
             // fails to load on another machine.
             const PlayerMovementSettings& settings = _playerMovement.settings;
-            playerModel->primitive = cubePrimitive;
-            playerModel->primitive.material = &_playerMaterial;
-            playerModel->primitive.bounds = _playerBounds;
+            _sceneRenderRuntimes[playerModel->id].primitive = cubePrimitive;
+            _sceneRenderRuntimes[playerModel->id].primitive.material = &_playerMaterial;
+            _sceneRenderRuntimes[playerModel->id].primitive.bounds = _playerBounds;
             playerModel->localTransform.position = glm::vec3(
                 0.0f, settings.playerHeight * 0.5f, 0.0f);
             playerModel->localTransform.scale = glm::vec3(

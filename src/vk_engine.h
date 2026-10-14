@@ -13,6 +13,7 @@
 #include <player_movement.h>
 #include <portal.h>
 #include <scene.h>
+#include "scene_render_data.h"
 #include <world.h>
 
 struct DeletionQueue
@@ -1724,6 +1725,7 @@ class VulkanEngine{
         // portal test panels, and the player body all render and collide from
         // these objects.  Nothing about the level is hard-coded twice.
         Scene _scene;
+        std::unordered_map<SceneObjectID, SceneRenderRuntime> _sceneRenderRuntimes;
         SceneObjectID _sandboxRoot{InvalidSceneObject};
         SceneObjectID _floorObject{InvalidSceneObject};
         SceneObjectID _playerObject{InvalidSceneObject};

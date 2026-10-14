@@ -1,7 +1,13 @@
+add_library(glm INTERFACE)
+target_include_directories(glm INTERFACE glm)
+add_subdirectory(entt)
+add_subdirectory(doctest)
+add_subdirectory(simdjson)
+set(FASTGLTF_DOWNLOAD_SIMDJSON OFF CACHE BOOL "Use vendored simdjson" FORCE)
+if(MIRABILIS_BUILD_ENGINE)
 find_package(Vulkan REQUIRED)
 
 add_library(vkbootstrap STATIC)
-add_library(glm INTERFACE)
 add_library(vma INTERFACE)
 
 add_library(stb_image INTERFACE)
@@ -22,7 +28,6 @@ set_property(TARGET vkbootstrap PROPERTY CXX_STANDARD 20)
 #both vma and glm and header only libs so we only need the include path
 target_include_directories(vma INTERFACE vma)
 
-target_include_directories(glm INTERFACE glm)
 
 #add_library(sdl2 INTERFACE)
 
@@ -60,3 +65,5 @@ target_include_directories(imguizmo PUBLIC ImGuizmo)
 target_link_libraries(imguizmo PUBLIC imgui)
 
 target_include_directories(stb_image INTERFACE stb_image)
+
+endif()

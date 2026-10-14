@@ -17,44 +17,6 @@ namespace {
 
 constexpr const char* EditorSceneDirectory = "../../assets/scenes";
 
-// Inverse of scene.h's Y * X * Z Euler convention.  ImGuizmo gives us a
-// modified matrix; scene objects store editable components, so recover those
-// components after each drag instead of keeping a second matrix representation.
-Transform transform_from_matrix(const glm::mat4& matrix)
-{
-    constexpr float Epsilon = 0.00001f;
-    Transform transform{};
-    transform.position = glm::vec3(matrix[3]);
-
-    glm::mat3 rotation{matrix};
-    transform.scale = glm::vec3(
-        glm::length(rotation[0]),
-        glm::length(rotation[1]),
-        glm::length(rotation[2]));
-    if (transform.scale.x < Epsilon || transform.scale.y < Epsilon ||
-        transform.scale.z < Epsilon) {
-        return transform;
-    }
-    rotation[0] /= transform.scale.x;
-    rotation[1] /= transform.scale.y;
-    rotation[2] /= transform.scale.z;
-
-    // For R = Ry(yaw) * Rx(pitch) * Rz(roll):
-    // pitch = asin(-R[1][2]), yaw = atan2(R[0][2], R[2][2]),
-    // roll = atan2(R[1][0], R[1][1]). GLM uses column-major indexing.
-    transform.rotation.x = std::asin(std::clamp(-rotation[2][1], -1.0f, 1.0f));
-    const float cosPitch = std::cos(transform.rotation.x);
-    if (std::abs(cosPitch) > Epsilon) {
-        transform.rotation.y = std::atan2(rotation[2][0], rotation[2][2]);
-        transform.rotation.z = std::atan2(rotation[0][1], rotation[1][1]);
-    } else {
-        // At the singularity yaw and roll describe the same degree of
-        // freedom. Preserve a stable, editable representation.
-        transform.rotation.y = std::atan2(-rotation[0][2], rotation[0][0]);
-        transform.rotation.z = 0.0f;
-    }
-    return transform;
-}
 
 } // namespace
 
@@ -958,6 +920,14 @@ bool VulkanEngine::delete_selected_scene_object()
         return false;
     }
 
+    VK_CHECK(vkDeviceWaitIdle(_device));
+    const auto releaseBranch = [&](const auto& self, SceneObjectID id) -> void {
+        if (const auto* node = _scene.get(id)) {
+            for (const auto child : node->children) self(self, child);
+            _sceneRenderRuntimes.erase(id);
+        }
+    };
+    releaseBranch(releaseBranch, object->id);
     if (!_scene.destroy_object(object->id)) {
         return false;
     }
@@ -1005,7 +975,7 @@ bool VulkanEngine::duplicate_selected_scene_object()
         const TimeTrialRole timeTrialRole = branchSource->timeTrialRole;
         const SceneMaterial material = branchSource->material;
         const std::string modelPath = branchSource->modelPath;
-        const std::shared_ptr<LoadedGLTF> model = branchSource->model;
+        const std::shared_ptr<LoadedGLTF> model = _sceneRenderRuntimes[branchSource->id].model;
         const std::vector<SceneObjectID> children = branchSource->children;
 
         const SceneObjectID duplicateID = _scene.create_object(
@@ -1028,7 +998,7 @@ bool VulkanEngine::duplicate_selected_scene_object()
         duplicate->modelPath = modelPath;
         if (assetKind == SceneAssetKind::ImportedGLTF) {
             duplicate->assetKind = assetKind;
-            duplicate->model = model;
+            _sceneRenderRuntimes[duplicate->id].model = model;
         } else {
             assign_scene_asset(*duplicate, assetKind);
         }
@@ -1320,7 +1290,7 @@ SceneObjectID VulkanEngine::import_gltf_actor(std::string_view modelPath)
         glm::inverse(parentWorld) * glm::vec4(spawnWorldPosition, 1.0f));
     object->assetKind = SceneAssetKind::ImportedGLTF;
     object->modelPath = std::string(modelPath);
-    object->model = *model;
+    _sceneRenderRuntimes[object->id].model = *model;
 
     _selectedSceneObject = id;
     _sceneDocument.dirty = true;
@@ -1332,12 +1302,12 @@ void VulkanEngine::assign_scene_asset(
     SceneAssetKind assetKind)
 {
     object.assetKind = assetKind;
-    object.primitive = {};
-    object.model.reset();
+    _sceneRenderRuntimes[object.id].primitive = {};
+    _sceneRenderRuntimes[object.id].model.reset();
 
     switch (assetKind) {
     case SceneAssetKind::FloorQuad:
-        object.primitive = MeshPrimitive{
+        _sceneRenderRuntimes[object.id].primitive = MeshPrimitive{
             .indexCount = 6,
             .firstIndex = 0,
             .indexBuffer = _floorMesh.indexBuffer.buffer,
@@ -1346,7 +1316,7 @@ void VulkanEngine::assign_scene_asset(
             .material = &_floorMaterial};
         break;
     case SceneAssetKind::UnitCube:
-        object.primitive = MeshPrimitive{
+        _sceneRenderRuntimes[object.id].primitive = MeshPrimitive{
             .indexCount = 36,
             .firstIndex = 0,
             .indexBuffer = _wallMesh.indexBuffer.buffer,
@@ -1355,7 +1325,7 @@ void VulkanEngine::assign_scene_asset(
             .material = &_wallMaterial};
         break;
     case SceneAssetKind::SurfRamp:
-        object.primitive = MeshPrimitive{
+        _sceneRenderRuntimes[object.id].primitive = MeshPrimitive{
             .indexCount = 24,
             .firstIndex = 0,
             .indexBuffer = _rampMesh.indexBuffer.buffer,
@@ -1370,7 +1340,7 @@ void VulkanEngine::assign_scene_asset(
         }
         auto model = loadGltf(this, object.modelPath);
         if (model) {
-            object.model = *model;
+            _sceneRenderRuntimes[object.id].model = *model;
         } else {
             fmt::print(
                 "Failed to load scene glTF '{}' for actor '{}'.\n",
@@ -1386,13 +1356,13 @@ void VulkanEngine::assign_scene_asset(
     // Reuse the bright portal/player materials for level-authoring markers.
     // Material pointers are rebuilt from the saved role every time a scene is
     // loaded, just like the primitive itself.
-    if (object.primitive.valid()) {
+    if (_sceneRenderRuntimes[object.id].primitive.valid()) {
         if (object.timeTrialRole == TimeTrialRole::SpawnPoint) {
-            object.primitive.material = &_playerMaterial;
+            _sceneRenderRuntimes[object.id].primitive.material = &_playerMaterial;
         } else if (object.timeTrialRole == TimeTrialRole::StartTrigger) {
-            object.primitive.material = &_bluePortalMaterial;
+            _sceneRenderRuntimes[object.id].primitive.material = &_bluePortalMaterial;
         } else if (object.timeTrialRole == TimeTrialRole::FinishTrigger) {
-            object.primitive.material = &_orangePortalMaterial;
+            _sceneRenderRuntimes[object.id].primitive.material = &_orangePortalMaterial;
         }
     }
 }

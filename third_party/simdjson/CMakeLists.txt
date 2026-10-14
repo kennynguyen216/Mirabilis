@@ -1,0 +1,7 @@
+add_library(fastgltf_simdjson STATIC simdjson.cpp)
+target_include_directories(fastgltf_simdjson PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>" "$<INSTALL_INTERFACE:include>")
+target_compile_features(fastgltf_simdjson PUBLIC cxx_std_17)
+install(TARGETS fastgltf_simdjson EXPORT fastgltf-targets ARCHIVE DESTINATION lib)
+if(MSVC)
+  target_compile_options(fastgltf_simdjson PRIVATE /bigobj)
+endif()
