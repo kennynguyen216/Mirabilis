@@ -1759,6 +1759,7 @@ class VulkanEngine{
         std::vector<SurfRamp> _activeSurfRamps;
         std::unordered_map<PersistentID, SceneMaterialRuntime> _sceneMaterialRuntimes;
         std::unordered_map<PersistentID, glm::mat4> _previousSceneObjectTransforms;
+        std::unordered_map<PersistentID, std::vector<glm::mat4>> _previousSceneModelTransforms;
         std::unordered_map<std::string, AllocatedImage> _sceneTextureCache;
         std::unordered_set<std::string> _failedSceneTextures;
     };
