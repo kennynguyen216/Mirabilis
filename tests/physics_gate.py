@@ -24,7 +24,8 @@ def telemetry(logs):
             continue
         fields = dict(re.findall(r'([a-z][a-z-]*)=([^\s]+)', line))
         assert all(key in fields for key in ('phase', *FIELDS)), line
-        records.append({'phase': fields['phase'], **{key: int(fields[key]) for key in FIELDS}})
+        records.append({'phase': fields['phase'], **{key: int(fields[key]) for key in FIELDS},
+                        **{key: int(fields[key]) for key in ('editor-mode', 'body-sleep', 'ecs-sleep') if key in fields}})
     assert records, 'No physics telemetry was emitted'
     assert all(b['frame'] > a['frame'] for a, b in zip(records, records[1:])), 'Telemetry frame order'
     return records
@@ -92,6 +93,10 @@ def main():
     assert not output.exists() or not any(output.iterdir()), 'Use fresh evidence directory'
     output.mkdir(parents=True, exist_ok=True)
     ecs_gate.REPO, ecs_gate.OUT = repo, output
+    for source in (Path(__file__), Path(ecs_gate.__file__)):
+        shutil.copy2(source, output/f'{source.stem}.source.py')
+    (output/'runner-hashes.json').write_text(json.dumps({source.name: ecs_gate.digest(source)
+        for source in (Path(__file__), Path(ecs_gate.__file__))}, indent=2))
     scratch = output/'scratch-scenes'
     scratch.mkdir()
     for scene in (repo/'assets/scenes').glob('*.json'):
