@@ -106,6 +106,7 @@ def validation(gate=False):
         scratch.mkdir(exist_ok=True)
         for scene in (REPO/'assets/scenes').glob('*.json'):
             shutil.copy2(scene,scratch/scene.name)
+        shutil.copy2(REPO/'tests/fixtures/ecs_input/invalid_transform.json',scratch/'invalid_transform.json')
     summary = {}
     for name, scene, frames, extra, marker in cases:
         flags = {'MIRABILIS_TEST_SCENE':scene,'MIRABILIS_TEST_FRAMES':str(frames),'MIRABILIS_TEST_WINDOW':'1600x900','VK_LAYER_VALIDATE_SYNC':'1','VK_KHRONOS_VALIDATION_VALIDATE_SYNC':'true',**extra}
