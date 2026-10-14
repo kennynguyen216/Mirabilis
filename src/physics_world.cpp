@@ -12,6 +12,7 @@
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtx/euler_angles.hpp>
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -75,7 +76,10 @@ bool exact_world_trs(const glm::mat4& world,Transform& out) {
         if(!std::isfinite(scale[c]) || scale[c]==0) return false;
         unmirrored[c]/=scale[c];
     }
-    out=transform_from_matrix(unmirrored);
+    out.position=glm::vec3(world[3]);
+    double yaw,pitch,roll;
+    glm::extractEulerAngleYXZ(glm::dmat4(unmirrored),yaw,pitch,roll);
+    out.rotation=glm::vec3(pitch,yaw,roll);
     out.scale=scale;
     if(mirrored) out.scale.x=-out.scale.x;
     return valid_component(out) && same_matrix(world,to_matrix(out));
@@ -110,6 +114,17 @@ struct PhysicsWorld::Impl {
                 ancestor=scene.get(*h.parent);
             }
         }
+    }
+    void wake_neighbors(JPH::BodyID id) {
+        JPH::AABox bounds;
+        {
+            JPH::BodyLockRead lock(system.GetBodyLockInterface(),id);
+            if(!lock.Succeeded() || !lock.GetBody().IsStatic()) return;
+            bounds=lock.GetBody().GetWorldSpaceBounds();
+        }
+        bounds.ExpandBy(JPH::Vec3::sReplicate(system.GetPhysicsSettings().mSpeculativeContactDistance));
+        system.GetBodyInterface().ActivateBodiesInAABox(bounds,
+            JPH::SpecifiedBroadPhaseLayerFilter(JPH::BroadPhaseLayer(1)),JPH::SpecifiedObjectLayerFilter(1));
     }
     JPH::ShapeRefC shape(const Collider& c,glm::vec3 scale) {
         JPH::ShapeSettings::ShapeResult result;
@@ -149,6 +164,7 @@ PhysicsWorld::~PhysicsWorld() { clear(); }
 void PhysicsWorld::remove(EntityRef ref) {
     if(_impl->stepping) { _impl->warn("Body removal refused during a physics step; drain deferred destruction after the step"); return; }
     if(auto* body=_impl->find(ref)) {
+        _impl->wake_neighbors(body->id);
         auto& api=_impl->system.GetBodyInterface(); api.RemoveBody(body->id); api.DestroyBody(body->id); _impl->bodies.erase(ref.persistentId);
     }
 }
@@ -216,20 +232,26 @@ bool PhysicsWorld::synchronize(Scene& scene,bool editorMode) {
                 const auto id=api.CreateAndAddBody(creation,dynamic?JPH::EActivation::Activate:JPH::EActivation::DontActivate);
                 if(id.IsInvalid()) throw std::runtime_error("Jolt body capacity exhausted");
                 if(old) remove(ref);
+                _impl->wake_neighbors(id);
                 if(dynamic) { api.SetLinearVelocity(id,preservedLinear); api.SetAngularVelocity(id,preservedAngular); }
                 const auto q=rotation(pose);
                 _impl->bodies.emplace(ref.persistentId,Impl::Body{ref,id,*collider,settings,pose.scale,pose.position,pose.position,q,q,world,false});
                 _impl->reset_subtree(scene,ref);
                 old=_impl->find(ref);
             } else if(world!=old->lastWorld) {
+                _impl->wake_neighbors(old->id);
                 api.SetPositionAndRotation(old->id,jvec(pose.position),jquat(rotation(pose)),dynamic?JPH::EActivation::Activate:JPH::EActivation::DontActivate);
+                _impl->wake_neighbors(old->id);
                 old->currentPosition=old->previousPosition=pose.position;
                 old->currentRotation=old->previousRotation=rotation(pose);
                 old->lastWorld=world; _impl->reset_subtree(scene,ref);
             }
-            old->sleeping=dynamic && !api.IsActive(old->id);
-            scene.set(ref,PhysicsState{old->sleeping},true);
         } catch(const std::exception& error) { _impl->warn("Entity "+std::to_string(ref.persistentId)+": "+error.what()); success=false; }
+    }
+    // Static edits can wake a Dynamic processed earlier in hierarchy order.
+    for(auto& [id,body]:_impl->bodies) {
+        (void)id; body.sleeping=body.settings.motion==BodyMotion::Dynamic && !api.IsActive(body.id);
+        if(!scene.pending(body.ref)) scene.set(body.ref,PhysicsState{body.sleeping},true);
     }
     scene.consume_transform_dirty();
     return success;
@@ -252,7 +274,8 @@ void PhysicsWorld::step(Scene& scene,float dt,const std::function<void()>& durin
         body.sleeping=!api.IsActive(body.id);
         if(body.sleeping) {body.previousPosition=body.currentPosition;body.previousRotation=body.currentRotation;}
         const auto matrix=glm::translate(glm::mat4(1),body.currentPosition)*glm::mat4_cast(body.currentRotation);
-        Transform pose=transform_from_matrix(matrix);
+        Transform pose;
+        if(!exact_world_trs(matrix,pose)) throw std::runtime_error("Invalid Jolt transform");
         pose.scale=body.scale;
         if(!valid_component(pose)) throw std::runtime_error("Invalid Jolt transform");
         scene.set_local_transform(body.ref,pose,true); scene.set(body.ref,PhysicsState{body.sleeping},true);

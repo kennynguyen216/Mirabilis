@@ -4,6 +4,8 @@
 #include <limits>
 #include <set>
 #include <chrono>
+#include <iomanip>
+#include <sstream>
 
 using mirabilis::PhysicsWorld;
 using ecs_test::check_matrix;
@@ -162,6 +164,161 @@ TEST_CASE("moving noncollider support parent agrees in Jolt player collision and
     REQUIRE(physics.body_bounds(support)); check_vector(collision.walls[0].min,physics.body_bounds(support)->min);
     check_vector(collision.walls[0].max,physics.body_bounds(support)->max);
     CHECK(scene.read<Transform>(moving)->position.y == doctest::Approx(1).epsilon(.03));
+}
+
+TEST_CASE("sleeping dynamic wakes and falls when static support changes or is removed") {
+    Scene scene; PhysicsWorld physics;
+    const auto parent = scene.create_object("noncollider support parent");
+    const auto support = box(scene,{},false,parent), moving = box(scene,{2,2,0},true);
+    const auto distantSupport = box(scene,{100,0,0}), distant = box(scene,{100,2,0},true);
+    auto collider = *scene.read<Collider>(support); collider.colliderHalfExtents = {4,.5f,4};
+    REQUIRE(scene.set(support,collider)); REQUIRE(scene.set(distantSupport,collider));
+    REQUIRE(physics.synchronize(scene,false));
+    for (int i=0;i<900 && (!physics.sleeping(moving) || !physics.sleeping(distant));++i) tick(physics,scene);
+    REQUIRE(physics.sleeping(moving)); REQUIRE(physics.sleeping(distant));
+    const float restingY = scene.read<Transform>(moving)->position.y;
+    const auto distantWorld = scene.world_matrix(distant);
+    REQUIRE(restingY == doctest::Approx(1).epsilon(.03));
+    bool nativeRemovalOnly = false;
+    SUBCASE("moving noncollider parent removes support") {
+        Transform translated; translated.position.x = 10;
+        REQUIRE(scene.set_local_transform(parent,translated));
+        REQUIRE(physics.synchronize(scene,false));
+        REQUIRE(physics.body_world(support)); check_matrix(*physics.body_world(support),scene.world_matrix(support));
+    }
+    SUBCASE("shrinking static collider removes support") {
+        collider.colliderHalfExtents.x = .1f; REQUIRE(scene.set(support,collider));
+        REQUIRE(physics.synchronize(scene,false));
+    }
+    SUBCASE("disabling static collider removes support") {
+        collider.hasCollision = false; REQUIRE(scene.set(support,collider));
+        REQUIRE(physics.synchronize(scene,false)); CHECK_FALSE(physics.has_body(support));
+    }
+    SUBCASE("explicit native body removal wakes its sleeping contact") {
+        physics.remove(support); CHECK_FALSE(physics.has_body(support)); nativeRemovalOnly = true;
+    }
+    SUBCASE("deferred entity teardown preserves reads and removes support") {
+        REQUIRE(scene.destroy_object(support)); CHECK(scene.pending(support)); CHECK(scene.valid(support));
+        REQUIRE(scene.read<Collider>(support)); REQUIRE(physics.body_world(support));
+        CHECK(physics.has_body(support));
+        scene.drain_destruction([&](EntityRef ref) {
+            CHECK(ref == support); CHECK(scene.valid(ref)); CHECK(scene.pending(ref));
+            REQUIRE(scene.read<Transform>(ref)); REQUIRE(scene.read<Collider>(ref));
+            CHECK(physics.has_body(ref)); physics.remove(ref); CHECK_FALSE(physics.has_body(ref));
+        });
+        CHECK_FALSE(scene.valid(support)); CHECK_FALSE(physics.has_body(support));
+        REQUIRE(physics.synchronize(scene,false));
+    }
+    CHECK(physics.sleeping(distant)); REQUIRE(scene.read<PhysicsState>(distant));
+    CHECK(scene.read<PhysicsState>(distant)->sleeping);
+    if (!nativeRemovalOnly) {
+        CHECK_FALSE(physics.sleeping(moving)); REQUIRE(scene.read<PhysicsState>(moving));
+        CHECK_FALSE(scene.read<PhysicsState>(moving)->sleeping);
+    }
+    for (int i=0;i<120;++i) {
+        if (nativeRemovalOnly) physics.step(scene,dt);
+        else tick(physics,scene);
+    }
+    CHECK_FALSE(physics.sleeping(moving));
+    REQUIRE(scene.read<PhysicsState>(moving)); CHECK_FALSE(scene.read<PhysicsState>(moving)->sleeping);
+    CHECK(scene.read<Transform>(moving)->position.y < restingY - .5f);
+    CHECK(physics.velocity(moving).y < -1);
+    CHECK(physics.sleeping(distant)); check_matrix(scene.world_matrix(distant),distantWorld);
+}
+
+TEST_CASE("reparenting enabled collider subtrees rejects singular world scale before mutation") {
+    Scene scene; PhysicsWorld physics;
+    const auto oldParent = scene.create_object("existing valid parent");
+    const auto zeroParent = scene.create_object("singular noncollider parent");
+    Transform singular; singular.scale.x = 0; REQUIRE(scene.set_local_transform(zeroParent,singular));
+    EntityRef subtree, enabled;
+    SUBCASE("enabled collider at subtree root") { subtree = enabled = box(scene,{2,0,0},false,oldParent); }
+    SUBCASE("noncollider root with enabled collider descendant") {
+        subtree = scene.create_object("noncollider subtree root",oldParent);
+        const auto middle = scene.create_object("noncollider intermediate",subtree);
+        enabled = box(scene,{2,0,0},false,middle);
+    }
+    REQUIRE(subtree); REQUIRE(enabled); REQUIRE(physics.synchronize(scene,true));
+    const auto snapshot = scene.take_snapshot();
+    const auto world = scene.world_matrix(enabled); const auto local = scene.local_matrix(subtree);
+    REQUIRE(physics.body_world(enabled)); const auto native = *physics.body_world(enabled);
+    REQUIRE(physics.body_bounds(enabled)); const auto bounds = *physics.body_bounds(enabled);
+    CHECK_FALSE(scene.set_parent(subtree,zeroParent));
+    ecs_test::check_snapshot(snapshot,scene.take_snapshot());
+    check_matrix(scene.local_matrix(subtree),local); check_matrix(scene.world_matrix(enabled),world);
+    CHECK(scene.read<Hierarchy>(subtree)->parent == oldParent.persistentId);
+    REQUIRE(physics.synchronize(scene,true)); REQUIRE(physics.body_world(enabled));
+    check_matrix(*physics.body_world(enabled),native);
+    REQUIRE(physics.body_bounds(enabled)); check_vector(physics.body_bounds(enabled)->min,bounds.min);
+    check_vector(physics.body_bounds(enabled)->max,bounds.max);
+}
+
+TEST_CASE("reparenting dormant disabled colliders under singular noncollider parent is allowed") {
+    Scene scene; PhysicsWorld physics;
+    const auto zeroParent = scene.create_object("singular noncollider parent");
+    Transform singular; singular.scale.x = 0; REQUIRE(scene.set_local_transform(zeroParent,singular));
+    const auto subtree = scene.create_object("dormant subtree");
+    const auto disabled = box(scene,{2,0,0},false,subtree);
+    auto collider = *scene.read<Collider>(disabled); collider.hasCollision = false;
+    REQUIRE(scene.set(disabled,collider)); REQUIRE(scene.set(disabled,RigidBody{}));
+    REQUIRE(physics.synchronize(scene,true)); CHECK(physics.body_count() == 0);
+    REQUIRE(scene.set_parent(subtree,zeroParent));
+    CHECK(scene.read<Hierarchy>(subtree)->parent == zeroParent.persistentId);
+    CHECK(scene.read<Hierarchy>(disabled)->parent == subtree.persistentId);
+    CHECK(glm::length(glm::vec3(scene.world_matrix(disabled)[0])) == 0);
+    REQUIRE(physics.synchronize(scene,true)); CHECK(physics.body_count() == 0);
+    REQUIRE(scene.read<RigidBody>(disabled)); CHECK(scene.read<RigidBody>(disabled)->motion == BodyMotion::Static);
+}
+
+TEST_CASE("dynamic root boxes preserve valid near vertical Euler rotations through stepping") {
+    for (const float magnitude : {1.5700f,1.5705f,1.5707f,1.57079632679f}) {
+        for (const float sign : {-1.0f,1.0f}) {
+            const float pitch = sign*magnitude; INFO("pitch=" << pitch);
+            Scene scene; PhysicsWorld physics; const auto moving = box(scene,{1,3,5},true);
+            Transform authored = *scene.read<Transform>(moving);
+            authored.rotation = {pitch,.6f,.3f}; authored.scale = {1.5f,2,.75f};
+            REQUIRE(scene.set_local_transform(moving,authored));
+            auto body = *scene.read<RigidBody>(moving); body.gravityFactor = 0;
+            REQUIRE(scene.set(moving,body)); const auto expected = to_matrix(authored);
+            Transform exact; REQUIRE(mirabilis::exact_world_trs(expected,exact));
+            check_matrix(to_matrix(exact),expected);
+            REQUIRE(physics.synchronize(scene,false)); REQUIRE(physics.body_count() == 1);
+            REQUIRE(physics.body_world(moving)); check_matrix(*physics.body_world(moving),expected);
+            tick(physics,scene);
+            check_matrix(scene.world_matrix(moving),expected);
+            REQUIRE(physics.body_world(moving)); check_matrix(*physics.body_world(moving),expected);
+            for (const float alpha : {0.0f,.5f,1.0f}) check_matrix(physics.render_world(scene,moving,alpha),expected);
+        }
+    }
+}
+
+TEST_CASE("near vertical parented dynamic loads detach exact world pose and reload scratch saves") {
+    for (const float magnitude : {1.5700f,1.5705f,1.5707f,1.57079632679f}) {
+        for (const float sign : {-1.0f,1.0f}) {
+            const float pitch = sign*magnitude; INFO("pitch=" << pitch);
+            Transform parent; parent.position = {3,4,5}; parent.scale = glm::vec3(2);
+            Transform child; child.position = {1,2,3}; child.rotation = {pitch,.6f,.3f}; child.scale = {1,2,3};
+            const auto expected = to_matrix(parent)*to_matrix(child);
+            std::ostringstream encoded; encoded << std::setprecision(std::numeric_limits<float>::max_digits10)
+                << R"({"position":[1,2,3],"rotation":[)" << pitch << R"(,0.6,0.3],"scale":[1,2,3]})";
+            const auto noCollider = R"({"enabled":false,"shape":0,"center":[0,0,0],"halfExtents":[0.5,0.5,0.5]})";
+            StagedScene staged,reopened; std::string error;
+            REQUIRE_MESSAGE(parse_scene_json(document(object_json(1,"null",
+                R"({"position":[3,4,5],"rotation":[0,0,0],"scale":[2,2,2]})","",noCollider)+","+
+                object_json(2,"1",encoded.str(),dynamic)),"near-vertical.json",{},staged,error),error);
+            const auto moving = staged.scene.get(2); REQUIRE(moving);
+            CHECK_FALSE(staged.scene.read<Hierarchy>(moving)->parent);
+            check_matrix(staged.scene.world_matrix(moving),expected);
+            const auto snapshot = staged.scene.take_snapshot();
+            const auto path = std::filesystem::temp_directory_path() / ("mirabilis-near-vertical-"+
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".json");
+            REQUIRE_MESSAGE(save_scene_atomic(path,staged.scene,staged.settings,{},error),error);
+            const auto saved = ecs_test::read_file(path); std::filesystem::remove(path);
+            REQUIRE_MESSAGE(parse_scene_json(saved,"near-vertical-scratch.json",{},reopened,error),error);
+            ecs_test::check_snapshot(snapshot,reopened.scene.take_snapshot());
+            check_matrix(reopened.scene.world_matrix(reopened.scene.get(2)),expected);
+        }
+    }
 }
 
 TEST_CASE("offset rotated collider sync retains entity origin and interpolation") {
