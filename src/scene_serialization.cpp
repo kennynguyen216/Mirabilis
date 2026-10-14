@@ -317,6 +317,13 @@ bool validate_authored_scene(const mirabilis::Scene& scene,const SceneSettings& 
             if(!scene.read<Name>(ref)||!transform||!visibility||!mesh||!material||!collider||!role||!valid_component(*transform)||!valid_component(*visibility)||!valid_component(*mesh)||!valid_component(*material)||!valid_component(*collider)||!valid_component(*role))invalid("Invalid saved component value");
             const auto body=scene.read<RigidBody>(ref);
             if((body&&!valid_component(*body)) || !scene.validate_physics_edit(ref,body,collider,transform))invalid("Invalid saved physics settings: "+scene.last_error());
+            if(collider->hasCollision) {
+                const auto world=scene.world_matrix(ref);
+                for(int axis=0;axis<3;++axis) {
+                    const float scale=glm::length(glm::vec3(world[axis]));
+                    if(!finite(scale)||scale<=0.000001f)invalid("Enabled collider has invalid world scale: "+std::to_string(ref.persistentId));
+                }
+            }
             if(ref.persistentId>=scene.next_persistent_id())invalid("Persistent ID counter is below an entity ID");
             if(const auto unknown=scene.read<UnknownComponents>(ref))for(const auto& [key,raw]:unknown->blocks) {
                 if(std::find(std::begin(KnownComponents),std::end(KnownComponents),key)!=std::end(KnownComponents))invalid("Unknown component shadows a known component");
