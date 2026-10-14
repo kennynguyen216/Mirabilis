@@ -170,11 +170,14 @@ TEST_CASE("sleeping dynamic wakes and falls when static support changes or is re
     Scene scene; PhysicsWorld physics;
     const auto parent = scene.create_object("noncollider support parent");
     const auto support = box(scene,{},false,parent), moving = box(scene,{2,2,0},true);
+    const auto distantSupport = box(scene,{100,0,0}), distant = box(scene,{100,2,0},true);
     auto collider = *scene.read<Collider>(support); collider.colliderHalfExtents = {4,.5f,4};
-    REQUIRE(scene.set(support,collider)); REQUIRE(physics.synchronize(scene,false));
-    for (int i=0;i<900 && !physics.sleeping(moving);++i) tick(physics,scene);
-    REQUIRE(physics.sleeping(moving));
+    REQUIRE(scene.set(support,collider)); REQUIRE(scene.set(distantSupport,collider));
+    REQUIRE(physics.synchronize(scene,false));
+    for (int i=0;i<900 && (!physics.sleeping(moving) || !physics.sleeping(distant));++i) tick(physics,scene);
+    REQUIRE(physics.sleeping(moving)); REQUIRE(physics.sleeping(distant));
     const float restingY = scene.read<Transform>(moving)->position.y;
+    const auto distantWorld = scene.world_matrix(distant);
     REQUIRE(restingY == doctest::Approx(1).epsilon(.03));
     bool nativeRemovalOnly = false;
     SUBCASE("moving noncollider parent removes support") {
@@ -214,6 +217,7 @@ TEST_CASE("sleeping dynamic wakes and falls when static support changes or is re
     REQUIRE(scene.read<PhysicsState>(moving)); CHECK_FALSE(scene.read<PhysicsState>(moving)->sleeping);
     CHECK(scene.read<Transform>(moving)->position.y < restingY - .5f);
     CHECK(physics.velocity(moving).y < -1);
+    CHECK(physics.sleeping(distant)); check_matrix(scene.world_matrix(distant),distantWorld);
 }
 
 TEST_CASE("reparenting enabled collider subtrees rejects singular world scale before mutation") {
