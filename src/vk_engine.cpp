@@ -1878,6 +1878,7 @@ void VulkanEngine::run(){
                     physicsRequire(_traceSupported && !_traceTriangles.empty() && (!testPhysicsShortTrace || dynamicDraws > 0), "path trace lost dynamic geometry");
                     if (!testPhysicsShortTrace) physicsRequire(physicsPhase == "sandbox", "trace lifecycle ended too early");
                     fmt::print("PHYSICS trace PASS\n");
+                    if (!testPhysicsShortTrace) fmt::print("PHYSICS lifecycle PASS\n");
                 } else {
                     physicsRequire(physicsPhase == "sandbox", "lifecycle run ended too early");
                     fmt::print("PHYSICS lifecycle PASS\n");

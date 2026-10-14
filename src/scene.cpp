@@ -105,9 +105,27 @@ bool Scene::validate_physics_edit(EntityRef ref, const RigidBody* body, const Co
             }
         }
     }
-    if (collider && collider->hasCollision && transform &&
-        glm::any(glm::lessThanEqual(glm::abs(transform->scale), glm::vec3(1e-6f))))
-        return fail("Colliders require nonzero scale");
+    const auto nonzero = [](glm::vec3 scale) { return glm::all(glm::greaterThan(glm::abs(scale),glm::vec3(1e-6f))); };
+    if (transform && !nonzero(transform->scale)) {
+        std::vector<EntityRef> stack{ref};
+        while (!stack.empty()) {
+            const auto target = stack.back(); stack.pop_back();
+            const auto* childCollider = target == ref ? collider : read<Collider>(target);
+            if (childCollider && childCollider->hasCollision) return fail("Colliders and their ancestors require nonzero scale");
+            for (const auto id : read<Hierarchy>(target)->children) stack.push_back(get(id));
+        }
+    }
+    if (collider && collider->hasCollision) {
+        auto parent = read<Hierarchy>(ref)->parent;
+        while (parent) {
+            const auto ancestor = get(*parent);
+            if (!nonzero(read<Transform>(ancestor)->scale)) return fail("Collider ancestor has zero scale");
+            parent = read<Hierarchy>(ancestor)->parent;
+        }
+        const auto ownWorld = (read<Hierarchy>(ref)->parent ? world_matrix(*read<Hierarchy>(ref)->parent) : glm::mat4(1)) *
+            to_matrix(transform ? *transform : *read<Transform>(ref));
+        if (!finite_matrix(ownWorld)) return fail("Collider world transform is not finite");
+    }
     return true;
 }
 bool Scene::mutable_ref(EntityRef ref, bool owner) const {
