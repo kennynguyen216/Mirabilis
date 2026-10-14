@@ -55,6 +55,11 @@ public:
     template<class T> bool remove(EntityRef ref, bool owner = false) {
         static_assert(!std::is_same_v<T, Transform> && !std::is_same_v<T, Hierarchy> && !std::is_same_v<T, Name> && !std::is_same_v<T, PersistentIdentity> && !std::is_same_v<T, CreationOrder> && !std::is_same_v<T, PendingDestroy>);
         if (!mutable_ref(ref, owner)) return false;
+        if constexpr (std::is_same_v<T, Visibility> || std::is_same_v<T, SceneMeshAsset> ||
+            std::is_same_v<T, SceneMaterial> || std::is_same_v<T, Collider> ||
+            std::is_same_v<T, TimeTrial> || std::is_same_v<T, UnknownComponents>) {
+            return fail("Required core components cannot be detached; use their disabled/empty values");
+        }
         if (_inDestroyCallback) return enqueue_command(ref, [owner](Scene& scene, EntityRef target) { scene.remove<T>(target, owner); });
         _registry.remove<T>(ref.entity);
         if constexpr (std::is_same_v<T, Collider>) mark_transform_dirty(ref);
