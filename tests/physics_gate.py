@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import importlib.metadata
 import ecs_gate
 
 STATIC_CACHES = ('sdf', 'surface', 'ray-shadow')
@@ -35,14 +36,15 @@ def check_raster(records):
     assert all(phases.values()), 'Missing lifecycle phase'
     awake, asleep = phases['awake'], phases['sleep']
     assert all(awake[-1][f'{cache}-enabled'] == 1 for cache in STATIC_CACHES), 'Required static cache capability inactive'
+    assert all(awake[-1][cache] > 0 for cache in STATIC_CACHES), 'Required cache never built actual geometry'
     assert len(awake) >= 4 and len(asleep) >= 2, 'Need repeated awake/sleep samples'
     assert all(item['dynamic-draws'] > 0 for item in awake), 'Awake dynamic geometry missing'
     for phase in (awake[2:], asleep):
         for cache in STATIC_CACHES:
             assert phase[-1][cache] == phase[0][cache], f'{cache} rebuilt every frame'
     for cache in STATIC_CACHES:
-        assert 0 <= asleep[0][cache] - awake[-1][cache] <= 1, f'{cache} sleep rebuild batch'
-        assert 0 <= phases['wake'][0][cache] - asleep[-1][cache] <= 1, f'{cache} wake rebuild batch'
+        assert asleep[0][cache] - awake[-1][cache] == 1, f'{cache} sleep rebuild batch'
+        assert phases['wake'][0][cache] - asleep[-1][cache] == 1, f'{cache} wake rebuild batch'
         assert phases['unchanged-restore'][-1][cache] == phases['edit-restore'][-1][cache], f'{cache} unchanged restore rebuilt'
     assert asleep[-1]['eligible'] > awake[-1]['eligible'], 'Sleeping subtree never entered static caches'
     assert phases['wake'][0]['eligible'] < asleep[-1]['eligible'], 'Awake subtree stayed in static caches'
@@ -93,6 +95,20 @@ def main():
         shutil.copy2(scene, scratch/scene.name)
     original = json.loads((scratch/'physics_drop_demo.json').read_text())
     (scratch/'physics_child_demo.json').write_text(json.dumps(child_variant(original), indent=2))
+    ecs_gate.run('sdf-preflight', 'Debug', {'MIRABILIS_TEST_SCENE': 'physics_child_demo.json',
+        'MIRABILIS_TEST_SCENE_DIRECTORY': str(scratch), 'MIRABILIS_TEST_FRAMES': '2',
+        'MIRABILIS_TEST_RESET_PLAY': '1', 'MIRABILIS_TEST_WINDOW': '1600x900', 'MIRABILIS_LUMEN_LITE': '1'})
+    queue, cache = repo/'assets/sdf/queue', repo/'assets/sdf/cache'
+    with (output/'sdf-bake.log').open('w') as log:
+        subprocess.run([sys.executable, str(repo/'scripts/bake_sdf.py'), '--queue', str(queue), str(cache)],
+                       stdout=log, stderr=subprocess.STDOUT, check=True, timeout=1800)
+    assert all((cache/f'{path.stem}.sdf').is_file() for path in queue.glob('*.obj')), 'Queued SDF mesh not baked'
+    bake = {'scriptSha256': ecs_gate.digest(repo/'scripts/bake_sdf.py'),
+            'dependencies': {package: importlib.metadata.version(package)
+                             for package in ('numpy', 'trimesh', 'mesh-to-sdf', 'PyOpenGL', 'pyrender', 'scipy')},
+            'fileSha256': {str(path.relative_to(repo)): ecs_gate.digest(path)
+                          for directory in (queue, cache) for path in sorted(directory.iterdir()) if path.is_file()}}
+    (output/'sdf-bake-inventory.json').write_text(json.dumps(bake, indent=2))
     summary = {}
     for name, scene, trace, frames in [('raster-demo', 'physics_drop_demo.json', False, 1080),
                                ('raster-child', 'physics_child_demo.json', False, 1080),
