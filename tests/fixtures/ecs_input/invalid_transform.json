@@ -1,0 +1,87 @@
+{
+  "version": 2,
+  "nextActor": 1,
+  "nextPersistentId": 10,
+  "objects": [
+    {
+      "id": 0,
+      "parent": null,
+      "siblingIndex": 0,
+      "components": {
+        "name": {
+          "value": "valid"
+        },
+        "transform": {
+          "position": [
+            Infinity,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "visibility": {
+          "visible": true,
+          "layer": 0
+        },
+        "mesh": {
+          "asset": "empty",
+          "modelPath": ""
+        },
+        "material": {
+          "enabled": false,
+          "baseColorTexture": "",
+          "normalTexture": "",
+          "metallicRoughnessTexture": "",
+          "tint": [
+            1,
+            1,
+            1,
+            1
+          ],
+          "uvScale": [
+            1,
+            1
+          ],
+          "metallic": 0,
+          "roughness": 0.8,
+          "debugChecker": false,
+          "emissionColor": [
+            0,
+            0,
+            0
+          ],
+          "emissionStrength": 0,
+          "transmission": 0,
+          "ior": 1.5
+        },
+        "collider": {
+          "enabled": false,
+          "shape": 0,
+          "center": [
+            0,
+            0,
+            0
+          ],
+          "halfExtents": [
+            0.5,
+            0.5,
+            0.5
+          ]
+        },
+        "timeTrialRole": {
+          "role": "none"
+        }
+      }
+    }
+  ],
+  "authoredPortals": []
+}
