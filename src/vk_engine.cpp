@@ -172,12 +172,12 @@ bool VulkanEngine::install_staged_scene(StagedScene&& staging)
         fmt::print("Invalid editor scene: {}\n", error); return false;
     }
     VK_CHECK(vkDeviceWaitIdle(_device));
-    _physicsWorld.clear();
     _scene.replace(std::move(staging.scene), [&](EntityRef ref) {
         _physicsWorld.remove(ref);
         cleanup_scene_entity(ref);
         _sceneRenderRuntimes.erase(ref.persistentId);
     });
+    _physicsWorld.clear();
     _sceneRenderRuntimes.clear();
     clear_scene_material_resources();
     _previousSceneObjectTransforms.clear();
@@ -218,7 +218,6 @@ bool VulkanEngine::restore_play_snapshot()
 {
     if (!_playSnapshot) return true;
     VK_CHECK(vkDeviceWaitIdle(_device));
-    _physicsWorld.clear();
     if (!_scene.restore_snapshot(_playSnapshot->entities, [&](EntityRef ref) {
         const auto material = _sceneMaterialRuntimes.find(ref.persistentId);
         const auto render = _sceneRenderRuntimes.find(ref.persistentId);
@@ -228,6 +227,7 @@ bool VulkanEngine::restore_play_snapshot()
         cleanup_scene_entity(ref);
         _sceneRenderRuntimes.erase(ref.persistentId);
     })) return false;
+    _physicsWorld.clear();
     _authoredPortals.pairs = _playSnapshot->authoredPortals;
     _authoredPortals.draft.reset();
     apply_scene_settings(_playSnapshot->settings);
