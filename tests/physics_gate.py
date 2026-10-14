@@ -13,7 +13,7 @@ import ecs_gate
 STATIC_CACHES = ('sdf', 'surface', 'ray-shadow')
 FIELDS = ('frame', 'bodies', 'sdf', 'surface', 'trace', 'ray-shadow',
           'eligible', 'dynamic-draws', 'history-reset', 'sdf-enabled',
-          'surface-enabled', 'ray-shadow-enabled', 'trace-enabled')
+          'surface-enabled', 'ray-shadow-enabled', 'trace-enabled', 'sdf-placed', 'sdf-instances')
 
 
 def telemetry(logs):
@@ -37,6 +37,8 @@ def check_raster(records):
     awake, asleep = phases['awake'], phases['sleep']
     assert all(awake[-1][f'{cache}-enabled'] == 1 for cache in STATIC_CACHES), 'Required static cache capability inactive'
     assert all(awake[-1][cache] > 0 for cache in STATIC_CACHES), 'Required cache never built actual geometry'
+    for sample in (awake[-1], asleep[-1]):
+        assert sample['sdf-placed'] == sample['sdf-instances'] and sample['sdf-placed'] > 0, 'SDF geometry not fully baked/placed'
     assert len(awake) >= 4 and len(asleep) >= 2, 'Need repeated awake/sleep samples'
     assert all(item['dynamic-draws'] > 0 for item in awake), 'Awake dynamic geometry missing'
     for phase in (awake[2:], asleep):

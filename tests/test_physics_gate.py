@@ -11,6 +11,7 @@ class PhysicsTelemetry(unittest.TestCase):
                 'sdf': count, 'surface': count, 'ray-shadow': count, 'trace': 0,
                 'eligible': 3 if phase == 'sleep' else 2, 'dynamic-draws': 1,
                 'sdf-enabled': 1, 'surface-enabled': 1, 'ray-shadow-enabled': 1, 'trace-enabled': 0,
+                'sdf-placed': 3 if phase == 'sleep' else 2, 'sdf-instances': 3 if phase == 'sleep' else 2,
                 'history-reset': 1 if phase in ('teleport', 'restore') else 0})
         return values
 
