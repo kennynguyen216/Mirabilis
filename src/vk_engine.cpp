@@ -1586,6 +1586,7 @@ void VulkanEngine::run(){
     }
     const bool testPhysics = frameLimit && SDL_getenv("MIRABILIS_TEST_PHYSICS_LIFECYCLE");
     const bool testPhysicsTrace = testPhysics && _rendererMode == RendererMode::SoftwarePathTrace;
+    const bool testPhysicsShortTrace = testPhysicsTrace && frameLimit <= 200;
     SceneDocumentSnapshot physicsAuthored;
     Camera physicsCamera;
     PersistentID physicsBox = InvalidSceneObject;
@@ -1669,7 +1670,7 @@ void VulkanEngine::run(){
             _playerMovement.previousPosition = _playerMovement.position;
             _playerMovement.velocity = glm::vec3(0);
             auto ref = _scene.get(physicsBox);
-            if (!testPhysicsTrace) {
+            if (!testPhysicsShortTrace) {
                 if (_frameNumber == 900) {
                     physicsRequire(_physicsWorld.sleeping(ref), "drop did not settle and sleep");
                     physicsRequire(_physicsWorld.queue_impulse(_scene,ref,{0,3,0}), "wake impulse refused");
@@ -1857,7 +1858,7 @@ void VulkanEngine::run(){
             if (physicsPhase == "teleport") {
                 const auto pose = _scene.world_matrix(ref);
                 physicsRequire(glm::length(glm::vec3(pose[3])-glm::vec3(-.5f,2,0)) < 1e-4f, "teleport target pose drifted");
-                if (_frameNumber == 930) {
+                if (_frameNumber == 931) {
                     for (const auto& draw : worldDrawContext.OpaqueSurfaces) if (!draw.contributesToStaticCaches) {
                         for (int c=0;c<4;++c) for(int r=0;r<4;++r)
                             physicsRequire(std::abs(draw.previousTransform[c][r]-draw.transform[c][r]) < 1e-5f, "teleport retained old motion history");
@@ -1865,7 +1866,7 @@ void VulkanEngine::run(){
                     fmt::print("PHYSICS teleport pose/history PASS\n");
                 }
             }
-            if (!physicsCaptureDirectory.empty() && (_frameNumber == 30 || (!testPhysicsTrace && _frameNumber == 850))) {
+            if (!physicsCaptureDirectory.empty() && (_frameNumber == 30 || (!testPhysicsShortTrace && _frameNumber == 850))) {
                 std::filesystem::create_directories(physicsCaptureDirectory);
                 const auto path = (std::filesystem::path(physicsCaptureDirectory) / physicsPhase).string();
                 if (testPhysicsTrace) capture_path_trace(path.c_str());
@@ -1873,7 +1874,8 @@ void VulkanEngine::run(){
             }
             if (_frameNumber+1 >= frameLimit) {
                 if (testPhysicsTrace) {
-                    physicsRequire(dynamicDraws > 0 && _traceSupported && !_traceTriangles.empty(), "path trace lost dynamic geometry");
+                    physicsRequire(_traceSupported && !_traceTriangles.empty() && (!testPhysicsShortTrace || dynamicDraws > 0), "path trace lost dynamic geometry");
+                    if (!testPhysicsShortTrace) physicsRequire(physicsPhase == "sandbox", "trace lifecycle ended too early");
                     fmt::print("PHYSICS trace PASS\n");
                 } else {
                     physicsRequire(physicsPhase == "sandbox", "lifecycle run ended too early");

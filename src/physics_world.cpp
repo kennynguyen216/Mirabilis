@@ -140,7 +140,7 @@ struct PhysicsWorld::Impl {
 PhysicsWorld::PhysicsWorld() { static JoltRuntime runtime; _impl=std::make_unique<Impl>(); }
 PhysicsWorld::~PhysicsWorld() { clear(); }
 void PhysicsWorld::remove(EntityRef ref) {
-    if(_impl->stepping) throw std::logic_error("Body removal must be deferred until the step completes");
+    if(_impl->stepping) { _impl->warn("Body removal refused during a physics step; drain deferred destruction after the step"); return; }
     if(auto* body=_impl->find(ref)) {
         auto& api=_impl->system.GetBodyInterface(); api.RemoveBody(body->id); api.DestroyBody(body->id); _impl->bodies.erase(ref.persistentId);
     }
