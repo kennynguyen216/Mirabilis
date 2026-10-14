@@ -1740,6 +1740,7 @@ class VulkanEngine{
         Scene _scene;
         mirabilis::PhysicsWorld _physicsWorld;
         float _physicsInterpolation{0};
+        uint32_t _physicsHistoryResetCount{0};
         void sync_physics_world();
         void reset_physics_render_history();
         std::optional<SceneDocumentSnapshot> _playSnapshot;

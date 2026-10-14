@@ -104,6 +104,7 @@ VulkanEngine& VulkanEngine::Get() {return *loadedEngine;}
 void VulkanEngine::reset_physics_render_history()
 {
     for (const auto id : _physicsWorld.consume_history_resets()) {
+        ++_physicsHistoryResetCount;
         _previousSceneObjectTransforms.erase(id);
         _previousSceneModelTransforms.erase(id);
     }
@@ -1583,6 +1584,30 @@ void VulkanEngine::run(){
         if (!r4FrameTimes) std::abort();
         r4FrameTimes << "frame,ms,radiosity_gpu_ms,ssgi_gpu_ms,radiosity_texels\n";
     }
+    const bool testPhysics = frameLimit && SDL_getenv("MIRABILIS_TEST_PHYSICS_LIFECYCLE");
+    const bool testPhysicsTrace = testPhysics && _rendererMode == RendererMode::SoftwarePathTrace;
+    SceneDocumentSnapshot physicsAuthored;
+    Camera physicsCamera;
+    PersistentID physicsBox = InvalidSceneObject;
+    std::string physicsPhase;
+    const auto physicsRequire = [](bool condition, const char* reason) {
+        if (!condition) { fmt::print("PHYSICS FAIL: {}\n", reason); std::abort(); }
+    };
+    std::string physicsCaptureDirectory;
+    if (testPhysics) {
+        if (const char* path = SDL_getenv("MIRABILIS_TEST_PHYSICS_CAPTURE_DIRECTORY")) physicsCaptureDirectory = path;
+        set_editor_mode(true);
+        physicsCamera = _editorCamera;
+        physicsAuthored = {_scene.take_snapshot(), capture_scene_settings(), _authoredPortals.pairs};
+        for (const auto ref : _scene.hierarchy_order()) {
+            const auto* body = _scene.read<RigidBody>(ref);
+            if (body && body->motion == BodyMotion::Dynamic) physicsBox = ref.persistentId;
+        }
+        physicsRequire(physicsBox != InvalidSceneObject, "demo has no Dynamic body");
+        set_editor_mode(false);
+        set_mouse_capture(false);
+        physicsPhase = "awake";
+    }
     auto previousTime = std::chrono::steady_clock::now();
 
     //main loop
@@ -1632,6 +1657,60 @@ void VulkanEngine::run(){
             const bool testMoving = _frameNumber >= 120 && !testTraversed && (!testRepeat || testTraversalCount < 12);
             _playerInput.forward = testMoving && !testBacking;
             _playerInput.backward = testMoving && testBacking;
+        }
+        _physicsHistoryResetCount = 0;
+        if (testPhysics) {
+            deltaTime = PlayerMovementDt;
+            _noClip.enabled = true;
+            _playerInput = {};
+            mainCamera = physicsCamera;
+            _editorCamera = physicsCamera;
+            _playerMovement.position = physicsCamera.position - glm::vec3(0,1.7f,0);
+            _playerMovement.previousPosition = _playerMovement.position;
+            _playerMovement.velocity = glm::vec3(0);
+            auto ref = _scene.get(physicsBox);
+            if (!testPhysicsTrace) {
+                if (_frameNumber == 900) {
+                    physicsRequire(_physicsWorld.sleeping(ref), "drop did not settle and sleep");
+                    physicsRequire(_physicsWorld.queue_impulse(_scene,ref,{0,3,0}), "wake impulse refused");
+                    physicsPhase = "wake";
+                }
+                if (_frameNumber == 930) {
+                    auto body = *_scene.read<RigidBody>(ref); body.gravityFactor = 0;
+                    physicsRequire(_scene.set(ref,body,true), "zero gravity refused");
+                    sync_physics_world();
+                    physicsRequire(_physicsWorld.queue_velocity(_scene,ref,{}), "zero velocity refused");
+                    auto target = *_scene.read<Transform>(ref); target.position = {-.5f,2,0}; target.rotation = {0,.4f,0};
+                    physicsRequire(_physicsWorld.queue_teleport(_scene,ref,target), "teleport refused");
+                    physicsPhase = "teleport";
+                }
+                if (_frameNumber == 960) { reset_play(); physicsPhase = "restore"; }
+                if (_frameNumber == 980) { set_editor_mode(true); physicsPhase = "edit-restore"; }
+                if (_frameNumber == 990) {
+                    _playSnapshot = physicsAuthored;
+                    physicsRequire(restore_play_snapshot(), "unchanged restore failed");
+                    _playSnapshot.reset(); physicsPhase = "unchanged-restore";
+                }
+                if (_frameNumber == 1020) {
+                    auto body = *_scene.read<RigidBody>(_scene.get(physicsBox)); body.mass = 3;
+                    physicsRequire(_scene.set(_scene.get(physicsBox),body), "editor mass edit refused");
+                    physicsRequire(SDL_getenv("MIRABILIS_TEST_SCENE_DIRECTORY") != nullptr, "scratch directory required");
+                    physicsRequire(save_editor_scene_as("physics_gate_saved.json"), "scratch save failed");
+                    physicsRequire(load_editor_scene("physics_gate_saved.json"), "scratch reopen failed");
+                    physicsRequire(_scene.read<RigidBody>(_scene.get(physicsBox))->mass == 3, "saved mass lost");
+                    physicsPhase = "reopened";
+                }
+                if (_frameNumber == 1050) {
+                    physicsRequire(load_editor_scene("sandbox.json"), "sandbox replacement failed");
+                    size_t expected = 0;
+                    for (const auto object : _scene.hierarchy_order()) {
+                        const auto* collider = _scene.read<Collider>(object);
+                        if (collider && collider->hasCollision && !_scene.dynamic_ancestor(object)) ++expected;
+                    }
+                    physicsRequire(_physicsWorld.body_count() == expected, "sandbox static body count mismatch");
+                    physicsPhase = "sandbox";
+                }
+            }
         }
         if (_editorMode) {
             if (_cinematic.recording) {
@@ -1755,6 +1834,53 @@ void VulkanEngine::run(){
         }
         const bool placementFrame = testPlacement && (_frameNumber == 100 || _frameNumber == 160 || _frameNumber == 220 ||
             (referencePortalTest && _frameNumber == 265));
+        if (testPhysics) {
+            const auto ref = _scene.get(physicsBox);
+            if (_frameNumber < 900) physicsPhase = _physicsWorld.sleeping(ref) ? "sleep" : "awake";
+            size_t eligible = 0, dynamicDraws = 0;
+            for (const auto& draw : worldDrawContext.OpaqueSurfaces) if (draw.contributesToStaticCaches) ++eligible;
+            for (const auto& draw : worldDrawContext.TransparentSurfaces) if (draw.contributesToStaticCaches) ++eligible;
+            for (const auto object : _scene.hierarchy_order()) {
+                if (!_scene.dynamic_ancestor(object)) continue;
+                const auto* visible = _scene.read<Visibility>(object);
+                if (!visible || !visible->visible || visible->layer != RenderLayer::World) continue;
+                const auto runtime = _sceneRenderRuntimes.find(object.persistentId);
+                if (runtime == _sceneRenderRuntimes.end()) continue;
+                if (runtime->second.model) dynamicDraws += _previousSceneModelTransforms[object.persistentId].size();
+                else if (runtime->second.primitive.valid()) ++dynamicDraws;
+            }
+            const bool lumen = _ssgi.lumenEnabled && _ssgi.enabled;
+            fmt::print("PHYSICS phase={} frame={} bodies={} sdf={} surface={} trace={} ray-shadow={} eligible={} dynamic-draws={} history-reset={} sdf-enabled={} surface-enabled={} ray-shadow-enabled={} trace-enabled={}\n",
+                physicsPhase,_frameNumber,_physicsWorld.body_count(),stats.sdf_rebuild_count,stats.surface_cache_rebuild_count,
+                stats.trace_rebuild_count,stats.sun_shadow_rebuild_count,eligible,dynamicDraws,_physicsHistoryResetCount,
+                int(lumen),int(lumen),int(_rayQueryShadows),int(_traceSupported));
+            if (physicsPhase == "teleport") {
+                const auto pose = _scene.world_matrix(ref);
+                physicsRequire(glm::length(glm::vec3(pose[3])-glm::vec3(-.5f,2,0)) < 1e-4f, "teleport target pose drifted");
+                if (_frameNumber == 930) {
+                    for (const auto& draw : worldDrawContext.OpaqueSurfaces) if (!draw.contributesToStaticCaches) {
+                        for (int c=0;c<4;++c) for(int r=0;r<4;++r)
+                            physicsRequire(std::abs(draw.previousTransform[c][r]-draw.transform[c][r]) < 1e-5f, "teleport retained old motion history");
+                    }
+                    fmt::print("PHYSICS teleport pose/history PASS\n");
+                }
+            }
+            if (!physicsCaptureDirectory.empty() && (_frameNumber == 30 || (!testPhysicsTrace && _frameNumber == 850))) {
+                std::filesystem::create_directories(physicsCaptureDirectory);
+                const auto path = (std::filesystem::path(physicsCaptureDirectory) / physicsPhase).string();
+                if (testPhysicsTrace) capture_path_trace(path.c_str());
+                else { capture_raster(path.c_str()); capture_cinematic_frame(physicsCaptureDirectory.c_str(),_frameNumber); }
+            }
+            if (_frameNumber+1 >= frameLimit) {
+                if (testPhysicsTrace) {
+                    physicsRequire(dynamicDraws > 0 && _traceSupported && !_traceTriangles.empty(), "path trace lost dynamic geometry");
+                    fmt::print("PHYSICS trace PASS\n");
+                } else {
+                    physicsRequire(physicsPhase == "sandbox", "lifecycle run ended too early");
+                    fmt::print("PHYSICS lifecycle PASS\n");
+                }
+            }
+        }
         if (placementFrame) {
             placementRevision = _traceSceneRevision;
             placementAlbedoHash = _surfaceCache.albedoVolumeHash;
