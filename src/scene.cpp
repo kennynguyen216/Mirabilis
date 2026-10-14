@@ -164,6 +164,9 @@ bool Scene::set_sibling_index(EntityRef ref, size_t index, bool owner) {
 bool Scene::set_local_transform(EntityRef ref, const Transform& transform, bool owner) { return set<Transform>(ref, transform, owner); }
 bool Scene::set_world_transform(EntityRef ref, const glm::mat4& world, bool owner) {
     if (!mutable_ref(ref, owner) || !finite_matrix(world)) return fail("Invalid world transform");
+    if (_inDestroyCallback) return enqueue_command(ref, [world, owner](Scene& scene, EntityRef target) {
+        scene.set_world_transform(target, world, owner);
+    });
     const auto& hierarchy = *read<Hierarchy>(ref);
     const auto parentWorld = hierarchy.parent ? world_matrix(*hierarchy.parent) : glm::mat4(1);
     const auto local = glm::inverse(parentWorld) * world;
@@ -353,7 +356,8 @@ bool Scene::restore_snapshot(const SceneSnapshot& snapshot, const DestroyCallbac
     }
     std::unordered_set<PersistentID> keep = saved;
     keep.insert(snapshot.runtimeIds.begin(), snapshot.runtimeIds.end());
-    drain_destruction(beforeDestroy);
+    // Synchronous restoration must finish the finite scene, independent of the per-frame cap.
+    drain_destruction(beforeDestroy, std::max<size_t>(4096, _entities.size()));
     // Remove play-created entities individually: a surviving authored child may have moved under one.
     const auto removalOrder = hierarchy_order();
     for (auto it = removalOrder.rbegin(); it != removalOrder.rend(); ++it) if (!keep.contains(it->persistentId)) {
@@ -361,7 +365,7 @@ bool Scene::restore_snapshot(const SceneSnapshot& snapshot, const DestroyCallbac
         _registry.emplace_or_replace<PendingDestroy>(ref.entity);
         _destruction.push_back(ref);
     }
-    drain_destruction(beforeDestroy);
+    drain_destruction(beforeDestroy, std::max<size_t>(4096, _entities.size()));
     if (!_destruction.empty()) return fail("Snapshot teardown still has pending work");
     clear_queues();
     if (_epoch == UINT64_MAX) return fail("Scene epoch exhausted");
@@ -385,7 +389,8 @@ void Scene::clear(const DestroyCallback& beforeDestroy) {
         const auto ref = *it;
         _registry.emplace<PendingDestroy>(ref.entity); _destruction.push_back(ref);
     }
-    drain_destruction(beforeDestroy);
+    // Budget every existing entity while retaining a bound on callback-generated work.
+    drain_destruction(beforeDestroy, std::max<size_t>(4096, _entities.size()));
     if (!_destruction.empty()) throw std::runtime_error("Scene teardown cap reached");
     clear_queues(); _dirty.clear(); _roots.clear();
     _entities.clear(); _registry.clear();
