@@ -87,6 +87,7 @@ def timings():
         if BASELINE:
             baseline = json.loads((BASELINE/'timing-summary.json').read_text())[scene]
             limit = baseline['medianMeanFrameMs']*(1+baseline['allowedSlowdownPercent']/100)
+            summary[scene]['allowedSlowdownPercent'] = baseline['allowedSlowdownPercent']
             summary[scene]['baselineMedianMeanFrameMs'] = baseline['medianMeanFrameMs']
             summary[scene]['maximumGateMeanFrameMs'] = limit
             summary[scene]['pass'] = summary[scene]['medianMeanFrameMs'] <= limit
