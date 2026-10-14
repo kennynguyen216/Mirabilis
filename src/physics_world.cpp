@@ -287,7 +287,7 @@ bool PhysicsWorld::queue_teleport(Scene& scene,EntityRef ref,const Transform& po
         auto& api=_impl->system.GetBodyInterface();
         // Shape scaling follows the same dirty reconciliation as authoring edits.
         target.set_local_transform(entity,pose,true);
-        if(glm::any(glm::greaterThan(glm::abs(b->scale-pose.scale),glm::vec3(1e-5f)))) {synchronize(target,false);b=_impl->find(entity);if(!b)return;}
+        if(b->scale!=pose.scale) {synchronize(target,_impl->editorMode);b=_impl->find(entity);if(!b)return;}
         api.SetPositionAndRotation(b->id,jvec(pose.position),jquat(rotation(pose)),JPH::EActivation::Activate);
         b->previousPosition=b->currentPosition=pose.position; b->previousRotation=b->currentRotation=rotation(pose);
         b->lastWorld=target.world_matrix(entity);b->sleeping=false;target.set(entity,PhysicsState{false},true);
