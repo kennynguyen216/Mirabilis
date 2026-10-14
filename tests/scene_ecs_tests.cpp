@@ -175,6 +175,13 @@ TEST_CASE("runtime ownership protects descendant subtrees but external driving d
     REQUIRE(scene.destroy_object(authored,true)); scene.drain_destruction(); CHECK_FALSE(scene.valid(runtimeChild));
 }
 
+TEST_CASE("required value components remain while optional tags can detach") {
+    mirabilis::Scene scene; const auto ref = scene.create_object("live");
+    REQUIRE(scene.has<Collider>(ref)); CHECK_FALSE(scene.remove<Collider>(ref)); CHECK(scene.has<Collider>(ref));
+    REQUIRE(scene.set(ref,PortalPlaceable{})); CHECK(scene.has<PortalPlaceable>(ref));
+    REQUIRE(scene.remove<PortalPlaceable>(ref)); CHECK_FALSE(scene.has<PortalPlaceable>(ref));
+}
+
 TEST_CASE("duplication allocates every ID and retains ordered components") {
     mirabilis::Scene scene;
     const auto root = scene.create_object("root"), a = scene.create_object("a",root), b = scene.create_object("b",root);
