@@ -1367,7 +1367,7 @@ void VulkanEngine::run(){
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
         ImGuizmo::BeginFrame();
-        draw_frame_ui(wallDeltaTime);
+        if (!SDL_getenv("MIRABILIS_TEST_HIDE_PANELS")) draw_frame_ui(wallDeltaTime);
 
         ImGui::Render();
         // Exercise the editor's scene replacement path, not only cold startup.
