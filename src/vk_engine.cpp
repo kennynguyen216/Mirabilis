@@ -1627,6 +1627,9 @@ void VulkanEngine::run(){
 
         //handle events on queue
         while (SDL_PollEvent(&e) != 0) {
+            if (testPhysics && e.type == SDL_KEYDOWN) {
+                fmt::print("PHYSICS interactive key event: key={} repeat={}\n",int(e.key.keysym.sym),int(e.key.repeat));
+            }
             bQuit = process_event(e) || bQuit;
         }
         // do not draw if we are minimized
@@ -1903,10 +1906,11 @@ void VulkanEngine::run(){
                 else if (runtime->second.primitive.valid()) ++dynamicDraws;
             }
             const bool lumen = _ssgi.lumenEnabled && _ssgi.enabled;
-            fmt::print("PHYSICS phase={} frame={} bodies={} sdf={} surface={} trace={} ray-shadow={} eligible={} dynamic-draws={} history-reset={} sdf-enabled={} surface-enabled={} ray-shadow-enabled={} trace-enabled={} sdf-placed={} sdf-instances={}\n",
+            fmt::print("PHYSICS phase={} frame={} bodies={} sdf={} surface={} trace={} ray-shadow={} eligible={} dynamic-draws={} history-reset={} sdf-enabled={} surface-enabled={} ray-shadow-enabled={} trace-enabled={} sdf-placed={} sdf-instances={} editor-mode={} body-sleep={} ecs-sleep={}\n",
                 physicsPhase,_frameNumber,_physicsWorld.body_count(),stats.sdf_rebuild_count,stats.surface_cache_rebuild_count,
                 stats.trace_rebuild_count,stats.sun_shadow_rebuild_count,eligible,dynamicDraws,_physicsHistoryResetCount,
-                int(lumen),int(lumen),int(_rayQueryShadows),int(_traceSupported),_sceneSdf.placedCount,_sceneSdf.instanceCount);
+                int(lumen),int(lumen),int(_rayQueryShadows),int(_traceSupported),_sceneSdf.placedCount,_sceneSdf.instanceCount,int(_editorMode),int(_physicsWorld.sleeping(ref)),
+                int(_scene.read<PhysicsState>(ref) && _scene.read<PhysicsState>(ref)->sleeping));
             if (physicsPhase == "teleport") {
                 const auto pose = _scene.world_matrix(ref);
                 physicsRequire(glm::length(glm::vec3(pose[3])-glm::vec3(-.5f,2,0)) < 1e-4f, "teleport target pose drifted");
