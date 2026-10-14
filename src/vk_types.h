@@ -227,6 +227,7 @@ public:
 };
 
 struct RenderObject {
+    bool contributesToStaticCaches{true};
     uint32_t indexCount{};
     uint32_t firstIndex{};
     VkBuffer indexBuffer{};

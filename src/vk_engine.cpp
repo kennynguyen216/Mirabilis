@@ -91,6 +91,127 @@ VulkanEngine* loadedEngine = nullptr;
 
 VulkanEngine& VulkanEngine::Get() {return *loadedEngine;}
 
+void VulkanEngine::take_play_snapshot()
+{
+    _playSnapshot = SceneDocumentSnapshot{_scene.take_snapshot(), capture_scene_settings(), _authoredPortals.pairs};
+}
+
+void VulkanEngine::drain_scene_destruction()
+{
+    bool pending = false;
+    for (const auto entity : _scene.registry().view<PendingDestroy>()) { (void)entity; pending = true; break; }
+    if (!pending) return;
+    VK_CHECK(vkDeviceWaitIdle(_device));
+    _scene.drain_destruction([&](EntityRef ref) {
+        cleanup_scene_entity(ref);
+        _sceneRenderRuntimes.erase(ref.persistentId);
+    });
+}
+
+bool VulkanEngine::install_staged_scene(StagedScene&& staging)
+{
+    PersistentID root = InvalidSceneObject, floor = InvalidSceneObject;
+    for (const auto ref : staging.scene.creation_order()) {
+        const auto* hierarchy = staging.scene.read<Hierarchy>(ref);
+        const auto* name = staging.scene.read<Name>(ref);
+        const auto* mesh = staging.scene.read<SceneMeshAsset>(ref);
+        if (!hierarchy->parent && name->value == "Sandbox") root = ref.persistentId;
+        if (floor == InvalidSceneObject && mesh && mesh->assetKind == SceneAssetKind::FloorQuad) floor = ref.persistentId;
+    }
+    if (root == InvalidSceneObject || floor == InvalidSceneObject) {
+        fmt::print("Editor scene is missing its Sandbox root or Floor\n");
+        return false;
+    }
+    std::string error;
+    if (!validate_authored_scene(staging.scene, staging.settings, staging.authoredPortals, error)) {
+        fmt::print("Invalid editor scene: {}\n", error); return false;
+    }
+    VK_CHECK(vkDeviceWaitIdle(_device));
+    _scene.replace(std::move(staging.scene), [&](EntityRef ref) {
+        cleanup_scene_entity(ref);
+        _sceneRenderRuntimes.erase(ref.persistentId);
+    });
+    _sceneRenderRuntimes.clear();
+    clear_scene_material_resources();
+    _previousSceneObjectTransforms.clear();
+    _selectedSceneObject = _materialEditor.object = InvalidSceneObject;
+    _sandboxRoot = _floorObject = _playerObject = _playerModelObject = _bluePortalObject = _orangePortalObject = InvalidSceneObject;
+    _bluePortal = {}; _orangePortal = {};
+    _authoredPortals = {};
+    _playSnapshot.reset();
+    if (SDL_getenv("MIRABILIS_TEST_FRAMES")) {
+        if (!_sceneRenderRuntimes.empty() || !_sceneMaterialRuntimes.empty() || !_previousSceneObjectTransforms.empty() ||
+            _selectedSceneObject != InvalidSceneObject || _materialEditor.object != InvalidSceneObject) std::abort();
+        fmt::print("ECS replacement maps cleared: epoch={}\n", _scene.epoch());
+    }
+    _sandboxRoot = root; _floorObject = floor;
+    _authoredPortals.pairs = std::move(staging.authoredPortals);
+    apply_scene_settings(staging.settings);
+    for (const auto ref : _scene.creation_order()) {
+        const auto* mesh = _scene.read<SceneMeshAsset>(ref);
+        if (mesh) assign_scene_asset(ref, mesh->assetKind);
+    }
+    create_runtime_scene_objects();
+    if (!_editorMode) take_play_snapshot();
+    _sceneSdf.rebuildRequested = true;
+    _surfaceCache.rebuildRequested = true;
+    _traceDrawHash = 0;
+    _sunCasters.hash = 0;
+    _ssgi.historyValid = false;
+    _previousMainViewProjectionValid = false;
+    _autoExposure.snap = true;
+    respawn_player();
+    rebuild_collision_from_scene();
+    return true;
+}
+
+bool VulkanEngine::restore_play_snapshot()
+{
+    if (!_playSnapshot) return true;
+    VK_CHECK(vkDeviceWaitIdle(_device));
+    if (!_scene.restore_snapshot(_playSnapshot->entities, [&](EntityRef ref) {
+        cleanup_scene_entity(ref);
+        _sceneRenderRuntimes.erase(ref.persistentId);
+    })) return false;
+    _authoredPortals.pairs = _playSnapshot->authoredPortals;
+    _authoredPortals.draft.reset();
+    apply_scene_settings(_playSnapshot->settings);
+    bool recreated = false;
+    for (const auto ref : _scene.creation_order()) {
+        if (!_sceneRenderRuntimes.contains(ref.persistentId)) {
+            const auto* mesh = _scene.read<SceneMeshAsset>(ref);
+            if (mesh) { assign_scene_asset(ref, mesh->assetKind); recreated = true; }
+        }
+    }
+    if (recreated) {
+        _sceneSdf.rebuildRequested = true;
+        _surfaceCache.rebuildRequested = true;
+        _traceDrawHash = 0;
+        _sunCasters.hash = 0;
+    }
+    _previousSceneObjectTransforms.clear();
+    for (auto& [id, runtime] : _sceneRenderRuntimes) {
+        (void)id;
+        if (runtime.model) for (auto& [name, node] : runtime.model->nodes) { (void)name; node->hasPreviousDrawTransform = false; }
+    }
+    const auto rebind = [&](PersistentID& id) { if (!_scene.valid(_scene.get(id))) id = InvalidSceneObject; };
+    rebind(_selectedSceneObject); rebind(_materialEditor.object);
+    rebind(_sandboxRoot); rebind(_floorObject); rebind(_playerObject); rebind(_playerModelObject);
+    rebind(_bluePortalObject); rebind(_orangePortalObject);
+    _ssgi.historyValid = false;
+    _previousMainViewProjectionValid = false;
+    rebuild_collision_from_scene();
+    return true;
+}
+
+void VulkanEngine::reset_play()
+{
+    if (_editorMode || !restore_play_snapshot()) return;
+    _physicsStep.accumulator = 0;
+    _playerInput.jumpPressed = false;
+    fmt::print("ECS Reset Play complete: epoch={}\n", _scene.epoch());
+}
+
 void VulkanEngine::apply_max_fidelity_settings()
 {
     renderScale = 1.0f;
@@ -384,6 +505,10 @@ void VulkanEngine::set_editor_mode(bool enabled)
         return;
     }
 
+    if (enabled) {
+        if (!restore_play_snapshot()) return;
+        _playSnapshot.reset();
+    } else take_play_snapshot();
     _editorMode = enabled;
     if (enabled) {
         _noClip.enabled = false;
@@ -672,7 +797,7 @@ void VulkanEngine::cleanup()
         // Scene objects can hold the last reference to a loaded glTF, so
         // they must release it while the device is still alive.
         _sceneRenderRuntimes.clear();
-        _scene.objects.clear();
+        _scene.clear();
         loadedScenes.clear();
         _playerModel.reset();
         _mainDeletionQueue.flush();
@@ -1358,7 +1483,9 @@ void VulkanEngine::run(){
                     _physicsStep.targetPlayerYaw,
                     static_cast<float>(stepIndex) /
                         static_cast<float>(stepCount));
+                _scene.apply_commands();
                 update_physics(PhysicsDt);
+                drain_scene_destruction();
                 _physicsStep.accumulator -= PhysicsDt;
             }
             _physicsStep.previousPlayerYaw = _physicsStep.targetPlayerYaw;
@@ -1402,10 +1529,17 @@ void VulkanEngine::run(){
             if(testFrame==4) _editorCamera.position.x+=0.1f;
             if(testFrame==5) _traceSettings.maxDepth=1;
             if(testFrame>=6&&testFrame<=8) {
-                for(auto& object:_scene.objects) if(object.alive&&object.visible&&object.material.enabled) {
-                    if(testFrame==6) object.material.colorTint.r*=0.5f;
-                    if(testFrame==7) object.visible=false;
-                    if(testFrame==8) object.localTransform.position.x+=0.125f;
+                for(const auto object : _scene.creation_order()) {
+                    auto* visibility = _scene.edit<Visibility>(object);
+                    auto* material = _scene.edit<SceneMaterial>(object);
+                    if (!visibility || !material || !visibility->visible || !material->enabled) continue;
+                    if(testFrame==6) material->colorTint.r*=0.5f;
+                    if(testFrame==7) visibility->visible=false;
+                    if(testFrame==8) {
+                        auto transform = *_scene.read<Transform>(object);
+                        transform.position.x+=0.125f;
+                        _scene.set_local_transform(object, transform);
+                    }
                     break;
                 }
             }
@@ -1417,9 +1551,12 @@ void VulkanEngine::run(){
             if(testFrame==14) _traceSettings.portalLimit=1;
             if(testFrame==15) _shadow.sunlightDirection.x+=0.25f;
             if(testFrame==16) {
-                for(auto& object:_scene.objects) if(object.alive&&object.visible&&object.material.enabled) {
-                    object.material.emissionColor=glm::vec3(1);
-                    object.material.emissionStrength+=1; break;
+                for(const auto object : _scene.creation_order()) {
+                    const auto* visibility = _scene.read<Visibility>(object);
+                    auto* material = _scene.edit<SceneMaterial>(object);
+                    if (!visibility || !material || !visibility->visible || !material->enabled) continue;
+                    material->emissionColor=glm::vec3(1);
+                    material->emissionStrength+=1; break;
                 }
             }
             if(testFrame==17&&!_authoredPortals.pairs.empty()) _authoredPortals.pairs[0].first.position.x+=0.125f;
@@ -1460,6 +1597,9 @@ void VulkanEngine::run(){
             const auto balance = _postProcess.whiteBalance;
             const float saturation = _ssgi.colorSaturation;
             const std::string scene = _sceneDocument.activeFilename;
+            if (!SDL_getenv("MIRABILIS_TEST_SCENE_DIRECTORY")) {
+                fmt::print("GI TEST FAIL: color roundtrip requires a scratch MIRABILIS_TEST_SCENE_DIRECTORY\n"); std::abort();
+            }
             if (!save_editor_scene() || !load_editor_scene_named(scene) ||
                 glm::length(tint - _traceSettings.lighting.environmentTint) > 1e-5f ||
                 glm::length(balance - _postProcess.whiteBalance) > 1e-5f ||
@@ -1469,6 +1609,8 @@ void VulkanEngine::run(){
             _editorCamera = camera;
             fmt::print("Color settings scene roundtrip PASS\n");
         }
+        drain_scene_destruction();
+        _scene.consume_transform_dirty();
         draw(deltaTime);
         if (placementFrame) {
             if (!_bluePortal.placed || (_frameNumber > 160 && !_orangePortal.placed) ||

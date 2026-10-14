@@ -1045,7 +1045,6 @@ class VulkanEngine{
         bool load_editor_scene();
         bool load_editor_scene_named(std::string_view sceneName);
         void restore_last_editor_scene_name();
-        void assign_scene_asset(SceneObject& object, SceneAssetKind assetKind);
         void assign_scene_asset(EntityRef object, SceneAssetKind assetKind);
         MaterialInstance* resolve_scene_material(EntityRef object);
         SceneSettings capture_scene_settings() const;
@@ -1060,7 +1059,6 @@ class VulkanEngine{
         void create_runtime_scene_objects();
         void sync_scene_driven_objects();
         void emit_scene_render_objects(RenderLayer layer, DrawContext& drawContext);
-        MaterialInstance* resolve_scene_material(const SceneObject& object);
         // srgb = false for textures that store data rather than colour.
         const AllocatedImage& load_scene_texture(
             std::string_view texturePath, bool srgb = true);
