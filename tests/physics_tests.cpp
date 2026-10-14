@@ -29,6 +29,13 @@ void tick(PhysicsWorld& physics, Scene& scene) {
     REQUIRE(physics.synchronize(scene, false));
     physics.step(scene, dt);
     scene.drain_destruction([&](EntityRef ref) { physics.remove(ref); });
+    for (const auto ref : scene.hierarchy_order()) {
+        const auto* body = scene.read<RigidBody>(ref);
+        if (body && body->motion == BodyMotion::Dynamic && physics.has_body(ref)) {
+            REQUIRE(scene.read<PhysicsState>(ref));
+            CHECK(scene.read<PhysicsState>(ref)->sleeping == physics.sleeping(ref));
+        }
+    }
 }
 std::set<PersistentID> resets(PhysicsWorld& physics) {
     const auto values = physics.consume_history_resets();
