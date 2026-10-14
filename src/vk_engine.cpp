@@ -101,6 +101,30 @@ VulkanEngine* loadedEngine = nullptr;
 
 VulkanEngine& VulkanEngine::Get() {return *loadedEngine;}
 
+void VulkanEngine::reset_physics_render_history()
+{
+    for (const auto id : _physicsWorld.consume_history_resets()) {
+        _previousSceneObjectTransforms.erase(id);
+        _previousSceneModelTransforms.erase(id);
+    }
+}
+
+void VulkanEngine::sync_physics_world()
+{
+    std::vector<PersistentID> hosts;
+    for (const auto& pair : _authoredPortals.pairs) {
+        if (pair.first.hostWallObject) hosts.push_back(*pair.first.hostWallObject);
+        if (pair.second.hostWallObject) hosts.push_back(*pair.second.hostWallObject);
+    }
+    _scene.set_authored_portal_hosts(std::move(hosts));
+    if (!_physicsWorld.synchronize(_scene, _editorMode)) {
+        fmt::print("Physics synchronization failed; see diagnostics\n");
+        if (SDL_getenv("MIRABILIS_TEST_FRAMES")) std::abort();
+    }
+    stats.physics_body_count = static_cast<uint32_t>(_physicsWorld.body_count());
+    reset_physics_render_history();
+}
+
 void VulkanEngine::take_play_snapshot()
 {
     _playSnapshot = SceneDocumentSnapshot{_scene.take_snapshot(), capture_scene_settings(), _authoredPortals.pairs};
@@ -117,6 +141,7 @@ void VulkanEngine::drain_scene_destruction()
         const auto render = _sceneRenderRuntimes.find(ref.persistentId);
         _sceneResourcesRetired |= (material != _sceneMaterialRuntimes.end() && material->second.initialized) ||
             (render != _sceneRenderRuntimes.end() && render->second.model && render->second.model.use_count() == 1);
+        _physicsWorld.remove(ref);
         cleanup_scene_entity(ref);
         _sceneRenderRuntimes.erase(ref.persistentId);
     });
@@ -146,13 +171,16 @@ bool VulkanEngine::install_staged_scene(StagedScene&& staging)
         fmt::print("Invalid editor scene: {}\n", error); return false;
     }
     VK_CHECK(vkDeviceWaitIdle(_device));
+    _physicsWorld.clear();
     _scene.replace(std::move(staging.scene), [&](EntityRef ref) {
+        _physicsWorld.remove(ref);
         cleanup_scene_entity(ref);
         _sceneRenderRuntimes.erase(ref.persistentId);
     });
     _sceneRenderRuntimes.clear();
     clear_scene_material_resources();
     _previousSceneObjectTransforms.clear();
+    _previousSceneModelTransforms.clear();
     _selectedSceneObject = _materialEditor.object = InvalidSceneObject;
     _sandboxRoot = _floorObject = _playerObject = _playerModelObject = _bluePortalObject = _orangePortalObject = InvalidSceneObject;
     _bluePortal = {}; _orangePortal = {};
@@ -180,6 +208,7 @@ bool VulkanEngine::install_staged_scene(StagedScene&& staging)
     _previousMainViewProjectionValid = false;
     _autoExposure.snap = true;
     respawn_player();
+    sync_physics_world();
     rebuild_collision_from_scene();
     return true;
 }
@@ -188,11 +217,13 @@ bool VulkanEngine::restore_play_snapshot()
 {
     if (!_playSnapshot) return true;
     VK_CHECK(vkDeviceWaitIdle(_device));
+    _physicsWorld.clear();
     if (!_scene.restore_snapshot(_playSnapshot->entities, [&](EntityRef ref) {
         const auto material = _sceneMaterialRuntimes.find(ref.persistentId);
         const auto render = _sceneRenderRuntimes.find(ref.persistentId);
         _sceneResourcesRetired |= (material != _sceneMaterialRuntimes.end() && material->second.initialized) ||
             (render != _sceneRenderRuntimes.end() && render->second.model && render->second.model.use_count() == 1);
+        _physicsWorld.remove(ref);
         cleanup_scene_entity(ref);
         _sceneRenderRuntimes.erase(ref.persistentId);
     })) return false;
@@ -216,6 +247,7 @@ bool VulkanEngine::restore_play_snapshot()
         _sunCasters.hash = 0;
     }
     _previousSceneObjectTransforms.clear();
+    _previousSceneModelTransforms.clear();
     for (auto& [id, runtime] : _sceneRenderRuntimes) {
         (void)id;
         if (runtime.model) for (auto& [name, node] : runtime.model->nodes) { (void)name; node->hasPreviousDrawTransform = false; }
@@ -226,6 +258,7 @@ bool VulkanEngine::restore_play_snapshot()
     rebind(_bluePortalObject); rebind(_orangePortalObject);
     _ssgi.historyValid = false;
     _previousMainViewProjectionValid = false;
+    sync_physics_world();
     rebuild_collision_from_scene();
     return true;
 }
@@ -536,6 +569,7 @@ void VulkanEngine::set_editor_mode(bool enabled)
         _playSnapshot.reset();
     } else take_play_snapshot();
     _editorMode = enabled;
+    sync_physics_world();
     if (enabled) {
         _noClip.enabled = false;
         _noClip.up = false;
@@ -823,6 +857,7 @@ void VulkanEngine::cleanup()
         // Scene objects can hold the last reference to a loaded glTF, so
         // they must release it while the device is still alive.
         _sceneRenderRuntimes.clear();
+        _physicsWorld.clear();
         _scene.clear();
         loadedScenes.clear();
         _playerModel.reset();
@@ -1635,6 +1670,8 @@ void VulkanEngine::run(){
                         static_cast<float>(stepCount));
                 _scene.apply_commands();
                 update_player_movement(PlayerMovementDt);
+                sync_physics_world();
+                _physicsWorld.step(_scene, PlayerMovementDt);
                 drain_scene_destruction();
                 _playerStep.accumulator -= PlayerMovementDt;
             }
@@ -1760,7 +1797,8 @@ void VulkanEngine::run(){
             fmt::print("Color settings scene roundtrip PASS\n");
         }
         drain_scene_destruction();
-        _scene.consume_transform_dirty();
+        sync_physics_world();
+        _physicsInterpolation = _editorMode ? 1.0f : _playerStep.accumulator / PlayerMovementDt;
         if (_sceneResourcesRetired) {
             _sceneSdf.rebuildRequested = _surfaceCache.rebuildRequested = true;
             _traceDrawHash = _sunCasters.hash = 0;
