@@ -134,6 +134,17 @@ TEST_CASE("editor dirty parent and shape edits update native body without steppi
     REQUIRE(scene.set_local_transform(precise,preciseTransform)); REQUIRE(physics.synchronize(scene,true));
     REQUIRE(physics.body_bounds(precise)); const auto afterWidth = physics.body_bounds(precise)->max.x - physics.body_bounds(precise)->min.x;
     CHECK(afterWidth > beforeWidth + 5e-7f);
+    preciseTransform.position.x = 1e-6f;
+    REQUIRE(scene.set_local_transform(precise,preciseTransform)); REQUIRE(physics.synchronize(scene,true));
+    REQUIRE(physics.body_world(precise)); CHECK(std::abs((*physics.body_world(precise))[3].x-1e-6f) <= 1e-8f);
+    const auto rescaled = box(scene,{},true); REQUIRE(physics.synchronize(scene,false));
+    REQUIRE(physics.queue_velocity(scene,rescaled,{12,0,0})); scene.apply_commands();
+    Transform target; target.scale.x = 1.000001f;
+    REQUIRE(physics.queue_teleport(scene,rescaled,target)); scene.apply_commands();
+    REQUIRE(physics.body_bounds(rescaled));
+    CHECK(std::abs(physics.body_bounds(rescaled)->max.x-physics.body_bounds(rescaled)->min.x-1.000001f) <= 1e-7f);
+    REQUIRE(physics.body_world(rescaled)); CHECK(std::abs(glm::length(glm::vec3((*physics.body_world(rescaled))[0]))-1.000001f) <= 1e-7f);
+    CHECK(physics.velocity(rescaled).x == doctest::Approx(12));
 }
 
 TEST_CASE("moving noncollider support parent agrees in Jolt player collision and render in play") {
@@ -174,11 +185,12 @@ TEST_CASE("offset rotated collider sync retains entity origin and interpolation"
     CHECK(physics.render_world(scene,moving,.5f)[3].x == doctest::Approx(3.05f).epsilon(.0001));
     check_matrix(physics.render_world(scene,child,.5f),physics.render_world(scene,moving,.5f)*to_matrix(local));
     CHECK(resets(physics).empty());
+    const auto velocityBeforeTeleport = physics.velocity(moving);
     Transform teleported = *scene.read<Transform>(moving); teleported.position = {30,40,50};
     REQUIRE(scene.set_local_transform(moving,teleported));
     CHECK(scene.read<Transform>(moving)->position.x == doctest::Approx(3.1f).epsilon(.0001));
     CHECK(scene.queued_command_count() == 1); scene.apply_commands();
-    CHECK(physics.velocity(moving).x == doctest::Approx(12));
+    check_vector(physics.velocity(moving),velocityBeforeTeleport);
     for (float alpha : {0.0f,.5f,1.0f}) check_matrix(physics.render_world(scene,moving,alpha),to_matrix(teleported));
     const auto teleportReset = resets(physics); CHECK(teleportReset.contains(child.persistentId));
     CHECK(teleportReset.contains(moving.persistentId)); CHECK_FALSE(physics.sleeping(moving));
@@ -291,6 +303,13 @@ TEST_CASE("loader detaches representable parented dynamics preserves world pose 
     const auto* dormant = reopened.scene.read<RigidBody>(reopened.scene.get(3)); REQUIRE(dormant);
     CHECK(dormant->motion == BodyMotion::Static); CHECK(dormant->mass == 7);
     CHECK(dormant->friction == doctest::Approx(.8));
+    StagedScene large;
+    const auto largeParent = R"({"position":[3,4,5],"rotation":[0,0.6,0],"scale":[1000,1000,1000]})";
+    parent.scale = glm::vec3(1000); const auto expectedLarge = to_matrix(parent)*to_matrix(child);
+    Transform exact; REQUIRE(mirabilis::exact_world_trs(expectedLarge,exact)); check_matrix(to_matrix(exact),expectedLarge);
+    REQUIRE_MESSAGE(parse_scene_json(document(object_json(1,"null",largeParent)+","+object_json(2,"1",childTransform,dynamic)),
+        "large-trs.json",{},large,error),error);
+    check_matrix(large.scene.world_matrix(large.scene.get(2)),expectedLarge);
 }
 
 TEST_CASE("duplicated dynamic subtree creates one fresh native body and preserves saved fields") {
@@ -328,10 +347,10 @@ TEST_CASE("play creation applies queued physics commands before first body synch
     Transform target; target.position = {10,20,30};
     CHECK_FALSE(physics.has_body(spawned));
     REQUIRE(physics.queue_teleport(scene,spawned,target)); REQUIRE(physics.queue_velocity(scene,spawned,{12,0,0}));
-    CHECK(scene.apply_commands() == 2); CHECK(physics.has_body(spawned)); tick(physics,scene);
+    CHECK(scene.apply_commands() == 2); CHECK(physics.has_body(spawned));
+    CHECK(physics.velocity(spawned).x == doctest::Approx(12)); tick(physics,scene);
     CHECK(scene.read<Transform>(spawned)->position.x == doctest::Approx(10.1f).epsilon(.0001));
     CHECK(scene.read<Transform>(spawned)->position.y == doctest::Approx(20).epsilon(.0001));
-    CHECK(physics.velocity(spawned).x == doctest::Approx(12));
     const auto forced = box(scene,{100,0,0},true), impulsed = box(scene,{-100,0,0},true);
     REQUIRE(scene.set(forced,body)); REQUIRE(scene.set(impulsed,body));
     CHECK_FALSE(physics.has_body(forced)); CHECK_FALSE(physics.has_body(impulsed));
