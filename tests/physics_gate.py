@@ -11,6 +11,7 @@ import importlib.metadata
 import ecs_gate
 
 STATIC_CACHES = ('sdf', 'surface', 'ray-shadow')
+RASTER_CACHES = (*STATIC_CACHES, 'trace')
 FIELDS = ('frame', 'bodies', 'sdf', 'surface', 'trace', 'ray-shadow',
           'eligible', 'dynamic-draws', 'history-reset', 'sdf-enabled',
           'surface-enabled', 'ray-shadow-enabled', 'trace-enabled', 'sdf-placed', 'sdf-instances')
@@ -42,9 +43,9 @@ def check_raster(records):
     assert len(awake) >= 4 and len(asleep) >= 2, 'Need repeated awake/sleep samples'
     assert all(item['dynamic-draws'] > 0 for item in awake), 'Awake dynamic geometry missing'
     for phase in (awake[2:], asleep):
-        for cache in STATIC_CACHES:
+        for cache in RASTER_CACHES:
             assert phase[-1][cache] == phase[0][cache], f'{cache} rebuilt every frame'
-    for cache in STATIC_CACHES:
+    for cache in RASTER_CACHES:
         assert asleep[0][cache] - awake[-1][cache] == 1, f'{cache} sleep rebuild batch'
         assert phases['wake'][0][cache] - asleep[-1][cache] == 1, f'{cache} wake rebuild batch'
         assert phases['unchanged-restore'][-1][cache] == phases['edit-restore'][-1][cache], f'{cache} unchanged restore rebuilt'

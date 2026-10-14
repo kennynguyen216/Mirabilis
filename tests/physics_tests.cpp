@@ -342,6 +342,12 @@ TEST_CASE("invalid known rigid bodies and sheared dynamic loads fail transaction
         R"({"enabled":false,"shape":0,"center":[0,0,0],"halfExtents":[0.5,0.5,0.5]})")),"static.json",{},disabled,error),error);
     PhysicsWorld physics; REQUIRE(physics.synchronize(disabled.scene,true)); CHECK(physics.body_count() == 0);
     const auto* body = disabled.scene.read<RigidBody>(disabled.scene.get(1)); REQUIRE(body); CHECK(body->gravityFactor == -2);
+    StagedScene tiny;
+    REQUIRE_MESSAGE(parse_scene_json(document(object_json(1,"null",R"({"position":[0,0,0],"rotation":[0,0,0],"scale":[0.0000001,1,1]})")),
+        "tiny-static.json",{},tiny,error),error);
+    PhysicsWorld tinyPhysics; REQUIRE(tinyPhysics.synchronize(tiny.scene,true)); CHECK(tinyPhysics.body_count() == 1);
+    REQUIRE(tinyPhysics.body_world(tiny.scene.get(1)));
+    CHECK(glm::length(glm::vec3((*tinyPhysics.body_world(tiny.scene.get(1)))[0])) == doctest::Approx(1e-7f).epsilon(.01));
 }
 
 TEST_CASE("physics demo scratch save reopens all saved components and replaces cleanly") {
