@@ -435,9 +435,16 @@ void VulkanEngine::update_trace_scene() {
         std::memcpy(_traceLightBuffer.info.pMappedData,&_traceSettings.lighting,sizeof(TraceLighting));
         vmaFlushAllocation(_allocator,_traceLightBuffer.allocation,0,VK_WHOLE_SIZE);
     };
+    // Raster GI shares the static-cache policy; the reference renderer keeps moving geometry.
+    const bool includeAwakeDynamics = _rendererMode == RendererMode::SoftwarePathTrace;
+    const auto included = [includeAwakeDynamics](const RenderObject& draw) {
+        return includeAwakeDynamics || draw.contributesToStaticCaches;
+    };
     uint64_t drawHash=1469598103934665603ull;
     auto append=[&](const void* data,size_t bytes) {auto p=static_cast<const uint8_t*>(data);for(size_t i=0;i<bytes;++i) {drawHash^=p[i];drawHash*=1099511628211ull;}};
+    append(&includeAwakeDynamics, sizeof(includeAwakeDynamics));
     for(const auto& draw:worldDrawContext.OpaqueSurfaces) {
+        if (!included(draw)) continue;
         append(&draw.transform,sizeof(draw.transform)); append(&draw.vertexBufferAddress,sizeof(draw.vertexBufferAddress));
         append(&draw.firstIndex,sizeof(draw.firstIndex)); append(&draw.indexCount,sizeof(draw.indexCount));
         if(draw.material) {
@@ -458,6 +465,7 @@ void VulkanEngine::update_trace_scene() {
     // temporarily keeps both the old and new allocations during a scene switch.
     size_t triangleCapacity = 0, texelCapacity = 0;
     for (const auto& draw : worldDrawContext.OpaqueSurfaces) {
+        if (!included(draw)) continue;
         auto found = _traceMeshSources.find(draw.vertexBufferAddress);
         auto source = found == _traceMeshSources.end() ? nullptr : found->second.lock();
         if (!source || !draw.material || draw.material->passType != MaterialPass::MainColor) continue;
@@ -476,6 +484,7 @@ void VulkanEngine::update_trace_scene() {
     triangles.reserve(triangleCapacity);
     texels.reserve(texelCapacity);
     for (const auto& draw : worldDrawContext.OpaqueSurfaces) {
+        if (!included(draw)) continue;
         auto found=_traceMeshSources.find(draw.vertexBufferAddress);
         auto source=found==_traceMeshSources.end()?nullptr:found->second.lock();
         if (!source || !draw.material || draw.material->passType!=MaterialPass::MainColor) continue;
@@ -510,6 +519,7 @@ void VulkanEngine::update_trace_scene() {
     }
     uint64_t hash=1469598103934665603ull;
     const auto hashBytes=[&](const void* data,size_t size) { auto p=static_cast<const unsigned char*>(data); for(size_t i=0;i<size;++i) { hash^=p[i]; hash*=1099511628211ull; } };
+    hashBytes(&includeAwakeDynamics, sizeof(includeAwakeDynamics));
     hashBytes(triangles.data(),triangles.size()*sizeof(TraceTriangle)); hashBytes(materials.data(),materials.size()*sizeof(TraceMaterial));
     hashBytes(texels.data(),texels.size()*sizeof(uint32_t));
     if (_traceTriangleBuffer.buffer && hash==_traceSceneHash) {uploadPortals(); uploadLighting(); return;}
