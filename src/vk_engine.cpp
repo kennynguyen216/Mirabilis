@@ -1926,7 +1926,7 @@ void VulkanEngine::run(){
                 std::filesystem::create_directories(physicsCaptureDirectory);
                 const auto path = (std::filesystem::path(physicsCaptureDirectory) / physicsPhase).string();
                 if (testPhysicsTrace) capture_path_trace(path.c_str());
-                else { capture_raster(path.c_str()); capture_ssgi(path.c_str()); capture_cinematic_frame(physicsCaptureDirectory.c_str(),_frameNumber); }
+                else { capture_raster(path.c_str()); capture_ssgi((path+"-gi").c_str()); capture_cinematic_frame(physicsCaptureDirectory.c_str(),_frameNumber); }
             }
             if (_frameNumber+1 >= frameLimit) {
                 if (testPhysicsTrace) {
