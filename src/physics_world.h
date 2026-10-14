@@ -28,6 +28,7 @@ public:
     std::vector<PersistentID> consume_history_resets();
     const std::vector<std::string>& warnings() const;
 private:
+    bool ensure_body(Scene&, EntityRef);
     struct Impl;
     std::unique_ptr<Impl> _impl;
 };

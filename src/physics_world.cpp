@@ -93,7 +93,7 @@ struct PhysicsWorld::Impl {
     std::unordered_map<PersistentID,Body> bodies;
     std::unordered_set<PersistentID> resetIds;
     std::vector<std::string> diagnostics;
-    uint64_t epoch{0}; bool stepping{false};
+    uint64_t epoch{0}; bool stepping{false}; bool editorMode{true};
     Impl() { system.Init(65536,0,65536,10240,layers,broad,pairs); system.SetGravity({0,-9.81f,0}); }
     void warn(std::string message) {
         if(std::find(diagnostics.begin(),diagnostics.end(),message)==diagnostics.end()) {
@@ -164,6 +164,7 @@ bool PhysicsWorld::sleeping(EntityRef ref) const { const auto* body=_impl->find(
 const std::vector<std::string>& PhysicsWorld::warnings() const { return _impl->diagnostics; }
 bool PhysicsWorld::synchronize(Scene& scene,bool editorMode) {
     if(_impl->epoch!=scene.epoch()) { clear(); _impl->epoch=scene.epoch(); }
+    _impl->editorMode=editorMode;
     scene.set_physics_play(!editorMode);
     scene.set_teleport_handler([this,&scene](EntityRef ref,const Transform& transform) {return queue_teleport(scene,ref,transform);});
     auto& api=_impl->system.GetBodyInterface();
@@ -269,11 +270,19 @@ std::optional<AABB> PhysicsWorld::body_bounds(EntityRef ref) const {
     const auto bounds=lock.GetBody().GetWorldSpaceBounds(); return AABB{gvec(bounds.mMin),gvec(bounds.mMax)};
 }
 glm::vec3 PhysicsWorld::velocity(EntityRef ref) const {const auto* b=_impl->find(ref);return b?gvec(_impl->system.GetBodyInterface().GetLinearVelocity(b->id)):glm::vec3(0);}
+bool PhysicsWorld::ensure_body(Scene& scene,EntityRef ref) {
+    const auto* settings=scene.read<RigidBody>(ref);
+    if(!settings || settings->motion!=BodyMotion::Dynamic) return false;
+    const auto* body=_impl->find(ref);
+    return (body && body->settings.motion==BodyMotion::Dynamic) ||
+        (synchronize(scene,_impl->editorMode) && has_body(ref));
+}
 bool PhysicsWorld::queue_teleport(Scene& scene,EntityRef ref,const Transform& pose) {
     const auto* body=scene.read<RigidBody>(ref);
     if(!scene.mutable_ref(ref) || !body || body->motion!=BodyMotion::Dynamic || !valid_component(pose) ||
         !scene.validate_physics_edit(ref,body,scene.read<Collider>(ref),&pose)) return false;
     return scene.enqueue_command(ref,[this,pose](Scene& target,EntityRef entity) {
+        if(!ensure_body(target,entity))return;
         auto* b=_impl->find(entity); if(!b)return;
         auto& api=_impl->system.GetBodyInterface();
         // Shape scaling follows the same dirty reconciliation as authoring edits.
@@ -287,20 +296,20 @@ bool PhysicsWorld::queue_teleport(Scene& scene,EntityRef ref,const Transform& po
 }
 bool PhysicsWorld::queue_velocity(Scene& scene,EntityRef ref,glm::vec3 value) {
     const auto* b=scene.read<RigidBody>(ref); if(!scene.mutable_ref(ref) || !b || b->motion!=BodyMotion::Dynamic || !finite(value))return false;
-    return scene.enqueue_command(ref,[this,value](Scene& target,EntityRef entity) { if(auto* body=_impl->find(entity)) {
+    return scene.enqueue_command(ref,[this,value](Scene& target,EntityRef entity) { if(!ensure_body(target,entity))return; if(auto* body=_impl->find(entity)) {
         auto& api=_impl->system.GetBodyInterface();api.SetLinearVelocity(body->id,jvec(value));api.ActivateBody(body->id);
         body->sleeping=false;target.set(entity,PhysicsState{false},true);
     }});
 }
 bool PhysicsWorld::queue_impulse(Scene& scene,EntityRef ref,glm::vec3 value) {
     const auto* b=scene.read<RigidBody>(ref);if(!scene.mutable_ref(ref) || !b || b->motion!=BodyMotion::Dynamic || !finite(value))return false;
-    return scene.enqueue_command(ref,[this,value](Scene& target,EntityRef entity) {if(auto* body=_impl->find(entity)) {
+    return scene.enqueue_command(ref,[this,value](Scene& target,EntityRef entity) {if(!ensure_body(target,entity))return; if(auto* body=_impl->find(entity)) {
         _impl->system.GetBodyInterface().AddImpulse(body->id,jvec(value));body->sleeping=false;target.set(entity,PhysicsState{false},true);
     }});
 }
 bool PhysicsWorld::queue_force(Scene& scene,EntityRef ref,glm::vec3 value) {
     const auto* b=scene.read<RigidBody>(ref);if(!scene.mutable_ref(ref) || !b || b->motion!=BodyMotion::Dynamic || !finite(value))return false;
-    return scene.enqueue_command(ref,[this,value](Scene& target,EntityRef entity) {if(auto* body=_impl->find(entity)) {
+    return scene.enqueue_command(ref,[this,value](Scene& target,EntityRef entity) {if(!ensure_body(target,entity))return; if(auto* body=_impl->find(entity)) {
         _impl->system.GetBodyInterface().AddForce(body->id,jvec(value));body->sleeping=false;target.set(entity,PhysicsState{false},true);
     }});
 }
