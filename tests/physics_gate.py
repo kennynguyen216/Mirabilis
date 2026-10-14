@@ -118,6 +118,9 @@ def main():
         summary[name] = {**result, 'telemetry': records}
         (output/'physics-summary.json').write_text(json.dumps(summary, indent=2))
     assert summary['raster-child']['telemetry'][0]['bodies'] == summary['raster-demo']['telemetry'][0]['bodies'], 'Visual child created independent body'
+    demo_awake = [item for item in summary['raster-demo']['telemetry'] if item['phase'] == 'awake']
+    child_awake = [item for item in summary['raster-child']['telemetry'] if item['phase'] == 'awake']
+    assert child_awake[-1]['dynamic-draws'] > demo_awake[-1]['dynamic-draws'], 'glTF child surfaces missing inherited dynamic metadata'
     print('PHYSICS GPU gate PASS', flush=True)
 
 
