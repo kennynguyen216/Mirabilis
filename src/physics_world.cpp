@@ -59,8 +59,8 @@ bool same_collider(const Collider& a,const Collider& b) {
 namespace mirabilis {
 bool world_transform_has_shear(const glm::mat4& world) {
     glm::vec3 x(world[0]),y(world[1]),z(world[2]);
-    if(glm::length(x)<1e-6f || glm::length(y)<1e-6f || glm::length(z)<1e-6f) return true;
-    x=glm::normalize(x); y=glm::normalize(y); z=glm::normalize(z);
+    if(glm::length(glm::dvec3(x))==0 || glm::length(glm::dvec3(y))==0 || glm::length(glm::dvec3(z))==0) return true;
+    x=glm::vec3(glm::normalize(glm::dvec3(x))); y=glm::vec3(glm::normalize(glm::dvec3(y))); z=glm::vec3(glm::normalize(glm::dvec3(z)));
     return std::abs(glm::dot(x,y))>1e-4f || std::abs(glm::dot(x,z))>1e-4f || std::abs(glm::dot(y,z))>1e-4f;
 }
 bool exact_world_trs(const glm::mat4& world,Transform& out) {
@@ -69,7 +69,14 @@ bool exact_world_trs(const glm::mat4& world,Transform& out) {
     glm::mat4 unmirrored=world;
     const bool mirrored=glm::determinant(glm::mat3(world))<0;
     if(mirrored) unmirrored[0]=-unmirrored[0];
+    glm::vec3 scale;
+    for(int c=0;c<3;++c) {
+        scale[c]=static_cast<float>(glm::length(glm::dvec3(unmirrored[c])));
+        if(!std::isfinite(scale[c]) || scale[c]==0) return false;
+        unmirrored[c]/=scale[c];
+    }
     out=transform_from_matrix(unmirrored);
+    out.scale=scale;
     if(mirrored) out.scale.x=-out.scale.x;
     return valid_component(out) && same_matrix(world,to_matrix(out));
 }
@@ -191,7 +198,7 @@ bool PhysicsWorld::synchronize(Scene& scene,bool editorMode) {
             _impl->warn("Static entity "+std::to_string(ref.persistentId)+" shear uses a best-fit oriented collider");
         }
         if(!scene.validate_physics_edit(ref,saved,collider,scene.read<Transform>(ref)) ||
-            glm::any(glm::lessThanEqual(glm::abs(pose.scale),glm::vec3(1e-6f)))) {success=false;continue;}
+            glm::any(glm::lessThanEqual(glm::abs(pose.scale),glm::vec3(0)))) {success=false;continue;}
         auto* old=_impl->find(ref);
         const bool rebuild=!old || !same_collider(old->collider,*collider) || !same_settings(old->settings,settings) || glm::any(glm::greaterThan(glm::abs(old->scale-pose.scale),glm::vec3(1e-5f)));
         try {

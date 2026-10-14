@@ -105,7 +105,7 @@ bool Scene::validate_physics_edit(EntityRef ref, const RigidBody* body, const Co
             }
         }
     }
-    const auto nonzero = [](glm::vec3 scale) { return glm::all(glm::greaterThan(glm::abs(scale),glm::vec3(1e-6f))); };
+    const auto nonzero = [](glm::vec3 scale) { return glm::all(glm::greaterThan(glm::abs(scale),glm::vec3(0))); };
     if (transform && !nonzero(transform->scale)) {
         std::vector<EntityRef> stack{ref};
         while (!stack.empty()) {
