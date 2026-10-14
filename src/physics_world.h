@@ -11,12 +11,14 @@ public:
     PhysicsWorld(const PhysicsWorld&) = delete;
     PhysicsWorld& operator=(const PhysicsWorld&) = delete;
     bool synchronize(Scene&, bool editorMode);
-    void step(Scene&, float dt);
+    void step(Scene&, float dt, const std::function<void()>& duringStep = {});
     void remove(EntityRef);
     void clear();
     size_t body_count() const;
     bool has_body(EntityRef) const;
     bool sleeping(EntityRef) const;
+    std::optional<glm::mat4> body_world(EntityRef) const;
+    std::optional<AABB> body_bounds(EntityRef) const;
     bool queue_teleport(Scene&, EntityRef, const Transform&);
     bool queue_velocity(Scene&, EntityRef, glm::vec3);
     bool queue_impulse(Scene&, EntityRef, glm::vec3);
