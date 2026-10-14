@@ -17,6 +17,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
+#include <limits>
 #include <thread>
 
 #define VMA_IMPLEMENTATION
@@ -166,6 +168,13 @@ void VulkanEngine::init()
     SDL_WindowFlags window_flags =
         static_cast<SDL_WindowFlags>(SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
 
+    if (const char* size = SDL_getenv("MIRABILIS_TEST_WINDOW")) {
+        unsigned width = 0, height = 0;
+        if (std::sscanf(size, "%ux%u", &width, &height) != 2 || width == 0 || height == 0 || width > 8192 || height > 8192) {
+            throw std::runtime_error("MIRABILIS_TEST_WINDOW requires WIDTHxHEIGHT, each in 1..8192");
+        }
+        _windowExtent = {width, height};
+    }
     _window = SDL_CreateWindow(
         "Vulkan Engine",
         SDL_WINDOWPOS_UNDEFINED,
@@ -1032,6 +1041,45 @@ void VulkanEngine::draw(float deltaTime)
 }
 
 void VulkanEngine::run(){
+    // Baseline fixtures come from the engine collector, before harness portal placement.
+    if (const char* path = SDL_getenv("MIRABILIS_TEST_COLLISION_DUMP")) {
+        rebuild_collision_from_scene();
+        std::ofstream out(path);
+        out << std::setprecision(std::numeric_limits<float>::max_digits10);
+        const auto vec = [&](const glm::vec3& v) { out << '[' << v.x << ',' << v.y << ',' << v.z << ']'; };
+        out << "{\"walls\":[";
+        for (size_t i = 0; i < _activeWallColliders.size(); ++i) {
+            if (i) out << ',';
+            out << "{\"min\":"; vec(_activeWallColliders[i].min);
+            out << ",\"max\":"; vec(_activeWallColliders[i].max); out << '}';
+        }
+        out << "],\"grounds\":[";
+        for (size_t i = 0; i < _activeGroundPlanes.size(); ++i) {
+            if (i) out << ',';
+            const auto& p = _activeGroundPlanes[i];
+            out << "{\"center\":[" << p.center.x << ',' << p.center.y
+                << "],\"halfExtents\":[" << p.halfExtents.x << ',' << p.halfExtents.y
+                << "],\"height\":" << p.height << '}';
+        }
+        out << "],\"ramps\":[";
+        for (size_t i = 0; i < _activeSurfRamps.size(); ++i) {
+            if (i) out << ',';
+            const auto& r = _activeSurfRamps[i];
+            out << "{\"worldToLocal\":[";
+            for (int c = 0; c < 4; ++c) for (int row = 0; row < 4; ++row) {
+                if (c || row) out << ',';
+                out << r.worldToLocal[c][row];
+            }
+            out << "],\"lowLeft\":"; vec(r.lowLeft);
+            out << ",\"lowRight\":"; vec(r.lowRight);
+            out << ",\"highLeft\":"; vec(r.highLeft); out << '}';
+        }
+        out << "]}\n";
+        out.close();
+        if (!out) throw std::runtime_error("Could not write baseline collision dump");
+        fmt::print("ECS collision dump complete: {}\n", path);
+        if (SDL_getenv("MIRABILIS_TEST_COLLISION_DUMP_ONLY")) return;
+    }
     SDL_Event e; 
     bool bQuit = false;
     bool testRestored=false;
