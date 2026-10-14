@@ -673,6 +673,7 @@ void VulkanEngine::update_scene_sdf()
     });
     pool.destroy_pools(_device);
     _sceneSdf.fieldValid = true;
+    ++stats.sdf_rebuild_count;
 
     finishStatus(fmt::format(
         "Field {}x{}x{} at {:.1f} cm voxels.",

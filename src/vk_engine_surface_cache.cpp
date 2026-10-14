@@ -795,6 +795,7 @@ void VulkanEngine::update_surface_cache()
     });
 
     _surfaceCache.valid = true;
+    ++stats.surface_cache_rebuild_count;
     _surfaceCache.captureMilliseconds = std::chrono::duration<float, std::milli>(
         std::chrono::steady_clock::now() - started).count();
     _surfaceCache.status = fmt::format(
