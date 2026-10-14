@@ -244,3 +244,80 @@ TEST_CASE("spawn trigger and cache queries depend on authored scene state") {
     CHECK(contributes_to_static_caches(scene,drawable,true)); CHECK(contributes_to_static_caches(scene,drawable,false));
     auto stale = drawable; ++stale.epoch; CHECK_FALSE(contributes_to_static_caches(scene,stale,false));
 }
+
+TEST_CASE("finite scene teardown completes beyond the ordinary destruction cap") {
+    mirabilis::Scene scene;
+    const auto saved = scene.create_object("saved");
+    const auto snapshot = scene.take_snapshot();
+    std::vector<EntityRef> playCreated;
+    for (int i = 0; i < 5000; ++i) playCreated.push_back(scene.create_object("play-created"));
+    const auto epoch = scene.epoch(); const auto high = scene.next_persistent_id();
+    size_t callbacks = 0; int commands = 0;
+    const auto beforeDestroy = [&](EntityRef ref) {
+        CHECK(scene.epoch() == epoch); CHECK(scene.valid(ref)); CHECK(scene.pending(ref));
+        REQUIRE(scene.read<Name>(ref)); ++callbacks;
+    };
+    REQUIRE(scene.enqueue_command(playCreated.back(),[&](auto&,auto) { ++commands; }));
+    SUBCASE("clear") {
+        REQUIRE_NOTHROW(scene.clear(beforeDestroy));
+        CHECK(callbacks == playCreated.size()+1); CHECK(scene.hierarchy_order().empty());
+        CHECK_FALSE(scene.valid(saved)); CHECK(scene.epoch() > epoch);
+    }
+    SUBCASE("replace") {
+        mirabilis::Scene staging; REQUIRE(staging.create_object("replacement"));
+        REQUIRE_NOTHROW(scene.replace(std::move(staging),beforeDestroy));
+        CHECK(callbacks == playCreated.size()+1); REQUIRE(scene.hierarchy_order().size() == 1);
+        CHECK(scene.read<Name>(scene.hierarchy_order().front())->value == "replacement");
+        CHECK_FALSE(scene.valid(saved)); CHECK(scene.epoch() > epoch);
+    }
+    SUBCASE("restore live play-created entities") {
+        REQUIRE(scene.restore_snapshot(snapshot,beforeDestroy));
+        CHECK(callbacks == playCreated.size()); CHECK_FALSE(scene.valid(saved)); CHECK(scene.epoch() > epoch);
+        CHECK(scene.next_persistent_id() == high); check_snapshot(snapshot,scene.take_snapshot());
+        CHECK(scene.create_object("after restore").persistentId >= high);
+    }
+    SUBCASE("restore already pending play-created entities") {
+        for (auto ref : playCreated) REQUIRE(scene.destroy_object(ref));
+        REQUIRE(scene.restore_snapshot(snapshot,beforeDestroy));
+        CHECK(callbacks == playCreated.size()); CHECK_FALSE(scene.valid(saved)); CHECK(scene.epoch() > epoch);
+        CHECK(scene.next_persistent_id() == high); check_snapshot(snapshot,scene.take_snapshot());
+    }
+    SUBCASE("ordinary drains remain bounded and retain pending work") {
+        for (auto ref : playCreated) REQUIRE(scene.destroy_object(ref));
+        CHECK(scene.drain_destruction(beforeDestroy) == 4096); CHECK(callbacks == 4096);
+        size_t pending = 0;
+        for (auto ref : playCreated) if (scene.valid(ref)) {
+            CHECK(scene.pending(ref)); REQUIRE(scene.read<Name>(ref)); ++pending;
+        }
+        CHECK(pending == 904); CHECK(scene.epoch() == epoch);
+        CHECK(scene.drain_destruction(beforeDestroy) == 904); CHECK(callbacks == playCreated.size());
+        CHECK(scene.valid(saved));
+    }
+    for (auto ref : playCreated) CHECK_FALSE(scene.valid(ref));
+    CHECK(scene.queued_command_count() == 0); CHECK(scene.apply_commands() == 0); CHECK(commands == 0);
+    CHECK(scene.drain_destruction() == 0);
+}
+
+TEST_CASE("queued world setters convert against earlier queued parent changes") {
+    mirabilis::Scene scene;
+    const auto parent = scene.create_object("parent"), child = scene.create_object("child",parent);
+    const auto other = scene.create_object("other"), dying = scene.create_object("dying");
+    Transform otherPose; otherPose.position.x = 20; REQUIRE(scene.set_local_transform(other,otherPose));
+    REQUIRE(scene.destroy_object(dying));
+    REQUIRE(scene.drain_destruction([&](EntityRef) {
+        Transform pose; pose.position.x = 10; REQUIRE(scene.set_local_transform(parent,pose));
+        REQUIRE(scene.set_world_transform(child,glm::translate(glm::mat4(1),glm::vec3(5,0,0))));
+        CHECK(scene.world_matrix(child)[3].x == 0);
+    }) == 1);
+    CHECK(scene.apply_commands() == 2); CHECK(scene.world_matrix(child)[3].x == doctest::Approx(5));
+    CHECK(scene.read<Transform>(child)->position.x == doctest::Approx(-5));
+    const auto anotherDying = scene.create_object("another dying"); REQUIRE(scene.destroy_object(anotherDying));
+    REQUIRE(scene.drain_destruction([&](EntityRef) {
+        REQUIRE(scene.set_parent(child,other));
+        REQUIRE(scene.set_world_transform(child,glm::translate(glm::mat4(1),glm::vec3(7,0,0))));
+        CHECK(scene.read<Hierarchy>(child)->parent == parent.persistentId);
+    }) == 1);
+    CHECK(scene.apply_commands() == 2); CHECK(scene.read<Hierarchy>(child)->parent == other.persistentId);
+    CHECK(scene.world_matrix(child)[3].x == doctest::Approx(7));
+    CHECK(scene.read<Transform>(child)->position.x == doctest::Approx(-13));
+}
