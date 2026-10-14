@@ -1597,8 +1597,9 @@ void VulkanEngine::run(){
     std::string physicsCaptureDirectory;
     if (testPhysics) {
         if (const char* path = SDL_getenv("MIRABILIS_TEST_PHYSICS_CAPTURE_DIRECTORY")) physicsCaptureDirectory = path;
-        set_editor_mode(true);
         physicsCamera = _editorCamera;
+        set_editor_mode(true);
+        _editorCamera = physicsCamera;
         physicsAuthored = {_scene.take_snapshot(), capture_scene_settings(), _authoredPortals.pairs};
         for (const auto ref : _scene.hierarchy_order()) {
             const auto* body = _scene.read<RigidBody>(ref);
@@ -1836,55 +1837,6 @@ void VulkanEngine::run(){
         }
         const bool placementFrame = testPlacement && (_frameNumber == 100 || _frameNumber == 160 || _frameNumber == 220 ||
             (referencePortalTest && _frameNumber == 265));
-        if (testPhysics) {
-            const auto ref = _scene.get(physicsBox);
-            if (_frameNumber < 900) physicsPhase = _physicsWorld.sleeping(ref) ? "sleep" : "awake";
-            size_t eligible = 0, dynamicDraws = 0;
-            for (const auto& draw : worldDrawContext.OpaqueSurfaces) if (draw.contributesToStaticCaches) ++eligible;
-            for (const auto& draw : worldDrawContext.TransparentSurfaces) if (draw.contributesToStaticCaches) ++eligible;
-            for (const auto object : _scene.hierarchy_order()) {
-                if (!_scene.dynamic_ancestor(object)) continue;
-                const auto* visible = _scene.read<Visibility>(object);
-                if (!visible || !visible->visible || visible->layer != RenderLayer::World) continue;
-                const auto runtime = _sceneRenderRuntimes.find(object.persistentId);
-                if (runtime == _sceneRenderRuntimes.end()) continue;
-                if (runtime->second.model) dynamicDraws += _previousSceneModelTransforms[object.persistentId].size();
-                else if (runtime->second.primitive.valid()) ++dynamicDraws;
-            }
-            const bool lumen = _ssgi.lumenEnabled && _ssgi.enabled;
-            fmt::print("PHYSICS phase={} frame={} bodies={} sdf={} surface={} trace={} ray-shadow={} eligible={} dynamic-draws={} history-reset={} sdf-enabled={} surface-enabled={} ray-shadow-enabled={} trace-enabled={}\n",
-                physicsPhase,_frameNumber,_physicsWorld.body_count(),stats.sdf_rebuild_count,stats.surface_cache_rebuild_count,
-                stats.trace_rebuild_count,stats.sun_shadow_rebuild_count,eligible,dynamicDraws,_physicsHistoryResetCount,
-                int(lumen),int(lumen),int(_rayQueryShadows),int(_traceSupported));
-            if (physicsPhase == "teleport") {
-                const auto pose = _scene.world_matrix(ref);
-                physicsRequire(glm::length(glm::vec3(pose[3])-glm::vec3(-.5f,2,0)) < 1e-4f, "teleport target pose drifted");
-                if (_frameNumber == 931) {
-                    for (const auto& draw : worldDrawContext.OpaqueSurfaces) if (!draw.contributesToStaticCaches) {
-                        for (int c=0;c<4;++c) for(int r=0;r<4;++r)
-                            physicsRequire(std::abs(draw.previousTransform[c][r]-draw.transform[c][r]) < 1e-5f, "teleport retained old motion history");
-                    }
-                    fmt::print("PHYSICS teleport pose/history PASS\n");
-                }
-            }
-            if (!physicsCaptureDirectory.empty() && (_frameNumber == 30 || (!testPhysicsShortTrace && _frameNumber == 850))) {
-                std::filesystem::create_directories(physicsCaptureDirectory);
-                const auto path = (std::filesystem::path(physicsCaptureDirectory) / physicsPhase).string();
-                if (testPhysicsTrace) capture_path_trace(path.c_str());
-                else { capture_raster(path.c_str()); capture_cinematic_frame(physicsCaptureDirectory.c_str(),_frameNumber); }
-            }
-            if (_frameNumber+1 >= frameLimit) {
-                if (testPhysicsTrace) {
-                    physicsRequire(_traceSupported && !_traceTriangles.empty() && (!testPhysicsShortTrace || dynamicDraws > 0), "path trace lost dynamic geometry");
-                    if (!testPhysicsShortTrace) physicsRequire(physicsPhase == "sandbox", "trace lifecycle ended too early");
-                    fmt::print("PHYSICS trace PASS\n");
-                    if (!testPhysicsShortTrace) fmt::print("PHYSICS lifecycle PASS\n");
-                } else {
-                    physicsRequire(physicsPhase == "sandbox", "lifecycle run ended too early");
-                    fmt::print("PHYSICS lifecycle PASS\n");
-                }
-            }
-        }
         if (placementFrame) {
             placementRevision = _traceSceneRevision;
             placementAlbedoHash = _surfaceCache.albedoVolumeHash;
@@ -1935,6 +1887,55 @@ void VulkanEngine::run(){
             _sceneResourcesRetired = false;
         }
         draw(deltaTime);
+        if (testPhysics) {
+            const auto ref = _scene.get(physicsBox);
+            if (_frameNumber < 900) physicsPhase = _physicsWorld.sleeping(ref) ? "sleep" : "awake";
+            size_t eligible = 0, dynamicDraws = 0;
+            for (const auto& draw : worldDrawContext.OpaqueSurfaces) if (draw.contributesToStaticCaches) ++eligible;
+            for (const auto& draw : worldDrawContext.TransparentSurfaces) if (draw.contributesToStaticCaches) ++eligible;
+            for (const auto object : _scene.hierarchy_order()) {
+                if (!_scene.dynamic_ancestor(object)) continue;
+                const auto* visible = _scene.read<Visibility>(object);
+                if (!visible || !visible->visible || visible->layer != RenderLayer::World) continue;
+                const auto runtime = _sceneRenderRuntimes.find(object.persistentId);
+                if (runtime == _sceneRenderRuntimes.end()) continue;
+                if (runtime->second.model) dynamicDraws += _previousSceneModelTransforms[object.persistentId].size();
+                else if (runtime->second.primitive.valid()) ++dynamicDraws;
+            }
+            const bool lumen = _ssgi.lumenEnabled && _ssgi.enabled;
+            fmt::print("PHYSICS phase={} frame={} bodies={} sdf={} surface={} trace={} ray-shadow={} eligible={} dynamic-draws={} history-reset={} sdf-enabled={} surface-enabled={} ray-shadow-enabled={} trace-enabled={}\n",
+                physicsPhase,_frameNumber,_physicsWorld.body_count(),stats.sdf_rebuild_count,stats.surface_cache_rebuild_count,
+                stats.trace_rebuild_count,stats.sun_shadow_rebuild_count,eligible,dynamicDraws,_physicsHistoryResetCount,
+                int(lumen),int(lumen),int(_rayQueryShadows),int(_traceSupported));
+            if (physicsPhase == "teleport") {
+                const auto pose = _scene.world_matrix(ref);
+                physicsRequire(glm::length(glm::vec3(pose[3])-glm::vec3(-.5f,2,0)) < 1e-4f, "teleport target pose drifted");
+                if (_frameNumber == 931) {
+                    for (const auto& draw : worldDrawContext.OpaqueSurfaces) if (!draw.contributesToStaticCaches) {
+                        for (int c=0;c<4;++c) for(int r=0;r<4;++r)
+                            physicsRequire(std::abs(draw.previousTransform[c][r]-draw.transform[c][r]) < 1e-5f, "teleport retained old motion history");
+                    }
+                    fmt::print("PHYSICS teleport pose/history PASS\n");
+                }
+            }
+            if (!physicsCaptureDirectory.empty() && (_frameNumber == 30 || (!testPhysicsShortTrace && _frameNumber == 850))) {
+                std::filesystem::create_directories(physicsCaptureDirectory);
+                const auto path = (std::filesystem::path(physicsCaptureDirectory) / physicsPhase).string();
+                if (testPhysicsTrace) capture_path_trace(path.c_str());
+                else { capture_raster(path.c_str()); capture_cinematic_frame(physicsCaptureDirectory.c_str(),_frameNumber); }
+            }
+            if (_frameNumber+1 >= frameLimit) {
+                if (testPhysicsTrace) {
+                    physicsRequire(_traceSupported && !_traceTriangles.empty() && (!testPhysicsShortTrace || dynamicDraws > 0), "path trace lost dynamic geometry");
+                    if (!testPhysicsShortTrace) physicsRequire(physicsPhase == "sandbox", "trace lifecycle ended too early");
+                    fmt::print("PHYSICS trace PASS\n");
+                    if (!testPhysicsShortTrace) fmt::print("PHYSICS lifecycle PASS\n");
+                } else {
+                    physicsRequire(physicsPhase == "sandbox", "lifecycle run ended too early");
+                    fmt::print("PHYSICS lifecycle PASS\n");
+                }
+            }
+        }
         if (placementFrame) {
             if (!_bluePortal.placed || (_frameNumber > 160 && !_orangePortal.placed) ||
                 placementRevision != _traceSceneRevision || placementAlbedoHash != _surfaceCache.albedoVolumeHash ||
