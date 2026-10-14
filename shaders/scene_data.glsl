@@ -67,4 +67,5 @@ layout(set = 0, binding = 0) uniform SceneData {
     // scene), y = frame index for the per-frame sample rotation, z = specular
     // samples per pixel, w = 1 while measuring cache-lookup coverage.
     vec4 emitterSettings;
+    vec4 environmentTint;
 } sceneData;

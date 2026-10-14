@@ -202,6 +202,8 @@ struct GPUSceneData {
     // scene_data.glsl.  x = emitter triangles sampled (0 = off), y = frame
     // index, z = specular samples per pixel, w = 1 while measuring coverage.
     glm::vec4 emitterSettings{0.0f};
+    // rgb = environment multiplier, w = final GI color saturation.
+    glm::vec4 environmentTint{1.0f};
 };
 
 // Sixteen visible surfaces (the player pair plus seven authored links), with

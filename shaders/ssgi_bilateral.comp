@@ -17,11 +17,13 @@ layout(push_constant) uniform constants {
     vec4 settings;
     // xy = live draw extent.
     ivec4 frame;
+    vec4 projection;
 } PushConstants;
 
 vec2 frame_uv(vec2 screenUV, sampler2D source)
 {
-    return live_uv(screenUV, source, vec2(PushConstants.frame.xy));
+    vec2 extent = vec2(PushConstants.frame.xy);
+    return live_uv(ssgi_geometry_uv(screenUV, extent), source, extent);
 }
 
 vec2 ssgi_uv(vec2 screenUV, sampler2D source)
@@ -47,6 +49,8 @@ void main()
     }
     vec3 centerNormal = normalize(texture(
         prepassNormal, frame_uv(uv, prepassNormal)).xyz);
+    vec3 centerPosition = ssgi_view_position(ssgi_geometry_uv(uv,
+        vec2(PushConstants.frame.xy)), centerDepth, PushConstants.projection);
 
     int radius = clamp(int(PushConstants.settings.x + 0.5), 1, 8);
     ivec2 direction = PushConstants.control.zw;
@@ -61,12 +65,15 @@ void main()
         vec2 sampleUV = (vec2(samplePixel) + 0.5) / vec2(extent);
         float sampleDepth = texture(
             prepassDepth, frame_uv(sampleUV, prepassDepth)).r;
+        if (sampleDepth <= 1e-6) continue;
         vec3 sampleNormal = normalize(texture(
             prepassNormal, frame_uv(sampleUV, prepassNormal)).xyz);
         float spatial = exp(-0.5 * float(tap * tap) /
             max(float(radius * radius) * 0.35, 0.001));
-        float depthWeight = exp(-abs(sampleDepth - centerDepth) *
-            PushConstants.settings.y);
+        float depthWeight = ssgi_plane_weight(centerPosition,
+            ssgi_view_position(ssgi_geometry_uv(sampleUV, vec2(PushConstants.frame.xy)),
+                sampleDepth, PushConstants.projection),
+            centerNormal, PushConstants.settings.y);
         float normalWeight = pow(max(dot(centerNormal, sampleNormal), 0.0),
             PushConstants.settings.z);
         float weight = spatial * depthWeight * normalWeight;

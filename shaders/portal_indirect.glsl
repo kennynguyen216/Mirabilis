@@ -5,14 +5,14 @@ const uint RayFieldUncovered = 1u << 7;
 const uint RayFieldExit = 1u << 8;
 const uint RayFieldExhausted = 1u << 9;
 #define LUMEN_HIT_LIGHTING_ENABLED true
-#define LUMEN_SURFACE_LOOKUP(p, n) surface_cache_lookup(p, n, false, false, true)
+#define LUMEN_SURFACE_LOOKUP(p, n) surface_cache_lookup(p, n, false, true, true)
 #include "lumen_world_trace.glsl"
 
 vec3 portal_indirect(vec3 world, vec3 normal)
 {
     SurfaceCacheSample sky = surface_cache_lookup(world, normal, true, true, true);
     if (sceneData.portalIndirectSettings.w > 0.5 && sky.weight > 0.0) {
-        SurfaceCacheSample lighting = surface_cache_lookup(world, normal, false, true, true);
+        SurfaceCacheSample lighting = surface_cache_lookup(world, normal, false, true, true, 3);
         return sky.sky + lighting.indirect;
     }
     vec3 helper = abs(normal.z) < 0.999 ? vec3(0, 0, 1) : vec3(1, 0, 0);

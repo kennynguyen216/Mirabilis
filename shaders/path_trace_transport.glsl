@@ -10,7 +10,7 @@ vec3 cosineDirection(vec3 n,inout uint state) {
     return normalize(tangent*(sqrt(u)*cos(phi))+cross(n,tangent)*(sqrt(u)*sin(phi))+n*sqrt(1-u));
 }
 #include "path_trace_material.glsl"
-vec3 environmentRadiance(vec3 d) {return lighting.environment.y>0.5?vec3(0):lighting.environment.x*mix(vec3(0.7,0.8,1),vec3(0.12,0.3,0.65),clamp(d.y*0.5+0.5,0,1));}
+vec3 environmentRadiance(vec3 d) {return lighting.environment.y>0.5?vec3(0):lighting.environment.x*lighting.environmentTint.rgb*mix(vec3(0.7,0.8,1),vec3(0.12,0.3,0.65),clamp(d.y*0.5+0.5,0,1));}
 vec3 offsetOrigin(vec3 p,vec3 geometric,vec3 outgoing) {
     float epsilon=max(0.0002,max(abs(p.x),max(abs(p.y),abs(p.z)))*0.000002);
     return p+geometric*(dot(geometric,outgoing)>0?epsilon:-epsilon);

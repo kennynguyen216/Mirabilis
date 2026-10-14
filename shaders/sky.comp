@@ -20,6 +20,7 @@ layout(push_constant) uniform constants
     vec4 data2;
     vec4 data3;
     vec4 data4;
+    vec4 environmentTint;
 } PushConstants;
 
 float hash12(vec2 p)
@@ -52,7 +53,7 @@ void main()
             : gradient_radiance(direction);
         radiance = PushConstants.data1.z > 0.5
             ? vec3(0.0)
-            : radiance * PushConstants.data1.y;
+            : radiance * PushConstants.data1.y * PushConstants.environmentTint.rgb;
         imageStore(image, texelCoord, vec4(radiance, 1.0));
     }
 }

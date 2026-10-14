@@ -42,6 +42,7 @@ layout(set = 0, binding = 4) uniform SkyIrradiance {
     uvec4 settings;
     // x = panorama mip, y = the sky's radiance ceiling (indirectSettings.zw).
     vec4 environment;
+    vec4 environmentTint;
 } sky;
 // The selected panorama, for a hemispherical sky sample that leaves the field.
 layout(set = 0, binding = 9) uniform sampler2D environmentPanorama;
@@ -129,7 +130,7 @@ const uint SkySamples = 32u;
 vec3 sky_radiance(vec3 direction)
 {
     if (sky.settings.x == 0u) {
-        return gradient_radiance(direction);
+        return sky.environmentTint.rgb * gradient_radiance(direction);
     }
     // environment_radiance()'s panorama read: the same mip, and the same
     // ceiling separating the sky from a sun disk the sun term delivers.
@@ -139,7 +140,7 @@ vec3 sky_radiance(vec3 direction)
     if (luminance > sky.environment.y) {
         radiance *= sky.environment.y / luminance;
     }
-    return radiance;
+    return sky.environmentTint.rgb * radiance;
 }
 
 #ifdef MIRABILIS_RT_SHADOWS

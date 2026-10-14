@@ -37,12 +37,43 @@ vec3 lumen_hit_sun(vec3 p)
         sunlight_visibility(p, n);
 }
 
-// Light arriving along one ray the screen could not answer: the surface the
-// scene field hits, read from the surface cache, or the sky for a ray that
-// leaves the scene.
+vec3 lumen_hit_radiance(vec3 p, out uint rayClass)
+{
+    SurfaceCacheSample surface = LUMEN_SURFACE_LOOKUP(p, lumen_field_normal(p));
+    if (surface.weight > 0.0) {
+        rayClass = RayFieldCache;
+        // Explicit emitter sampling owns emission at the receiver.
+        return surface.albedo * (surface.direct + surface.indirect) +
+            (sceneData.emitterSettings.x > 0.5 ? vec3(0.0) : surface.emissive);
+    }
+    rayClass = RayFieldUncovered;
+    return lumen_hit_sun(p);
+}
+
+// Light arriving along one world ray: hardware geometry when available,
+// otherwise the scene field. Both read the same cache at the hit.
 vec3 lumen_trace(vec3 worldPosition, vec3 worldNormal, vec3 worldDirection,
     out uint rayClass)
 {
+#ifdef MIRABILIS_RT_SHADOWS
+    // Reuse the opaque scene TLAS already bound for sunlight. The field's
+    // multi-voxel origin offset moves rays almost a metre off the wall in a
+    // large scene, and its voxel shells imprint false floor-contact bands.
+    float magnitude = max(max(abs(worldPosition.x), abs(worldPosition.y)), abs(worldPosition.z));
+    float epsilon = max(0.0002, magnitude * 0.000002);
+    vec3 origin = worldPosition + worldNormal * epsilon;
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, sunCasters, gl_RayFlagsOpaqueEXT, 0xFF,
+        origin, 0.0001, worldDirection, 1.0e6);
+    while (rayQueryProceedEXT(query)) {
+    }
+    if (rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+        vec3 p = origin + worldDirection * rayQueryGetIntersectionTEXT(query, true);
+        return lumen_hit_radiance(p, rayClass);
+    }
+    rayClass = RayFieldExit;
+    return environment_radiance(worldDirection);
+#else
     float voxel = fieldMin.w;
     vec3 origin = worldPosition + worldNormal * (2.5 * voxel);
     vec3 inverse = 1.0 / worldDirection;
@@ -54,19 +85,7 @@ vec3 lumen_trace(vec3 worldPosition, vec3 worldNormal, vec3 worldDirection,
         float d = lumen_field_distance(origin + worldDirection * t);
         if (d < 0.25 * voxel) {
             vec3 p = origin + worldDirection * t;
-            SurfaceCacheSample surface = LUMEN_SURFACE_LOOKUP(p, lumen_field_normal(p));
-            if (surface.weight > 0.0) {
-                rayClass = RayFieldCache;
-                // Emitted light is sampled explicitly at the receiver while
-                // emitterSettings.x > 0 (R4.9), so a hit adds only what the
-                // surface reflects.
-                return surface.albedo * (surface.direct + surface.indirect) +
-                    (sceneData.emitterSettings.x > 0.5 ? vec3(0.0) : surface.emissive);
-            }
-            // A surface no card saw: only its sun is known (R4.61); guessing
-            // its sky once lit sealed rooms (section 4.3).
-            rayClass = RayFieldUncovered;
-            return lumen_hit_sun(p);
+            return lumen_hit_radiance(p, rayClass);
         }
         t += max(d, 0.5 * voxel);
     }
@@ -75,4 +94,5 @@ vec3 lumen_trace(vec3 worldPosition, vec3 worldNormal, vec3 worldDirection,
     // room (the same rule the cache's radiosity follows).
     rayClass = t >= tExit ? RayFieldExit : RayFieldExhausted;
     return t >= tExit ? environment_radiance(worldDirection) : vec3(0.0);
+#endif
 }

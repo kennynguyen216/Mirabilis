@@ -28,7 +28,7 @@ layout(push_constant) uniform constants {
     // z = normal dot threshold, w = velocity rejection threshold.
     vec4 temporal;
     // x = rays per pixel, yz = live draw extent, w = bit 0 screen probes,
-    // bit 1 hierarchical screen trace.
+    // bit 1 hierarchical screen trace, bit 7 disables screen tracing in Lumen.
     uvec4 quality;
 } PushConstants;
 
@@ -88,7 +88,7 @@ layout(set = 2, binding = 10) uniform sampler3D albedoVolume;
 #include "sun_shadow.glsl"
 
 #define LUMEN_HIT_LIGHTING_ENABLED ((PushConstants.quality.w & 8u) != 0u)
-#define LUMEN_SURFACE_LOOKUP(p, n) surface_cache_lookup(p, n)
+#define LUMEN_SURFACE_LOOKUP(p, n) surface_cache_lookup(p, n, false, true, true)
 #include "lumen_world_trace.glsl"
 #endif
 
@@ -105,7 +105,8 @@ float randomFloat(inout uint state)
 
 vec2 frame_uv(vec2 screenUV, sampler2D source)
 {
-    return live_uv(screenUV, source, vec2(PushConstants.quality.yz));
+    vec2 extent = vec2(PushConstants.quality.yz);
+    return live_uv(ssgi_geometry_uv(screenUV, extent), source, extent);
 }
 
 vec3 view_position(vec2 screenUV, float depth)
@@ -115,10 +116,10 @@ vec3 view_position(vec2 screenUV, float depth)
     return view.xyz / view.w;
 }
 
-vec3 cosine_direction(vec3 normal, inout uint state)
+vec3 cosine_direction(vec3 normal, vec2 xi)
 {
-    float u1 = randomFloat(state);
-    float u2 = randomFloat(state);
+    float u1 = xi.x;
+    float u2 = xi.y;
     float radius = sqrt(u1);
     float angle = 2.0 * Pi * u2;
     vec3 local = vec3(radius * cos(angle), radius * sin(angle), sqrt(1.0 - u1));
@@ -265,6 +266,7 @@ struct TraceOrigin {
 
 TraceOrigin trace_origin(vec2 screenUV, float depth)
 {
+    screenUV = ssgi_geometry_uv(screenUV, vec2(PushConstants.quality.yz));
     TraceOrigin o;
     o.position = view_position(screenUV, depth);
     o.normal = normalize(texture(prepassNormal,
@@ -299,10 +301,11 @@ vec3 trace_incident(TraceOrigin o, vec3 direction, bool primarySkyCached,
     // read as exhausted; HZB is outside the R4 contract and must be off.
     bool leftScreen = false;
     traceFieldExit = false;
-    if (hzb_enabled()) {
+    bool screenTrace = (PushConstants.quality.w & 128u) == 0u;
+    if (screenTrace && hzb_enabled()) {
         hit = hzb_march(origin, direction, hitUV, hitDepth,
             portalTermination, stepsTaken);
-    } else for (int stepIndex = 1; stepIndex <= stepCount; ++stepIndex) {
+    } else if (screenTrace) for (int stepIndex = 1; stepIndex <= stepCount; ++stepIndex) {
         stepsTaken = stepIndex;
         vec3 rayPoint = origin + direction * (stride * float(stepIndex));
         vec4 clip = sceneData.proj * vec4(rayPoint, 1.0);
@@ -325,13 +328,14 @@ vec3 trace_incident(TraceOrigin o, vec3 direction, bool primarySkyCached,
         float surfaceDepth = texture(
             prepassDepth, frame_uv(rayUV, prepassDepth)).r;
         if (surfaceDepth <= BackgroundDepth) continue;
-        vec3 surfacePosition = view_position(rayUV, surfaceDepth);
+        vec2 surfaceUV = ssgi_geometry_uv(rayUV, vec2(PushConstants.quality.yz));
+        vec3 surfacePosition = view_position(surfaceUV, surfaceDepth);
         float separation = (-rayPoint.z) - (-surfacePosition.z);
         float allowedThickness = PushConstants.settings.y *
             (1.0 + 0.01 * max(-surfacePosition.z, 0.0));
         if (separation >= 0.0 && separation <= allowedThickness) {
             hit = true;
-            hitUV = rayUV;
+            hitUV = surfaceUV;
             hitDepth = surfaceDepth;
             break;
         }
@@ -340,7 +344,28 @@ vec3 trace_incident(TraceOrigin o, vec3 direction, bool primarySkyCached,
     vec3 incident = vec3(0.0);
     // Set when a screen hit could not be used, so the miss path below knows
     // it is standing in for a hit rather than for a genuine miss.
-    bool unusableHit = hit && PushConstants.control.z == 0u;
+    bool unusableHit = false;
+#ifdef LUMEN_LITE
+    if (hit) {
+        // Cache lighting is current and world-space; it needs no screen history.
+        vec4 hitWorld = sceneData.inverseViewProjection *
+            vec4(hitUV * 2.0 - 1.0, hitDepth, 1.0);
+        vec3 hitNormal = normalize(transpose(mat3(sceneData.view)) *
+            texture(prepassNormal, frame_uv(hitUV, prepassNormal)).xyz);
+        SurfaceCacheSample hitSurface = LUMEN_SURFACE_LOOKUP(hitWorld.xyz / hitWorld.w, hitNormal);
+        if (hitSurface.weight > 0.0) {
+            incident = r4_ray_value(RayScreenHit,
+                hitSurface.albedo * hitSurface.direct +
+                (sceneData.emitterSettings.x > 0.5 ? vec3(0.0) : hitSurface.emissive));
+            incident += r4_ray_value(RayScreenHitCache, hitSurface.albedo * hitSurface.indirect);
+        } else {
+            // Resolve coverage gaps through the same world path as a screen miss.
+            hit = false;
+            unusableHit = true;
+        }
+    }
+#else
+    unusableHit = hit && PushConstants.control.z == 0u;
     if (hit && PushConstants.control.z != 0u) {
         vec2 hitVelocity = texture(
             gbufferVelocity, frame_uv(hitUV, gbufferVelocity)).xy;
@@ -349,42 +374,19 @@ vec3 trace_incident(TraceOrigin o, vec3 direction, bool primarySkyCached,
             all(lessThan(previousHitUV, vec2(1.0)))) {
             vec3 screenDirect = texture(previousDirectLighting,
                 frame_uv(previousHitUV, previousDirectLighting)).rgb;
-#ifdef LUMEN_LITE
-            // A screen hit reads the cache, as a field hit does, so both carry
-            // one source: the direct page's sun, sky and emitters (R4.14).
-            // The screen's own direct-lighting target has no sky -- diffuse
-            // sky is SSGI's -- so a sky-lit wall used to pass on nothing.
-            // Where the cache does not cover the hit, that known direct light
-            // is kept and the ray is counted as uncached; no sky is invented.
-            vec4 hitWorld = sceneData.inverseViewProjection *
-                vec4(hitUV * 2.0 - 1.0, hitDepth, 1.0);
-            vec3 hitNormal = normalize(transpose(mat3(sceneData.view)) *
-                texture(prepassNormal, frame_uv(hitUV, prepassNormal)).xyz);
-            SurfaceCacheSample hitSurface =
-                surface_cache_lookup(hitWorld.xyz / hitWorld.w, hitNormal);
-            if (hitSurface.weight > 0.0) {
-                incident = r4_ray_value(RayScreenHit,
-                    hitSurface.albedo * hitSurface.direct +
-                    (sceneData.emitterSettings.x > 0.5 ? vec3(0.0) : hitSurface.emissive));
-                incident += r4_ray_value(RayScreenHitCache,
-                    hitSurface.albedo * hitSurface.indirect);
-            } else {
-                incident = r4_ray_value(RayScreenHitUncached, screenDirect);
-            }
-#else
             incident = r4_ray_value(RayScreenHit, screenDirect);
-#endif
         } else {
             hit = false;
             unusableHit = true;
         }
     }
+#endif
     // Section 4.3: only a ray that demonstrably left the scene is lit from the
     // sky, and only the scene field can show that.  Every other ray the screen
     // could not answer -- off screen, out of steps, stopped at a portal, or a
     // hit that cannot be reprojected -- is "no estimate" and adds nothing.
     // SSGI owns diffuse environment light, so nothing else adds it back.
-    if (!hit || PushConstants.control.z == 0u) {
+    if (!hit || unusableHit) {
 #ifdef LUMEN_LITE
         uint rayClass = RayPortal;
         incident = portalTermination
@@ -753,7 +755,7 @@ void main()
 #ifdef LUMEN_LITE
     // quality.w bit 6: IQ10's control, the nearest-texel sky read.
     SurfaceCacheSample primarySky = surface_cache_lookup(
-        o.worldPosition, o.worldNormal, true, (PushConstants.quality.w & 64u) == 0u);
+        o.worldPosition, o.worldNormal, true, (PushConstants.quality.w & 64u) == 0u, true);
     bool primarySkyCached = primarySky.weight > 0.0;
     if (probes_enabled()) {
         vec3 gathered;
@@ -794,8 +796,13 @@ void main()
     int hitSamples = 0;
     int portalSamples = 0;
     int totalSteps = 0;
+    // Cover radial and azimuth strata instead of letting two independent
+    // rays cluster. A shared random rotation keeps every stratum unbiased.
+    float rotation = randomFloat(state);
     for (int rayIndex = 0; rayIndex < rayCount; ++rayIndex) {
-        vec3 direction = cosine_direction(o.normal, state);
+        vec2 xi = vec2((float(rayIndex) + randomFloat(state)) / float(rayCount),
+            fract((float(rayCount - 1 - rayIndex) + randomFloat(state)) / float(rayCount) + rotation));
+        vec3 direction = cosine_direction(o.normal, xi);
         bool hit, portalTermination;
         int stepsTaken;
         indirect += trace_incident(o, direction, primarySkyCached,

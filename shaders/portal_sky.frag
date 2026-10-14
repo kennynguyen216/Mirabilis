@@ -15,6 +15,7 @@ layout(push_constant) uniform constants
     vec4 cameraRight;
     vec4 cameraUp;
     vec4 cameraForward;
+    vec4 environmentTint;
 } PushConstants;
 
 void main()
@@ -41,5 +42,5 @@ void main()
         : gradient_radiance(direction);
     outFragColor = vec4(PushConstants.settings.w < 0.0 ? radiance
         : (PushConstants.data1.x > 0.5 ? vec3(0.0)
-            : radiance * PushConstants.settings.w), 1.0);
+            : radiance * PushConstants.settings.w * PushConstants.environmentTint.rgb), 1.0);
 }

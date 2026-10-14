@@ -31,7 +31,7 @@ struct SSGIPreset {
 constexpr std::array<SSGIPreset, 5> SSGIPresets{{
     {false, 4, 32, 12.0f, 0.35f, 0.08f, 3, 800.0f, 32.0f, 0.92f},
     {true,  4, 48, 16.0f, 0.30f, 0.06f, 4, 700.0f, 28.0f, 0.94f},
-    {true,  2, 32, 12.0f, 0.35f, 0.08f, 3, 800.0f, 32.0f, 0.92f},
+    {true,  2, 32, 12.0f, 0.35f, 0.08f, 5, 800.0f, 32.0f, 0.92f},
     {true,  1, 16,  8.0f, 0.45f, 0.10f, 2, 900.0f, 36.0f, 0.90f},
     {false, 8, 96, 20.0f, 0.25f, 0.05f, 5, 800.0f, 32.0f, 0.96f}}};
 }
@@ -824,6 +824,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
                 (_ssgi.staticAccumulation ? 32u : 0u) |
                 // IQ10 control: the nearest-texel primary cache-sky read.
                 (SDL_getenv("MIRABILIS_IQ10_NEAREST_SKY") ? 64u : 0u) |
+                (lumen && !_ssgi.screenTraceEnabled ? 128u : 0u) |
                 // Hit-lit sun at uncovered field hits follows the cache's
                 // own sun source (R4.61).
                 ((_r4Contributions.cacheSources & r4::LightSun) != 0u ? 8u : 0u) |
@@ -889,6 +890,8 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkCmdBindPipeline(
                 cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.filterPipeline);
             SSGIFilterPushConstants filterPush{};
+            filterPush.projection = glm::vec4(sceneData.proj[0][0], sceneData.proj[1][1],
+                sceneData.proj[2][2], sceneData.proj[3][2]);
             filterPush.settings = glm::vec4(
                 static_cast<float>(_ssgi.filterRadius),
                 _ssgi.filterDepthFalloff,
@@ -958,6 +961,9 @@ void VulkanEngine::draw_ssgi_composite(VkCommandBuffer cmd)
         _ssgi.compositePipeline.layout, 0, 1,
         &_ssgi.compositeDescriptors[1u - _ssgi.historyWriteIndex], 0, nullptr);
     SSGICompositePushConstants push{};
+    push.projection = glm::vec4(sceneData.proj[0][0], sceneData.proj[1][1],
+        sceneData.proj[2][2], sceneData.proj[3][2]);
+    push.colorSettings.x = _ssgi.colorSaturation;
     const VkExtent2D ssgiExtent = active_ssgi_extent();
     push.extents = glm::vec4(
         static_cast<float>(_drawExtent.width),

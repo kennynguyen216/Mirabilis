@@ -38,7 +38,7 @@ vec3 apply_environment_policy(vec3 radiance)
     if (luminance > sceneData.indirectSettings.w) {
         radiance *= sceneData.indirectSettings.w / luminance;
     }
-    return sceneData.ssgiFallbackSettings.x * radiance;
+    return sceneData.ssgiFallbackSettings.x * sceneData.environmentTint.rgb * radiance;
 }
 
 // Radiance arriving from one direction outside the scene.  The equirectangular

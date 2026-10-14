@@ -7,7 +7,7 @@ layout(set=0,binding=1,rgba32f) uniform image2D historyImage;
 layout(std430,set=0,binding=2) readonly buffer Triangles { Triangle triangles[]; };
 layout(std430,set=0,binding=3) readonly buffer Materials { Material materials[]; };
 layout(set=0,binding=5) uniform sampler2D rasterDepth;
-layout(std140,set=0,binding=6) uniform Lighting { vec4 sunDirection; vec4 sunRadiance; vec4 environment; uvec4 counts; } lighting;
+layout(std140,set=0,binding=6) uniform Lighting { vec4 sunDirection; vec4 sunRadiance; vec4 environment; uvec4 counts; vec4 environmentTint; } lighting;
 layout(std430,set=0,binding=7) readonly buffer Emitters { uint emitters[]; };
 layout(set=0,binding=8,rgba32f) uniform image2D directHistory;
 layout(set=0,binding=9,rgba32f) uniform image2D indirectHistory;

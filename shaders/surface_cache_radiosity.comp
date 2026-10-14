@@ -37,6 +37,8 @@ layout(set = 1, binding = 6) uniform sampler3D sceneField;
 // happened to have updated first, so no two runs agreed.
 layout(set = 1, binding = 10) uniform sampler2D cacheIndirectPrevious;
 #define SURFACE_CACHE_READ_INDIRECT(texel) texelFetch(cacheIndirectPrevious, texel, 0).rgb
+layout(set = 1, binding = 11) uniform sampler2D cacheSky;
+#define SURFACE_CACHE_READ_SKY(texel) texelFetch(cacheSky, texel, 0).rgb
 #include "surface_cache_lookup.glsl"
 
 layout(push_constant) uniform constants {
@@ -52,6 +54,8 @@ layout(push_constant) uniform constants {
     uvec4 control;
     // x = weight of the new estimate, y = maximum trace distance.
     vec4 settings;
+    // xy = local card offset, zw = dispatch size; rect is the full card.
+    uvec4 tile;
 } PushConstants;
 
 const float Pi = 3.14159265359;
@@ -103,10 +107,11 @@ vec3 field_normal(vec3 p)
 
 void main()
 {
-    uvec2 local = gl_GlobalInvocationID.xy;
-    if (any(greaterThanEqual(local, PushConstants.rect.zw))) {
+    uvec2 work = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(work, PushConstants.tile.zw))) {
         return;
     }
+    uvec2 local = work + PushConstants.tile.xy;
     ivec2 texel = ivec2(PushConstants.rect.xy + local);
     float depth = texelFetch(cacheDepth, texel, 0).r;
     if (depth >= 1.0) {
@@ -158,7 +163,7 @@ void main()
             continue;
         }
         vec3 p = origin + direction * t;
-        SurfaceCacheSample surface = surface_cache_lookup(p, field_normal(p));
+        SurfaceCacheSample surface = surface_cache_lookup(p, field_normal(p), false, true, true);
         if (surface.weight > 0.0) {
             vec3 arriving = PushConstants.control.z != 0u
                 ? surface.direct : surface.direct + surface.indirect;

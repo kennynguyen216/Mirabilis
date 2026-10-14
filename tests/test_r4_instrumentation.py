@@ -132,8 +132,10 @@ class CacheChannelContract(unittest.TestCase):
 
     def test_screen_hits_and_field_hits_share_the_cache_direct_source(self):
         ssgi = SSGI.read_text(encoding="utf-8")
-        self.assertIn("incident = r4_ray_value(RayScreenHit,\n                    hitSurface.albedo * hitSurface.direct", ssgi)
-        self.assertIn("incident = r4_ray_value(RayScreenHitUncached, screenDirect);", ssgi)
+        self.assertIn("incident = r4_ray_value(RayScreenHit, hitSurface.albedo * hitSurface.direct",
+                      re.sub(r"\s+", " ", ssgi))
+        self.assertNotIn("r4_ray_value(RayScreenHitUncached, screenDirect)", ssgi)
+        self.assertIn("LUMEN_SURFACE_LOOKUP(hitWorld.xyz / hitWorld.w, hitNormal)", ssgi)
 
     def test_cache_sky_is_hemispherical_and_exit_only(self):
         direct = self.DIRECT.read_text(encoding="utf-8")
@@ -145,11 +147,11 @@ class CacheChannelContract(unittest.TestCase):
     def test_background_follows_the_environment_policy(self):
         sky = (ROOT / "shaders" / "sky.comp").read_text(encoding="utf-8")
         self.assertIn(": gradient_radiance(direction);", sky)
-        self.assertIn("radiance * PushConstants.data1.y;", sky)
+        self.assertIn("radiance * PushConstants.data1.y * PushConstants.environmentTint.rgb;", sky)
 
     def test_direct_sky_follows_the_environment_selection(self):
         text = self.DIRECT.read_text(encoding="utf-8")
-        self.assertIn("return gradient_radiance(direction);", text)
+        self.assertIn("return sky.environmentTint.rgb * gradient_radiance(direction);", text)
 
     def test_radiosity_is_reflected_geometry_transport_only(self):
         text = self.RADIOSITY.read_text(encoding="utf-8")
@@ -162,7 +164,8 @@ class CacheChannelContract(unittest.TestCase):
         ssgi = SSGI.read_text(encoding="utf-8")
         self.assertIn('#include "sun_shadow.glsl"', ssgi)
         world = (ROOT / "shaders" / "lumen_world_trace.glsl").read_text(encoding="utf-8")
-        self.assertIn("rayClass = RayFieldUncovered;\n            return lumen_hit_sun(p);", world)
+        self.assertIn("rayClass = RayFieldUncovered; return lumen_hit_sun(p);",
+                      re.sub(r"\s+", " ", world))
         structures = (ROOT / "shaders" / "input_structures.glsl").read_text(encoding="utf-8")
         self.assertIn('#include "sun_shadow.glsl"', structures)
         self.assertNotIn("float sunlight_visibility", structures, "shadow test copied, not shared")

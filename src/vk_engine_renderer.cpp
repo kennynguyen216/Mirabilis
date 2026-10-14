@@ -578,6 +578,8 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
         occlusionFraction.x - 0.5f / occlusionAllocation.x,
         occlusionFraction.y - 0.5f / occlusionAllocation.y);
     data.ssgiFallbackSettings = _traceSettings.lighting.environment;
+    data.environmentTint = _traceSettings.lighting.environmentTint;
+    data.environmentTint.w = _ssgi.colorSaturation;
     // x is unused since R4: SSGI owns diffuse environment outright.
     data.indirectSettings = glm::vec4(
         0.0f,

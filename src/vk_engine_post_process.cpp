@@ -439,6 +439,11 @@ void VulkanEngine::draw_tonemap(VkCommandBuffer cmd)
         nullptr);
 
     TonemapPushConstants pushConstants{};
+    // ponytail: artist RGB balance, use chromatic adaptation if Kelvin-based
+    // camera calibration becomes a requirement. Neutral controls are identity.
+    const glm::vec2 balance = _postProcess.whiteBalance;
+    const glm::vec3 gain(std::exp2(balance.x), std::exp2(-balance.y), std::exp2(-balance.x));
+    pushConstants.whiteBalanceGain = glm::vec4(gain / glm::dot(gain, glm::vec3(.2126f, .7152f, .0722f)), 0);
     pushConstants.settings = glm::vec4(
         _postProcess.tonemapExposure,
         _postProcess.tonemapOperator == 1 ? 1.0f : 0.0f,

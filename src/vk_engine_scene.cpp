@@ -85,6 +85,7 @@ void VulkanEngine::update_scene(float deltaTime)
     if (backgroundEffects.size() > 1) {
         const glm::mat4 rotation = camera.getRotationMatrix();
         ComputeEffect& sky = backgroundEffects[1];
+        sky.data.environmentTint = _traceSettings.lighting.environmentTint;
         sky.data.data2 = glm::vec4(
             glm::normalize(glm::vec3(rotation * glm::vec4(1.0f, 0.0f, 0.0f, 0.0f))),
             static_cast<float>(_drawExtent.width));

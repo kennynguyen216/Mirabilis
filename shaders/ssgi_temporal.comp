@@ -28,12 +28,8 @@ layout(push_constant) uniform constants {
 
 vec2 frame_uv(vec2 screenUV, sampler2D source)
 {
-    return live_uv(screenUV, source, vec2(PushConstants.quality.yz));
-}
-
-vec2 ssgi_uv(vec2 screenUV, sampler2D source)
-{
-    return live_uv(screenUV, source, vec2(PushConstants.control.xy));
+    vec2 extent = vec2(PushConstants.quality.yz);
+    return live_uv(ssgi_geometry_uv(screenUV, extent), source, extent);
 }
 
 void main()
@@ -43,6 +39,7 @@ void main()
     if (any(greaterThanEqual(pixel, extent))) return;
 
     vec2 screenUV = (vec2(pixel) + 0.5) / vec2(extent);
+    vec2 geometryUV = ssgi_geometry_uv(screenUV, vec2(PushConstants.quality.yz));
     float depth = texture(prepassDepth,
         frame_uv(screenUV, prepassDepth)).r;
     if (depth <= 1e-6) {
@@ -56,6 +53,10 @@ void main()
     vec3 current = imageLoad(rawIndirectImage, pixel).rgb;
     vec3 normal = normalize(texture(prepassNormal,
         frame_uv(screenUV, prepassNormal)).xyz);
+    vec3 worldNormal = normalize(transpose(mat3(sceneData.view)) * normal);
+    vec4 projection = vec4(sceneData.proj[0][0], sceneData.proj[1][1],
+        sceneData.proj[2][2], sceneData.proj[3][2]);
+    vec3 position = ssgi_view_position(geometryUV, depth, projection);
     vec2 velocity = texture(gbufferVelocity,
         frame_uv(screenUV, gbufferVelocity)).xy;
     vec2 previousUV = screenUV + velocity;
@@ -69,29 +70,70 @@ void main()
         rejection = 0.25;
     }
 
-    vec4 priorMetadata = vec4(0.0);
+    vec3 history = vec3(0.0);
+    float historyLength = 0.0;
+    float historyWeightSum = 0.0;
     if (accepted) {
-        priorMetadata = texture(previousMetadata,
-            ssgi_uv(previousUV, previousMetadata));
         vec4 worldPosition = sceneData.inverseViewProjection *
-            vec4(screenUV * 2.0 - 1.0, depth, 1.0);
+            vec4(geometryUV * 2.0 - 1.0, depth, 1.0);
         worldPosition /= worldPosition.w;
         vec4 previousClip = sceneData.previousViewProjection * worldPosition;
-        float expectedDepth = previousClip.z / max(previousClip.w, 0.00001);
-        if (abs(priorMetadata.r - expectedDepth) > PushConstants.temporal.y) {
+        if (previousClip.w <= 0.0) {
             accepted = false;
             rejection = 0.50;
         }
-    }
-    if (accepted && dot(normal, decode_octahedron(priorMetadata.gb)) <
-        PushConstants.temporal.z) {
-        accepted = false;
-        rejection = 0.75;
-    }
-    if (accepted && (abs(priorMetadata.a - currentPortal) > 0.5 ||
-        length(velocity) > PushConstants.temporal.w)) {
-        accepted = false;
-        rejection = 1.0;
+        if (length(velocity) > PushConstants.temporal.w) {
+            accepted = false;
+            rejection = 1.0;
+        }
+        if (accepted) {
+            float expectedDepth = previousClip.z / previousClip.w;
+            vec2 expectedUV = previousClip.xy / previousClip.w * 0.5 + 0.5;
+            vec3 expectedPosition = ssgi_view_position(expectedUV, expectedDepth, projection);
+            // Projection is fixed between valid history frames. Bring the
+            // receiver plane into the previous camera before testing its taps.
+            vec3 previousNormal = normalize(mat3(sceneData.inverseProjection *
+                sceneData.previousViewProjection) * worldNormal);
+            vec2 f = previousUV * vec2(extent) - 0.5;
+            ivec2 base = ivec2(floor(f));
+            vec2 fraction = fract(f);
+            // Validate each bilinear tap before blending. Interpolated depth
+            // and normals can hide a disocclusion between unrelated surfaces.
+            for (int i = 0; i < 4; ++i) {
+                ivec2 corner = ivec2(i & 1, i >> 1);
+                ivec2 q = base + corner;
+                if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, extent))) continue;
+                vec4 metadata = texelFetch(previousMetadata, q, 0);
+                vec2 qUV = (vec2(q) + 0.5) / vec2(extent);
+                vec3 priorPosition = ssgi_view_position(ssgi_geometry_uv(qUV,
+                    vec2(PushConstants.quality.yz)), metadata.r, projection);
+                if (metadata.r <= 1e-6 || abs(dot(previousNormal, priorPosition - expectedPosition)) >
+                    PushConstants.temporal.y * max(-expectedPosition.z, 1.0)) {
+                    rejection = max(rejection, 0.50);
+                    continue;
+                }
+                if (dot(worldNormal, decode_octahedron(metadata.gb)) < PushConstants.temporal.z) {
+                    rejection = max(rejection, 0.75);
+                    continue;
+                }
+                if (abs(metadata.a - currentPortal) > 0.5) {
+                    rejection = 1.0;
+                    continue;
+                }
+                float tapWeight = (corner.x == 1 ? fraction.x : 1.0 - fraction.x) *
+                    (corner.y == 1 ? fraction.y : 1.0 - fraction.y);
+                vec4 prior = texelFetch(previousTemporalIndirect, q, 0);
+                history += prior.rgb * tapWeight;
+                historyLength += prior.a * tapWeight;
+                historyWeightSum += tapWeight;
+            }
+            accepted = historyWeightSum > 1e-4;
+            if (accepted) {
+                history /= historyWeightSum;
+                historyLength /= historyWeightSum;
+                rejection = 0.0;
+            }
+        }
     }
 
     vec3 result = current;
@@ -106,13 +148,20 @@ void main()
         for (int y = -1; y <= 1; ++y) {
             for (int x = -1; x <= 1; ++x) {
                 ivec2 q = clamp(pixel + ivec2(x, y) * stride, ivec2(0), extent - 1);
+                vec2 qUV = (vec2(q) + 0.5) / vec2(extent);
+                float qDepth = texture(prepassDepth, frame_uv(qUV, prepassDepth)).r;
+                if (qDepth <= 1e-6) continue;
+                vec3 qNormal = normalize(texture(prepassNormal, frame_uv(qUV, prepassNormal)).xyz);
+                if (dot(normal, qNormal) < PushConstants.temporal.z ||
+                    abs(dot(normal, ssgi_view_position(ssgi_geometry_uv(qUV,
+                        vec2(PushConstants.quality.yz)), qDepth, projection) - position)) >
+                        PushConstants.temporal.y * max(-position.z, 1.0) ||
+                    abs(texture(portalMask, frame_uv(qUV, portalMask)).r - currentPortal) > 0.5) continue;
                 vec3 sampleValue = imageLoad(rawIndirectImage, q).rgb;
                 neighborhoodMin = min(neighborhoodMin, sampleValue);
                 neighborhoodMax = max(neighborhoodMax, sampleValue);
             }
         }
-        vec3 history = texture(previousTemporalIndirect,
-            ssgi_uv(previousUV, previousTemporalIndirect)).rgb;
         // The clamp guards against stale history under motion.  On a still,
         // accepted reprojection it only biases: at two rays a pixel most
         // neighbourhoods of a sparse sun path are near 0, and clamping to
@@ -129,13 +178,17 @@ void main()
         if ((PushConstants.quality.w & 32u) != 0u && weight < 0.98) {
             weight = mix(0.98, weight, motion);
         }
+        // Newly uncovered pixels build history gradually instead of giving
+        // their first noisy sample the full settled-history weight.
+        weight = min(weight, historyLength / (historyLength + 1.0));
         result = mix(current, history, clamp(weight, 0.0, 0.99));
     }
 
-    imageStore(temporalIndirectImage, pixel, vec4(result, 1.0));
+    imageStore(temporalIndirectImage, pixel,
+        vec4(result, accepted ? min(historyLength + 1.0, 256.0) : 1.0));
     imageStore(temporalDiagnosticImage, pixel, vec4(
         rejection, min(length(velocity) * 20.0, 1.0),
         accepted ? 1.0 : 0.0, 1.0));
     imageStore(currentMetadata, pixel,
-        vec4(depth, encode_octahedron(normal), currentPortal));
+        vec4(depth, encode_octahedron(worldNormal), currentPortal));
 }

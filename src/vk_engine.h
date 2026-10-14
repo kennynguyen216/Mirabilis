@@ -52,6 +52,7 @@ struct ComputePushConstants {
 	glm::vec4 data2;
 	glm::vec4 data3;
 	glm::vec4 data4;
+    glm::vec4 environmentTint{1,1,1,0};
 };
 
 struct ComputeEffect {
@@ -75,6 +76,7 @@ struct PortalSkyPushConstants {
     glm::vec4 cameraRight;
     glm::vec4 cameraUp;
     glm::vec4 cameraForward;
+    glm::vec4 environmentTint{1,1,1,0};
 };
 
 // The sunlight depth pass binds no descriptor sets.  Folding the light's
@@ -98,6 +100,7 @@ struct TonemapPushConstants {
     // (0 ACES, 1 Reinhard), z = 1 while the curve is bypassed and only the
     // sRGB encode runs.
     glm::vec4 settings{1.0f, 0.0f, 0.0f, 0.0f};
+    glm::vec4 whiteBalanceGain{1,1,1,0};
 };
 
 struct FXAAPushConstants {
@@ -140,6 +143,7 @@ struct SSGIFilterPushConstants {
     glm::vec4 settings{0.0f};
     // xy = live draw extent, for the full-size depth and normal inputs.
     glm::ivec4 frame{0};
+    glm::vec4 projection{0.0f};
 };
 
 struct SSGICompositePushConstants {
@@ -147,6 +151,8 @@ struct SSGICompositePushConstants {
     glm::vec4 extents{0.0f};
     // x = indirect intensity, y = half-resolution flag.
     glm::vec4 settings{0.0f};
+    glm::vec4 colorSettings{1,0,0,0};
+    glm::vec4 projection{0.0f};
 };
 
 // Field meanings are documented in shaders/sdf_debug.comp.  128 bytes, the
@@ -364,6 +370,8 @@ struct SurfaceCacheRadiosityPushConstants {
     glm::uvec4 rect{0};
     glm::uvec4 control{0};
     glm::vec4 settings{0.0f};
+    // xy = local card offset, zw = dispatch size. rect stays the full card.
+    glm::uvec4 tile{0};
 };
 
 // Field meanings are documented in shaders/surface_cache_direct.comp.
@@ -601,6 +609,7 @@ class VulkanEngine{
     uint64_t _traceDrawHash{0};
     std::vector<TracePortal> _tracePortals;
     AllocatedBuffer _tracePortalBuffer{};
+    bool _tracePortalBufferDirty{false};
     VkExtent2D _windowExtent{1280, 720};
 
     FrameData _frames[FRAME_OVERLAP];
@@ -1339,6 +1348,7 @@ class VulkanEngine{
             // Lumen-lite: screen misses trace the scene distance field and
             // read the surface cache instead of the environment.
             bool lumenEnabled{false};
+            bool screenTraceEnabled{true};
             VkDescriptorSetLayout lumenLayout{};
             VkPipelineLayout lumenPipelineLayout{};
             VkPipeline lumenPipeline{};
@@ -1369,6 +1379,7 @@ class VulkanEngine{
             float filterDepthFalloff{};
             float filterNormalPower{};
             float intensity{1.0f};
+            float colorSaturation{1.0f};
             // Fill ray misses from the selected skybox rather than the
             // analytic gradient.  Turning this off restores parity with the
             // software path tracer, which still lights its misses from the
@@ -1522,12 +1533,13 @@ class VulkanEngine{
             bool measureEmitterVisibility{false};
             bool radiosityEnabled{true};
             uint32_t radiosityCursor{0};
+            uint32_t radiosityRow{0};
+            float radiosityPendingBlend{1.0f};
             // Per card: how many radiosity updates it has had since the last
             // capture.  The first updates average progressively (1/n) so a
             // static scene keeps converging; radiosityBlend is the floor that
             // keeps a changing one responsive.
             std::vector<uint32_t> cardUpdates;
-            std::vector<uint32_t> cardLastUpdate;
             uint32_t radiosityUpdate{0};
             // Texels traced per update; each traces raysPerTexel rays.
             // Independent of SSGI presets, so editor tuning survives changes.
@@ -1657,6 +1669,7 @@ class VulkanEngine{
             // Stops in photographic terms would be friendlier, but every other
             // exposure-like control in this engine is a plain multiplier.
             float tonemapExposure{1.0f};
+            glm::vec2 whiteBalance{0.0f}; // warmth, green/magenta tint
             // 0 = ACES filmic, 1 = Reinhard.
             int tonemapOperator{0};
             // Runs the sRGB encode without the curve, so the curve's

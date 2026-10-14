@@ -240,7 +240,7 @@ vec3 material_environment_scale(vec3 radiance)
 {
     return sceneData.ssgiFallbackSettings.y > 0.5
         ? vec3(0.0)
-        : sceneData.ssgiFallbackSettings.x * radiance;
+        : sceneData.ssgiFallbackSettings.x * sceneData.environmentTint.rgb * radiance;
 }
 
 vec3 material_ibl_diffuse_light(vec3 n)

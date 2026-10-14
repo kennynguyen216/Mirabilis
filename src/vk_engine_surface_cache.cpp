@@ -413,6 +413,7 @@ void VulkanEngine::init_surface_cache_resources()
             builder.add_binding(binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         }
         builder.add_binding(10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         _surfaceCache.radiosityLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
         VkPushConstantRange range{
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -819,9 +820,10 @@ void VulkanEngine::update_surface_cache()
         }
     });
     _surfaceCache.radiosityCursor = 0;
+    _surfaceCache.radiosityRow = 0;
+    _surfaceCache.radiosityPendingBlend = 1.0f;
     _surfaceCache.radiosityUpdate = 0;
     _surfaceCache.cardUpdates.assign(_surfaceCache.cards.size(), 0);
-    _surfaceCache.cardLastUpdate.assign(_surfaceCache.cards.size(), 0);
     build_surface_cache_lookup();
     light_surface_cache();
 
@@ -883,6 +885,7 @@ void VulkanEngine::light_surface_cache()
     // A changed sky relights the cache: swapping the skybox otherwise leaves
     // every card carrying the previous one's light.
     mix(&skyIntensity, sizeof(skyIntensity));
+    mix(&_traceSettings.lighting.environmentTint, sizeof(glm::vec4));
     mix(_ibl.environmentSH.data(), sizeof(glm::vec4) * 9);
     mix(&panoramaSky, sizeof(panoramaSky));
     // Sky directions per texel: 32 through the software BVH; 256 by ray query
@@ -938,7 +941,7 @@ void VulkanEngine::light_surface_cache()
     // pass reads.  Lighting is hash-gated, so this buffer is built only when
     // the cache is actually re-lit.
     AllocatedBuffer skyBuffer = create_buffer(
-        sizeof(glm::vec4) * 11,
+        sizeof(glm::vec4) * 12,
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU);
     std::memcpy(skyBuffer.info.pMappedData, _ibl.environmentSH.data(),
@@ -949,6 +952,8 @@ void VulkanEngine::light_surface_cache()
         &skySettings, sizeof(skySettings));
     std::memcpy(static_cast<char*>(skyBuffer.info.pMappedData) + sizeof(glm::vec4) * 10,
         &skyEnvironment, sizeof(skyEnvironment));
+    std::memcpy(static_cast<char*>(skyBuffer.info.pMappedData) + sizeof(glm::vec4) * 11,
+        &_traceSettings.lighting.environmentTint, sizeof(glm::vec4));
     // Bound even when unused, so the descriptor set is always complete.
     AllocatedBuffer placeholder = create_buffer(sizeof(glm::vec4) * 16,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
@@ -964,7 +969,7 @@ void VulkanEngine::light_surface_cache()
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     writer.write_image(3, _sceneSdf.field.imageView, _sdf.sampler,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-    writer.write_buffer(4, skyBuffer.buffer, sizeof(glm::vec4) * 11, 0,
+    writer.write_buffer(4, skyBuffer.buffer, sizeof(glm::vec4) * 12, 0,
         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
     writer.write_buffer(5, traceBuffer(_traceTriangleBuffer), VK_WHOLE_SIZE, 0,
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
@@ -1048,6 +1053,13 @@ void VulkanEngine::light_surface_cache()
     _surfaceCache.lightingHash = hash;
     _surfaceCache.lightingRestHash = restHash;
     _surfaceCache.lightingValid = true;
+    // New lighting starts a new estimate. Static cache samples can then
+    // converge by actual update count rather than forgetting between visits.
+    std::fill(_surfaceCache.cardUpdates.begin(), _surfaceCache.cardUpdates.end(), 0);
+    _surfaceCache.radiosityCursor = 0;
+    _surfaceCache.radiosityRow = 0;
+    _surfaceCache.radiosityPendingBlend = 1.0f;
+    _ssgi.historyValid = false;
     _surfaceCache.lightingMilliseconds = std::chrono::duration<float, std::milli>(
         std::chrono::steady_clock::now() - started).count();
     fmt::print("Surface cache lit{}: {} cards, {} emitter triangles, {} sky in {:.1f} ms\n",
@@ -1365,6 +1377,8 @@ void VulkanEngine::update_surface_cache_radiosity(VkCommandBuffer cmd)
     DescriptorWriter writer;
     writer.write_image(0, _surfaceCache.indirect.imageView, VK_NULL_HANDLE,
         VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+    writer.write_image(11, _surfaceCache.sky.imageView, _prepass.sampler,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     const std::array<VkImageView, 5> pages{
         _surfaceCache.normal.imageView, _surfaceCache.depth.imageView,
         _surfaceCache.albedo.imageView, _surfaceCache.emissive.imageView,
@@ -1385,22 +1399,26 @@ void VulkanEngine::update_surface_cache_radiosity(VkCommandBuffer cmd)
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     writer.update_set(_device, set);
 
-    // The next cards in round-robin order, up to the texel budget, so a large
-    // atlas converges over several updates instead of stalling one frame.
-    std::vector<uint32_t> batch;
+    // Split large cards into row strips: the first card must respect the
+    // budget too. UV reconstruction still uses the full card rectangle.
+    struct Update { uint32_t card, row, rows; };
+    std::vector<Update> batch;
     uint64_t texels = 0;
     const uint32_t cardCount = static_cast<uint32_t>(cards.size());
+    const uint64_t budget = std::max(_surfaceCache.radiosityTexelBudget, MaxCardTexels);
     for (uint32_t n = 0; n < cardCount; ++n) {
-        const uint32_t index = (_surfaceCache.radiosityCursor + n) % cardCount;
-        const uint64_t cardTexels = uint64_t(cards[index].rect.z) * cards[index].rect.w;
-        if (!batch.empty() && texels + cardTexels > _surfaceCache.radiosityTexelBudget) {
-            break;
-        }
-        batch.push_back(index);
-        texels += cardTexels;
+        const uint32_t index = _surfaceCache.radiosityCursor;
+        const auto& rect = cards[index].rect;
+        const uint32_t rows = std::min<uint64_t>(rect.w - _surfaceCache.radiosityRow,
+            (budget - texels) / rect.z);
+        if (rows == 0) break;
+        batch.push_back({index, _surfaceCache.radiosityRow, rows});
+        texels += uint64_t(rect.z) * rows;
+        _surfaceCache.radiosityRow += rows;
+        if (_surfaceCache.radiosityRow < rect.w) break;
+        _surfaceCache.radiosityRow = 0;
+        _surfaceCache.radiosityCursor = (index + 1u) % cardCount;
     }
-    _surfaceCache.radiosityCursor =
-        (_surfaceCache.radiosityCursor + static_cast<uint32_t>(batch.size())) % cardCount;
     const uint32_t update = _surfaceCache.radiosityUpdate++;
     _surfaceCache.radiosityBatchTexels = texels;
 
@@ -1422,37 +1440,37 @@ void VulkanEngine::update_surface_cache_radiosity(VkCommandBuffer cmd)
         _surfaceCache.radiosityPipelineLayout, 0, 2, sets.data(), 0, nullptr);
     std::vector<VkImageCopy> regions;
     regions.reserve(batch.size());
-    const bool originalTiming = SDL_getenv("MIRABILIS_TEST_FRAMES") &&
-        SDL_getenv("MIRABILIS_R6_RADIOSITY_CONTROL");
-    for (uint32_t index : batch) {
+    for (const Update& regionUpdate : batch) {
+        const uint32_t index = regionUpdate.card;
         const SurfaceCard& card = cards[index];
         SurfaceCacheRadiosityPushConstants push{};
         push.cardToWorld0 = glm::row(card.cardToWorld, 0);
         push.cardToWorld1 = glm::row(card.cardToWorld, 1);
         push.cardToWorld2 = glm::row(card.cardToWorld, 2);
         push.rect = card.rect;
+        push.tile = glm::uvec4(0, regionUpdate.row, card.rect.z, regionUpdate.rows);
         push.control = glm::uvec4(update, _surfaceCache.raysPerTexel,
             _surfaceCache.singleBounce ? 1u : 0u, 0);
         uint32_t& updates = _surfaceCache.cardUpdates[index];
-        const uint32_t gap = updates && !originalTiming ? update - _surfaceCache.cardLastUpdate[index] : 1u;
-        const float floor = gap > 1u ? 1.0f - std::pow(1.0f - _surfaceCache.radiosityBlend, float(gap))
-            : _surfaceCache.radiosityBlend;
-        const float blend = std::max(
-            1.0f / float(updates + 1), floor);
-        _surfaceCache.cardLastUpdate[index] = update;
-        ++updates;
+        if (regionUpdate.row == 0) {
+            // Waiting frames add no rays: do not inflate the blend by the
+            // round-robin gap, which kept large-scene cache lighting noisy.
+            _surfaceCache.radiosityPendingBlend = std::max(
+                1.0f / float(updates + 1), _surfaceCache.radiosityBlend);
+            ++updates;
+        }
         push.settings = glm::vec4(
-            blend, _surfaceCache.radiosityMaxDistance, 0.0f, 0.0f);
+            _surfaceCache.radiosityPendingBlend, _surfaceCache.radiosityMaxDistance, 0.0f, 0.0f);
         vkCmdPushConstants(cmd, _surfaceCache.radiosityPipelineLayout,
             VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-        vkCmdDispatch(cmd, (card.rect.z + 7) / 8, (card.rect.w + 7) / 8, 1);
+        vkCmdDispatch(cmd, (push.tile.z + 7) / 8, (push.tile.w + 7) / 8, 1);
 
         VkImageCopy& region = regions.emplace_back();
         region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         region.dstSubresource = region.srcSubresource;
-        region.srcOffset = {int32_t(card.rect.x), int32_t(card.rect.y), 0};
+        region.srcOffset = {int32_t(card.rect.x), int32_t(card.rect.y + regionUpdate.row), 0};
         region.dstOffset = region.srcOffset;
-        region.extent = {card.rect.z, card.rect.w, 1};
+        region.extent = {card.rect.z, regionUpdate.rows, 1};
     }
     vkutil::transition_image(cmd, _surfaceCache.indirect.image,
         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -2606,7 +2624,7 @@ void VulkanEngine::measure_sky_visibility(const char* csvPath)
     const auto skyLuminance = [&](glm::vec3 d) {
         const float s = std::clamp(d.y * 0.5f + 0.5f, 0.0f, 1.0f);
         const glm::vec3 c = glm::mix(glm::vec3(0.7f, 0.8f, 1.0f), glm::vec3(0.12f, 0.3f, 0.65f), s);
-        return intensity * glm::dot(c, glm::vec3(0.2126f, 0.7152f, 0.0722f));
+        return intensity * glm::dot(c * glm::vec3(sceneData.environmentTint), glm::vec3(0.2126f, 0.7152f, 0.0722f));
     };
     std::ofstream csv(csvPath);
     csv << "texel_x,texel_y,world_x,world_y,world_z,normal_x,normal_y,normal_z,screen_u,screen_v,in_front,"

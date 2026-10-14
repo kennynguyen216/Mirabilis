@@ -1540,7 +1540,7 @@ void VulkanEngine::draw_ambient_occlusion_settings()
 void VulkanEngine::draw_tonemap_settings()
 {
     if (ImGui::CollapsingHeader("Tonemapping")) {
-        // Also a session preference, so none of it marks the level dirty.
+        // Exposure is a session preference; white balance is scene-authored.
         ImGui::Checkbox("Enabled##Tonemapping", &_postProcess.tonemapEnabled);
         if (!_postProcess.tonemapEnabled) {
             ImGui::TextDisabled(
@@ -1577,6 +1577,11 @@ void VulkanEngine::draw_tonemap_settings()
             // rather than on both at once.
             ImGui::Checkbox(
                 "Bypass Curve (encode only)", &_postProcess.tonemapBypassCurve);
+            ImGui::SeparatorText("White balance");
+            bool balanceEdited = ImGui::SliderFloat("Cool / warm", &_postProcess.whiteBalance.x, -1, 1, "%.2f");
+            balanceEdited |= ImGui::SliderFloat("Green / magenta", &_postProcess.whiteBalance.y, -1, 1, "%.2f");
+            if (ImGui::Button("Reset white balance")) { _postProcess.whiteBalance = glm::vec2(0); balanceEdited = true; }
+            if (balanceEdited) _sceneDocument.dirty = true;
             if (_debugViews.view != RenderDebugView::None) {
                 ImGui::TextDisabled("Inactive while a debug view is shown.");
             }
@@ -1655,6 +1660,8 @@ void VulkanEngine::draw_screen_buffer_settings()
         ImGui::SeparatorText("SSGI Milestone 5");
         ImGui::Checkbox("Run SSGI", &_ssgi.enabled);
         ImGui::Checkbox("Lumen-lite World Fallback", &_ssgi.lumenEnabled);
+        if (_ssgi.lumenEnabled && ImGui::Checkbox("Screen Trace", &_ssgi.screenTraceEnabled))
+            _ssgi.historyValid = false;
         ImGui::Checkbox("Screen Probes", &_ssgi.probesEnabled);
         ImGui::Checkbox("Hierarchical Screen Trace", &_ssgi.hzbEnabled);
         if (_ssgi.lumenEnabled && !lumen_lite_ready()) {
@@ -1681,7 +1688,7 @@ void VulkanEngine::draw_screen_buffer_settings()
         ImGui::SliderFloat(
             "History Weight", &_ssgi.historyWeight, 0.0f, 0.98f, "%.3f");
         ImGui::SliderFloat(
-            "History Depth Reject", &_ssgi.depthRejection,
+            "History Relative Depth Reject", &_ssgi.depthRejection,
             0.0001f, 0.02f, "%.4f");
         ImGui::SliderFloat(
             "History Normal Reject", &_ssgi.normalRejection,
@@ -1693,7 +1700,7 @@ void VulkanEngine::draw_screen_buffer_settings()
         ImGui::Checkbox("Spatial Filter", &_ssgi.spatialFilterEnabled);
         ImGui::SliderInt("Filter Radius", &_ssgi.filterRadius, 1, 8);
         ImGui::SliderFloat(
-            "Filter Depth Falloff", &_ssgi.filterDepthFalloff,
+            "Filter Plane Falloff", &_ssgi.filterDepthFalloff,
             10.0f, 4000.0f, "%.1f");
         ImGui::SliderFloat(
             "Filter Normal Power", &_ssgi.filterNormalPower,
@@ -1701,6 +1708,9 @@ void VulkanEngine::draw_screen_buffer_settings()
         ImGui::SeparatorText("SSGI Milestone 7");
         ImGui::SliderFloat(
             "Indirect Intensity", &_ssgi.intensity, 0.0f, 2.0f, "%.2f");
+        if (ImGui::SliderFloat("GI Color Saturation", &_ssgi.colorSaturation, 0.0f, 1.0f, "%.2f"))
+            _sceneDocument.dirty = true;
+        ImGui::TextWrapped("Lower this to soften colored GI and sky fill. Surface colors and direct lights stay colored.");
         ImGui::TextDisabled("SSGI owns diffuse environment light while it runs.");
         // A traced ray that leaves the depth buffer has to be filled from
         // somewhere.  The analytic gradient is what the software path tracer

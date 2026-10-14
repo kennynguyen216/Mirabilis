@@ -9,6 +9,7 @@
 #include "environment.glsl"
 #include "material_brdf.glsl"
 #include "portal_indirect.glsl"
+#include "indirect_color.glsl"
 
 #ifndef MIRABILIS_ALPHA_MASK
 layout(early_fragment_tests) in;
@@ -70,6 +71,12 @@ void main()
     } else {
         material_ambient(surface, ambientLight, ambientDiffuse, ambientSpecular);
     }
+    if (!lumen && substitute > 0.0 && sceneData.environmentTint.w < 1.0) {
+        vec3 standIn = (sceneData.iblSettings.x > 0.5
+            ? material_ibl_diffuse_light(surface.normal) : environment_irradiance(normal)) * occlusion * substitute;
+        ambientDiffuse += material_diffuse_albedo(surface) *
+            (indirect_color(standIn, sceneData.environmentTint.w) - standIn);
+    }
 
     vec3 emission = material_emission(geometricNormal, inWorldPosition);
     vec3 emitterDiffuse = vec3(0.0);
@@ -78,7 +85,7 @@ void main()
         material_emitters(surface, inWorldPosition, geometricNormal, gl_FragCoord.xy,
             emitterDiffuse, emitterSpecular);
     vec3 indirect = lumen ? material_diffuse_albedo(surface) *
-        portal_indirect(inWorldPosition, geometricNormal) * sceneData.portalIndirectSettings.z
+        indirect_color(portal_indirect(inWorldPosition, geometricNormal), sceneData.environmentTint.w) * sceneData.portalIndirectSettings.z
         : vec3(0.0);
 
     outFragColor = vec4(

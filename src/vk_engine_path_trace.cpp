@@ -124,6 +124,7 @@ void VulkanEngine::draw_path_trace(VkCommandBuffer cmd) {
     append(&pc.origin,64); append(&_drawExtent,sizeof(_drawExtent)); append(&renderScale,sizeof(renderScale));
     append(&pc.settings.w,sizeof(pc.settings.w));
     append(&pc.sampling,sizeof(pc.sampling)); append(&_traceSceneRevision,sizeof(_traceSceneRevision));
+    append(_tracePortals.data(), _tracePortals.size() * sizeof(TracePortal));
     append(&_traceSettings.lighting,sizeof(TraceLighting));
     if(!_traceRuntime.wasActive||hash!=_traceRuntime.inputHash||_traceRuntime.samples>=16777216u) {
         _traceRuntime.samples=0; _traceRuntime.inputHash=hash;
@@ -165,17 +166,28 @@ void VulkanEngine::draw_path_trace_ui() {
     if (ImGui::Combo("Renderer",&mode,"Raster\0Path Traced Reference (Software)\0"))
         _rendererMode=(_traceSupported&&mode==1)?RendererMode::SoftwarePathTrace:RendererMode::Raster;
     ImGui::TextWrapped("%s",_traceStatus.c_str());
+    if (ImGui::CollapsingHeader("Scene lighting")) {
+        bool edited = ImGui::ColorEdit3("Sun light (HDR)", &_traceSettings.lighting.sunRadiance.x,
+            ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+        edited |= ImGui::SliderFloat("Sky intensity", &_traceSettings.lighting.environment.x, 0, 4);
+        edited |= ImGui::ColorEdit3("Sky color multiplier", &_traceSettings.lighting.environmentTint.x,
+            ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+        bool black = _traceSettings.lighting.environment.y > .5f;
+        if (ImGui::Checkbox("Black environment", &black)) {
+            edited = true; _traceSettings.lighting.environment.y = black ? 1.f : 0.f;
+        }
+        if (edited) {
+            _traceSettings.lighting.environmentTint = glm::clamp(_traceSettings.lighting.environmentTint, glm::vec4(0), glm::vec4(4));
+            _sceneDocument.dirty = true;
+        }
+        ImGui::TextWrapped("Balance neutral or warm sunlight against sky fill. These settings are saved with the scene.");
+    }
     if(_rendererMode==RendererMode::SoftwarePathTrace) {
         ImGui::Combo("Trace view",&_traceSettings.debugView,"Geometric normal\0Shading normal\0Distance\0Albedo\0Material ID\0Node visits\0Triangle tests\0One noisy sample\0Accumulated radiance\0Nonfinite / traversal errors\0Direct radiance\0Indirect radiance\0Portal traversals\0Portal limit\0");
         ImGui::SliderInt("Surface scattering events",&_traceSettings.maxDepth,1,4);
         ImGui::InputInt("Base seed",&_traceSettings.baseSeed);
         ImGui::Combo("Material model",&_traceSettings.materialModel,"Lambertian reference\0GGX + dielectric\0");
         ImGui::SliderFloat("Exposure (EV)",&_traceSettings.exposure,-6,6);
-        bool edited=ImGui::ColorEdit3("Reference sun radiance",&_traceSettings.lighting.sunRadiance.x,ImGuiColorEditFlags_Float|ImGuiColorEditFlags_HDR);
-        edited|=ImGui::SliderFloat("Environment intensity",&_traceSettings.lighting.environment.x,0,4);
-        bool black=_traceSettings.lighting.environment.y>0.5f;
-        if(ImGui::Checkbox("Black environment",&black)) {edited=true;_traceSettings.lighting.environment.y=black?1.f:0.f;}
-        if(edited) _sceneDocument.dirty=true;
         if(ImGui::Button("Reset accumulation")) _traceRuntime.wasActive=false;
         ImGui::Text("Samples %u | GPU %.2f ms (max %.2f)",_traceRuntime.samples,_traceRuntime.gpuMs,_traceRuntime.maxGpuMs);
         ImGui::Text("Triangles %zu | BVH nodes %zu | revision %llu",_traceTriangles.size(),_traceNodes.size(),_traceSceneRevision);
@@ -394,6 +406,24 @@ void VulkanEngine::update_trace_scene() {
     addPortal(_bluePortal,_orangePortal.placed?&_orangePortal:nullptr);
     addPortal(_orangePortal,_bluePortal.placed?&_bluePortal:nullptr);
     for(const auto& pair:_authoredPortals.pairs) {addPortal(pair.first,&pair.second);addPortal(pair.second,&pair.first);}
+    if (portals.size() != _tracePortals.size() ||
+        (!portals.empty() && std::memcmp(portals.data(), _tracePortals.data(), portals.size() * sizeof(TracePortal)) != 0)) {
+        _tracePortals = std::move(portals);
+        _tracePortalBufferDirty = true;
+    }
+    // Raster GI reads world triangles, not path-tracer portal records. Keep
+    // their CPU snapshot current, and defer GPU writes until the reference
+    // renderer needs them. Portal edits must not rebuild geometry or relight.
+    const auto uploadPortals = [&] {
+        if (_rendererMode != RendererMode::SoftwarePathTrace || !_tracePortalBufferDirty) return;
+        VK_CHECK(vkDeviceWaitIdle(_device));
+        if (_tracePortals.size() > MaxPortalSurfaces) std::abort();
+        if (!_tracePortals.empty()) std::memcpy(_tracePortalBuffer.info.pMappedData,
+            _tracePortals.data(), _tracePortals.size() * sizeof(TracePortal));
+        vmaFlushAllocation(_allocator, _tracePortalBuffer.allocation, 0, VK_WHOLE_SIZE);
+        _traceSettings.lighting.counts.y = uint32_t(_tracePortals.size());
+        _tracePortalBufferDirty = false;
+    };
     // Lighting is not geometry (IQ13b).  Hashed with it, every step of the
     // editor's sun slider recollected every triangle, rebuilt the BVH and the
     // albedo volume and relit the whole surface cache.  It is rewritten on its
@@ -407,7 +437,6 @@ void VulkanEngine::update_trace_scene() {
     };
     uint64_t drawHash=1469598103934665603ull;
     auto append=[&](const void* data,size_t bytes) {auto p=static_cast<const uint8_t*>(data);for(size_t i=0;i<bytes;++i) {drawHash^=p[i];drawHash*=1099511628211ull;}};
-    append(portals.data(),portals.size()*sizeof(TracePortal));
     for(const auto& draw:worldDrawContext.OpaqueSurfaces) {
         append(&draw.transform,sizeof(draw.transform)); append(&draw.vertexBufferAddress,sizeof(draw.vertexBufferAddress));
         append(&draw.firstIndex,sizeof(draw.firstIndex)); append(&draw.indexCount,sizeof(draw.indexCount));
@@ -417,13 +446,34 @@ void VulkanEngine::update_trace_scene() {
             const auto* texture=draw.material->traceTexture.get(); append(&texture,sizeof(texture));
         }
     }
-    if(_traceTriangleBuffer.buffer&&drawHash==_traceDrawHash) {uploadLighting(); return;}
+    if(_traceTriangleBuffer.buffer&&drawHash==_traceDrawHash) {uploadPortals(); uploadLighting(); return;}
     _traceDrawHash=drawHash;
     std::vector<TraceTriangle> triangles;
     std::vector<TraceMaterial> materials;
     std::vector<uint32_t> texels;
     std::unordered_map<const TraceTextureSource*,glm::uvec4> textures;
     std::unordered_map<const MaterialInstance*,uint32_t> materialIds;
+    // Reserve once: growing the ~630 MiB Sponza triangle vector otherwise
+    // temporarily keeps both the old and new allocations during a scene switch.
+    size_t triangleCapacity = 0, texelCapacity = 0;
+    for (const auto& draw : worldDrawContext.OpaqueSurfaces) {
+        auto found = _traceMeshSources.find(draw.vertexBufferAddress);
+        auto source = found == _traceMeshSources.end() ? nullptr : found->second.lock();
+        if (!source || !draw.material || draw.material->passType != MaterialPass::MainColor) continue;
+        const size_t first = std::min<size_t>(draw.firstIndex, source->indices.size());
+        const size_t end = std::min(source->indices.size(), first + draw.indexCount);
+        triangleCapacity += (end - first) / 3;
+        if (auto texture = draw.material->traceTexture;
+            texture && textures.emplace(texture.get(), glm::uvec4(0)).second) {
+            texelCapacity += texture->rgba.size();
+        }
+    }
+    textures.clear();
+    fmt::print("GI scene packing: {} triangles, {} texture texels ({:.1f} MiB)\n",
+        triangleCapacity, texelCapacity,
+        double(triangleCapacity * sizeof(TraceTriangle) + texelCapacity * sizeof(uint32_t)) / (1024.0 * 1024.0));
+    triangles.reserve(triangleCapacity);
+    texels.reserve(texelCapacity);
     for (const auto& draw : worldDrawContext.OpaqueSurfaces) {
         auto found=_traceMeshSources.find(draw.vertexBufferAddress);
         auto source=found==_traceMeshSources.end()?nullptr:found->second.lock();
@@ -461,13 +511,11 @@ void VulkanEngine::update_trace_scene() {
     const auto hashBytes=[&](const void* data,size_t size) { auto p=static_cast<const unsigned char*>(data); for(size_t i=0;i<size;++i) { hash^=p[i]; hash*=1099511628211ull; } };
     hashBytes(triangles.data(),triangles.size()*sizeof(TraceTriangle)); hashBytes(materials.data(),materials.size()*sizeof(TraceMaterial));
     hashBytes(texels.data(),texels.size()*sizeof(uint32_t));
-    hashBytes(portals.data(),portals.size()*sizeof(TracePortal));
-    if (_traceTriangleBuffer.buffer && hash==_traceSceneHash) {uploadLighting(); return;}
+    if (_traceTriangleBuffer.buffer && hash==_traceSceneHash) {uploadPortals(); uploadLighting(); return;}
     VK_CHECK(vkDeviceWaitIdle(_device)); // Rare scene edits retire all readers before replacing descriptors/buffers.
     _traceSceneHash=hash; ++_traceSceneRevision;
     _traceTriangles=std::move(triangles); _traceMaterials=std::move(materials);
     _traceTexels=std::move(texels);
-    _tracePortals=std::move(portals);
     _traceSettings.lighting.counts.y=uint32_t(_tracePortals.size());
     _traceNodes=build_trace_bvh(_traceTriangles);
     _traceEmitters.clear();
@@ -488,7 +536,9 @@ void VulkanEngine::update_trace_scene() {
     upload(_traceNodeBuffer,_traceNodes.data(),_traceNodes.size()*sizeof(TraceBVHNode),sizeof(TraceBVHNode));
     upload(_traceEmitterBuffer,_traceEmitters.data(),_traceEmitters.size()*sizeof(uint32_t),sizeof(uint32_t));
     upload(_traceTexelBuffer,_traceTexels.data(),_traceTexels.size()*sizeof(uint32_t),sizeof(uint32_t));
-    upload(_tracePortalBuffer,_tracePortals.data(),_tracePortals.size()*sizeof(TracePortal),sizeof(TracePortal));
+    if (_tracePortals.size() > MaxPortalSurfaces) std::abort();
+    upload(_tracePortalBuffer,_tracePortals.data(),_tracePortals.size()*sizeof(TracePortal),MaxPortalSurfaces*sizeof(TracePortal));
+    _tracePortalBufferDirty = false;
     destroy_buffer(_traceLightBuffer);
     _traceLightBuffer=create_buffer(sizeof(TraceLighting),VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
     std::memcpy(_traceLightBuffer.info.pMappedData,&_traceSettings.lighting,sizeof(_traceSettings.lighting));
@@ -646,8 +696,10 @@ void VulkanEngine::write_capture_lighting(std::ostream& out) const
         << "\nRaster ambient colour: " << d.ambientColor.r << "," << d.ambientColor.g
         << "," << d.ambientColor.b
         << "\nEnvironment intensity: " << d.ssgiFallbackSettings.x
+        << "\nEnvironment tint: " << d.environmentTint.x << ',' << d.environmentTint.y << ',' << d.environmentTint.z
         << " black=" << (d.ssgiFallbackSettings.y > 0.5f)
         << "\nSSGI intensity: " << _ssgi.intensity
+        << "\nGI color saturation: " << _ssgi.colorSaturation
         << "\nSSAO active: " << ssao_active()
         << "\nImage-based lighting: " << (d.iblSettings.x > 0.5f)
         << "\nNormal maps: " << (d.materialSettings.x > 0.5f)

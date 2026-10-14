@@ -548,6 +548,7 @@ void VulkanEngine::draw_portal_sky(
         0,
         nullptr);
     PortalSkyPushConstants pushConstants{};
+    pushConstants.environmentTint = _traceSettings.lighting.environmentTint;
     const bool lumen = _ssgi.enabled && _ssgi.lumenEnabled &&
         !(SDL_getenv("MIRABILIS_TEST_FRAMES") && SDL_getenv("MIRABILIS_R6_PORTAL_GI_CONTROL"));
     const ComputePushConstants& background = backgroundEffects[currentBackgroundEffect].data;
