@@ -3,6 +3,7 @@
 #include "scene_queries.h"
 #include <limits>
 #include <set>
+#include <chrono>
 
 using mirabilis::PhysicsWorld;
 using ecs_test::check_matrix;
@@ -288,7 +289,10 @@ TEST_CASE("physics demo scratch save reopens all saved components and replaces c
     }
     CHECK(dynamicCount == 1);
     const auto snapshot = demo.scene.take_snapshot();
-    std::string saved; REQUIRE(serialize_scene_json(demo.scene,demo.settings,demo.authoredPortals,saved,error));
+    const auto path = std::filesystem::temp_directory_path() / ("mirabilis-physics-demo-" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".json");
+    REQUIRE_MESSAGE(save_scene_atomic(path,demo.scene,demo.settings,demo.authoredPortals,error),error);
+    const auto saved = ecs_test::read_file(path); std::filesystem::remove(path);
     REQUIRE_MESSAGE(parse_scene_json(saved,"scratch-demo.json",{},reopened,error),error);
     ecs_test::check_snapshot(snapshot,reopened.scene.take_snapshot()); ecs_test::check_settings(demo.settings,reopened.settings);
     PhysicsWorld physics; REQUIRE(physics.synchronize(reopened.scene,true)); CHECK(physics.body_count() >= 3);
