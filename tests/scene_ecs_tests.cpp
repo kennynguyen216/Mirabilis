@@ -123,18 +123,21 @@ TEST_CASE("pending subtree reads survive while all public mutations fail") {
 TEST_CASE("destroy callbacks queue live mutations and join bounded destruction drains") {
     mirabilis::Scene scene;
     const auto dying = scene.create_object("dying"), next = scene.create_object("next"), live = scene.create_object("live");
+    const auto liveParent = scene.create_object("live parent");
     REQUIRE(scene.destroy_object(dying));
     REQUIRE(scene.drain_destruction([&](EntityRef ref) {
         if (ref.persistentId == dying.persistentId) {
             REQUIRE(scene.set(live,Name{"queued"})); CHECK(scene.read<Name>(live)->value == "live");
             Transform t; t.position.x = 9; REQUIRE(scene.set_local_transform(live,t));
             CHECK(scene.read<Transform>(live)->position.x == 0); REQUIRE(scene.destroy_object(next));
+            REQUIRE(scene.set_parent(live,liveParent)); CHECK(scene.read<Hierarchy>(live)->parent == std::nullopt);
         }
     },1) == 1);
     CHECK(scene.pending(next)); CHECK(scene.valid(next)); CHECK_FALSE(scene.last_error().empty());
-    CHECK(scene.read<Name>(live)->value == "live"); CHECK(scene.queued_command_count() == 2);
+    CHECK(scene.read<Name>(live)->value == "live"); CHECK(scene.queued_command_count() == 3);
     CHECK(scene.drain_destruction() == 1); CHECK_FALSE(scene.valid(next));
-    CHECK(scene.apply_commands() == 2); CHECK(scene.read<Name>(live)->value == "queued");
+    CHECK(scene.apply_commands() == 3); CHECK(scene.read<Name>(live)->value == "queued");
+    CHECK(scene.read<Hierarchy>(live)->parent == liveParent.persistentId);
     CHECK(scene.read<Transform>(live)->position.x == 9);
     int calls = 0;
     REQUIRE(scene.enqueue_command(live,[&](auto& s,auto ref) {
