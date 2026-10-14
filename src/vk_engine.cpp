@@ -136,6 +136,11 @@ bool VulkanEngine::install_staged_scene(StagedScene&& staging)
         fmt::print("Editor scene is missing its Sandbox root or Floor\n");
         return false;
     }
+    // Four native runtime entities must fit without exhausting the saved counter.
+    if (staging.scene.next_persistent_id() > UINT64_MAX - 5) {
+        fmt::print("Persistent ID allocator cannot accommodate runtime scene entities\n");
+        return false;
+    }
     std::string error;
     if (!validate_authored_scene(staging.scene, staging.settings, staging.authoredPortals, error)) {
         fmt::print("Invalid editor scene: {}\n", error); return false;
