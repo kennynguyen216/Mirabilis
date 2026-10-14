@@ -25,6 +25,13 @@ struct Collider {
     glm::vec3 colliderCenter{0};
     glm::vec3 colliderHalfExtents{0.5f};
 };
+enum class BodyMotion : uint8_t { Static, Dynamic };
+struct RigidBody {
+    BodyMotion motion{BodyMotion::Static};
+    float mass{1.0f}, friction{0.5f}, restitution{0.0f}, gravityFactor{1.0f};
+};
+// Runtime-only activation state; never serialized or snapshotted.
+struct PhysicsState { bool sleeping{false}; };
 struct PortalPlaceable {};
 struct TimeTrial { TimeTrialRole role{TimeTrialRole::None}; };
 struct TransformDrivenExternally {};
@@ -39,6 +46,7 @@ bool valid_component(const SceneMeshAsset&);
 bool valid_component(const SceneMaterial&);
 bool valid_component(const Collider&);
 bool valid_component(const TimeTrial&);
+bool valid_component(const RigidBody&);
 
 // Transient authored copies for duplication and play snapshots, never live authority.
 struct EntityState {
@@ -55,6 +63,7 @@ struct EntityState {
     bool portalPlaceable{false};
     bool transformDrivenExternally{false};
     UnknownComponents unknown;
+    std::optional<RigidBody> rigidBody;
 };
 struct SceneSnapshot {
     std::vector<EntityState> entities;

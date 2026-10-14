@@ -1,3 +1,4 @@
+#include "physics_world.h"
 #pragma once
 #include "path_trace_scene.h"
 
@@ -221,6 +222,8 @@ struct ColliderDebugPushConstants {
 };
 
 struct EngineStats {
+    uint32_t physics_body_count{0};
+    uint64_t sdf_rebuild_count{0}, surface_cache_rebuild_count{0}, trace_rebuild_count{0}, sun_shadow_rebuild_count{0};
     float frametime{0.0f};
     int triangle_count{0};
     int drawcall_count{0};
@@ -1735,6 +1738,10 @@ class VulkanEngine{
         // portal test panels, and the player body all render and collide from
         // these objects.  Nothing about the level is hard-coded twice.
         Scene _scene;
+        mirabilis::PhysicsWorld _physicsWorld;
+        float _physicsInterpolation{0};
+        void sync_physics_world();
+        void reset_physics_render_history();
         std::optional<SceneDocumentSnapshot> _playSnapshot;
         bool _sceneResourcesRetired{false};
         std::string _authoredSkyboxId;

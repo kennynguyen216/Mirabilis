@@ -24,6 +24,12 @@ public:
     bool pending(EntityRef ref) const;
     bool mutable_ref(EntityRef ref, bool owner = false) const;
     bool runtime_only(EntityRef ref) const;
+    EntityRef dynamic_ancestor(EntityRef ref) const;
+    bool validate_physics_edit(EntityRef, const RigidBody*, const Collider*, const Transform*) const;
+    void set_authored_portal_hosts(std::vector<PersistentID> hosts);
+    void set_physics_play(bool play) { _physicsPlay = play; }
+    using TeleportHandler = std::function<bool(EntityRef, const Transform&)>;
+    void set_teleport_handler(TeleportHandler handler) { _teleportHandler = std::move(handler); }
     uint64_t epoch() const { return _epoch; }
     PersistentID next_persistent_id() const { return _nextPersistentId; }
     bool reserve_persistent_ids(PersistentID next);
@@ -103,6 +109,9 @@ private:
     std::deque<Command> _commands;
     std::unordered_set<PersistentID> _dirty;
     bool _inDestroyCallback{false};
+    bool _physicsPlay{false};
+    TeleportHandler _teleportHandler;
+    std::vector<PersistentID> _authoredPortalHosts;
     mutable std::string _lastError;
     bool fail(std::string message) const;
     EntityRef create_with_id(std::string name, PersistentID id);
