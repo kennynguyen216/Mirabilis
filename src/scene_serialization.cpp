@@ -320,8 +320,8 @@ bool validate_authored_scene(const mirabilis::Scene& scene,const SceneSettings& 
             if(collider->hasCollision) {
                 const auto world=scene.world_matrix(ref);
                 for(int axis=0;axis<3;++axis) {
-                    const float scale=glm::length(glm::vec3(world[axis]));
-                    if(!finite(scale)||scale<=0.000001f)invalid("Enabled collider has invalid world scale: "+std::to_string(ref.persistentId));
+                    const double scale=glm::length(glm::dvec3(world[axis]));
+                    if(!std::isfinite(scale)||scale==0.0)invalid("Enabled collider has invalid world scale: "+std::to_string(ref.persistentId));
                 }
             }
             if(ref.persistentId>=scene.next_persistent_id())invalid("Persistent ID counter is below an entity ID");
