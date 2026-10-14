@@ -1697,12 +1697,13 @@ void VulkanEngine::run(){
                     physicsRequire(_scene.set(_scene.get(physicsBox),body), "editor mass edit refused");
                     physicsRequire(SDL_getenv("MIRABILIS_TEST_SCENE_DIRECTORY") != nullptr, "scratch directory required");
                     physicsRequire(save_editor_scene_as("physics_gate_saved.json"), "scratch save failed");
-                    physicsRequire(load_editor_scene("physics_gate_saved.json"), "scratch reopen failed");
+                    physicsRequire(load_editor_scene(), "scratch reopen failed");
                     physicsRequire(_scene.read<RigidBody>(_scene.get(physicsBox))->mass == 3, "saved mass lost");
                     physicsPhase = "reopened";
                 }
                 if (_frameNumber == 1050) {
-                    physicsRequire(load_editor_scene("sandbox.json"), "sandbox replacement failed");
+                    _sceneDocument.activeFilename = "sandbox.json";
+                    physicsRequire(load_editor_scene(), "sandbox replacement failed");
                     size_t expected = 0;
                     for (const auto object : _scene.hierarchy_order()) {
                         const auto* collider = _scene.read<Collider>(object);
