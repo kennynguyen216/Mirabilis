@@ -26,7 +26,7 @@ JPH::Quat jquat(glm::quat q) { return {q.x,q.y,q.z,q.w}; }
 glm::quat gquat(JPH::Quat q) { return {q.GetW(),q.GetX(),q.GetY(),q.GetZ()}; }
 bool finite(glm::vec3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
 bool same_matrix(const glm::mat4& a, const glm::mat4& b) {
-    for(int c=0;c<4;++c) for(int r=0;r<4;++r) if(std::abs(a[c][r]-b[c][r])>1e-5f) return false;
+    for(int c=0;c<4;++c) for(int r=0;r<4;++r) if(std::abs(a[c][r]-b[c][r])>1e-5f*std::max({1.0f,std::abs(a[c][r]),std::abs(b[c][r])})) return false;
     return true;
 }
 struct JoltRuntime {
@@ -221,7 +221,7 @@ bool PhysicsWorld::synchronize(Scene& scene,bool editorMode) {
                 _impl->bodies.emplace(ref.persistentId,Impl::Body{ref,id,*collider,settings,pose.scale,pose.position,pose.position,q,q,world,false});
                 _impl->reset_subtree(scene,ref);
                 old=_impl->find(ref);
-            } else if(!same_matrix(world,old->lastWorld)) {
+            } else if(world!=old->lastWorld) {
                 api.SetPositionAndRotation(old->id,jvec(pose.position),jquat(rotation(pose)),dynamic?JPH::EActivation::Activate:JPH::EActivation::DontActivate);
                 old->currentPosition=old->previousPosition=pose.position;
                 old->currentRotation=old->previousRotation=rotation(pose);
