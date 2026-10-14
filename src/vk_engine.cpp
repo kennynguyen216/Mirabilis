@@ -1903,10 +1903,10 @@ void VulkanEngine::run(){
                 else if (runtime->second.primitive.valid()) ++dynamicDraws;
             }
             const bool lumen = _ssgi.lumenEnabled && _ssgi.enabled;
-            fmt::print("PHYSICS phase={} frame={} bodies={} sdf={} surface={} trace={} ray-shadow={} eligible={} dynamic-draws={} history-reset={} sdf-enabled={} surface-enabled={} ray-shadow-enabled={} trace-enabled={}\n",
+            fmt::print("PHYSICS phase={} frame={} bodies={} sdf={} surface={} trace={} ray-shadow={} eligible={} dynamic-draws={} history-reset={} sdf-enabled={} surface-enabled={} ray-shadow-enabled={} trace-enabled={} sdf-placed={} sdf-instances={}\n",
                 physicsPhase,_frameNumber,_physicsWorld.body_count(),stats.sdf_rebuild_count,stats.surface_cache_rebuild_count,
                 stats.trace_rebuild_count,stats.sun_shadow_rebuild_count,eligible,dynamicDraws,_physicsHistoryResetCount,
-                int(lumen),int(lumen),int(_rayQueryShadows),int(_traceSupported));
+                int(lumen),int(lumen),int(_rayQueryShadows),int(_traceSupported),_sceneSdf.placedCount,_sceneSdf.instanceCount);
             if (physicsPhase == "teleport") {
                 const auto pose = _scene.world_matrix(ref);
                 physicsRequire(glm::length(glm::vec3(pose[3])-glm::vec3(-.5f,2,0)) < 1e-4f, "teleport target pose drifted");
