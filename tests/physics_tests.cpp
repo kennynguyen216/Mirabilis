@@ -320,6 +320,28 @@ TEST_CASE("queued physics commands reject invalid refs and finite input violatio
     REQUIRE(physics.queue_force(scene,moving,{120,0,0})); tick(physics,scene); CHECK(physics.velocity(moving).x > .5f);
 }
 
+TEST_CASE("play creation applies queued physics commands before first body synchronization") {
+    Scene scene; PhysicsWorld physics; REQUIRE(physics.synchronize(scene,false));
+    const auto snapshot = scene.take_snapshot();
+    const auto spawned = box(scene,{1,3,4},true);
+    auto body = *scene.read<RigidBody>(spawned); body.gravityFactor = 0; REQUIRE(scene.set(spawned,body));
+    Transform target; target.position = {10,20,30};
+    CHECK_FALSE(physics.has_body(spawned));
+    REQUIRE(physics.queue_teleport(scene,spawned,target)); REQUIRE(physics.queue_velocity(scene,spawned,{12,0,0}));
+    CHECK(scene.apply_commands() == 2); CHECK(physics.has_body(spawned)); tick(physics,scene);
+    CHECK(scene.read<Transform>(spawned)->position.x == doctest::Approx(10.1f).epsilon(.0001));
+    CHECK(scene.read<Transform>(spawned)->position.y == doctest::Approx(20).epsilon(.0001));
+    CHECK(physics.velocity(spawned).x == doctest::Approx(12));
+    const auto forced = box(scene,{100,0,0},true), impulsed = box(scene,{-100,0,0},true);
+    REQUIRE(scene.set(forced,body)); REQUIRE(scene.set(impulsed,body));
+    CHECK_FALSE(physics.has_body(forced)); CHECK_FALSE(physics.has_body(impulsed));
+    REQUIRE(physics.queue_force(scene,forced,{120,0,0})); REQUIRE(physics.queue_impulse(scene,impulsed,{4,0,0}));
+    tick(physics,scene); CHECK(physics.velocity(forced).x > .5f); CHECK(physics.velocity(impulsed).x > 3);
+    REQUIRE(scene.restore_snapshot(snapshot,[&](EntityRef ref) { physics.remove(ref); }));
+    REQUIRE(physics.synchronize(scene,false)); CHECK(physics.body_count() == 0);
+    CHECK_FALSE(scene.valid(spawned)); CHECK_FALSE(scene.valid(forced)); CHECK_FALSE(scene.valid(impulsed));
+}
+
 TEST_CASE("saved authored portal host in dynamic subtree is rejected before replacement") {
     const auto collider = R"({"enabled":true,"shape":0,"center":[0,0,0],"halfExtents":[0.5,0.5,0.5]})";
     auto input = document(object_json(1,"null",identity,dynamic,collider,true)+","+object_json(2,"1",identity,"",collider,true));
