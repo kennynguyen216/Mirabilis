@@ -113,6 +113,10 @@ void VulkanEngine::drain_scene_destruction()
     if (!pending) return;
     VK_CHECK(vkDeviceWaitIdle(_device));
     _scene.drain_destruction([&](EntityRef ref) {
+        const auto material = _sceneMaterialRuntimes.find(ref.persistentId);
+        const auto render = _sceneRenderRuntimes.find(ref.persistentId);
+        _sceneResourcesRetired |= (material != _sceneMaterialRuntimes.end() && material->second.initialized) ||
+            (render != _sceneRenderRuntimes.end() && render->second.model && render->second.model.use_count() == 1);
         cleanup_scene_entity(ref);
         _sceneRenderRuntimes.erase(ref.persistentId);
     });
@@ -180,6 +184,10 @@ bool VulkanEngine::restore_play_snapshot()
     if (!_playSnapshot) return true;
     VK_CHECK(vkDeviceWaitIdle(_device));
     if (!_scene.restore_snapshot(_playSnapshot->entities, [&](EntityRef ref) {
+        const auto material = _sceneMaterialRuntimes.find(ref.persistentId);
+        const auto render = _sceneRenderRuntimes.find(ref.persistentId);
+        _sceneResourcesRetired |= (material != _sceneMaterialRuntimes.end() && material->second.initialized) ||
+            (render != _sceneRenderRuntimes.end() && render->second.model && render->second.model.use_count() == 1);
         cleanup_scene_entity(ref);
         _sceneRenderRuntimes.erase(ref.persistentId);
     })) return false;
@@ -190,10 +198,13 @@ bool VulkanEngine::restore_play_snapshot()
     for (const auto ref : _scene.creation_order()) {
         if (!_sceneRenderRuntimes.contains(ref.persistentId)) {
             const auto* mesh = _scene.read<SceneMeshAsset>(ref);
-            if (mesh) { assign_scene_asset(ref, mesh->assetKind); recreated = true; }
+            if (mesh) {
+                assign_scene_asset(ref, mesh->assetKind);
+                recreated |= _sceneRenderRuntimes[ref.persistentId].model != nullptr;
+            }
         }
     }
-    if (recreated) {
+    if (recreated || _sceneResourcesRetired) {
         _sceneSdf.rebuildRequested = true;
         _surfaceCache.rebuildRequested = true;
         _traceDrawHash = 0;
@@ -1390,10 +1401,18 @@ void VulkanEngine::run(){
                 _bluePortal = {}; _bluePortal.placed = true; _bluePortal.hostWallObject = host.persistentId;
                 _selectedSceneObject = host.persistentId;
                 require(!delete_selected_scene_object() && _scene.valid(host) && !_scene.pending(host), "direct portal host deletion protection");
-                _authoredPortals.pairs.push_back({_bluePortal, _bluePortal});
+                Portal other = _bluePortal; other.hostWallObject.reset(); other.position.x += 10;
+                _authoredPortals.pairs.push_back({_bluePortal, other});
+                set_editor_mode(false);
                 require(_scene.destroy_object(parent), "cascade host destruction request");
                 drain_scene_destruction();
                 require(!_scene.valid(host) && !_bluePortal.placed && _authoredPortals.pairs.size() == authored.size(), "cascade portal cleanup");
+                reset_play();
+                require(!_scene.valid(host) && _scene.valid(_scene.get(host.persistentId)) && _authoredPortals.pairs.size() == authored.size() + 1 &&
+                    _authoredPortals.pairs.back().first.hostWallObject == host.persistentId, "authored portal host snapshot restoration");
+                set_editor_mode(true);
+                require(_scene.destroy_object(_scene.get(parent.persistentId)), "remove restored test subtree");
+                drain_scene_destruction();
                 _bluePortal = blue; _authoredPortals.pairs = authored; _selectedSceneObject = selected;
                 fmt::print("ECS document and portal checks PASS: play save, malformed play/editor loads, failed saves keep file/dirty, direct/cascade hosts\n");
             }
@@ -1727,6 +1746,11 @@ void VulkanEngine::run(){
         }
         drain_scene_destruction();
         _scene.consume_transform_dirty();
+        if (_sceneResourcesRetired) {
+            _sceneSdf.rebuildRequested = _surfaceCache.rebuildRequested = true;
+            _traceDrawHash = _sunCasters.hash = 0;
+            _sceneResourcesRetired = false;
+        }
         draw(deltaTime);
         if (placementFrame) {
             if (!_bluePortal.placed || (_frameNumber > 160 && !_orangePortal.placed) ||

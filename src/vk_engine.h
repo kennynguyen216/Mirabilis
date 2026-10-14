@@ -1736,6 +1736,7 @@ class VulkanEngine{
         // these objects.  Nothing about the level is hard-coded twice.
         Scene _scene;
         std::optional<SceneDocumentSnapshot> _playSnapshot;
+        bool _sceneResourcesRetired{false};
         std::string _authoredSkyboxId;
         std::unordered_map<PersistentID, SceneRenderRuntime> _sceneRenderRuntimes;
         SceneObjectID _sandboxRoot{InvalidSceneObject};
