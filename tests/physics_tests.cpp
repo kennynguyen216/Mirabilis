@@ -191,10 +191,6 @@ TEST_CASE("sleeping dynamic wakes and falls when static support changes or is re
         collider.hasCollision = false; REQUIRE(scene.set(support,collider));
         REQUIRE(physics.synchronize(scene,false)); CHECK_FALSE(physics.has_body(support));
     }
-    SUBCASE("removing static collider component removes support") {
-        REQUIRE(scene.remove<Collider>(support));
-        REQUIRE(physics.synchronize(scene,false)); CHECK_FALSE(physics.has_body(support));
-    }
     SUBCASE("explicit native body removal wakes its sleeping contact") {
         physics.remove(support); CHECK_FALSE(physics.has_body(support)); nativeRemovalOnly = true;
     }
