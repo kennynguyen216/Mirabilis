@@ -133,6 +133,18 @@ bool VulkanEngine::save_editor_scene()
     const auto scenePath = editor_scene_path(_sceneDocument.activeFilename);
     std::string error;
     bool saved = false;
+    const auto engineSceneValid = [](const mirabilis::Scene& scene) {
+        bool root = false, floor = false;
+        for (const auto ref : scene.hierarchy_order()) {
+            if (scene.runtime_only(ref)) continue;
+            const auto* hierarchy = scene.read<Hierarchy>(ref);
+            const auto* name = scene.read<Name>(ref);
+            const auto* mesh = scene.read<SceneMeshAsset>(ref);
+            root |= hierarchy && !hierarchy->parent && name && name->value == "Sandbox";
+            floor |= mesh && mesh->assetKind == SceneAssetKind::FloorQuad;
+        }
+        return root && floor;
+    };
     if (!_editorMode && _playSnapshot) {
         mirabilis::Scene authored;
         if (!authored.restore_snapshot(_playSnapshot->entities) ||
@@ -140,8 +152,14 @@ bool VulkanEngine::save_editor_scene()
             fmt::print("Could not reconstruct authored scene for saving: {}\n", authored.last_error());
             return false;
         }
+        if (!engineSceneValid(authored)) {
+            fmt::print("Could not save scene: missing authored Sandbox root or Floor.\n"); return false;
+        }
         saved = save_scene_atomic(scenePath, authored, _playSnapshot->settings, _playSnapshot->authoredPortals, error);
     } else {
+        if (!engineSceneValid(_scene)) {
+            fmt::print("Could not save scene: missing authored Sandbox root or Floor.\n"); return false;
+        }
         saved = save_scene_atomic(scenePath, _scene, capture_scene_settings(), _authoredPortals.pairs, error);
     }
     if (!saved) { fmt::print("Could not save scene '{}': {}\n", scenePath.string(), error); return false; }

@@ -89,6 +89,10 @@ std::optional<PersistentID> reference(Json value, uint64_t version, bool parent)
 }
 void read_material(Object json, SceneMaterial& material, bool legacy) {
     if(legacy && !optional(json,"materialEnabled"))return;
+    if(legacy) {
+        required(json,"baseColorTexture"); required(json,"materialTint"); required(json,"uvScale");
+        required(json,"materialMetallic"); required(json,"materialRoughness");
+    }
     const auto key=[&](const char* oldKey,const char* newKey){return legacy?oldKey:newKey;};
     read_bool(json,key("materialEnabled","enabled"),material.enabled);
     read_string(json,"baseColorTexture",material.baseColorTexturePath);

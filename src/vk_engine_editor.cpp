@@ -904,7 +904,7 @@ bool VulkanEngine::duplicate_selected_scene_object()
     const auto branchOrder = [&](EntityRef root) {
         std::vector<PersistentID> ids;
         const auto walk = [&](auto&& self, EntityRef ref) -> void {
-            if (!_scene.valid(ref) || _scene.runtime_only(ref)) return;
+            if (!_scene.valid(ref) || _scene.runtime_only(ref) || _scene.pending(ref)) return;
             ids.push_back(ref.persistentId);
             for (const auto id : _scene.read<Hierarchy>(ref)->children) self(self, _scene.get(id));
         };
