@@ -1,6 +1,9 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 #include "scene_queries.h"
+#include "scene_serialization.h"
+static_assert(std::is_same_v<decltype(EntityRef::persistentId), uint64_t>);
+static_assert(sizeof(entt::entity) == sizeof(uint32_t));
 TEST_CASE("extracted core keeps hierarchy and player collision") {
     Scene scene;
     const auto root = scene.create_object("root");

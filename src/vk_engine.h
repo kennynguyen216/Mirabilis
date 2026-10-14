@@ -13,6 +13,7 @@
 #include <player_movement.h>
 #include <portal.h>
 #include <scene.h>
+#include "scene_serialization.h"
 #include "scene_render_data.h"
 #include <world.h>
 
@@ -1045,6 +1046,17 @@ class VulkanEngine{
         bool load_editor_scene_named(std::string_view sceneName);
         void restore_last_editor_scene_name();
         void assign_scene_asset(SceneObject& object, SceneAssetKind assetKind);
+        void assign_scene_asset(EntityRef object, SceneAssetKind assetKind);
+        MaterialInstance* resolve_scene_material(EntityRef object);
+        SceneSettings capture_scene_settings() const;
+        void apply_scene_settings(const SceneSettings& settings);
+        bool install_staged_scene(StagedScene&& staging);
+        void take_play_snapshot();
+        bool restore_play_snapshot();
+        void reset_play();
+        void drain_scene_destruction();
+        void cleanup_scene_entity(EntityRef object);
+
         void create_runtime_scene_objects();
         void sync_scene_driven_objects();
         void emit_scene_render_objects(RenderLayer layer, DrawContext& drawContext);
@@ -1725,7 +1737,9 @@ class VulkanEngine{
         // portal test panels, and the player body all render and collide from
         // these objects.  Nothing about the level is hard-coded twice.
         Scene _scene;
-        std::unordered_map<SceneObjectID, SceneRenderRuntime> _sceneRenderRuntimes;
+        std::optional<SceneDocumentSnapshot> _playSnapshot;
+        std::string _authoredSkyboxId;
+        std::unordered_map<PersistentID, SceneRenderRuntime> _sceneRenderRuntimes;
         SceneObjectID _sandboxRoot{InvalidSceneObject};
         SceneObjectID _floorObject{InvalidSceneObject};
         SceneObjectID _playerObject{InvalidSceneObject};
@@ -1737,8 +1751,8 @@ class VulkanEngine{
         std::vector<AABB> _activeWallColliders;
         std::vector<GroundPlane> _activeGroundPlanes;
         std::vector<SurfRamp> _activeSurfRamps;
-        std::unordered_map<SceneObjectID, SceneMaterialRuntime> _sceneMaterialRuntimes;
-        std::unordered_map<SceneObjectID, glm::mat4> _previousSceneObjectTransforms;
+        std::unordered_map<PersistentID, SceneMaterialRuntime> _sceneMaterialRuntimes;
+        std::unordered_map<PersistentID, glm::mat4> _previousSceneObjectTransforms;
         std::unordered_map<std::string, AllocatedImage> _sceneTextureCache;
         std::unordered_set<std::string> _failedSceneTextures;
     };

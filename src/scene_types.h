@@ -1,0 +1,78 @@
+#pragma once
+#include <cstdint>
+#include <string>
+#include <vector>
+#include <glm/mat4x4.hpp>
+#include <glm/vec2.hpp>
+#include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
+#include "world.h"
+
+struct Transform {
+    glm::vec3 position{0.0f};
+    // Euler angles in radians, applied Y * X * Z.  Version 1 of the scene
+    // system only rotates renderables; colliders assume axis alignment.
+    glm::vec3 rotation{0.0f};
+    glm::vec3 scale{1.0f};
+};
+
+glm::mat4 to_matrix(const Transform& transform);
+Transform transform_from_matrix(const glm::mat4& matrix);
+
+// Which draw context an object feeds.  The player body must not be drawn for
+// the first-person camera, only for the virtual cameras behind portals.
+enum class RenderLayer : uint8_t {
+    World,
+    PortalViewOnly,
+};
+
+// A Box has an editable local center and half extents. Ground planes are flat
+// horizontal platforms, while SurfRamp is the engine's wedge-shaped slope.
+enum class CollisionShape : uint8_t {
+    Box,
+    GroundPlane,
+    SurfRamp,
+};
+
+// GPU buffers and material pointers are runtime-only.  This small identity is
+// what lets a saved scene reconstruct an object's engine-owned primitive when
+// it is loaded in a later session.
+enum class SceneAssetKind : uint8_t {
+    None,
+    FloorQuad,
+    UnitCube,
+    SurfRamp,
+    ImportedGLTF,
+};
+
+// These roles turn ordinary saved scene actors into a simple time-trial
+// course.  The mesh remains an ordinary primitive; the role only controls
+// gameplay behaviour.
+enum class TimeTrialRole : uint8_t {
+    None,
+    SpawnPoint,
+    StartTrigger,
+    FinishTrigger,
+};
+
+// Serializable material settings for engine-owned primitives. Vulkan images,
+// buffers, and descriptor sets deliberately live in VulkanEngine's runtime
+// cache rather than in the scene graph.
+struct SceneMaterial {
+    bool enabled{false};
+    bool debugChecker{false};
+    std::string baseColorTexturePath;
+    // Linear data, not colour.  Empty binds the engine's flat normal and a
+    // white metallic/roughness texture, which leaves the factors unchanged.
+    std::string normalTexturePath;
+    std::string metalRoughTexturePath;
+    glm::vec4 colorTint{1.0f};
+    glm::vec2 uvScale{1.0f};
+    float metallic{0.0f};
+    float roughness{0.8f};
+    glm::vec3 emissionColor{0};
+    float emissionStrength{0};
+    float transmission{0};
+    float ior{1.5f};
+};
+

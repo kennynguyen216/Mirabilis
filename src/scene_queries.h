@@ -1,5 +1,6 @@
 #pragma once
 #include "scene.h"
+#include "scene_ecs.h"
 #include "portal.h"
 #include "player_movement.h"
 #include <span>
@@ -14,3 +15,11 @@ inline PlayerCollisionSet collect_player_collision(const Scene& scene, std::span
     collect_player_collision(scene, portals, result);
     return result;
 }
+
+void collect_player_collision(const mirabilis::Scene&, std::span<const Portal>, PlayerCollisionSet&);
+PlayerCollisionSet collect_player_collision(const mirabilis::Scene&, std::span<const Portal>);
+std::optional<glm::vec3> find_scene_spawn_point(const mirabilis::Scene&);
+struct TimeTrialOverlap { bool start{false}; bool finish{false}; };
+TimeTrialOverlap collect_time_trial_overlaps(const mirabilis::Scene&, const AABB& player);
+bool contributes_to_static_caches(const mirabilis::Scene&, EntityRef, bool editorMode);
+std::vector<EntityRef> scene_emission_order(const mirabilis::Scene&);
