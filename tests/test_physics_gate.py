@@ -5,11 +5,12 @@ import physics_gate
 class PhysicsTelemetry(unittest.TestCase):
     def records(self):
         values = []
-        for frame, phase in enumerate(['awake']*4 + ['sleep']*2 + ['wake', 'teleport', 'restore', 'unchanged-restore', 'reopened', 'sandbox']):
+        for frame, phase in enumerate(['awake']*4 + ['sleep']*2 + ['wake', 'teleport', 'restore', 'edit-restore', 'unchanged-restore', 'reopened', 'sandbox']):
             count = 1 if frame < 4 else 2 if frame < 6 else 3
             values.append({'phase': phase, 'frame': frame+1, 'bodies': 3,
                 'sdf': count, 'surface': count, 'ray-shadow': count, 'trace': 0,
                 'eligible': 3 if phase == 'sleep' else 2, 'dynamic-draws': 1,
+                'sdf-enabled': 1, 'surface-enabled': 1, 'ray-shadow-enabled': 1, 'trace-enabled': 0,
                 'history-reset': 1 if phase in ('teleport', 'restore') else 0})
         return values
 

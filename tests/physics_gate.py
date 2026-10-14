@@ -11,7 +11,8 @@ import ecs_gate
 
 STATIC_CACHES = ('sdf', 'surface', 'ray-shadow')
 FIELDS = ('frame', 'bodies', 'sdf', 'surface', 'trace', 'ray-shadow',
-          'eligible', 'dynamic-draws', 'history-reset')
+          'eligible', 'dynamic-draws', 'history-reset', 'sdf-enabled',
+          'surface-enabled', 'ray-shadow-enabled', 'trace-enabled')
 
 
 def telemetry(logs):
@@ -30,9 +31,10 @@ def telemetry(logs):
 def check_raster(records):
     phases = {phase: [record for record in records if record['phase'] == phase]
               for phase in ('awake', 'sleep', 'wake', 'teleport', 'restore',
-                            'unchanged-restore', 'reopened', 'sandbox')}
+                            'edit-restore', 'unchanged-restore', 'reopened', 'sandbox')}
     assert all(phases.values()), 'Missing lifecycle phase'
     awake, asleep = phases['awake'], phases['sleep']
+    assert all(awake[-1][f'{cache}-enabled'] == 1 for cache in STATIC_CACHES), 'Required static cache capability inactive'
     assert len(awake) >= 4 and len(asleep) >= 2, 'Need repeated awake/sleep samples'
     assert all(item['dynamic-draws'] > 0 for item in awake), 'Awake dynamic geometry missing'
     for phase in (awake[2:], asleep):
@@ -41,7 +43,7 @@ def check_raster(records):
     for cache in STATIC_CACHES:
         assert 0 <= asleep[0][cache] - awake[-1][cache] <= 1, f'{cache} sleep rebuild batch'
         assert 0 <= phases['wake'][0][cache] - asleep[-1][cache] <= 1, f'{cache} wake rebuild batch'
-        assert phases['unchanged-restore'][-1][cache] == phases['restore'][-1][cache], f'{cache} unchanged restore rebuilt'
+        assert phases['unchanged-restore'][-1][cache] == phases['edit-restore'][-1][cache], f'{cache} unchanged restore rebuilt'
     assert asleep[-1]['eligible'] > awake[-1]['eligible'], 'Sleeping subtree never entered static caches'
     assert phases['wake'][0]['eligible'] < asleep[-1]['eligible'], 'Awake subtree stayed in static caches'
     assert phases['teleport'][0]['history-reset'] > 0, 'Teleport left previous-render history'
@@ -103,6 +105,7 @@ def main():
             assert 'renderer=software' in logs and 'PHYSICS trace PASS' in logs
             awake = [item for item in records if item['phase'] == 'awake']
             assert len(awake) >= 2 and all(item['dynamic-draws'] > 0 for item in awake)
+            assert awake[-1]['trace-enabled'] == 1
             assert awake[-1]['trace'] > awake[0]['trace'], 'Trace geometry did not update while body moved'
             assert (captures/'trace.pfm').is_file()
         else:
