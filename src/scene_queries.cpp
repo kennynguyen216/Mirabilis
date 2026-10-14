@@ -70,27 +70,29 @@ void carve_portal_opening(
     wallPieces = std::move(carvedPieces);
 }
 
-void collect_player_collision(const Scene& scene, std::span<const Portal> portals, PlayerCollisionSet& result)
+void collect_player_collision(const mirabilis::Scene& scene, std::span<const Portal> portals, PlayerCollisionSet& result)
 {
     // Colliders are rebuilt from the scene every tick, so a wall edited in
     // the inspector moves its collision in the same frame it moves visually.
+    const auto objects = scene.creation_order();
     result.walls.clear();
-    result.walls.reserve(scene.objects.size() + 12);
+    result.walls.reserve(objects.size() + 12);
     result.groundPlanes.clear();
-    result.groundPlanes.reserve(scene.objects.size());
+    result.groundPlanes.reserve(objects.size());
     result.surfRamps.clear();
-    result.surfRamps.reserve(scene.objects.size());
+    result.surfRamps.reserve(objects.size());
 
-    for (const SceneObject& object : scene.objects) {
-        if (!object.alive || !object.hasCollision) {
+    for (const EntityRef object : objects) {
+        const Collider* collider = scene.read<Collider>(object);
+        if (collider == nullptr || !collider->hasCollision) {
             continue;
         }
 
-        if (object.collisionShape == CollisionShape::GroundPlane) {
+        if (collider->collisionShape == CollisionShape::GroundPlane) {
             // A floor is a horizontal walkable surface rather than a box the
             // player gets pushed sideways from. Multiple floor actors make
             // independent platforms for course blockout.
-            const glm::mat4 world = scene.world_matrix(object.id);
+            const glm::mat4 world = scene.world_matrix(object);
             result.groundPlanes.push_back(GroundPlane{
                 .center = glm::vec2(world[3].x, world[3].z),
                 .halfExtents = glm::vec2(
@@ -100,8 +102,8 @@ void collect_player_collision(const Scene& scene, std::span<const Portal> portal
             continue;
         }
 
-        if (object.collisionShape == CollisionShape::SurfRamp) {
-            const glm::mat4 world = scene.world_matrix(object.id);
+        if (collider->collisionShape == CollisionShape::SurfRamp) {
+            const glm::mat4 world = scene.world_matrix(object);
             result.surfRamps.push_back(SurfRamp{
                 .worldToLocal = glm::inverse(world),
                 .lowLeft = glm::vec3(world * glm::vec4(-0.5f, 0.0f, -0.5f, 1.0f)),
@@ -110,12 +112,50 @@ void collect_player_collision(const Scene& scene, std::span<const Portal> portal
             continue;
         }
 
-        std::vector<AABB> wallPieces{collider_from_object(scene, object.id)};
+        std::vector<AABB> wallPieces{collider_from_object(scene, object)};
         for (const auto& portal : portals) {
-            if (portal.placed && portal.hostWallObject == object.id) carve_portal_opening(wallPieces, portal);
+            if (portal.placed && portal.hostWallObject == object.persistentId) carve_portal_opening(wallPieces, portal);
         }
         for (const AABB& piece : wallPieces) {
             add_collider_if_nonempty(result.walls, piece);
         }
     }
+}
+
+std::optional<glm::vec3> find_scene_spawn_point(const mirabilis::Scene& scene)
+{
+    for (const EntityRef ref : scene.creation_order()) {
+        const TimeTrial* role = scene.read<TimeTrial>(ref);
+        if (role != nullptr && role->role == TimeTrialRole::SpawnPoint) {
+            return glm::vec3(scene.world_matrix(ref)[3]);
+        }
+    }
+    return std::nullopt;
+}
+
+TimeTrialOverlap collect_time_trial_overlaps(const mirabilis::Scene& scene, const AABB& player)
+{
+    TimeTrialOverlap result;
+    for (const EntityRef ref : scene.creation_order()) {
+        const TimeTrial* role = scene.read<TimeTrial>(ref);
+        if (role == nullptr || (role->role != TimeTrialRole::StartTrigger &&
+            role->role != TimeTrialRole::FinishTrigger)) continue;
+        const AABB volume = collider_from_object(scene, ref);
+        const bool overlaps = player.min.x <= volume.max.x && player.max.x >= volume.min.x &&
+            player.min.y <= volume.max.y && player.max.y >= volume.min.y &&
+            player.min.z <= volume.max.z && player.max.z >= volume.min.z;
+        if (overlaps && role->role == TimeTrialRole::StartTrigger) result.start = true;
+        if (overlaps && role->role == TimeTrialRole::FinishTrigger) result.finish = true;
+    }
+    return result;
+}
+
+bool contributes_to_static_caches(const mirabilis::Scene& scene, EntityRef ref, bool)
+{
+    return scene.valid(ref);
+}
+
+std::vector<EntityRef> scene_emission_order(const mirabilis::Scene& scene)
+{
+    return scene.hierarchy_order();
 }

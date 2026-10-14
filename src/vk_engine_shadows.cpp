@@ -331,7 +331,7 @@ void VulkanEngine::update_sun_casters()
         for (size_t i = 0; i < bytes; ++i) { hash ^= p[i]; hash *= 1099511628211ull; }
     };
     for (const RenderObject& object : worldDrawContext.OpaqueSurfaces) {
-        if (!ray_query_caster(object)) {
+        if (!object.contributesToStaticCaches || !ray_query_caster(object)) {
             continue;
         }
         casters.push_back({&object, static_cast<uint32_t>(
