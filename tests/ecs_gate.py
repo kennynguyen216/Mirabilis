@@ -63,7 +63,10 @@ def collisions():
     directory = OUT/'collisions'
     directory.mkdir(exist_ok=True)
     summary = {}
-    for scene in sorted((REPO/'assets/scenes').glob('*.json')):
+    original = json.loads((REPO/'tests/fixtures/ecs_collision_manifest.json').read_text())
+    assert len(original) == 23
+    for name in sorted(original):
+        scene = REPO/'assets/scenes'/name
         path = directory / scene.name
         logs, result = run('collision-'+scene.stem,'Release',{'MIRABILIS_TEST_SCENE':scene.name,'MIRABILIS_TEST_FRAMES':'1','MIRABILIS_TEST_COLLISION_DUMP':str(path),'MIRABILIS_TEST_COLLISION_DUMP_ONLY':'1','MIRABILIS_TEST_WINDOW':'1600x900'})
         assert 'ECS collision dump complete:' in logs
