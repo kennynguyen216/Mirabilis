@@ -48,17 +48,28 @@ void VulkanEngine::emit_scene_render_objects(
         if (visibility == nullptr || !visibility->visible || visibility->layer != layer) continue;
         const auto runtime = _sceneRenderRuntimes.find(object.persistentId);
         if (runtime == _sceneRenderRuntimes.end()) continue;
-        const glm::mat4 world = _scene.world_matrix(object);
+        const glm::mat4 world = _physicsWorld.render_world(_scene, object, _physicsInterpolation);
         const bool cacheEligible = contributes_to_static_caches(_scene, object, _editorMode);
         if (runtime->second.model != nullptr) {
             const size_t opaqueBegin = drawContext.OpaqueSurfaces.size();
             const size_t transparentBegin = drawContext.TransparentSurfaces.size();
             runtime->second.model->Draw(world, drawContext);
+            auto& previous = _previousSceneModelTransforms[object.persistentId];
+            const size_t count = drawContext.OpaqueSurfaces.size() - opaqueBegin +
+                drawContext.TransparentSurfaces.size() - transparentBegin;
+            const bool historyValid = previous.size() == count;
+            previous.resize(count);
+            size_t index = 0;
+            const auto updateDraw = [&](RenderObject& draw) {
+                draw.contributesToStaticCaches = cacheEligible;
+                draw.previousTransform = historyValid ? previous[index] : draw.transform;
+                previous[index++] = draw.transform;
+            };
             for (size_t i = opaqueBegin; i < drawContext.OpaqueSurfaces.size(); ++i) {
-                drawContext.OpaqueSurfaces[i].contributesToStaticCaches = cacheEligible;
+                updateDraw(drawContext.OpaqueSurfaces[i]);
             }
             for (size_t i = transparentBegin; i < drawContext.TransparentSurfaces.size(); ++i) {
-                drawContext.TransparentSurfaces[i].contributesToStaticCaches = cacheEligible;
+                updateDraw(drawContext.TransparentSurfaces[i]);
             }
             continue;
         }
