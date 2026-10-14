@@ -1337,7 +1337,8 @@ void VulkanEngine::run(){
                 scene.set<Name>(target, Name{"must be discarded"});
             }), "queued play command");
             if (const char* scratch = SDL_getenv("MIRABILIS_TEST_SCENE_DIRECTORY")) {
-                require(std::filesystem::exists(std::filesystem::path(scratch) / "invalid_transform.json"), "malformed scratch fixture missing");
+                const std::filesystem::path scratchDirectory(scratch); // SDL_getenv reuses its buffer on Windows.
+                require(std::filesystem::exists(scratchDirectory / "invalid_transform.json"), "malformed scratch fixture missing");
                 const auto epochBeforeFailure = _scene.epoch();
                 const auto snapshotCount = _playSnapshot->entities.entities.size();
                 require(!load_editor_scene_named("invalid_transform.json") && !_editorMode && _playSnapshot &&
@@ -1346,11 +1347,14 @@ void VulkanEngine::run(){
                 const auto filename = _sceneDocument.activeFilename;
                 require(save_editor_scene_as("ecs-authored-play.json"), "saving authored state during play");
                 _sceneDocument.activeFilename = filename;
-                std::ifstream input(std::filesystem::path(scratch) / "ecs-authored-play.json", std::ios::binary);
+                std::ifstream input(scratchDirectory / "ecs-authored-play.json", std::ios::binary);
+                require(static_cast<bool>(input), "opening authored play scratch save");
                 const std::string json(std::istreambuf_iterator<char>(input), {});
                 StagedScene saved;
                 std::string error;
-                require(parse_scene_json(json, "ecs-authored-play.json", settings, saved, error), "saved play snapshot reload");
+                const bool parsed = parse_scene_json(json, "ecs-authored-play.json", settings, saved, error);
+                if (!parsed) fmt::print("ECS scratch reload error: {}\n", error);
+                require(parsed, "saved play snapshot reload");
                 const auto savedFloor = saved.scene.get(_floorObject);
                 require(saved.scene.valid(savedFloor) && !saved.scene.valid(saved.scene.get(created.persistentId)) &&
                     glm::length(saved.scene.read<Transform>(savedFloor)->position - original.position) < 1e-6f &&
