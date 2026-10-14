@@ -110,7 +110,7 @@ void read_material(Object json, SceneMaterial& material, bool legacy) {
         material.ior=std::clamp(material.ior,1.f,3.f);
     }
 }
-void read_settings(Object document, const SceneSettings& defaults, SceneSettings& settings) {
+void read_settings(Object document, uint64_t version, const SceneSettings& defaults, SceneSettings& settings) {
     settings.skybox=defaults.skybox; settings.sunDirection=defaults.sunDirection; settings.shadowsEnabled=defaults.shadowsEnabled;
     settings.shadowRadius=defaults.shadowRadius; settings.shadowDepthBias=defaults.shadowDepthBias; settings.shadowNormalBias=defaults.shadowNormalBias;
     if(const auto item=optional(document,"nextActor")) { const auto next=integer(*item); if(next>UINT32_MAX)invalid("nextActor is out of range"); settings.nextActor=static_cast<uint32_t>(std::max<uint64_t>(next,1)); }
@@ -121,12 +121,14 @@ void read_settings(Object document, const SceneSettings& defaults, SceneSettings
     if(const auto item=optional(document,"referenceLighting")) {
         const auto json=object(*item); read_optional(json,"sunRadiance",settings.sunRadiance,vector<glm::vec3>);
         read_float(json,"environmentIntensity",settings.environmentIntensity); read_bool(json,"blackEnvironment",settings.blackEnvironment); read_optional(json,"environmentTint",settings.environmentTint,vector<glm::vec3>);
-        settings.sunRadiance=glm::clamp(settings.sunRadiance,glm::vec3(0),glm::vec3(10000));
-        settings.environmentTint=glm::clamp(settings.environmentTint,glm::vec3(0),glm::vec3(4)); settings.environmentIntensity=std::clamp(settings.environmentIntensity,0.f,10000.f);
+        if(version==1) {
+            settings.sunRadiance=glm::clamp(settings.sunRadiance,glm::vec3(0),glm::vec3(10000));
+            settings.environmentTint=glm::clamp(settings.environmentTint,glm::vec3(0),glm::vec3(4)); settings.environmentIntensity=std::clamp(settings.environmentIntensity,0.f,10000.f);
+        }
     }
     if(const auto item=optional(document,"colorGrading")) {
         const auto json=object(*item); read_float(json,"warmth",settings.warmth); read_float(json,"tint",settings.tint); read_float(json,"giSaturation",settings.giSaturation);
-        settings.warmth=std::clamp(settings.warmth,-1.f,1.f); settings.tint=std::clamp(settings.tint,-1.f,1.f); settings.giSaturation=std::clamp(settings.giSaturation,0.f,1.f);
+        if(version==1) { settings.warmth=std::clamp(settings.warmth,-1.f,1.f); settings.tint=std::clamp(settings.tint,-1.f,1.f); settings.giSaturation=std::clamp(settings.giSaturation,0.f,1.f); }
     }
     if(const auto item=optional(document,"ssao")) {
         settings.ssao.emplace(); auto& ao=*settings.ssao; const auto json=object(*item);
@@ -196,7 +198,7 @@ bool parse_scene_json(std::string_view json,std::string_view sourceFilename,cons
         simdjson::dom::parser parser; Json element; const simdjson::padded_string padded(json);
         if(parser.parse(padded).get(element))invalid("Could not parse scene JSON");
         const auto document=object(element); const auto version=integer(required(document,"version")); if(version!=1&&version!=2)invalid("Unsupported scene version");
-        StagedScene staging; read_settings(document,defaults,staging.settings);
+        StagedScene staging; read_settings(document,version,defaults,staging.settings);
         const auto objects=array(required(document,"objects"));
         PersistentID largest=0; bool anyIds=false;
         for(Json item:objects) { const auto id=integer(required(object(item),"id")); if(id==UINT64_MAX||(version==1&&id>UINT32_MAX))invalid("Object ID is out of range"); largest=std::max(largest,id);anyIds=true; }
@@ -298,7 +300,11 @@ bool serialize_scene_json(const mirabilis::Scene& scene,const SceneSettings& set
         if(const auto unknown=scene.read<UnknownComponents>(ref))for(const auto& [key,value]:unknown->blocks)out<<", "<<quote(key)<<": "<<value;
         out<<"}}";
     }
-    out<<"\n  ]\n}\n";if(!out){error="Could not serialize scene";return false;}json=out.str();error.clear();return true;
+    out<<"\n  ]\n}\n";if(!out){error="Could not serialize scene";return false;}
+    auto result=out.str();
+    simdjson::dom::parser parser;Json parsed;const simdjson::padded_string padded(result);
+    if(parser.parse(padded).get(parsed)){error="Serialized scene contains invalid JSON or UTF-8";return false;}
+    json=std::move(result);error.clear();return true;
 }
 
 bool save_scene_atomic(const std::filesystem::path& destination,const mirabilis::Scene& scene,const SceneSettings& settings,std::span<const AuthoredPortalPair> portals,std::string& error) {

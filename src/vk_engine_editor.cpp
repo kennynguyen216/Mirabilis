@@ -79,7 +79,7 @@ void VulkanEngine::draw_inspector_panel()
             const auto role = *_scene.read<TimeTrial>(ref);
             bool portalPlaceable = _scene.has<PortalPlaceable>(ref);
             const bool runtimeOwned = _scene.runtime_only(ref);
-            ImGui::BeginDisabled(!_scene.mutable_ref(ref));
+            ImGui::BeginDisabled(runtimeOwned || _scene.pending(ref));
             ImGui::Text("Name: %s", name.value.c_str());
             ImGui::Separator();
 
@@ -244,7 +244,7 @@ void VulkanEngine::draw_inspector_panel()
                     _materialEditor.texturePathInput.data(),
                     _materialEditor.texturePathInput.size());
                 const auto materialRef = _scene.get(_materialEditor.object);
-                ImGui::BeginDisabled(!_scene.mutable_ref(materialRef));
+                ImGui::BeginDisabled(!_scene.valid(materialRef) || _scene.runtime_only(materialRef) || _scene.pending(materialRef));
                 if (ImGui::Button("Apply")) {
                     auto edited = *_scene.read<SceneMaterial>(materialRef);
                     edited.enabled = true;
@@ -329,7 +329,7 @@ void VulkanEngine::draw_editor_gizmo()
         authoredPortal = _authoredPortals.selectedSecond ? &pair.second : &pair.first;
     }
     if ((!hasObject && authoredPortal == nullptr) ||
-        (hasObject && (!_scene.mutable_ref(ref) || _scene.has<TransformDrivenExternally>(ref)))) {
+        (hasObject && (_scene.runtime_only(ref) || _scene.pending(ref) || _scene.has<TransformDrivenExternally>(ref)))) {
         return;
     }
 
