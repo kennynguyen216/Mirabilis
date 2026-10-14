@@ -35,10 +35,12 @@ std::set<PersistentID> resets(PhysicsWorld& physics) {
     return {values.begin(), values.end()};
 }
 std::string object_json(int id, std::string parent, std::string transform,
-    std::string body = "", std::string collider = R"({"enabled":true,"shape":0,"center":[0,0,0],"halfExtents":[0.5,0.5,0.5]})") {
+    std::string body = "", std::string collider = R"({"enabled":true,"shape":0,"center":[0,0,0],"halfExtents":[0.5,0.5,0.5]})",
+    bool portalPlaceable = false) {
     return "{\"id\":" + std::to_string(id) + ",\"parent\":" + parent +
         ",\"siblingIndex\":0,\"components\":{\"transform\":" + transform +
-        ",\"collider\":" + collider + (body.empty() ? "" : ",\"rigidBody\":" + body) + "}}";
+        ",\"collider\":" + collider + (body.empty() ? "" : ",\"rigidBody\":" + body) +
+        (portalPlaceable ? ",\"portalPlaceable\":{}" : "") + "}}";
 }
 const std::string identity = R"({"position":[0,0,0],"rotation":[0,0,0],"scale":[1,1,1]})";
 const std::string dynamic = R"({"motion":"Dynamic","mass":2,"friction":0.3,"restitution":0.2,"gravityFactor":1})";
@@ -284,7 +286,8 @@ TEST_CASE("queued physics commands reject invalid refs and finite input violatio
 }
 
 TEST_CASE("saved authored portal host in dynamic subtree is rejected before replacement") {
-    auto input = document(object_json(1,"null",identity,dynamic)+","+object_json(2,"1",identity));
+    const auto collider = R"({"enabled":true,"shape":0,"center":[0,0,0],"halfExtents":[0.5,0.5,0.5]})";
+    auto input = document(object_json(1,"null",identity,dynamic,collider,true)+","+object_json(2,"1",identity,"",collider,true));
     const auto portal = R"({"position":[0,0,0],"normal":[0,0,1],"up":[0,1,0],"halfWidth":0.8,"halfHeight":1.2,"hostWallObject":2})";
     const auto at = input.find("\"authoredPortals\":[]"); REQUIRE(at != std::string::npos);
     input.replace(at,std::string("\"authoredPortals\":[]").size(),"\"authoredPortals\":["+std::string(portal)+","+portal+"]");
