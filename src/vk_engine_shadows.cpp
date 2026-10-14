@@ -546,6 +546,7 @@ void VulkanEngine::update_sun_casters()
     destroy_buffer(scratch);
     destroy_buffer(instances);
     destroy_buffer(transforms);
+    ++stats.sun_shadow_rebuild_count;
     const double milliseconds = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - start).count();
     constexpr double MiB = 1024.0 * 1024.0;

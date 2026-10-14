@@ -447,6 +447,7 @@ void VulkanEngine::update_trace_scene() {
         }
     }
     if(_traceTriangleBuffer.buffer&&drawHash==_traceDrawHash) {uploadPortals(); uploadLighting(); return;}
+    const auto rebuildStarted = std::chrono::steady_clock::now();
     _traceDrawHash=drawHash;
     std::vector<TraceTriangle> triangles;
     std::vector<TraceMaterial> materials;
@@ -552,7 +553,11 @@ void VulkanEngine::update_trace_scene() {
     writer.write_buffer(2,_traceTriangleBuffer.buffer,VK_WHOLE_SIZE,0,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
     writer.write_buffer(3,_traceMaterialBuffer.buffer,VK_WHOLE_SIZE,0,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
     writer.update_set(_device,_traceSet);
-    fmt::print("GI scene revision={} triangles={} materials={} hash={}\n",_traceSceneRevision,_traceTriangles.size(),_traceMaterials.size(),_traceSceneHash);
+    ++stats.trace_rebuild_count;
+    const double rebuildMilliseconds = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - rebuildStarted).count();
+    fmt::print("GI scene revision={} triangles={} materials={} hash={} rebuild={:.1f} ms (wall clock, device wait included)\n",
+        _traceSceneRevision,_traceTriangles.size(),_traceMaterials.size(),_traceSceneHash,rebuildMilliseconds);
 }
 
 std::vector<glm::vec4> VulkanEngine::read_trace_image(const AllocatedImage& image) {
