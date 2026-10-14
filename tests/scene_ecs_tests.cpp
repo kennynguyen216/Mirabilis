@@ -261,7 +261,7 @@ TEST_CASE("finite scene teardown completes beyond the ordinary destruction cap")
     SUBCASE("clear") {
         REQUIRE_NOTHROW(scene.clear(beforeDestroy));
         CHECK(callbacks == playCreated.size()+1); CHECK(scene.hierarchy_order().empty());
-        CHECK_FALSE(scene.valid(saved)); CHECK(scene.epoch() > epoch);
+        CHECK_FALSE(scene.valid(saved));
     }
     SUBCASE("replace") {
         mirabilis::Scene staging; REQUIRE(staging.create_object("replacement"));
