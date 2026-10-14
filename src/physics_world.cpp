@@ -192,6 +192,7 @@ bool PhysicsWorld::synchronize(Scene& scene,bool editorMode) {
         const auto world=scene.world_matrix(ref);
         Transform pose;
         const bool exact=exact_world_trs(world,pose);
+        if(dynamic && exact) pose=*scene.read<Transform>(ref);
         if(!exact) {
             if(dynamic) { _impl->warn("Dynamic entity "+std::to_string(ref.persistentId)+" has unrepresentable world TRS"); success=false; continue; }
             pose=transform_from_matrix(world);
@@ -200,7 +201,7 @@ bool PhysicsWorld::synchronize(Scene& scene,bool editorMode) {
         if(!scene.validate_physics_edit(ref,saved,collider,scene.read<Transform>(ref)) ||
             glm::any(glm::lessThanEqual(glm::abs(pose.scale),glm::vec3(0)))) {success=false;continue;}
         auto* old=_impl->find(ref);
-        const bool rebuild=!old || !same_collider(old->collider,*collider) || !same_settings(old->settings,settings) || glm::any(glm::greaterThan(glm::abs(old->scale-pose.scale),glm::vec3(1e-5f)));
+        const bool rebuild=!old || !same_collider(old->collider,*collider) || !same_settings(old->settings,settings) || old->scale!=pose.scale;
         try {
             if(rebuild) {
                 const auto preservedLinear = old && dynamic ? api.GetLinearVelocity(old->id) : JPH::Vec3::sZero();
@@ -249,9 +250,10 @@ void PhysicsWorld::step(Scene& scene,float dt,const std::function<void()>& durin
         body.currentPosition=gvec(api.GetPosition(body.id)); body.currentRotation=gquat(api.GetRotation(body.id));
         body.sleeping=!api.IsActive(body.id);
         if(body.sleeping) {body.previousPosition=body.currentPosition;body.previousRotation=body.currentRotation;}
-        const auto matrix=glm::translate(glm::mat4(1),body.currentPosition)*glm::mat4_cast(body.currentRotation)*glm::scale(glm::mat4(1),body.scale);
-        Transform pose; if(!exact_world_trs(matrix,pose)) throw std::runtime_error("Invalid Jolt transform");
+        const auto matrix=glm::translate(glm::mat4(1),body.currentPosition)*glm::mat4_cast(body.currentRotation);
+        Transform pose=transform_from_matrix(matrix);
         pose.scale=body.scale;
+        if(!valid_component(pose)) throw std::runtime_error("Invalid Jolt transform");
         scene.set_local_transform(body.ref,pose,true); scene.set(body.ref,PhysicsState{body.sleeping},true);
         body.lastWorld=scene.world_matrix(body.ref);
     }
