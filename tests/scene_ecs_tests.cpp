@@ -294,7 +294,7 @@ TEST_CASE("finite scene teardown completes beyond the ordinary destruction cap")
         CHECK(scene.valid(saved));
     }
     for (auto ref : playCreated) CHECK_FALSE(scene.valid(ref));
-    CHECK(scene.queued_command_count() == 0); CHECK(scene.apply_commands() == 0); CHECK(commands == 0);
+    CHECK(scene.apply_commands() == 0); CHECK(scene.queued_command_count() == 0); CHECK(commands == 0);
     CHECK(scene.drain_destruction() == 0);
 }
 
@@ -320,4 +320,19 @@ TEST_CASE("queued world setters convert against earlier queued parent changes") 
     CHECK(scene.apply_commands() == 2); CHECK(scene.read<Hierarchy>(child)->parent == other.persistentId);
     CHECK(scene.world_matrix(child)[3].x == doctest::Approx(7));
     CHECK(scene.read<Transform>(child)->position.x == doctest::Approx(-13));
+}
+
+TEST_CASE("commands appended while applying a batch wait for the next batch") {
+    mirabilis::Scene scene;
+    const auto a = scene.create_object("a"), b = scene.create_object("b"), c = scene.create_object("c");
+    int bMutations = 0, late = 0;
+    REQUIRE(scene.enqueue_command(a,[&](auto& active,auto) {
+        REQUIRE(active.destroy_object(b));
+        REQUIRE(active.enqueue_command(c,[&](auto&,auto) { ++late; }));
+    }));
+    REQUIRE(scene.enqueue_command(b,[&](auto&,auto) { ++bMutations; }));
+    CHECK(scene.apply_commands() == 1); CHECK(bMutations == 0); CHECK(late == 0);
+    CHECK(scene.queued_command_count() == 1); CHECK(scene.pending(b));
+    CHECK(scene.apply_commands() == 1); CHECK(late == 1); CHECK(bMutations == 0);
+    CHECK(scene.queued_command_count() == 0); CHECK(scene.drain_destruction() == 1);
 }
