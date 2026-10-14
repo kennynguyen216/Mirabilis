@@ -3,7 +3,7 @@
 #include <vk_types.h>
 
 // A GPU primitive owned by the engine (the unit cube and the floor quad).
-// Imported assets use SceneObject::model instead.
+// Imported assets use the engine's per-entity model entry instead.
 struct MeshPrimitive {
     uint32_t indexCount{0};
     uint32_t firstIndex{0};

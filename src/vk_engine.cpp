@@ -33,6 +33,16 @@
 #include "imgui_impl_vulkan.h"
 #include "ImGuizmo.h"
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #ifdef NDEBUG
 constexpr bool bUseValidationLayers = false;
 #else
@@ -1290,6 +1300,112 @@ void VulkanEngine::run(){
         set_editor_mode(true);
         set_mouse_capture(false);
         ImGui::GetIO().IniFilename = nullptr;
+        if (SDL_getenv("MIRABILIS_TEST_ECS_LIFECYCLE")) {
+            const auto require = [](bool ok, const char* message) {
+                if (!ok) { fmt::print("GI TEST FAIL: ECS lifecycle {}\n", message); std::abort(); }
+            };
+            const auto floor = _scene.get(_floorObject);
+            const auto original = *_scene.read<Transform>(floor);
+            const auto player = _scene.get(_playerObject);
+            const auto settings = capture_scene_settings();
+            set_editor_mode(false);
+            auto moved = original; moved.position.x += 3;
+            require(_scene.set_local_transform(floor, moved), "play transform mutation");
+            const auto created = _scene.create_object("ECS play-created test entity");
+            require(static_cast<bool>(created), "play-created entity");
+            require(_scene.destroy_object(floor), "saved entity destruction");
+            drain_scene_destruction();
+            _postProcess.whiteBalance.x = 0.75f;
+            const auto highWater = _scene.next_persistent_id();
+            require(_scene.enqueue_command(created, [](Scene& scene, EntityRef target) {
+                scene.set<Name>(target, Name{"must be discarded"});
+            }), "queued play command");
+            if (const char* scratch = SDL_getenv("MIRABILIS_TEST_SCENE_DIRECTORY")) {
+                require(std::filesystem::exists(std::filesystem::path(scratch) / "invalid_transform.json"), "malformed scratch fixture missing");
+                const auto epochBeforeFailure = _scene.epoch();
+                const auto snapshotCount = _playSnapshot->entities.entities.size();
+                require(!load_editor_scene_named("invalid_transform.json") && !_editorMode && _playSnapshot &&
+                    _scene.epoch() == epochBeforeFailure && _playSnapshot->entities.entities.size() == snapshotCount && _scene.valid(created),
+                    "malformed play load changed scene, mode or snapshot");
+                const auto filename = _sceneDocument.activeFilename;
+                require(save_editor_scene_as("ecs-authored-play.json"), "saving authored state during play");
+                _sceneDocument.activeFilename = filename;
+                std::ifstream input(std::filesystem::path(scratch) / "ecs-authored-play.json", std::ios::binary);
+                const std::string json(std::istreambuf_iterator<char>(input), {});
+                StagedScene saved;
+                std::string error;
+                require(parse_scene_json(json, "ecs-authored-play.json", settings, saved, error), "saved play snapshot reload");
+                const auto savedFloor = saved.scene.get(_floorObject);
+                require(saved.scene.valid(savedFloor) && !saved.scene.valid(saved.scene.get(created.persistentId)) &&
+                    glm::length(saved.scene.read<Transform>(savedFloor)->position - original.position) < 1e-6f &&
+                    saved.scene.next_persistent_id() >= highWater, "play save included simulated state or lost allocator high-water");
+            }
+            reset_play();
+            const auto restored = _scene.get(_floorObject);
+            require(!_scene.valid(floor) && !_scene.valid(created) && !_scene.valid(player), "old epoch references must be stale");
+            require(_scene.valid(restored) && _scene.valid(_scene.get(_playerObject)), "saved/runtime identities restored");
+            require(glm::length(_scene.read<Transform>(restored)->position - original.position) < 1e-6f, "authored transform restored");
+            require(_scene.next_persistent_id() >= highWater && _scene.queued_command_count() == 0, "high-water/queue restore");
+            require(std::abs(_postProcess.whiteBalance.x - settings.warmth) < 1e-6f && !_editorMode, "settings restored and play continues");
+            moved.position.x += 2;
+            require(_scene.set_local_transform(restored, moved), "second play mutation");
+            set_editor_mode(true);
+            require(glm::length(_scene.read<Transform>(_scene.get(_floorObject))->position - original.position) < 1e-6f,
+                "leaving play restores authored transform");
+            const auto epoch = _scene.epoch();
+            if (SDL_getenv("MIRABILIS_TEST_SCENE_DIRECTORY")) {
+                const auto before = _scene.take_snapshot();
+                const auto* snapshot = _playSnapshot ? &*_playSnapshot : nullptr;
+                require(!load_editor_scene_named("invalid_transform.json"), "malformed scratch scene accepted");
+                require(_scene.epoch() == epoch && _editorMode && !_playSnapshot && snapshot == nullptr &&
+                    _scene.take_snapshot().entities.size() == before.entities.size(), "malformed load changed live state");
+                const auto destination = std::filesystem::path(SDL_getenv("MIRABILIS_TEST_SCENE_DIRECTORY")) / _sceneDocument.activeFilename;
+                const auto bytes = [&] {
+                    std::ifstream input(destination, std::ios::binary);
+                    return std::string(std::istreambuf_iterator<char>(input), {});
+                };
+                const auto originalBytes = bytes();
+                const auto currentFloor = _scene.get(_floorObject);
+                const auto collider = *_scene.read<Collider>(currentFloor);
+                _scene.edit<Collider>(currentFloor)->colliderHalfExtents.x = 0;
+                _sceneDocument.dirty = true;
+                require(!save_editor_scene() && _sceneDocument.dirty && bytes() == originalBytes,
+                    "invalid save must preserve file and dirty flag");
+                require(_scene.set(currentFloor, collider), "restore test collider");
+#ifdef _WIN32
+                const auto attributes = GetFileAttributesW(destination.c_str());
+                require(attributes != INVALID_FILE_ATTRIBUTES && SetFileAttributesW(destination.c_str(), attributes | FILE_ATTRIBUTE_READONLY),
+                    "prepare replacement failure");
+                const bool failed = !save_editor_scene();
+                SetFileAttributesW(destination.c_str(), attributes);
+                require(failed && _sceneDocument.dirty && bytes() == originalBytes,
+                    "replacement failure must preserve file and dirty flag");
+#endif
+                const auto parent = _scene.create_object("ECS cascade test parent", _scene.get(_sandboxRoot));
+                const auto host = _scene.create_object("ECS portal test host", parent);
+                require(_scene.set(host, Collider{true}) && _scene.set(host, PortalPlaceable{}), "prepare portal host");
+                const auto blue = _bluePortal;
+                const auto authored = _authoredPortals.pairs;
+                const auto selected = _selectedSceneObject;
+                _bluePortal = {}; _bluePortal.placed = true; _bluePortal.hostWallObject = host.persistentId;
+                _selectedSceneObject = host.persistentId;
+                require(!delete_selected_scene_object() && _scene.valid(host) && !_scene.pending(host), "direct portal host deletion protection");
+                _authoredPortals.pairs.push_back({_bluePortal, _bluePortal});
+                require(_scene.destroy_object(parent), "cascade host destruction request");
+                drain_scene_destruction();
+                require(!_scene.valid(host) && !_bluePortal.placed && _authoredPortals.pairs.size() == authored.size(), "cascade portal cleanup");
+                _bluePortal = blue; _authoredPortals.pairs = authored; _selectedSceneObject = selected;
+                fmt::print("ECS document and portal checks PASS: play save, malformed play/editor loads, failed saves keep file/dirty, direct/cascade hosts\n");
+            }
+            fmt::print("ECS lifecycle PASS: reset, leave-play, created/deleted entities, epochs, runtime survival, settings and queues\n");
+        }
+        if (SDL_getenv("MIRABILIS_TEST_RESET_PLAY")) {
+            set_editor_mode(false);
+            const auto epoch = _scene.epoch();
+            reset_play();
+            if (_editorMode || _scene.epoch() <= epoch) std::abort();
+            set_editor_mode(true);
+        }
         if(const char* camera=SDL_getenv("MIRABILIS_TEST_CAMERA")) {
             std::sscanf(camera,"%f %f %f %f %f",&_editorCamera.position.x,&_editorCamera.position.y,&_editorCamera.position.z,&_editorCamera.pitch,&_editorCamera.yaw);
         }

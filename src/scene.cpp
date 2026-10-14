@@ -82,7 +82,7 @@ bool Scene::reserve_persistent_ids(PersistentID next) {
     return true;
 }
 EntityRef Scene::create_with_id(std::string name, PersistentID id) {
-    if (id >= UINT64_MAX - 1 || _entities.contains(id)) {
+    if (id == UINT64_MAX || _entities.contains(id)) {
         fail("Duplicate or exhausted persistent ID"); return {};
     }
     const auto entity = _registry.create();
@@ -106,7 +106,7 @@ EntityRef Scene::create_with_id(std::string name, PersistentID id) {
 }
 EntityRef Scene::create_object(std::string name, std::optional<EntityRef> parent, bool owner) {
     if (parent && !mutable_ref(*parent, owner)) return {};
-    if (_nextPersistentId >= UINT64_MAX - 1) { fail("Persistent ID allocator exhausted"); return {}; }
+    if (_nextPersistentId == UINT64_MAX) { fail("Persistent ID allocator exhausted"); return {}; }
     const auto ref = create_with_id(std::move(name), _nextPersistentId);
     if (ref && parent) set_parent(ref, parent, owner);
     return ref;
@@ -319,7 +319,7 @@ EntityRef Scene::duplicate_subtree(EntityRef root) {
         const auto& children = read<Hierarchy>(ref)->children;
         stack.insert(stack.end(), children.rbegin(), children.rend());
     }
-    if (states.empty() || states.size() >= UINT64_MAX - _nextPersistentId) { fail("Persistent ID allocator exhausted"); return {}; }
+    if (states.empty() || states.size() > UINT64_MAX - _nextPersistentId) { fail("Persistent ID allocator exhausted"); return {}; }
     std::unordered_map<PersistentID, PersistentID> copies;
     for (const auto& state : states) {
         const auto ref = create_object(state.name.value);
@@ -346,7 +346,7 @@ EntityRef Scene::duplicate_subtree(EntityRef root) {
 bool Scene::restore_snapshot(const SceneSnapshot& snapshot, const DestroyCallback& beforeDestroy) {
     std::unordered_set<PersistentID> saved;
     for (const auto& state : snapshot.entities) {
-        if (state.id >= UINT64_MAX - 1 || !saved.insert(state.id).second ||
+        if (state.id == UINT64_MAX || !saved.insert(state.id).second ||
             !valid_component(state.transform) || !valid_component(state.mesh) || !valid_component(state.material) || !valid_component(state.collider)) {
             return fail("Invalid scene snapshot");
         }
