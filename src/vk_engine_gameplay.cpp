@@ -424,6 +424,7 @@ bool VulkanEngine::create_three_room_pole_chain()
     const Opening thirdOpening = openingForRoom(rooms[2]);
     _authoredPortals.pairs.clear();
     _authoredPortals.draft.reset();
+    _scene.set_authored_portal_hosts({});
     _authoredPortals.pairs.push_back(AuthoredPortalPair{
         makeEndpoint(firstOpening.leftCenter, glm::vec3(0, 0, -1),
                      firstOpening.leftHalfWidth),
