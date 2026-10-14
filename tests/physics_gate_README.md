@@ -45,7 +45,8 @@ PFM are retained and converted to PNG with the existing `pfm_to_png.py`. Inspect
 the pictures and report the actual visible differences; counters alone do not
 prove whether a box receives indirect lighting or what its missing contributions
 look like. Path tracing intentionally includes moving objects and rebuilds while
-they move. The runner's arithmetic/parser checks need no GPU:
+they move. A fourth 1080-frame trace run verifies restore batching and unchanged
+Edit restoration with path tracing active. The runner's arithmetic/parser checks need no GPU:
 
 ```powershell
 python -m unittest discover -s tests -p test_physics_gate.py

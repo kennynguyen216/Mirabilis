@@ -219,11 +219,12 @@ TEST_CASE("cache eligibility follows ancestor sleep state including missing stat
 }
 
 TEST_CASE("authored portal hosts cannot become dynamic or enter dynamic subtrees") {
-    Scene scene; const auto hostParent = scene.create_object("host parent"), host = box(scene,{},false,hostParent);
+    Scene scene; const auto hostParent = box(scene), host = box(scene,{},false,hostParent), rootHost = box(scene);
     const auto moving = box(scene,{},true); REQUIRE(scene.set(host,PortalPlaceable{}));
-    scene.set_authored_portal_hosts({host.persistentId});
+    scene.set_authored_portal_hosts({host.persistentId,rootHost.persistentId});
     CHECK_FALSE(scene.set_parent(host,moving)); CHECK_FALSE(scene.set_parent(hostParent,moving));
     auto body = *scene.read<RigidBody>(moving); CHECK_FALSE(scene.set(host,body));
+    CHECK_FALSE(scene.set(rootHost,body)); CHECK_FALSE(scene.set(hostParent,body));
     CHECK(scene.read<Hierarchy>(host)->parent == hostParent.persistentId);
     AuthoredPortalPair pair; pair.first.placed = pair.second.placed = true;
     pair.first.hostWallObject = host.persistentId;
