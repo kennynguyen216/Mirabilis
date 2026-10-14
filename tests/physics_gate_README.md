@@ -55,3 +55,10 @@ python -m unittest discover -s tests -p test_physics_gate.py
 Fresh reviewed Milestone1 baseline evidence lives separately under
 `C:/dev/mirabilis-work/physics-baseline`. Required performance thresholds continue
 to use the original frozen `baseline`, whose logs and prior gate remain intact.
+
+SDF coverage uses the existing mesh bake pipeline, not analytic fixtures. A
+two-frame Edit preflight queues every eligible primitive/glTF mesh, followed by
+`scripts/bake_sdf.py --queue assets/sdf/queue assets/sdf/cache`. Generated volumes
+remain ignored runtime artifacts. The runner retains bake logs, source hash,
+dependency versions and hashes of every queue/cache file; it requires real
+positive rebuild counters and exactly one enabled-cache sleep/wake rebuild.

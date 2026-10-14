@@ -8,9 +8,10 @@ class PhysicsTelemetry(unittest.TestCase):
         for frame, phase in enumerate(['awake']*4 + ['sleep']*2 + ['wake', 'teleport', 'restore', 'edit-restore', 'unchanged-restore', 'reopened', 'sandbox']):
             count = 1 if frame < 4 else 2 if frame < 6 else 3
             values.append({'phase': phase, 'frame': frame+1, 'bodies': 3,
-                'sdf': count, 'surface': count, 'ray-shadow': count, 'trace': 0,
+                'sdf': count, 'surface': count, 'ray-shadow': count, 'trace': count,
                 'eligible': 3 if phase == 'sleep' else 2, 'dynamic-draws': 1,
                 'sdf-enabled': 1, 'surface-enabled': 1, 'ray-shadow-enabled': 1, 'trace-enabled': 0,
+                'sdf-placed': 3 if phase == 'sleep' else 2, 'sdf-instances': 3 if phase == 'sleep' else 2,
                 'history-reset': 1 if phase in ('teleport', 'restore') else 0})
         return values
 

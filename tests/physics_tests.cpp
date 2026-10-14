@@ -121,6 +121,12 @@ TEST_CASE("editor dirty parent and shape edits update native body without steppi
     REQUIRE(physics.body_world(child)); check_matrix(*physics.body_world(child),to_matrix(best));
     auto singular = transform; singular.scale.x = 0;
     CHECK_FALSE(scene.set_local_transform(parent,singular)); check_matrix(scene.local_matrix(parent),to_matrix(transform));
+    const auto precise = box(scene); REQUIRE(physics.synchronize(scene,true));
+    REQUIRE(physics.body_bounds(precise)); const auto beforeWidth = physics.body_bounds(precise)->max.x - physics.body_bounds(precise)->min.x;
+    Transform preciseTransform; preciseTransform.scale.x = 1.000001f;
+    REQUIRE(scene.set_local_transform(precise,preciseTransform)); REQUIRE(physics.synchronize(scene,true));
+    REQUIRE(physics.body_bounds(precise)); const auto afterWidth = physics.body_bounds(precise)->max.x - physics.body_bounds(precise)->min.x;
+    CHECK(afterWidth > beforeWidth + 5e-7f);
 }
 
 TEST_CASE("moving noncollider support parent agrees in Jolt player collision and render in play") {
@@ -144,11 +150,14 @@ TEST_CASE("offset rotated collider sync retains entity origin and interpolation"
     Scene scene; PhysicsWorld physics; const auto moving = box(scene,{3,5,7},true);
     auto collider = *scene.read<Collider>(moving); collider.colliderCenter = {1,.3f,-.4f};
     REQUIRE(scene.set(moving,collider));
-    Transform initial = *scene.read<Transform>(moving); initial.rotation = {.2f,.6f,-.3f}; initial.scale = {2,1,3};
+    Transform initial = *scene.read<Transform>(moving); initial.rotation = {.2f,.6f,-.3f}; initial.scale = {2,-1,3};
     REQUIRE(scene.set_local_transform(moving,initial));
     auto body = *scene.read<RigidBody>(moving); body.gravityFactor = 0; REQUIRE(scene.set(moving,body));
     const auto child = scene.create_object("visual",moving); Transform local; local.position = {2,0,0};
     REQUIRE(scene.set_local_transform(child,local)); REQUIRE(physics.synchronize(scene,false));
+    REQUIRE(physics.body_bounds(moving));
+    check_vector((physics.body_bounds(moving)->min+physics.body_bounds(moving)->max)*.5f,
+        glm::vec3(to_matrix(initial)*glm::vec4(collider.colliderCenter,1)));
     const auto reset = resets(physics); CHECK(reset.contains(moving.persistentId)); CHECK(reset.contains(child.persistentId));
     check_matrix(physics.render_world(scene,moving,0),to_matrix(initial));
     REQUIRE(physics.queue_velocity(scene,moving,{12,0,0})); tick(physics,scene);
@@ -342,6 +351,12 @@ TEST_CASE("invalid known rigid bodies and sheared dynamic loads fail transaction
         R"({"enabled":false,"shape":0,"center":[0,0,0],"halfExtents":[0.5,0.5,0.5]})")),"static.json",{},disabled,error),error);
     PhysicsWorld physics; REQUIRE(physics.synchronize(disabled.scene,true)); CHECK(physics.body_count() == 0);
     const auto* body = disabled.scene.read<RigidBody>(disabled.scene.get(1)); REQUIRE(body); CHECK(body->gravityFactor == -2);
+    StagedScene tiny;
+    REQUIRE_MESSAGE(parse_scene_json(document(object_json(1,"null",R"({"position":[0,0,0],"rotation":[0,0,0],"scale":[0.0000001,1,1]})")),
+        "tiny-static.json",{},tiny,error),error);
+    PhysicsWorld tinyPhysics; REQUIRE(tinyPhysics.synchronize(tiny.scene,true)); CHECK(tinyPhysics.body_count() == 1);
+    REQUIRE(tinyPhysics.body_world(tiny.scene.get(1)));
+    CHECK(glm::length(glm::vec3((*tinyPhysics.body_world(tiny.scene.get(1)))[0])) == doctest::Approx(1e-7f).epsilon(.01));
 }
 
 TEST_CASE("physics demo scratch save reopens all saved components and replaces cleanly") {
