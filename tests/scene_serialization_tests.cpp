@@ -50,9 +50,9 @@ void check_collision(const PlayerCollisionSet& actual, simdjson::dom::element fi
     REQUIRE(actual.groundPlanes.size() == grounds.size()); i = 0;
     for (auto ground : grounds) {
         const simdjson::dom::array center = ground["center"], half = ground["halfExtents"];
-        size_t axis = 0; for (auto value : center) CHECK(near(actual.groundPlanes[i].center[axis++],double(value)));
-        axis = 0; for (auto value : half) CHECK(near(actual.groundPlanes[i].halfExtents[axis++],double(value)));
-        CHECK(near(actual.groundPlanes[i++].height,double(ground["height"])));
+        size_t axis = 0; for (auto value : center) CHECK(near_float(actual.groundPlanes[i].center[axis++],double(value)));
+        axis = 0; for (auto value : half) CHECK(near_float(actual.groundPlanes[i].halfExtents[axis++],double(value)));
+        CHECK(near_float(actual.groundPlanes[i++].height,double(ground["height"])));
     }
     const simdjson::dom::array ramps = fixture["ramps"];
     REQUIRE(actual.surfRamps.size() == ramps.size()); i = 0;
@@ -60,7 +60,7 @@ void check_collision(const PlayerCollisionSet& actual, simdjson::dom::element fi
         const simdjson::dom::array matrix = ramp["worldToLocal"];
         size_t index = 0;
         for (auto value : matrix) {
-            CHECK(near(actual.surfRamps[i].worldToLocal[index/4][index%4],double(value))); ++index;
+            CHECK(near_float(actual.surfRamps[i].worldToLocal[index/4][index%4],double(value))); ++index;
         }
         REQUIRE(index == 16);
         check_vector(actual.surfRamps[i].lowLeft,json_vec3(ramp["lowLeft"]));
