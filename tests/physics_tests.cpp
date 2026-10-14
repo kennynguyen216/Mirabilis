@@ -134,6 +134,17 @@ TEST_CASE("editor dirty parent and shape edits update native body without steppi
     REQUIRE(scene.set_local_transform(precise,preciseTransform)); REQUIRE(physics.synchronize(scene,true));
     REQUIRE(physics.body_bounds(precise)); const auto afterWidth = physics.body_bounds(precise)->max.x - physics.body_bounds(precise)->min.x;
     CHECK(afterWidth > beforeWidth + 5e-7f);
+    preciseTransform.position.x = 1e-6f;
+    REQUIRE(scene.set_local_transform(precise,preciseTransform)); REQUIRE(physics.synchronize(scene,true));
+    REQUIRE(physics.body_world(precise)); CHECK(std::abs((*physics.body_world(precise))[3].x-1e-6f) <= 1e-8f);
+    const auto rescaled = box(scene,{},true); REQUIRE(physics.synchronize(scene,false));
+    REQUIRE(physics.queue_velocity(scene,rescaled,{12,0,0})); scene.apply_commands();
+    Transform target; target.scale.x = 1.000001f;
+    REQUIRE(physics.queue_teleport(scene,rescaled,target)); scene.apply_commands();
+    REQUIRE(physics.body_bounds(rescaled));
+    CHECK(std::abs(physics.body_bounds(rescaled)->max.x-physics.body_bounds(rescaled)->min.x-1.000001f) <= 1e-7f);
+    REQUIRE(physics.body_world(rescaled)); CHECK(std::abs(glm::length(glm::vec3((*physics.body_world(rescaled))[0]))-1.000001f) <= 1e-7f);
+    CHECK(physics.velocity(rescaled).x == doctest::Approx(12));
 }
 
 TEST_CASE("moving noncollider support parent agrees in Jolt player collision and render in play") {
@@ -292,6 +303,13 @@ TEST_CASE("loader detaches representable parented dynamics preserves world pose 
     const auto* dormant = reopened.scene.read<RigidBody>(reopened.scene.get(3)); REQUIRE(dormant);
     CHECK(dormant->motion == BodyMotion::Static); CHECK(dormant->mass == 7);
     CHECK(dormant->friction == doctest::Approx(.8));
+    StagedScene large;
+    const auto largeParent = R"({"position":[3,4,5],"rotation":[0,0.6,0],"scale":[1000,1000,1000]})";
+    parent.scale = glm::vec3(1000); const auto expectedLarge = to_matrix(parent)*to_matrix(child);
+    Transform exact; REQUIRE(mirabilis::exact_world_trs(expectedLarge,exact)); check_matrix(to_matrix(exact),expectedLarge);
+    REQUIRE_MESSAGE(parse_scene_json(document(object_json(1,"null",largeParent)+","+object_json(2,"1",childTransform,dynamic)),
+        "large-trs.json",{},large,error),error);
+    check_matrix(large.scene.world_matrix(large.scene.get(2)),expectedLarge);
 }
 
 TEST_CASE("duplicated dynamic subtree creates one fresh native body and preserves saved fields") {
