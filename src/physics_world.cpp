@@ -201,6 +201,7 @@ bool PhysicsWorld::synchronize(Scene& scene,bool editorMode) {
                 JPH::ShapeRefC shape=_impl->shape(*collider,pose.scale);
                 JPH::BodyCreationSettings creation(shape,jvec(pose.position),jquat(rotation(pose)),
                     dynamic?JPH::EMotionType::Dynamic:JPH::EMotionType::Static,dynamic?1:0);
+                creation.mLinearDamping=0; creation.mAngularDamping=0;
                 creation.mFriction=settings.friction; creation.mRestitution=settings.restitution; creation.mGravityFactor=settings.gravityFactor;
                 if(dynamic) {creation.mOverrideMassProperties=JPH::EOverrideMassProperties::CalculateInertia;creation.mMassPropertiesOverride.mMass=settings.mass;}
                 const auto id=api.CreateAndAddBody(creation,dynamic?JPH::EActivation::Activate:JPH::EActivation::DontActivate);
