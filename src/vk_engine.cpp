@@ -1381,6 +1381,12 @@ void VulkanEngine::run(){
                     return std::string(std::istreambuf_iterator<char>(input), {});
                 };
                 const auto originalBytes = bytes();
+                StagedScene exhausted;
+                std::string capacityError;
+                require(parse_scene_json(originalBytes, _sceneDocument.activeFilename, settings, exhausted, capacityError) &&
+                    exhausted.scene.reserve_persistent_ids(UINT64_MAX - 1), "prepare runtime ID exhaustion");
+                require(!install_staged_scene(std::move(exhausted)) && _scene.epoch() == epoch && _editorMode,
+                    "runtime ID exhaustion replaced the live scene");
                 const auto currentFloor = _scene.get(_floorObject);
                 const auto collider = *_scene.read<Collider>(currentFloor);
                 _scene.edit<Collider>(currentFloor)->colliderHalfExtents.x = 0;
