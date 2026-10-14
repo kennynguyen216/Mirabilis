@@ -258,10 +258,10 @@ bool Scene::enqueue_command(EntityRef target, CommandAction action) {
     return true;
 }
 size_t Scene::apply_commands() {
-    const size_t count = _commands.size();
+    auto batch = std::move(_commands);
+    _commands.clear();
     size_t applied = 0;
-    for (size_t i = 0; i < count && !_commands.empty(); ++i) {
-        auto command = std::move(_commands.front()); _commands.pop_front();
+    for (auto& command : batch) {
         if (valid(command.target) && !pending(command.target)) {
             command.action(*this, command.target); ++applied;
         }
