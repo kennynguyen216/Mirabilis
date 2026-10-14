@@ -1,4 +1,7 @@
 #include "vk_engine.h"
+#include "scene_queries.h"
+
+#include <algorithm>
 
 #include <chrono>
 #include <cstring>
@@ -7,28 +10,30 @@
 
 void VulkanEngine::sync_scene_driven_objects()
 {
-    if (SceneObject* player = _scene.get(_playerObject)) {
-        player->localTransform.position = _playerMovement.position;
+    const EntityRef player = _scene.get(_playerObject);
+    if (const Transform* current = _scene.read<Transform>(player)) {
+        Transform transform = *current;
+        transform.position = _playerMovement.position;
         // Camera yaw uses a negative-Y rotation.
-        player->localTransform.rotation = glm::vec3(0.0f, -mainCamera.yaw, 0.0f);
+        transform.rotation = glm::vec3(0.0f, -mainCamera.yaw, 0.0f);
+        _scene.set_local_transform(player, transform, true);
     }
 
     const auto syncPortalObject = [&](SceneObjectID id, const Portal& portal) {
-        SceneObject* portalObject = _scene.get(id);
-        if (portalObject == nullptr) {
-            return;
-        }
-        portalObject->visible = portal.placed;
-        if (!portal.placed) {
-            return;
-        }
-        portalObject->localTransform.position = portal.position;
-        // Placed portals are always axis-aligned and upright for now, so the
-        // frame reduces to a yaw around the wall normal.
-        portalObject->localTransform.rotation = glm::vec3(
+        const EntityRef object = _scene.get(id);
+        const Transform* current = _scene.read<Transform>(object);
+        Visibility* visibility = _scene.edit<Visibility>(object, true);
+        if (current == nullptr || visibility == nullptr) return;
+        visibility->visible = portal.placed;
+        if (!portal.placed) return;
+        Transform transform = *current;
+        transform.position = portal.position;
+        // Placed portals are upright, so their frame reduces to yaw.
+        transform.rotation = glm::vec3(
             0.0f, std::atan2(portal.normal.x, portal.normal.z), 0.0f);
-        portalObject->localTransform.scale = glm::vec3(
+        transform.scale = glm::vec3(
             portal.halfWidth * 2.0f, portal.halfHeight * 2.0f, 1.0f);
+        _scene.set_local_transform(object, transform, true);
     };
     syncPortalObject(_bluePortalObject, _bluePortal);
     syncPortalObject(_orangePortalObject, _orangePortal);
@@ -38,37 +43,45 @@ void VulkanEngine::emit_scene_render_objects(
     RenderLayer layer,
     DrawContext& drawContext)
 {
-    for (SceneObject& object : _scene.objects) {
-        if (!object.alive || !object.visible || object.layer != layer) {
+    for (const EntityRef object : scene_emission_order(_scene)) {
+        const Visibility* visibility = _scene.read<Visibility>(object);
+        if (visibility == nullptr || !visibility->visible || visibility->layer != layer) continue;
+        const auto runtime = _sceneRenderRuntimes.find(object.persistentId);
+        if (runtime == _sceneRenderRuntimes.end()) continue;
+        const glm::mat4 world = _scene.world_matrix(object);
+        const bool cacheEligible = contributes_to_static_caches(_scene, object, _editorMode);
+        if (runtime->second.model != nullptr) {
+            const size_t opaqueBegin = drawContext.OpaqueSurfaces.size();
+            const size_t transparentBegin = drawContext.TransparentSurfaces.size();
+            runtime->second.model->Draw(world, drawContext);
+            for (size_t i = opaqueBegin; i < drawContext.OpaqueSurfaces.size(); ++i) {
+                drawContext.OpaqueSurfaces[i].contributesToStaticCaches = cacheEligible;
+            }
+            for (size_t i = transparentBegin; i < drawContext.TransparentSurfaces.size(); ++i) {
+                drawContext.TransparentSurfaces[i].contributesToStaticCaches = cacheEligible;
+            }
             continue;
         }
-
-        const glm::mat4 world = _scene.world_matrix(object.id);
-        if (_sceneRenderRuntimes[object.id].model != nullptr) {
-            _sceneRenderRuntimes[object.id].model->Draw(world, drawContext);
-            continue;
-        }
-        if (!_sceneRenderRuntimes[object.id].primitive.valid()) {
-            continue;
-        }
-
+        const MeshPrimitive& primitive = runtime->second.primitive;
+        if (!primitive.valid()) continue;
+        const SceneMaterial* material = _scene.read<SceneMaterial>(object);
         RenderObject renderObject{};
-        renderObject.indexCount = _sceneRenderRuntimes[object.id].primitive.indexCount;
-        renderObject.firstIndex = _sceneRenderRuntimes[object.id].primitive.firstIndex;
-        renderObject.indexBuffer = _sceneRenderRuntimes[object.id].primitive.indexBuffer;
-        renderObject.material = object.material.enabled
-            ? resolve_scene_material(object)
-            : _sceneRenderRuntimes[object.id].primitive.material;
-        renderObject.bounds = _sceneRenderRuntimes[object.id].primitive.bounds;
+        renderObject.indexCount = primitive.indexCount;
+        renderObject.firstIndex = primitive.firstIndex;
+        renderObject.indexBuffer = primitive.indexBuffer;
+        renderObject.material = material != nullptr && material->enabled
+            ? resolve_scene_material(object) : primitive.material;
+        renderObject.bounds = primitive.bounds;
         renderObject.transform = world;
-        if (const auto previous = _previousSceneObjectTransforms.find(object.id);
+        if (const auto previous = _previousSceneObjectTransforms.find(object.persistentId);
             previous != _previousSceneObjectTransforms.end()) {
             renderObject.previousTransform = previous->second;
         } else {
             renderObject.previousTransform = world;
         }
-        _previousSceneObjectTransforms[object.id] = world;
-        renderObject.vertexBufferAddress = _sceneRenderRuntimes[object.id].primitive.vertexBufferAddress;
+        _previousSceneObjectTransforms[object.persistentId] = world;
+        renderObject.vertexBufferAddress = primitive.vertexBufferAddress;
+        renderObject.contributesToStaticCaches = cacheEligible;
         drawContext.OpaqueSurfaces.push_back(renderObject);
     }
 }
@@ -111,10 +124,13 @@ void VulkanEngine::update_scene(float deltaTime)
     portalViewDrawContext.OpaqueSurfaces.clear();
     portalViewDrawContext.TransparentSurfaces.clear();
 
-    for (auto& [name, scene] : loadedScenes) {
-        if (scene != nullptr) {
-            scene->Draw(glm::mat4(1.0f), worldDrawContext);
-        }
+    std::vector<std::string> loadedSceneNames;
+    loadedSceneNames.reserve(loadedScenes.size());
+    for (const auto& [name, scene] : loadedScenes) loadedSceneNames.push_back(name);
+    std::sort(loadedSceneNames.begin(), loadedSceneNames.end());
+    for (const std::string& name : loadedSceneNames) {
+        const auto& scene = loadedScenes.at(name);
+        if (scene != nullptr) scene->Draw(glm::mat4(1.0f), worldDrawContext);
     }
     sync_scene_driven_objects();
     emit_scene_render_objects(RenderLayer::World, worldDrawContext);

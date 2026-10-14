@@ -80,17 +80,10 @@ void VulkanEngine::update_physics(float deltaTime)
 
 bool VulkanEngine::apply_scene_spawn_point()
 {
-    for (const SceneObject& object : _scene.objects) {
-        if (object.alive && object.timeTrialRole == TimeTrialRole::SpawnPoint) {
-            _playerMovement.settings.spawnPosition = glm::vec3(
-                _scene.world_matrix(object.id)[3]);
-            return true;
-        }
-    }
-    // A scene with no spawn marker must not inherit the prior scene's player
-    // position. The empty sandbox is centred on this safe fallback.
-    _playerMovement.settings.spawnPosition = glm::vec3(0.0f);
-    return false;
+    const auto spawn = find_scene_spawn_point(_scene);
+    // An empty scene must not inherit the prior scene's spawn.
+    _playerMovement.settings.spawnPosition = spawn.value_or(glm::vec3(0.0f));
+    return spawn.has_value();
 }
 
 void VulkanEngine::respawn_player()
@@ -127,27 +120,9 @@ void VulkanEngine::update_time_trial(float deltaTime)
         playerHalfWidth,
         _playerMovement.settings.playerHeight,
         playerHalfWidth);
-    const auto overlaps_player = [&](const AABB& volume) {
-        return playerMin.x <= volume.max.x && playerMax.x >= volume.min.x &&
-            playerMin.y <= volume.max.y && playerMax.y >= volume.min.y &&
-            playerMin.z <= volume.max.z && playerMax.z >= volume.min.z;
-    };
-
-    bool insideStart = false;
-    bool insideFinish = false;
-    for (const SceneObject& object : _scene.objects) {
-        if (!object.alive) {
-            continue;
-        }
-        if (object.timeTrialRole == TimeTrialRole::StartTrigger &&
-            overlaps_player(collider_from_object(_scene, object.id))) {
-            insideStart = true;
-        }
-        if (object.timeTrialRole == TimeTrialRole::FinishTrigger &&
-            overlaps_player(collider_from_object(_scene, object.id))) {
-            insideFinish = true;
-        }
-    }
+    const TimeTrialOverlap overlap = collect_time_trial_overlaps(_scene, {playerMin, playerMax});
+    const bool insideStart = overlap.start;
+    const bool insideFinish = overlap.finish;
 
     if (insideStart && !_timeTrial.playerInsideStartTrigger) {
         _timeTrial.seconds = 0.0f;
@@ -283,18 +258,15 @@ void VulkanEngine::place_portal(Portal& portal, const Portal& otherPortal)
     std::optional<RaycastHit> closestHit;
     AABB closestWall{};
     SceneObjectID closestWallObject = InvalidSceneObject;
-    for (const SceneObject& object : _scene.objects) {
-        if (!object.alive || !object.portalPlaceable) {
-            continue;
-        }
-        const AABB wall = collider_from_object(_scene, object.id);
-        const std::optional<RaycastHit> hit = raycast_aabb(
-            rayOrigin, rayDirection, wall);
+    for (const EntityRef object : _scene.creation_order()) {
+        if (!_scene.has<PortalPlaceable>(object)) continue;
+        const AABB wall = collider_from_object(_scene, object);
+        const std::optional<RaycastHit> hit = raycast_aabb(rayOrigin, rayDirection, wall);
         if (hit.has_value() &&
             (!closestHit.has_value() || hit->distance < closestHit->distance)) {
             closestHit = hit;
             closestWall = wall;
-            closestWallObject = object.id;
+            closestWallObject = object.persistentId;
         }
     }
 
@@ -382,17 +354,18 @@ bool VulkanEngine::create_three_room_pole_chain()
         glm::vec3 polePosition{0.0f};
     };
     std::vector<RoomPole> rooms;
-    for (const SceneObject& root : _scene.objects) {
-        if (!root.alive || root.parent != _sandboxRoot ||
-            !root.name.starts_with("Long Closed Room")) {
-            continue;
-        }
-        for (const SceneObjectID childID : root.children) {
-            const SceneObject* child = _scene.get(childID);
-            if (child != nullptr && child->name == "Center Pole") {
-                rooms.push_back(RoomPole{root.id,
-                    glm::vec3(_scene.world_matrix(root.id)[3]),
-                    glm::vec3(_scene.world_matrix(childID)[3])});
+    for (const EntityRef root : _scene.creation_order()) {
+        const Hierarchy* hierarchy = _scene.read<Hierarchy>(root);
+        const Name* name = _scene.read<Name>(root);
+        if (hierarchy == nullptr || hierarchy->parent != _sandboxRoot ||
+            name == nullptr || !name->value.starts_with("Long Closed Room")) continue;
+        for (const PersistentID childID : hierarchy->children) {
+            const EntityRef child = _scene.get(childID);
+            const Name* childName = _scene.read<Name>(child);
+            if (childName != nullptr && childName->value == "Center Pole") {
+                rooms.push_back(RoomPole{root.persistentId,
+                    glm::vec3(_scene.world_matrix(root)[3]),
+                    glm::vec3(_scene.world_matrix(child)[3])});
                 break;
             }
         }
@@ -411,7 +384,7 @@ bool VulkanEngine::create_three_room_pole_chain()
                                  float halfWidth) {
         Portal portal{};
         portal.placed = true;
-        portal.hostWallObject = InvalidSceneObject;
+        portal.hostWallObject.reset();
         portal.position = position;
         portal.halfWidth = halfWidth;
         portal.halfHeight = 2.98f;
@@ -463,4 +436,26 @@ bool VulkanEngine::create_three_room_pole_chain()
     _sceneDocument.dirty = true;
     rebuild_collision_from_scene();
     return true;
+}
+
+void VulkanEngine::cleanup_scene_entity(EntityRef object)
+{
+    const PersistentID id = object.persistentId;
+    if (_bluePortal.hostWallObject == id) _bluePortal = Portal{};
+    if (_orangePortal.hostWallObject == id) _orangePortal = Portal{};
+    const auto hosts = [id](const Portal& portal) { return portal.hostWallObject == id; };
+    std::erase_if(_authoredPortals.pairs, [&](const AuthoredPortalPair& pair) {
+        return hosts(pair.first) || hosts(pair.second);
+    });
+    if (_authoredPortals.draft && hosts(*_authoredPortals.draft)) _authoredPortals.draft.reset();
+    _previousSceneObjectTransforms.erase(id);
+    if (const auto material = _sceneMaterialRuntimes.find(id);
+        material != _sceneMaterialRuntimes.end()) {
+        if (material->second.constantsBuffer.buffer != VK_NULL_HANDLE) {
+            destroy_buffer(material->second.constantsBuffer);
+        }
+        _sceneMaterialRuntimes.erase(material);
+    }
+    if (_selectedSceneObject == id) _selectedSceneObject = InvalidSceneObject;
+    if (_materialEditor.object == id) _materialEditor.object = InvalidSceneObject;
 }
