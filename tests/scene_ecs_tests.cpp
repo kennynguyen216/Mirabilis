@@ -143,6 +143,20 @@ TEST_CASE("destroy callbacks queue live mutations and join bounded destruction d
     scene.apply_commands(); CHECK(calls == 1); scene.apply_commands(); CHECK(calls == 2);
 }
 
+TEST_CASE("destruction requests keep registry views readable until the drain") {
+    mirabilis::Scene scene;
+    std::vector<EntityRef> refs;
+    for (int i = 0; i < 8; ++i) refs.push_back(scene.create_object("iterated"));
+    size_t visited = 0;
+    for (const auto entity : scene.registry().view<const Name>()) {
+        const auto ref = scene.reference(entity);
+        REQUIRE(scene.destroy_object(ref)); CHECK(scene.valid(ref)); REQUIRE(scene.read<Name>(ref));
+        CHECK(scene.pending(ref)); ++visited;
+    }
+    CHECK(visited == refs.size()); CHECK(scene.drain_destruction() == refs.size());
+    for (const auto ref : refs) CHECK_FALSE(scene.valid(ref));
+}
+
 TEST_CASE("runtime ownership protects descendant subtrees but external driving does not") {
     mirabilis::Scene scene;
     const auto authored = scene.create_object("authored"), runtime = scene.create_object("player",authored);
