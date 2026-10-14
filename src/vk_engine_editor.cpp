@@ -1,5 +1,6 @@
 #include "vk_engine.h"
 #include "vk_engine_render_helpers.h"
+#include "physics_world.h"
 
 #include <algorithm>
 #include <cmath>
@@ -16,6 +17,7 @@
 
 namespace {
 constexpr const char* EditorSceneDirectory = "../../assets/scenes";
+std::string EditorEditMessage;
 
 bool draw_hierarchy_node(Scene& scene, PersistentID id, PersistentID& selected)
 {
@@ -39,7 +41,10 @@ bool draw_hierarchy_node(Scene& scene, PersistentID id, PersistentID& selected)
         if (const auto* payload = ImGui::AcceptDragDropPayload("SCENE_OBJECT")) {
             if (payload->DataSize == sizeof(PersistentID)) {
                 const auto child = scene.get(*static_cast<const PersistentID*>(payload->Data));
-                if (scene.valid(child) && scene.set_parent(child, ref)) { selected = child.persistentId; changed = true; }
+                if (scene.valid(child)) {
+                    if (scene.set_parent(child, ref)) { selected = child.persistentId; changed = true; EditorEditMessage.clear(); }
+                    else EditorEditMessage = scene.last_error();
+                }
             }
         }
         ImGui::EndDragDropTarget();
@@ -55,10 +60,13 @@ bool draw_hierarchy_node(Scene& scene, PersistentID id, PersistentID& selected)
 void VulkanEngine::draw_hierarchy_panel()
 {
     if (ImGui::Begin("Hierarchy")) {
+        ImGui::BeginDisabled(!_editorMode);
         const auto roots = _scene.roots();
         bool changed = false;
         for (const auto id : roots) changed |= draw_hierarchy_node(_scene, id, _selectedSceneObject);
         if (changed) { _sceneDocument.dirty = true; rebuild_collision_from_scene(); }
+        ImGui::EndDisabled();
+        if (!EditorEditMessage.empty()) ImGui::TextWrapped("Edit refused: %s", EditorEditMessage.c_str());
     }
     ImGui::End();
 }
@@ -79,7 +87,11 @@ void VulkanEngine::draw_inspector_panel()
             const auto role = *_scene.read<TimeTrial>(ref);
             bool portalPlaceable = _scene.has<PortalPlaceable>(ref);
             const bool runtimeOwned = _scene.runtime_only(ref);
-            ImGui::BeginDisabled(runtimeOwned || _scene.pending(ref));
+            const auto existingBody = _scene.read<RigidBody>(ref);
+            bool hasBody = existingBody != nullptr;
+            RigidBody body = existingBody ? *existingBody : RigidBody{};
+            bool bodyChanged = false;
+            ImGui::BeginDisabled(!_editorMode || runtimeOwned || _scene.pending(ref));
             ImGui::Text("Name: %s", name.value.c_str());
             ImGui::Separator();
 
@@ -108,6 +120,37 @@ void VulkanEngine::draw_inspector_panel()
             changed |= ImGui::Checkbox("Visible", &visibility.visible);
             changed |= ImGui::Checkbox("Has Collision", &collider.hasCollision);
             changed |= ImGui::Checkbox("Portal Placeable", &portalPlaceable);
+            ImGui::SeparatorText("Rigid Body");
+            bodyChanged |= ImGui::Checkbox("Rigid Body Settings", &hasBody);
+            if (hasBody) {
+                int motion = body.motion == BodyMotion::Dynamic ? 1 : 0;
+                if (ImGui::Combo("Motion", &motion, "Static\0Dynamic\0")) {
+                    body.motion = motion == 1 ? BodyMotion::Dynamic : BodyMotion::Static;
+                    bodyChanged = true;
+                }
+                bodyChanged |= ImGui::DragFloat("Mass", &body.mass, 0.05f);
+                bodyChanged |= ImGui::DragFloat("Friction", &body.friction, 0.01f);
+                bodyChanged |= ImGui::DragFloat("Restitution", &body.restitution, 0.01f, 0.f, 1.f);
+                bodyChanged |= ImGui::DragFloat("Gravity Factor", &body.gravityFactor, 0.01f);
+                ImGui::TextDisabled("Dynamic requires a root entity with an enabled Box collider.");
+            } else ImGui::TextDisabled("Enabled colliders use default Static body settings.");
+            changed |= bodyChanged;
+            const auto dynamic = _scene.dynamic_ancestor(ref);
+            if (dynamic && dynamic != ref) {
+                ImGui::TextWrapped("Visual-only under Dynamic entity %llu. Collider and Static settings are saved but create no body or player collision.", static_cast<unsigned long long>(dynamic.persistentId));
+            } else if (collider.hasCollision && !dynamic && mirabilis::world_transform_has_shear(_scene.world_matrix(ref))) {
+                ImGui::TextWrapped("Static collider has shear. Physics uses a best-fit oriented shape.");
+            }
+            if (portalPlaceable && dynamic) ImGui::TextWrapped("Portal Placeable is inactive inside a Dynamic subtree.");
+            if (_scene.read<Hierarchy>(ref)->parent && ImGui::Button("Move to scene root")) {
+                const auto world = _scene.world_matrix(ref);
+                if (_scene.set_parent(ref, std::nullopt) && _scene.set_world_transform(ref, world)) {
+                    transform = *_scene.read<Transform>(ref);
+                    _sceneDocument.dirty = true;
+                    rebuild_collision_from_scene();
+                    EditorEditMessage.clear();
+                } else EditorEditMessage = _scene.last_error();
+            }
             if (role.role != TimeTrialRole::None) {
                 const char* roleLabel = role.role == TimeTrialRole::SpawnPoint
                     ? "Spawn Point"
@@ -244,7 +287,7 @@ void VulkanEngine::draw_inspector_panel()
                     _materialEditor.texturePathInput.data(),
                     _materialEditor.texturePathInput.size());
                 const auto materialRef = _scene.get(_materialEditor.object);
-                ImGui::BeginDisabled(!_scene.valid(materialRef) || _scene.runtime_only(materialRef) || _scene.pending(materialRef));
+                ImGui::BeginDisabled(!_editorMode || !_scene.valid(materialRef) || _scene.runtime_only(materialRef) || _scene.pending(materialRef));
                 if (ImGui::Button("Apply")) {
                     auto edited = *_scene.read<SceneMaterial>(materialRef);
                     edited.enabled = true;
@@ -261,21 +304,28 @@ void VulkanEngine::draw_inspector_panel()
                 }
                 ImGui::EndPopup();
             }
-            if (changed && _scene.mutable_ref(ref)) {
+            if (changed && _editorMode && _scene.mutable_ref(ref)) {
                 const bool authoredHost = std::any_of(_authoredPortals.pairs.begin(), _authoredPortals.pairs.end(), [&](const AuthoredPortalPair& pair) {
                     return pair.first.hostWallObject == ref.persistentId || pair.second.hostWallObject == ref.persistentId;
                 });
                 if (!valid_component(transform) || !valid_component(visibility) || !valid_component(collider) || !valid_component(material) ||
                     (authoredHost && (!portalPlaceable || !collider.hasCollision || collider.collisionShape != CollisionShape::Box))) {
-                    ImGui::TextUnformatted("Invalid edit or authored portal host settings; edit refused.");
+                    EditorEditMessage = "Invalid edit or authored portal host settings";
+                } else if (!_scene.validate_physics_edit(ref, hasBody ? &body : nullptr, &collider, &transform)) {
+                    EditorEditMessage = _scene.last_error();
                 } else {
+                    // Remove the old motion constraint before applying the validated combination.
+                    if (bodyChanged && existingBody) _scene.remove<RigidBody>(ref);
                     if (!driven) _scene.set_local_transform(ref, transform);
                     _scene.set(ref, visibility); _scene.set(ref, collider); _scene.set(ref, material);
+                    if (hasBody && bodyChanged) _scene.set(ref, body);
                     if (portalPlaceable) _scene.set(ref, PortalPlaceable{}); else _scene.remove<PortalPlaceable>(ref);
                     _sceneDocument.dirty = true;
                     rebuild_collision_from_scene();
+                    EditorEditMessage.clear();
                 }
             }
+            if (!EditorEditMessage.empty()) ImGui::TextWrapped("Edit refused: %s", EditorEditMessage.c_str());
 
             if ((_bluePortal.placed && _bluePortal.hostWallObject == ref.persistentId) ||
                 (_orangePortal.placed && _orangePortal.hostWallObject == ref.persistentId)) {
@@ -301,7 +351,7 @@ void VulkanEngine::draw_inspector_panel()
                 (_bluePortal.placed && _bluePortal.hostWallObject == ref.persistentId) ||
                 (_orangePortal.placed && _orangePortal.hostWallObject == ref.persistentId);
             ImGui::Separator();
-            ImGui::BeginDisabled(isRequiredSandboxObject || hostsPlacedPortal);
+            ImGui::BeginDisabled(!_editorMode || isRequiredSandboxObject || hostsPlacedPortal);
             if (ImGui::Button("Delete Selected")) {
                 delete_selected_scene_object();
             }
@@ -320,6 +370,7 @@ void VulkanEngine::draw_inspector_panel()
 
 void VulkanEngine::draw_editor_gizmo()
 {
+    if (!_editorMode) return;
     const auto ref = _scene.get(_selectedSceneObject);
     const bool hasObject = _scene.valid(ref);
     Portal* authoredPortal = nullptr;
@@ -409,7 +460,8 @@ void VulkanEngine::draw_editor_gizmo()
 
     // ImGuizmo edits a world matrix. Scene objects store local components, so
     // convert back through the parent's world matrix before saving the change.
-    if (!_scene.set_world_transform(ref, worldTransform)) return;
+    if (!_scene.set_world_transform(ref, worldTransform)) { EditorEditMessage = _scene.last_error(); return; }
+    EditorEditMessage.clear();
 
     // Keep collision and portal raycasts coherent while the arrow is dragged.
     _sceneDocument.dirty = true;
