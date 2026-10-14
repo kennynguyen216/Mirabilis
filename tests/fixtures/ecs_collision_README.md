@@ -9,6 +9,8 @@ The Release executable SHA256 was
 `ecs_collision_manifest.json` records each source scene hash, fixture hash and
 ordered array counts. Authored portal pairs were loaded, player portals remained
 unplaced, and the dump ran before the bounded harness modified portals.
+The additional normalized hashes replace CRLF with LF before hashing, so a
+checkout's newline conversion does not invalidate this headless integrity check.
 
 Compare array lengths and order exactly. Every number uses absolute tolerance
 `1e-5` plus relative tolerance `1e-6 * abs(baseline value)`. Dumps use the float
