@@ -3,10 +3,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
-#include <unordered_map>
 
-#include <simdjson.h>
 #include <SDL.h>
 
 namespace {
@@ -14,7 +11,6 @@ namespace {
 constexpr const char* EditorSceneDirectory = "../../assets/scenes";
 constexpr const char* LastEditorScenePath = "../../assets/scenes/.last_scene";
 constexpr const char* DefaultEditorSceneFilename = "sandbox.json";
-constexpr uint64_t EditorSceneVersion = 1;
 
 std::optional<std::string> normalize_scene_filename(std::string_view name)
 {
@@ -30,374 +26,125 @@ std::optional<std::string> normalize_scene_filename(std::string_view name)
 
 std::filesystem::path editor_scene_path(std::string_view filename)
 {
-    return std::filesystem::path(EditorSceneDirectory) / std::string(filename);
-}
-
-struct SavedSceneObject {
-    uint32_t oldID{0};
-    int64_t oldParent{-1};
-    std::string name;
-    Transform transform{};
-    bool visible{true};
-    bool hasCollision{false};
-    bool portalPlaceable{false};
-    RenderLayer layer{RenderLayer::World};
-    CollisionShape collisionShape{CollisionShape::Box};
-    glm::vec3 colliderCenter{0.0f};
-    glm::vec3 colliderHalfExtents{0.5f};
-    SceneAssetKind assetKind{SceneAssetKind::None};
-    TimeTrialRole timeTrialRole{TimeTrialRole::None};
-    SceneMaterial material{};
-    std::string modelPath;
-};
-
-// Portal actors are runtime objects, but a level can carry their authored
-// placement.  Host IDs refer to the serialized scene IDs and are remapped
-// when the scene is loaded.
-struct SavedPreloadedPortal {
-    uint32_t oldHostWallObject{InvalidSceneObject};
-    Portal portal{};
-};
-
-struct SavedLightingSettings {
-    int skyboxSelection{0};
-    glm::vec3 sunlightDirection{0.0f, 1.0f, 0.5f};
-    bool shadowsEnabled{true};
-    float shadowRadius{60.0f};
-    float shadowDepthBias{0.0006f};
-    float shadowNormalBias{0.08f};
-};
-
-const char* scene_asset_name(SceneAssetKind kind)
-{
-    switch (kind) {
-    case SceneAssetKind::FloorQuad: return "floor";
-    case SceneAssetKind::UnitCube: return "cube";
-    case SceneAssetKind::SurfRamp: return "ramp";
-    case SceneAssetKind::ImportedGLTF: return "gltf";
-    case SceneAssetKind::None: return "empty";
-    }
-    return "empty";
-}
-
-std::optional<SceneAssetKind> scene_asset_from_name(std::string_view name)
-{
-    if (name == "floor") return SceneAssetKind::FloorQuad;
-    if (name == "cube") return SceneAssetKind::UnitCube;
-    if (name == "ramp") return SceneAssetKind::SurfRamp;
-    if (name == "gltf") return SceneAssetKind::ImportedGLTF;
-    if (name == "empty") return SceneAssetKind::None;
-    return std::nullopt;
-}
-
-const char* time_trial_role_name(TimeTrialRole role)
-{
-    switch (role) {
-    case TimeTrialRole::SpawnPoint: return "spawn";
-    case TimeTrialRole::StartTrigger: return "start";
-    case TimeTrialRole::FinishTrigger: return "finish";
-    case TimeTrialRole::None: return "none";
-    }
-    return "none";
-}
-
-std::optional<TimeTrialRole> time_trial_role_from_name(std::string_view name)
-{
-    if (name == "spawn") return TimeTrialRole::SpawnPoint;
-    if (name == "start") return TimeTrialRole::StartTrigger;
-    if (name == "finish") return TimeTrialRole::FinishTrigger;
-    if (name == "none") return TimeTrialRole::None;
-    return std::nullopt;
-}
-
-std::string json_escape(std::string_view text)
-{
-    std::string escaped;
-    escaped.reserve(text.size());
-    for (const char character : text) {
-        switch (character) {
-        case '\\': escaped += "\\\\"; break;
-        case '\"': escaped += "\\\""; break;
-        case '\n': escaped += "\\n"; break;
-        case '\r': escaped += "\\r"; break;
-        case '\t': escaped += "\\t"; break;
-        default: escaped += character; break;
-        }
-    }
-    return escaped;
-}
-
-bool read_json_vec3(simdjson::dom::element element, glm::vec3& value)
-{
-    simdjson::dom::array values;
-    if (element.get_array().get(values)) {
-        return false;
-    }
-    auto valueIt = values.begin();
-    for (int index = 0; index < 3; index++) {
-        if (valueIt == values.end()) {
-            return false;
-        }
-        double component = 0.0;
-        if ((*valueIt).get_double().get(component)) {
-            return false;
-        }
-        value[index] = static_cast<float>(component);
-        ++valueIt;
-    }
-    return valueIt == values.end();
-}
-
-bool read_json_vec2(simdjson::dom::element element, glm::vec2& value)
-{
-    simdjson::dom::array values;
-    if (element.get_array().get(values)) {
-        return false;
-    }
-    auto valueIt = values.begin();
-    for (int index = 0; index < 2; index++) {
-        if (valueIt == values.end()) {
-            return false;
-        }
-        double component = 0.0;
-        if ((*valueIt).get_double().get(component)) {
-            return false;
-        }
-        value[index] = static_cast<float>(component);
-        ++valueIt;
-    }
-    return valueIt == values.end();
-}
-
-bool read_json_vec4(simdjson::dom::element element, glm::vec4& value)
-{
-    simdjson::dom::array values;
-    if (element.get_array().get(values)) {
-        return false;
-    }
-    auto valueIt = values.begin();
-    for (int index = 0; index < 4; index++) {
-        if (valueIt == values.end()) {
-            return false;
-        }
-        double component = 0.0;
-        if ((*valueIt).get_double().get(component)) {
-            return false;
-        }
-        value[index] = static_cast<float>(component);
-        ++valueIt;
-    }
-    return valueIt == values.end();
+    const char* scratch = SDL_getenv("MIRABILIS_TEST_SCENE_DIRECTORY");
+    return std::filesystem::path(scratch && *scratch ? scratch : EditorSceneDirectory) / std::string(filename);
 }
 
 } // namespace
 
+SceneSettings VulkanEngine::capture_scene_settings() const
+{
+    SceneSettings settings;
+    settings.nextActor = _nextCreatedActorNumber;
+    settings.skybox = _authoredSkyboxId.empty() ? SkyboxIds[std::clamp(_skyboxSelection, 0, static_cast<int>(SkyboxIds.size()) - 1)] : _authoredSkyboxId;
+    settings.sunDirection = _shadow.sunlightDirection;
+    settings.shadowsEnabled = _shadow.enabled;
+    settings.shadowRadius = _shadow.radius;
+    settings.shadowDepthBias = _shadow.depthBias;
+    settings.shadowNormalBias = _shadow.normalBias;
+    settings.sunRadiance = glm::vec3(_traceSettings.lighting.sunRadiance);
+    settings.environmentIntensity = _traceSettings.lighting.environment.x;
+    settings.blackEnvironment = _traceSettings.lighting.environment.y > 0.5f;
+    settings.environmentTint = glm::vec3(_traceSettings.lighting.environmentTint);
+    settings.warmth = _postProcess.whiteBalance.x;
+    settings.tint = _postProcess.whiteBalance.y;
+    settings.giSaturation = _ssgi.colorSaturation;
+    if (_ssao.sceneOverride) settings.ssao = SceneSettings::SSAO{
+        _ssao.settings.enabled, _ssao.settings.radius, _ssao.settings.bias,
+        _ssao.settings.intensity, _ssao.settings.power};
+    return settings;
+}
+
+void VulkanEngine::apply_scene_settings(const SceneSettings& settings)
+{
+    _nextCreatedActorNumber = settings.nextActor;
+    _authoredSkyboxId = settings.skybox;
+    _shadow.sunlightDirection = settings.sunDirection;
+    _shadow.enabled = settings.shadowsEnabled;
+    _shadow.radius = settings.shadowRadius;
+    _shadow.depthBias = settings.shadowDepthBias;
+    _shadow.normalBias = settings.shadowNormalBias;
+    _traceSettings.lighting = TraceLighting{};
+    _traceSettings.lighting.sunRadiance = glm::vec4(settings.sunRadiance, 0);
+    _traceSettings.lighting.environment.x = settings.environmentIntensity;
+    _traceSettings.lighting.environment.y = settings.blackEnvironment ? 1.f : 0.f;
+    _traceSettings.lighting.environmentTint = glm::vec4(settings.environmentTint, 0);
+    _postProcess.whiteBalance = glm::vec2(settings.warmth, settings.tint);
+    _ssgi.colorSaturation = settings.giSaturation;
+    _ssao.settings = SSAOSettings{};
+    _ssao.sceneOverride = settings.ssao.has_value();
+    if (settings.ssao) {
+        const auto& ao = *settings.ssao;
+        _ssao.settings.enabled = ao.enabled; _ssao.settings.radius = ao.radius;
+        _ssao.settings.bias = ao.bias; _ssao.settings.intensity = ao.intensity;
+        _ssao.settings.power = ao.power;
+    }
+    bool found = false;
+    for (size_t index = 0; index < SkyboxIds.size(); ++index) {
+        if (settings.skybox != SkyboxIds[index]) continue;
+        found = true;
+        if (static_cast<int>(index) != _skyboxSelection && !set_skybox(static_cast<int>(index)))
+            fmt::print("Scene skybox '{}' could not be loaded; keeping its authored identity.\n", settings.skybox);
+        break;
+    }
+    if (!found) fmt::print("Scene skybox '{}' is unavailable; keeping its authored identity.\n", settings.skybox);
+    apply_r4_light_sources();
+}
+
 void VulkanEngine::create_runtime_scene_objects()
 {
-    // These are simulation-owned. They are recreated after loading a level,
-    // rather than being serialized with the editor-authored geometry.
-    _playerObject = _scene.create_object("Player", _sandboxRoot);
-    if (SceneObject* player = _scene.get(_playerObject)) {
-        player->transformDrivenExternally = true;
-        player->layer = RenderLayer::PortalViewOnly;
-    }
+    const auto player = _scene.create_object("Player", _scene.get(_sandboxRoot));
+    _playerObject = player.persistentId;
+    _scene.set(player, Visibility{true, RenderLayer::PortalViewOnly}, true);
+    _scene.set(player, TransformDrivenExternally{}, true);
+    _scene.set(player, RuntimeOnly{}, true);
 
-    _playerModelObject = _scene.create_object("Player Model", _playerObject);
-    if (SceneObject* playerModel = _scene.get(_playerModelObject)) {
-        playerModel->layer = RenderLayer::PortalViewOnly;
-        if (_playerModel) {
-            _sceneRenderRuntimes[playerModel->id].model = _playerModel;
-            // The source glTF is about 14 units tall at scale 1.0.
-            playerModel->localTransform.scale = glm::vec3(0.12f);
-        } else {
-            const PlayerMovementSettings& settings = _playerMovement.settings;
-            assign_scene_asset(*playerModel, SceneAssetKind::UnitCube);
-            _sceneRenderRuntimes[playerModel->id].primitive.material = &_playerMaterial;
-            _sceneRenderRuntimes[playerModel->id].primitive.bounds = _playerBounds;
-            playerModel->localTransform.position = glm::vec3(
-                0.0f, settings.playerHeight * 0.5f, 0.0f);
-            playerModel->localTransform.scale = glm::vec3(
-                settings.playerHalfWidth * 2.0f,
-                settings.playerHeight,
-                settings.playerHalfWidth * 2.0f);
-        }
+    const auto model = _scene.create_object("Player Model", player, true);
+    _playerModelObject = model.persistentId;
+    _scene.set(model, Visibility{true, RenderLayer::PortalViewOnly}, true);
+    Transform transform;
+    if (_playerModel) {
+        _sceneRenderRuntimes[model.persistentId].model = _playerModel;
+        transform.scale = glm::vec3(0.12f);
+    } else {
+        const auto& movement = _playerMovement.settings;
+        assign_scene_asset(model, SceneAssetKind::UnitCube);
+        auto& primitive = _sceneRenderRuntimes[model.persistentId].primitive;
+        primitive.material = &_playerMaterial;
+        primitive.bounds = _playerBounds;
+        transform.position = glm::vec3(0.f, movement.playerHeight * 0.5f, 0.f);
+        transform.scale = glm::vec3(movement.playerHalfWidth * 2.f, movement.playerHeight, movement.playerHalfWidth * 2.f);
     }
-
-    const auto createPortalObject = [&](const char* name) {
-        const SceneObjectID id = _scene.create_object(name, _sandboxRoot);
-        if (SceneObject* portalObject = _scene.get(id)) {
-            portalObject->visible = false;
-            portalObject->transformDrivenExternally = true;
-        }
-        return id;
+    _scene.set_local_transform(model, transform, true);
+    _scene.set(model, RuntimeOnly{}, true);
+    const auto createPortal = [&](const char* name) {
+        const auto ref = _scene.create_object(name, _scene.get(_sandboxRoot));
+        _scene.set(ref, Visibility{false, RenderLayer::World}, true);
+        _scene.set(ref, TransformDrivenExternally{}, true);
+        _scene.set(ref, RuntimeOnly{}, true);
+        return ref.persistentId;
     };
-    _bluePortalObject = createPortalObject("Blue Portal");
-    _orangePortalObject = createPortalObject("Orange Portal");
+    _bluePortalObject = createPortal("Blue Portal");
+    _orangePortalObject = createPortal("Orange Portal");
 }
 
 bool VulkanEngine::save_editor_scene()
 {
-    const std::filesystem::path scenePath = editor_scene_path(_sceneDocument.activeFilename);
-    std::error_code directoryError;
-    std::filesystem::create_directories(scenePath.parent_path(), directoryError);
-    if (directoryError) {
-        fmt::print("Could not create scene directory: {}\n", directoryError.message());
-        return false;
-    }
-
-    std::ofstream file(scenePath, std::ios::trunc);
-    if (!file) {
-        fmt::print("Could not save scene: {}\n", scenePath.string());
-        return false;
-    }
-
-    file << std::setprecision(9);
-    file << "{\n  \"version\": " << EditorSceneVersion
-         << ",\n  \"nextActor\": " << _nextCreatedActorNumber
-         << ",\n  \"objects\": [\n";
-
-    bool firstObject = true;
-    const auto writeVec3 = [&](const glm::vec3& value) {
-        file << '[' << value.x << ", " << value.y << ", " << value.z << ']';
-    };
-    const auto writeVec2 = [&](const glm::vec2& value) {
-        file << '[' << value.x << ", " << value.y << ']';
-    };
-    const auto writeVec4 = [&](const glm::vec4& value) {
-        file << '[' << value.x << ", " << value.y << ", "
-             << value.z << ", " << value.w << ']';
-    };
-    const auto runtime_owned = [&](const SceneObject& object) {
-        for (const SceneObject* current = &object;
-             current != nullptr;
-             current = _scene.get(current->parent)) {
-            if (current->transformDrivenExternally) {
-                return true;
-            }
+    const auto scenePath = editor_scene_path(_sceneDocument.activeFilename);
+    std::string error;
+    bool saved = false;
+    if (!_editorMode && _playSnapshot) {
+        mirabilis::Scene authored;
+        if (!authored.restore_snapshot(_playSnapshot->entities) ||
+            !authored.reserve_persistent_ids(_scene.next_persistent_id())) {
+            fmt::print("Could not reconstruct authored scene for saving: {}\n", authored.last_error());
+            return false;
         }
-        return false;
-    };
-    for (const SceneObject& object : _scene.objects) {
-        // Physics/player and the portal system rebuild their objects from
-        // current runtime state.  Saving them would make stale data win on
-        // the next launch.
-        if (!object.alive || runtime_owned(object)) {
-            continue;
-        }
-        if (!firstObject) {
-            file << ",\n";
-        }
-        firstObject = false;
-        file << "    {\"id\": " << object.id
-             << ", \"parent\": "
-             << (object.parent == InvalidSceneObject
-                    ? -1
-                    : static_cast<int64_t>(object.parent))
-             << ", \"name\": \"" << json_escape(object.name) << "\""
-             << ", \"position\": ";
-        writeVec3(object.localTransform.position);
-        file << ", \"rotation\": ";
-        writeVec3(object.localTransform.rotation);
-        file << ", \"scale\": ";
-        writeVec3(object.localTransform.scale);
-        file << ", \"colliderCenter\": ";
-        writeVec3(object.colliderCenter);
-        file << ", \"colliderHalfExtents\": ";
-        writeVec3(object.colliderHalfExtents);
-        file << ", \"materialEnabled\": "
-             << (object.material.enabled ? "true" : "false")
-             << ", \"baseColorTexture\": \""
-             << json_escape(object.material.baseColorTexturePath) << "\""
-             << ", \"normalTexture\": \""
-             << json_escape(object.material.normalTexturePath) << "\""
-             << ", \"metallicRoughnessTexture\": \""
-             << json_escape(object.material.metalRoughTexturePath) << "\""
-             << ", \"materialTint\": ";
-        writeVec4(object.material.colorTint);
-        file << ", \"emissionColor\": "; writeVec3(object.material.emissionColor);
-        file << ", \"emissionStrength\": " << object.material.emissionStrength;
-        file << ", \"transmission\": " << object.material.transmission << ", \"ior\": " << object.material.ior;
-        file << ", \"materialMetallic\": " << object.material.metallic
-             << ", \"materialRoughness\": " << object.material.roughness
-             << ", \"materialDebugChecker\": "
-             << (object.material.debugChecker ? "true" : "false")
-             << ", \"uvScale\": ";
-        writeVec2(object.material.uvScale);
-        file << ", \"visible\": " << (object.visible ? "true" : "false")
-             << ", \"hasCollision\": " << (object.hasCollision ? "true" : "false")
-             << ", \"portalPlaceable\": "
-             << (object.portalPlaceable ? "true" : "false")
-             << ", \"layer\": " << static_cast<int>(object.layer)
-             << ", \"collisionShape\": "
-             << static_cast<int>(object.collisionShape)
-             << ", \"timeTrialRole\": \""
-             << time_trial_role_name(object.timeTrialRole)
-             << "\", \"asset\": \"" << scene_asset_name(object.assetKind)
-             << "\", \"modelPath\": \""
-             << json_escape(object.modelPath) << "\"}";
+        saved = save_scene_atomic(scenePath, authored, _playSnapshot->settings, _playSnapshot->authoredPortals, error);
+    } else {
+        saved = save_scene_atomic(scenePath, _scene, capture_scene_settings(), _authoredPortals.pairs, error);
     }
-    file << "\n  ],\n  \"authoredPortals\": [";
-    const auto writePortal = [&](const Portal& portal) {
-        file << "{\"hostWallObject\": " << portal.hostWallObject
-             << ", \"position\": ";
-        writeVec3(portal.position);
-        file << ", \"normal\": ";
-        writeVec3(portal.normal);
-        file << ", \"up\": ";
-        writeVec3(portal.up);
-        file << ", \"halfWidth\": " << portal.halfWidth
-             << ", \"halfHeight\": " << portal.halfHeight << '}';
-    };
-    bool firstPortal = true;
-    for (const AuthoredPortalPair& pair : _authoredPortals.pairs) {
-        if (!firstPortal) file << ", ";
-        writePortal(pair.first);
-        file << ", ";
-        writePortal(pair.second);
-        firstPortal = false;
-    }
-    file << "]";
-    // The sun belongs to the level: how a course reads depends on where its
-    // light comes from.  The shadow tuning travels with it because the right
-    // bias depends on the scale of the geometry in this particular scene.
-    // Map resolution is deliberately not here; that is a quality setting for
-    // the machine, not a property of the level.
-    file << ",\n  \"referenceLighting\": {\"sunRadiance\": ";
-    writeVec3(glm::vec3(_traceSettings.lighting.sunRadiance));
-    file << ", \"environmentIntensity\": " << _traceSettings.lighting.environment.x
-         << ", \"blackEnvironment\": " << (_traceSettings.lighting.environment.y>0.5f?"true":"false")
-         << ", \"environmentTint\": ";
-    writeVec3(glm::vec3(_traceSettings.lighting.environmentTint)); file << '}';
-    file << ",\n  \"colorGrading\": {\"warmth\": " << _postProcess.whiteBalance.x
-         << ", \"tint\": " << _postProcess.whiteBalance.y
-         << ", \"giSaturation\": " << _ssgi.colorSaturation << '}';
-    const int savedSkybox = std::clamp(
-        _skyboxSelection, 0, static_cast<int>(SkyboxIds.size()) - 1);
-    file << ",\n  \"lighting\": {\"skybox\": \""
-         << SkyboxIds[savedSkybox] << "\", \"sunDirection\": ";
-    writeVec3(_shadow.sunlightDirection);
-    file << ", \"shadowsEnabled\": " << (_shadow.enabled ? "true" : "false")
-         << ", \"shadowRadius\": " << _shadow.radius
-         << ", \"shadowDepthBias\": " << _shadow.depthBias
-         << ", \"shadowNormalBias\": " << _shadow.normalBias << '}';
-    // Ambient occlusion is lighting too: the radius that reads correctly
-    // depends on the scale this level was authored at.  The sample count and
-    // the resolution are absent for the same reason the shadow map size is -
-    // they describe a machine, not a level.
-    if (_ssao.sceneOverride) {
-        file << ",\n  \"ssao\": {\"enabled\": "
-             << (_ssao.settings.enabled ? "true" : "false")
-             << ", \"radius\": " << _ssao.settings.radius
-             << ", \"bias\": " << _ssao.settings.bias
-             << ", \"intensity\": " << _ssao.settings.intensity
-             << ", \"power\": " << _ssao.settings.power << '}';
-    }
-    file << "\n}\n";
-    if (!file) {
-        fmt::print("Could not finish writing scene: {}\n", scenePath.string());
-        return false;
-    }
-
+    if (!saved) { fmt::print("Could not save scene '{}': {}\n", scenePath.string(), error); return false; }
     _sceneDocument.dirty = false;
     if (!SDL_getenv("MIRABILIS_TEST_FRAMES")) {
         std::ofstream lastSceneFile(LastEditorScenePath, std::ios::trunc);
@@ -467,542 +214,28 @@ void VulkanEngine::save_ao_preferences() const
     if (!file) fmt::print("Could not save ambient occlusion preferences\n");
 }
 
-namespace {
-
-bool read_saved_material(
-    simdjson::dom::object jsonObject,
-    SavedSceneObject& saved,
-    const std::filesystem::path& scenePath)
-{
-    simdjson::dom::element materialTint;
-    simdjson::dom::element uvScale;
-    std::string_view baseColorTexture;
-
-    bool materialEnabled = false;
-    const simdjson::error_code materialResult =
-        jsonObject["materialEnabled"].get_bool().get(materialEnabled);
-    if (materialResult == simdjson::NO_SUCH_FIELD) {
-        return true;
-    }
-    if (materialResult != simdjson::SUCCESS) {
-        fmt::print("Invalid material flag in editor scene: {}\n", scenePath.string());
-        return false;
-    }
-
-    double metallic = 0.0;
-    double roughness = 0.8;
-    if (jsonObject["baseColorTexture"].get_string().get(baseColorTexture) ||
-        jsonObject["materialTint"].get(materialTint) ||
-        jsonObject["uvScale"].get(uvScale) ||
-        !read_json_vec4(materialTint, saved.material.colorTint) ||
-        !read_json_vec2(uvScale, saved.material.uvScale) ||
-        jsonObject["materialMetallic"].get_double().get(metallic) ||
-        jsonObject["materialRoughness"].get_double().get(roughness) ||
-        saved.material.uvScale.x <= 0.0f ||
-        saved.material.uvScale.y <= 0.0f ||
-        metallic < 0.0 || metallic > 1.0 ||
-        roughness < 0.0 || roughness > 1.0) {
-        fmt::print("Invalid material in editor scene: {}\n", scenePath.string());
-        return false;
-    }
-
-    saved.material.enabled = materialEnabled;
-    saved.material.baseColorTexturePath = baseColorTexture;
-    // Optional, so scenes saved before these existed load unchanged.
-    std::string_view normalTexture;
-    if (jsonObject["normalTexture"].get_string().get(normalTexture) ==
-        simdjson::SUCCESS) {
-        saved.material.normalTexturePath = normalTexture;
-    }
-    std::string_view metalRoughTexture;
-    if (jsonObject["metallicRoughnessTexture"].get_string().get(metalRoughTexture) ==
-        simdjson::SUCCESS) {
-        saved.material.metalRoughTexturePath = metalRoughTexture;
-    }
-    saved.material.metallic = static_cast<float>(metallic);
-    saved.material.roughness = static_cast<float>(roughness);
-    double transmission = 0.0;
-    double ior = 1.5;
-    if (jsonObject["transmission"].get_double().get(transmission) ==
-            simdjson::SUCCESS &&
-        std::isfinite(transmission)) {
-        saved.material.transmission =
-            float(std::clamp(transmission, 0.0, 1.0));
-    }
-    if (jsonObject["ior"].get_double().get(ior) == simdjson::SUCCESS &&
-        std::isfinite(ior)) {
-        saved.material.ior = float(std::clamp(ior, 1.0, 3.0));
-    }
-    simdjson::dom::element emission;
-    if (jsonObject["emissionColor"].get(emission) == simdjson::SUCCESS) {
-        if (!read_json_vec3(emission, saved.material.emissionColor)) {
-            return false;
-        }
-        saved.material.emissionColor = glm::clamp(
-            saved.material.emissionColor, glm::vec3(0), glm::vec3(10000));
-    }
-    double strength = 0.0;
-    if (jsonObject["emissionStrength"].get_double().get(strength) ==
-            simdjson::SUCCESS &&
-        std::isfinite(strength)) {
-        saved.material.emissionStrength =
-            float(std::clamp(strength, 0.0, 10000.0));
-    }
-    bool debugChecker = false;
-    const simdjson::error_code checkerResult =
-        jsonObject["materialDebugChecker"].get_bool().get(debugChecker);
-    if (checkerResult != simdjson::SUCCESS &&
-        checkerResult != simdjson::NO_SUCH_FIELD) {
-        fmt::print("Invalid checker material flag in editor scene: {}\n",
-            scenePath.string());
-        return false;
-    }
-    saved.material.debugChecker = debugChecker;
-    return true;
-}
-
-} // namespace
-
 bool VulkanEngine::load_editor_scene()
 {
-    const std::filesystem::path scenePath = editor_scene_path(_sceneDocument.activeFilename);
-    if (!std::filesystem::exists(scenePath)) {
+    const auto path = editor_scene_path(_sceneDocument.activeFilename);
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return false;
+    std::string json((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    if (file.bad()) { fmt::print("Could not read scene: {}\n", path.string()); return false; }
+    StagedScene staging;
+    std::string error;
+    if (!parse_scene_json(json, path.filename().string(), capture_scene_settings(), staging, error)) {
+        fmt::print("Could not load scene '{}': {}\n", path.string(), error);
         return false;
     }
-
-    simdjson::padded_string json;
-    if (simdjson::padded_string::load(scenePath.string()).get(json)) {
-        fmt::print("Could not read editor scene: {}\n", scenePath.string());
-        return false;
-    }
-    simdjson::dom::parser parser;
-    simdjson::dom::element document;
-    if (parser.parse(json).get(document)) {
-        fmt::print("Could not parse editor scene JSON: {}\n", scenePath.string());
-        return false;
-    }
-
-    uint64_t version = 0;
-    simdjson::dom::array jsonObjects;
-    if (document["version"].get_uint64().get(version) ||
-        version != EditorSceneVersion ||
-        document["objects"].get_array().get(jsonObjects)) {
-        fmt::print("Unsupported editor scene: {}\n", scenePath.string());
-        return false;
-    }
-
-    uint64_t nextActor = 1;
-    document["nextActor"].get_uint64().get(nextActor);
-
-    // Absent in scenes saved before lighting was stored, and in that case
-    // every value below keeps whatever the engine already had.  That is why
-    // adding the block does not need a scene version bump.
-    SavedLightingSettings pendingLighting{
-        .skyboxSelection = _skyboxSelection,
-        .sunlightDirection = _shadow.sunlightDirection,
-        .shadowsEnabled = _shadow.enabled,
-        .shadowRadius = _shadow.radius,
-        .shadowDepthBias = _shadow.depthBias,
-        .shadowNormalBias = _shadow.normalBias};
-    simdjson::dom::object jsonLighting;
-    if (document["lighting"].get_object().get(jsonLighting) == simdjson::SUCCESS) {
-        std::string_view skyboxId;
-        if (jsonLighting["skybox"].get_string().get(skyboxId) ==
-            simdjson::SUCCESS) {
-            for (size_t index = 0; index < SkyboxIds.size(); ++index) {
-                if (skyboxId == SkyboxIds[index]) {
-                    pendingLighting.skyboxSelection = static_cast<int>(index);
-                    break;
-                }
-            }
-        }
-        simdjson::dom::element sunDirection;
-        glm::vec3 loadedSunDirection{0.0f};
-        if (jsonLighting["sunDirection"].get(sunDirection) == simdjson::SUCCESS &&
-            read_json_vec3(sunDirection, loadedSunDirection) &&
-            glm::dot(loadedSunDirection, loadedSunDirection) >= 0.000001f) {
-            // A zero direction cannot define a light camera, so a scene
-            // carrying one is ignored rather than allowed to break the pass.
-            pendingLighting.sunlightDirection = loadedSunDirection;
-        }
-        bool shadowsEnabled = pendingLighting.shadowsEnabled;
-        if (jsonLighting["shadowsEnabled"].get_bool().get(shadowsEnabled) ==
-            simdjson::SUCCESS) {
-            pendingLighting.shadowsEnabled = shadowsEnabled;
-        }
-        double numeric = 0.0;
-        if (jsonLighting["shadowRadius"].get_double().get(numeric) ==
-            simdjson::SUCCESS) {
-            pendingLighting.shadowRadius = static_cast<float>(numeric);
-        }
-        if (jsonLighting["shadowDepthBias"].get_double().get(numeric) ==
-            simdjson::SUCCESS) {
-            pendingLighting.shadowDepthBias = static_cast<float>(numeric);
-        }
-        if (jsonLighting["shadowNormalBias"].get_double().get(numeric) ==
-            simdjson::SUCCESS) {
-            pendingLighting.shadowNormalBias = static_cast<float>(numeric);
-        }
-    }
-
-    // Parsed into a local and committed at the very end, so a scene that
-    // fails to load halfway through leaves the current occlusion settings
-    // exactly as they were.  Starting from a default-constructed value is
-    // also what gives a legacy scene with no block the documented defaults
-    // rather than whatever the previous level happened to set.
-    TraceLighting pendingReference{};
-    simdjson::dom::object reference;
-    if(document["referenceLighting"].get_object().get(reference)==simdjson::SUCCESS) {
-        simdjson::dom::element color; glm::vec3 radiance;
-        if(reference["sunRadiance"].get(color)==simdjson::SUCCESS&&read_json_vec3(color,radiance))
-            pendingReference.sunRadiance=glm::vec4(glm::clamp(radiance,glm::vec3(0),glm::vec3(10000)),0);
-        double value=1;
-        if(reference["environmentIntensity"].get_double().get(value)==simdjson::SUCCESS&&std::isfinite(value))
-            pendingReference.environment.x=float(std::clamp(value,0.0,10000.0));
-        if(reference["environmentTint"].get(color)==simdjson::SUCCESS&&read_json_vec3(color,radiance))
-            pendingReference.environmentTint=glm::vec4(glm::clamp(radiance,glm::vec3(0),glm::vec3(4)),0);
-        bool black=false;
-        if(reference["blackEnvironment"].get_bool().get(black)==simdjson::SUCCESS) pendingReference.environment.y=black?1.f:0.f;
-    }
-    SSAOSettings pendingSSAO{};
-    glm::vec2 pendingBalance(0);
-    float pendingGiSaturation = 1.0f;
-    simdjson::dom::object grading;
-    if (document["colorGrading"].get_object().get(grading) == simdjson::SUCCESS) {
-        double value = 0;
-        if (grading["warmth"].get_double().get(value) == simdjson::SUCCESS && std::isfinite(value))
-            pendingBalance.x = float(std::clamp(value, -1.0, 1.0));
-        if (grading["tint"].get_double().get(value) == simdjson::SUCCESS && std::isfinite(value))
-            pendingBalance.y = float(std::clamp(value, -1.0, 1.0));
-        if (grading["giSaturation"].get_double().get(value) == simdjson::SUCCESS && std::isfinite(value))
-            pendingGiSaturation = float(std::clamp(value, 0.0, 1.0));
-    }
-    bool pendingSSAOOverride = false;
-    simdjson::dom::object jsonSSAO;
-    if (document["ssao"].get_object().get(jsonSSAO) == simdjson::SUCCESS) {
-        pendingSSAOOverride = true;
-        bool ssaoEnabled = pendingSSAO.enabled;
-        if (jsonSSAO["enabled"].get_bool().get(ssaoEnabled) == simdjson::SUCCESS) {
-            pendingSSAO.enabled = ssaoEnabled;
-        }
-        // Every value is range-checked before it is kept.  A radius of zero or
-        // a non-finite power would not merely look wrong, it would divide or
-        // exponentiate its way into NaNs across the whole occlusion image.
-        const auto readPositive = [&](const char* key, float& target) {
-            double numeric = 0.0;
-            if (jsonSSAO[key].get_double().get(numeric) != simdjson::SUCCESS) {
-                return;
-            }
-            const float value = static_cast<float>(numeric);
-            if (std::isfinite(value) && value > 0.0f) {
-                target = value;
-            }
-        };
-        const auto readNonNegative = [&](const char* key, float& target) {
-            double numeric = 0.0;
-            if (jsonSSAO[key].get_double().get(numeric) != simdjson::SUCCESS) {
-                return;
-            }
-            const float value = static_cast<float>(numeric);
-            if (std::isfinite(value) && value >= 0.0f) {
-                target = value;
-            }
-        };
-        readPositive("radius", pendingSSAO.radius);
-        readNonNegative("bias", pendingSSAO.bias);
-        readNonNegative("intensity", pendingSSAO.intensity);
-        readPositive("power", pendingSSAO.power);
-    }
-
-    std::vector<SavedPreloadedPortal> savedPreloadedPortals;
-    simdjson::dom::array jsonPreloadedPortals;
-    const simdjson::error_code preloadResult =
-        document["authoredPortals"].get_array().get(jsonPreloadedPortals);
-    if (preloadResult == simdjson::SUCCESS) {
-        for (simdjson::dom::element jsonPortalElement : jsonPreloadedPortals) {
-            simdjson::dom::object jsonPortal;
-            SavedPreloadedPortal saved{};
-            simdjson::dom::element position;
-            simdjson::dom::element normal;
-            simdjson::dom::element up;
-            uint64_t hostWallObject = InvalidSceneObject;
-            double halfWidth = 0.0;
-            double halfHeight = 0.0;
-            if (jsonPortalElement.get_object().get(jsonPortal) ||
-                jsonPortal["hostWallObject"].get_uint64().get(hostWallObject) ||
-                jsonPortal["position"].get(position) ||
-                jsonPortal["normal"].get(normal) ||
-                jsonPortal["up"].get(up) ||
-                !read_json_vec3(position, saved.portal.position) ||
-                !read_json_vec3(normal, saved.portal.normal) ||
-                !read_json_vec3(up, saved.portal.up) ||
-                jsonPortal["halfWidth"].get_double().get(halfWidth) ||
-                jsonPortal["halfHeight"].get_double().get(halfHeight) ||
-                hostWallObject > UINT32_MAX || halfWidth <= 0.0 ||
-                halfHeight <= 0.0 || glm::length(saved.portal.normal) < 0.99f ||
-                glm::length(saved.portal.up) < 0.99f) {
-                fmt::print("Invalid preloaded portal in editor scene: {}\n", scenePath.string());
-                return false;
-            }
-            saved.oldHostWallObject = static_cast<uint32_t>(hostWallObject);
-            saved.portal.placed = true;
-            saved.portal.halfWidth = static_cast<float>(halfWidth);
-            saved.portal.halfHeight = static_cast<float>(halfHeight);
-            orient_portal(saved.portal, saved.portal.normal);
-            savedPreloadedPortals.push_back(std::move(saved));
-        }
-        if (savedPreloadedPortals.size() % 2 != 0 ||
-            savedPreloadedPortals.size() / 2 > MaxAuthoredPortalPairs) {
-            fmt::print("Authored portals must be complete linked pairs: {}\n", scenePath.string());
-            return false;
-        }
-    } else if (preloadResult != simdjson::NO_SUCH_FIELD) {
-        fmt::print("Invalid preloaded portals in editor scene: {}\n", scenePath.string());
-        return false;
-    }
-
-    std::vector<SavedSceneObject> savedObjects;
-    for (simdjson::dom::element jsonObjectElement : jsonObjects) {
-        simdjson::dom::object jsonObject;
-        SavedSceneObject saved{};
-        simdjson::dom::element position;
-        simdjson::dom::element rotation;
-        simdjson::dom::element scale;
-        simdjson::dom::element colliderCenter;
-        simdjson::dom::element colliderHalfExtents;
-        std::string_view name;
-        std::string_view assetName;
-        std::string_view timeTrialRoleName;
-        std::string_view modelPath;
-        uint64_t id = 0;
-        int64_t parent = -1;
-        int64_t layer = 0;
-        int64_t collisionShape = 0;
-
-        if (jsonObjectElement.get_object().get(jsonObject) ||
-            jsonObject["id"].get_uint64().get(id) ||
-            jsonObject["parent"].get_int64().get(parent) ||
-            jsonObject["name"].get_string().get(name) ||
-            jsonObject["position"].get(position) ||
-            jsonObject["rotation"].get(rotation) ||
-            jsonObject["scale"].get(scale) ||
-            !read_json_vec3(position, saved.transform.position) ||
-            !read_json_vec3(rotation, saved.transform.rotation) ||
-            !read_json_vec3(scale, saved.transform.scale) ||
-            jsonObject["visible"].get_bool().get(saved.visible) ||
-            jsonObject["hasCollision"].get_bool().get(saved.hasCollision) ||
-            jsonObject["portalPlaceable"].get_bool().get(saved.portalPlaceable) ||
-            jsonObject["layer"].get_int64().get(layer) ||
-            jsonObject["collisionShape"].get_int64().get(collisionShape) ||
-            jsonObject["asset"].get_string().get(assetName)) {
-            fmt::print("Invalid object in editor scene: {}\n", scenePath.string());
-            return false;
-        }
-        const std::optional<SceneAssetKind> assetKind = scene_asset_from_name(assetName);
-        if (!assetKind.has_value() || layer < 0 || layer > 1 ||
-            collisionShape < 0 || collisionShape > 2) {
-            fmt::print("Unsupported object data in editor scene: {}\n", scenePath.string());
-            return false;
-        }
-        saved.oldID = static_cast<uint32_t>(id);
-        saved.oldParent = parent;
-        saved.name = name;
-        saved.layer = static_cast<RenderLayer>(layer);
-        saved.collisionShape = static_cast<CollisionShape>(collisionShape);
-        saved.assetKind = *assetKind;
-
-        // This field was introduced after the first editor scenes.  Leaving
-        // it absent means the object remains an ordinary actor.
-        if (jsonObject["timeTrialRole"].get_string().get(timeTrialRoleName) ==
-            simdjson::SUCCESS) {
-            const std::optional<TimeTrialRole> role =
-                time_trial_role_from_name(timeTrialRoleName);
-            if (!role.has_value()) {
-                fmt::print("Unsupported time-trial role in editor scene: {}\n", scenePath.string());
-                return false;
-            }
-            saved.timeTrialRole = *role;
-        }
-
-        // Collider fields were added after the first saved scenes.  Missing
-        // values deliberately use the unit-cube defaults, so old levels load
-        // with exactly their original collision behaviour.
-        const bool hasColliderCenter =
-            jsonObject["colliderCenter"].get(colliderCenter) == simdjson::SUCCESS;
-        const bool hasColliderHalfExtents =
-            jsonObject["colliderHalfExtents"].get(colliderHalfExtents) == simdjson::SUCCESS;
-        if (hasColliderCenter != hasColliderHalfExtents ||
-            (hasColliderCenter &&
-             (!read_json_vec3(colliderCenter, saved.colliderCenter) ||
-              !read_json_vec3(colliderHalfExtents, saved.colliderHalfExtents))) ||
-            saved.colliderHalfExtents.x <= 0.0f ||
-            saved.colliderHalfExtents.y <= 0.0f ||
-            saved.colliderHalfExtents.z <= 0.0f) {
-            fmt::print("Invalid box collider in editor scene: {}\n", scenePath.string());
-            return false;
-        }
-        if (saved.assetKind == SceneAssetKind::ImportedGLTF) {
-            if (jsonObject["modelPath"].get_string().get(modelPath) ||
-                modelPath.empty()) {
-                fmt::print("Missing model path in editor scene: {}\n", scenePath.string());
-                return false;
-            }
-            saved.modelPath = modelPath;
-        }
-
-        // Material fields are optional so every scene saved before this
-        // component existed remains loadable with its original defaults.
-        if (!read_saved_material(jsonObject, saved, scenePath)) {
-            return false;
-        }
-        // Version 1 accidentally wrote Player Model even though its Player
-        // parent is runtime-only.  PortalViewOnly is reserved for that
-        // runtime graph, so ignore those stale entries and preserve the
-        // editor-authored objects in already-saved files.
-        if (saved.layer == RenderLayer::PortalViewOnly) {
-            continue;
-        }
-        savedObjects.push_back(std::move(saved));
-    }
-
-    if (savedObjects.empty()) {
-        fmt::print("Editor scene has no objects: {}\n", scenePath.string());
-        return false;
-    }
-
-    Scene restoredScene{};
-    std::unordered_map<uint32_t, SceneObjectID> restoredIDs;
-    const bool isGIPlaytest = scenePath.filename().string().rfind("gi_", 0) == 0;
-    for (const SavedSceneObject& saved : savedObjects) {
-        const SceneObjectID newID = restoredScene.create_object(saved.name);
-        restoredIDs.emplace(saved.oldID, newID);
-        SceneObject* object = restoredScene.get(newID);
-        object->localTransform = saved.transform;
-        object->visible = saved.visible;
-        // GI fixtures are also useful as small gameplay rooms. Their trace
-        // validation scenes historically left collision disabled because the
-        // automated tracer uses the editor camera. Keep authored collision
-        // values authoritative everywhere else, while giving these fixtures
-        // a floor and solid cube boundaries for F1/F2 gameplay inspection.
-        const bool giFloor = isGIPlaytest &&
-            saved.assetKind == SceneAssetKind::FloorQuad &&
-            saved.collisionShape == CollisionShape::GroundPlane &&
-            std::abs(saved.transform.position.y) <= 0.01f;
-        const bool giCube = isGIPlaytest && saved.assetKind == SceneAssetKind::UnitCube;
-        object->hasCollision = saved.hasCollision || giFloor || giCube;
-        object->portalPlaceable = saved.portalPlaceable;
-        object->layer = saved.layer;
-        object->collisionShape = saved.collisionShape;
-        object->colliderCenter = saved.colliderCenter;
-        object->colliderHalfExtents = saved.colliderHalfExtents;
-        object->assetKind = saved.assetKind;
-        object->timeTrialRole = saved.timeTrialRole;
-        object->material = saved.material;
-        object->modelPath = saved.modelPath;
-    }
-    for (const SavedSceneObject& saved : savedObjects) {
-        if (saved.oldParent < 0) {
-            continue;
-        }
-        const auto child = restoredIDs.find(saved.oldID);
-        const auto parent = restoredIDs.find(static_cast<uint32_t>(saved.oldParent));
-        if (child == restoredIDs.end() || parent == restoredIDs.end() ||
-            !restoredScene.set_parent(child->second, parent->second)) {
-            fmt::print("Invalid hierarchy in editor scene: {}\n", scenePath.string());
-            return false;
-        }
-    }
-
-    SceneObjectID restoredRoot = InvalidSceneObject;
-    SceneObjectID restoredFloor = InvalidSceneObject;
-    for (SceneObject& object : restoredScene.objects) {
-        if (object.parent == InvalidSceneObject && object.name == "Sandbox") {
-            restoredRoot = object.id;
-        }
-        if (object.assetKind == SceneAssetKind::FloorQuad &&
-            restoredFloor == InvalidSceneObject) {
-            restoredFloor = object.id;
-        }
-    }
-    if (restoredRoot == InvalidSceneObject || restoredFloor == InvalidSceneObject) {
-        fmt::print("Editor scene is missing its Sandbox root or Floor: {}\n", scenePath.string());
-        return false;
-    }
-
-    VK_CHECK(vkDeviceWaitIdle(_device));
-    _sceneRenderRuntimes.clear();
-    _scene = std::move(restoredScene);
-    _sandboxRoot = restoredRoot;
-    _floorObject = restoredFloor;
-    for (SceneObject& object : _scene.objects) {
-        assign_scene_asset(object, object.assetKind);
-    }
-    create_runtime_scene_objects();
-    retract_portals();
-    _authoredPortals.pairs.clear();
-    _authoredPortals.draft.reset();
-    for (size_t portalIndex = 0; portalIndex < savedPreloadedPortals.size(); portalIndex += 2) {
-        const auto blueHost = restoredIDs.find(savedPreloadedPortals[portalIndex].oldHostWallObject);
-        const auto orangeHost = restoredIDs.find(savedPreloadedPortals[portalIndex + 1].oldHostWallObject);
-        const auto validHost = [&](const auto& host) {
-            const SceneObject* object = host == restoredIDs.end()
-                ? nullptr
-                : _scene.get(host->second);
-            return object != nullptr && object->alive && object->portalPlaceable &&
-                object->hasCollision && object->collisionShape == CollisionShape::Box;
-        };
-        const bool blueIsFreestanding =
-            savedPreloadedPortals[portalIndex].oldHostWallObject == InvalidSceneObject;
-        const bool orangeIsFreestanding =
-            savedPreloadedPortals[portalIndex + 1].oldHostWallObject == InvalidSceneObject;
-        if ((!blueIsFreestanding && !validHost(blueHost)) ||
-            (!orangeIsFreestanding && !validHost(orangeHost))) {
-            fmt::print("Preloaded portal host is missing or not placeable: {}\n", scenePath.string());
-            return false;
-        }
-        AuthoredPortalPair pair{savedPreloadedPortals[portalIndex].portal,
-                                savedPreloadedPortals[portalIndex + 1].portal};
-        pair.first.hostWallObject = blueIsFreestanding
-            ? InvalidSceneObject
-            : blueHost->second;
-        pair.second.hostWallObject = orangeIsFreestanding
-            ? InvalidSceneObject
-            : orangeHost->second;
-        _authoredPortals.pairs.push_back(std::move(pair));
-    }
-    reset_time_trial();
-    _selectedSceneObject = InvalidSceneObject;
-    _nextCreatedActorNumber = static_cast<uint32_t>(std::max<uint64_t>(nextActor, 1));
-    // Past every path that could still have failed.
-    _ssao.settings = pendingSSAO;
-    _ssao.sceneOverride = pendingSSAOOverride;
-    _traceSettings.lighting = pendingReference;
-    _postProcess.whiteBalance = pendingBalance;
-    _ssgi.colorSaturation = pendingGiSaturation;
-    apply_r4_light_sources();
-    _shadow.sunlightDirection = pendingLighting.sunlightDirection;
-    _shadow.enabled = pendingLighting.shadowsEnabled;
-    _shadow.radius = pendingLighting.shadowRadius;
-    _shadow.depthBias = pendingLighting.shadowDepthBias;
-    _shadow.normalBias = pendingLighting.shadowNormalBias;
-    if (pendingLighting.skyboxSelection != _skyboxSelection &&
-        !set_skybox(pendingLighting.skyboxSelection)) {
-        fmt::print(
-            "Scene skybox could not be loaded; keeping {}\n",
-            SkyboxDisplayNames[_skyboxSelection]);
-    }
-    // A newly loaded scene supplies the gameplay spawn. Ordinary editor/play
-    // toggles can then preserve the paused player's position.
-    respawn_player();
+    for (const auto& warning : staging.warnings) fmt::print("Scene warning: {}\n", warning);
+    if (!install_staged_scene(std::move(staging))) return false;
     _sceneDocument.dirty = false;
     if (!SDL_getenv("MIRABILIS_TEST_FRAMES")) {
         std::ofstream lastSceneFile(LastEditorScenePath, std::ios::trunc);
         if (lastSceneFile) lastSceneFile << _sceneDocument.activeFilename << '\n';
     }
-    rebuild_collision_from_scene();
-    // A new scene is a cut, not a change of light to adapt to.
     _autoExposure.snap = true;
-    fmt::print("Loaded editor scene: {}\n", scenePath.string());
+    fmt::print("Loaded editor scene: {}\n", path.string());
     return true;
 }
 
@@ -1023,109 +256,32 @@ bool VulkanEngine::load_editor_scene_named(std::string_view sceneName)
 
 void VulkanEngine::build_sandbox_scene()
 {
-    const MeshPrimitive floorPrimitive{
-        .indexCount = 6,
-        .firstIndex = 0,
-        .indexBuffer = _floorMesh.indexBuffer.buffer,
-        .vertexBufferAddress = _floorMesh.vertexBufferAddress,
-        .bounds = _floorBounds,
-        .material = &_floorMaterial};
-    // The unit cube every wall and panel is built from.
-    const MeshPrimitive cubePrimitive{
-        .indexCount = 36,
-        .firstIndex = 0,
-        .indexBuffer = _wallMesh.indexBuffer.buffer,
-        .vertexBufferAddress = _wallMesh.vertexBufferAddress,
-        .bounds = _wallBounds,
-        .material = &_wallMaterial};
-
-    _sandboxRoot = _scene.create_object("Sandbox");
-
-    _floorObject = _scene.create_object("Floor", _sandboxRoot);
-    if (SceneObject* floor = _scene.get(_floorObject)) {
-        floor->localTransform.scale = glm::vec3(50.0f, 1.0f, 50.0f);
-        _sceneRenderRuntimes[floor->id].primitive = floorPrimitive;
-        floor->assetKind = SceneAssetKind::FloorQuad;
-        floor->hasCollision = true;
-        floor->collisionShape = CollisionShape::GroundPlane;
-    }
-
-    // Arena boundary plus a compact portal test rig around spawn.  Scale is
-    // the full size of the box, so a wall's collider is exactly its mesh.
-    struct WallDescription {
-        const char* name;
-        glm::vec3 position;
-        glm::vec3 scale;
-    };
-    const std::array<WallDescription, 7> wallDescriptions{{
-        {"North Wall", {0.0f, 1.5f, -24.75f}, {50.0f, 3.0f, 0.5f}},
-        {"South Wall", {0.0f, 1.5f, 24.75f}, {50.0f, 3.0f, 0.5f}},
-        {"West Wall", {-24.75f, 1.5f, 0.0f}, {0.5f, 3.0f, 50.0f}},
-        {"East Wall", {24.75f, 1.5f, 0.0f}, {0.5f, 3.0f, 50.0f}},
-        {"Test North Panel", {0.0f, 1.5f, -5.0f}, {6.0f, 3.0f, 0.5f}},
-        {"Test South Panel", {0.0f, 1.5f, 5.0f}, {6.0f, 3.0f, 0.5f}},
-        {"Test East Panel", {5.0f, 1.5f, 0.0f}, {0.5f, 3.0f, 6.0f}},
+    const auto root = _scene.create_object("Sandbox");
+    _sandboxRoot = root.persistentId;
+    const auto floor = _scene.create_object("Floor", root);
+    _floorObject = floor.persistentId;
+    Transform transform; transform.scale = glm::vec3(50.f, 1.f, 50.f);
+    _scene.set_local_transform(floor, transform);
+    _scene.set(floor, Collider{true, CollisionShape::GroundPlane});
+    assign_scene_asset(floor, SceneAssetKind::FloorQuad);
+    struct WallDescription { const char* name; glm::vec3 position; glm::vec3 scale; };
+    const std::array<WallDescription, 7> descriptions{{
+        {"North Wall", {0.f, 1.5f, -24.75f}, {50.f, 3.f, 0.5f}},
+        {"South Wall", {0.f, 1.5f, 24.75f}, {50.f, 3.f, 0.5f}},
+        {"West Wall", {-24.75f, 1.5f, 0.f}, {0.5f, 3.f, 50.f}},
+        {"East Wall", {24.75f, 1.5f, 0.f}, {0.5f, 3.f, 50.f}},
+        {"Test North Panel", {0.f, 1.5f, -5.f}, {6.f, 3.f, 0.5f}},
+        {"Test South Panel", {0.f, 1.5f, 5.f}, {6.f, 3.f, 0.5f}},
+        {"Test East Panel", {5.f, 1.5f, 0.f}, {0.5f, 3.f, 6.f}},
     }};
-    for (const WallDescription& description : wallDescriptions) {
-        const SceneObjectID id = _scene.create_object(
-            description.name, _sandboxRoot);
-        SceneObject* wall = _scene.get(id);
-        if (wall == nullptr) {
-            continue;
-        }
-        wall->localTransform.position = description.position;
-        wall->localTransform.scale = description.scale;
-        _sceneRenderRuntimes[wall->id].primitive = cubePrimitive;
-        wall->assetKind = SceneAssetKind::UnitCube;
-        wall->hasCollision = true;
-        wall->portalPlaceable = true;
+    for (const auto& description : descriptions) {
+        const auto wall = _scene.create_object(description.name, root);
+        transform = {}; transform.position = description.position; transform.scale = description.scale;
+        _scene.set_local_transform(wall, transform);
+        _scene.set(wall, Collider{true, CollisionShape::Box});
+        _scene.set(wall, PortalPlaceable{});
+        assign_scene_asset(wall, SceneAssetKind::UnitCube);
     }
-
-    // The player node follows physics; its model child holds the editable
-    // asset offset, facing correction, and scale.
-    _playerObject = _scene.create_object("Player", _sandboxRoot);
-    if (SceneObject* player = _scene.get(_playerObject)) {
-        player->transformDrivenExternally = true;
-        player->layer = RenderLayer::PortalViewOnly;
-    }
-
-    _playerModelObject = _scene.create_object("Player Model", _playerObject);
-    if (SceneObject* playerModel = _scene.get(_playerModelObject)) {
-        playerModel->layer = RenderLayer::PortalViewOnly;
-        if (_playerModel) {
-            _sceneRenderRuntimes[playerModel->id].model = _playerModel;
-            // The imported model has a large internal glTF scale (about 14
-            // world units tall at 1.0), while the player is roughly 1.8 tall.
-            playerModel->localTransform.scale = glm::vec3(0.12f);
-        } else {
-            // Keep the collision-sized box as a visible fallback if the asset
-            // fails to load on another machine.
-            const PlayerMovementSettings& settings = _playerMovement.settings;
-            _sceneRenderRuntimes[playerModel->id].primitive = cubePrimitive;
-            _sceneRenderRuntimes[playerModel->id].primitive.material = &_playerMaterial;
-            _sceneRenderRuntimes[playerModel->id].primitive.bounds = _playerBounds;
-            playerModel->localTransform.position = glm::vec3(
-                0.0f, settings.playerHeight * 0.5f, 0.0f);
-            playerModel->localTransform.scale = glm::vec3(
-                settings.playerHalfWidth * 2.0f,
-                settings.playerHeight,
-                settings.playerHalfWidth * 2.0f);
-        }
-    }
-
-    // Portals keep their own placement, traversal, and stencil logic. These
-    // objects only mirror it so the hierarchy shows where each portal is.
-    const auto createPortalObject = [&](const char* name) {
-        const SceneObjectID id = _scene.create_object(name, _sandboxRoot);
-        if (SceneObject* portalObject = _scene.get(id)) {
-            portalObject->visible = false;
-            portalObject->transformDrivenExternally = true;
-        }
-        return id;
-    };
-    _bluePortalObject = createPortalObject("Blue Portal");
-    _orangePortalObject = createPortalObject("Orange Portal");
-
-    // Give physics its ground plane before the first frame runs.
+    create_runtime_scene_objects();
     rebuild_collision_from_scene();
 }

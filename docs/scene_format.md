@@ -50,3 +50,8 @@ Play saves use authored snapshot entities, settings and portal pairs, with the
 current persistent-ID allocator high-water mark. Round trips compare authored
 components, references, settings and hierarchy order; runtime IDs and allocator
 metadata may advance when runtime entities are recreated.
+
+Engine harness saves must set `MIRABILIS_TEST_SCENE_DIRECTORY` to an absolute
+scratch directory containing scene copies. Scene load/save paths use that
+directory; model and texture paths keep their existing interpretation. Bounded
+`MIRABILIS_TEST_FRAMES` runs never write `assets/scenes/.last_scene`.
