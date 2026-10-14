@@ -69,6 +69,15 @@ def child_variant(document):
     return variant
 
 
+def check_trace_restore(records):
+    phases = {phase: [item for item in records if item['phase'] == phase]
+              for phase in ('teleport', 'restore', 'edit-restore', 'unchanged-restore', 'reopened', 'sandbox')}
+    assert all(phases.values()), 'Missing trace lifecycle phase'
+    assert 0 <= phases['restore'][0]['trace'] - phases['teleport'][-1]['trace'] <= 1, 'Trace restore rebuild batch'
+    assert phases['unchanged-restore'][-1]['trace'] == phases['edit-restore'][-1]['trace'], 'Trace unchanged restore rebuilt'
+    assert phases['sandbox'][-1]['bodies'] > 0
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--repo', type=Path, required=True)
@@ -85,13 +94,14 @@ def main():
     original = json.loads((scratch/'physics_drop_demo.json').read_text())
     (scratch/'physics_child_demo.json').write_text(json.dumps(child_variant(original), indent=2))
     summary = {}
-    for name, scene, trace in [('raster-demo', 'physics_drop_demo.json', False),
-                               ('raster-child', 'physics_child_demo.json', False),
-                               ('trace-child', 'physics_child_demo.json', True)]:
+    for name, scene, trace, frames in [('raster-demo', 'physics_drop_demo.json', False, 1080),
+                               ('raster-child', 'physics_child_demo.json', False, 1080),
+                               ('trace-child', 'physics_child_demo.json', True, 200),
+                               ('trace-child-lifecycle', 'physics_child_demo.json', True, 1080)]:
         captures = output/name/'captures'
         captures.mkdir(parents=True)
         flags = {'MIRABILIS_TEST_SCENE': scene, 'MIRABILIS_TEST_SCENE_DIRECTORY': str(scratch),
-                 'MIRABILIS_TEST_PHYSICS_LIFECYCLE': '1', 'MIRABILIS_TEST_FRAMES': '200' if trace else '1080',
+                 'MIRABILIS_TEST_PHYSICS_LIFECYCLE': '1', 'MIRABILIS_TEST_FRAMES': str(frames),
                  'MIRABILIS_TEST_WINDOW': '1600x900', 'MIRABILIS_TEST_HIDE_PANELS': '1',
                  'MIRABILIS_TEST_CAMERA': '0 2.5 12 -0.08 0',
                  'MIRABILIS_TEST_PHYSICS_CAPTURE_DIRECTORY': str(captures),
@@ -102,11 +112,13 @@ def main():
         logs, result = ecs_gate.run(name, 'Debug', flags, seconds=900)
         records = telemetry(logs)
         if trace:
-            assert 'renderer=software' in logs and 'PHYSICS trace PASS' in logs
+            assert 'renderer=software' in logs and ('PHYSICS trace PASS' if frames <= 200 else 'PHYSICS lifecycle PASS') in logs
             awake = [item for item in records if item['phase'] == 'awake']
             assert len(awake) >= 2 and all(item['dynamic-draws'] > 0 for item in awake)
             assert awake[-1]['trace-enabled'] == 1
             assert awake[-1]['trace'] > awake[0]['trace'], 'Trace geometry did not update while body moved'
+            if frames > 200:
+                check_trace_restore(records)
             assert (captures/'trace.pfm').is_file()
         else:
             assert 'PHYSICS lifecycle PASS' in logs and 'renderer=raster' in logs
@@ -118,6 +130,9 @@ def main():
         summary[name] = {**result, 'telemetry': records}
         (output/'physics-summary.json').write_text(json.dumps(summary, indent=2))
     assert summary['raster-child']['telemetry'][0]['bodies'] == summary['raster-demo']['telemetry'][0]['bodies'], 'Visual child created independent body'
+    demo_awake = [item for item in summary['raster-demo']['telemetry'] if item['phase'] == 'awake']
+    child_awake = [item for item in summary['raster-child']['telemetry'] if item['phase'] == 'awake']
+    assert child_awake[-1]['dynamic-draws'] > demo_awake[-1]['dynamic-draws'], 'glTF child surfaces missing inherited dynamic metadata'
     print('PHYSICS GPU gate PASS', flush=True)
 
 

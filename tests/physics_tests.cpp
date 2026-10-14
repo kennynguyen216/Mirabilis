@@ -35,10 +35,12 @@ std::set<PersistentID> resets(PhysicsWorld& physics) {
     return {values.begin(), values.end()};
 }
 std::string object_json(int id, std::string parent, std::string transform,
-    std::string body = "", std::string collider = R"({"enabled":true,"shape":0,"center":[0,0,0],"halfExtents":[0.5,0.5,0.5]})") {
+    std::string body = "", std::string collider = R"({"enabled":true,"shape":0,"center":[0,0,0],"halfExtents":[0.5,0.5,0.5]})",
+    bool portalPlaceable = false) {
     return "{\"id\":" + std::to_string(id) + ",\"parent\":" + parent +
         ",\"siblingIndex\":0,\"components\":{\"transform\":" + transform +
-        ",\"collider\":" + collider + (body.empty() ? "" : ",\"rigidBody\":" + body) + "}}";
+        ",\"collider\":" + collider + (body.empty() ? "" : ",\"rigidBody\":" + body) +
+        (portalPlaceable ? ",\"portalPlaceable\":{}" : "") + "}}";
 }
 const std::string identity = R"({"position":[0,0,0],"rotation":[0,0,0],"scale":[1,1,1]})";
 const std::string dynamic = R"({"motion":"Dynamic","mass":2,"friction":0.3,"restitution":0.2,"gravityFactor":1})";
@@ -117,6 +119,25 @@ TEST_CASE("editor dirty parent and shape edits update native body without steppi
     Transform exact; CHECK_FALSE(mirabilis::exact_world_trs(scene.world_matrix(child),exact));
     const auto best = transform_from_matrix(scene.world_matrix(child));
     REQUIRE(physics.body_world(child)); check_matrix(*physics.body_world(child),to_matrix(best));
+    auto singular = transform; singular.scale.x = 0;
+    CHECK_FALSE(scene.set_local_transform(parent,singular)); check_matrix(scene.local_matrix(parent),to_matrix(transform));
+}
+
+TEST_CASE("moving noncollider support parent agrees in Jolt player collision and render in play") {
+    Scene scene; PhysicsWorld physics; const auto parent = scene.create_object("support parent");
+    const auto support = box(scene,{},false,parent), moving = box(scene,{0,2,0},true);
+    auto collider = *scene.read<Collider>(support); collider.colliderHalfExtents = {4,.5f,4};
+    REQUIRE(scene.set(support,collider)); REQUIRE(physics.synchronize(scene,false));
+    for (int i=0;i<360;++i) tick(physics,scene);
+    CHECK(scene.read<Transform>(moving)->position.y == doctest::Approx(1).epsilon(.03));
+    Transform translated; translated.position.x = .2f; REQUIRE(scene.set_local_transform(parent,translated));
+    tick(physics,scene);
+    REQUIRE(physics.body_world(support)); check_matrix(*physics.body_world(support),scene.world_matrix(support));
+    check_matrix(physics.render_world(scene,support,.5f),scene.world_matrix(support));
+    const auto collision = collect_player_collision(scene,{}); REQUIRE(collision.walls.size() == 1);
+    REQUIRE(physics.body_bounds(support)); check_vector(collision.walls[0].min,physics.body_bounds(support)->min);
+    check_vector(collision.walls[0].max,physics.body_bounds(support)->max);
+    CHECK(scene.read<Transform>(moving)->position.y == doctest::Approx(1).epsilon(.03));
 }
 
 TEST_CASE("offset rotated collider sync retains entity origin and interpolation") {
@@ -219,11 +240,12 @@ TEST_CASE("cache eligibility follows ancestor sleep state including missing stat
 }
 
 TEST_CASE("authored portal hosts cannot become dynamic or enter dynamic subtrees") {
-    Scene scene; const auto hostParent = scene.create_object("host parent"), host = box(scene,{},false,hostParent);
+    Scene scene; const auto hostParent = box(scene), host = box(scene,{},false,hostParent), rootHost = box(scene);
     const auto moving = box(scene,{},true); REQUIRE(scene.set(host,PortalPlaceable{}));
-    scene.set_authored_portal_hosts({host.persistentId});
+    scene.set_authored_portal_hosts({host.persistentId,rootHost.persistentId});
     CHECK_FALSE(scene.set_parent(host,moving)); CHECK_FALSE(scene.set_parent(hostParent,moving));
     auto body = *scene.read<RigidBody>(moving); CHECK_FALSE(scene.set(host,body));
+    CHECK_FALSE(scene.set(rootHost,body)); CHECK_FALSE(scene.set(hostParent,body));
     CHECK(scene.read<Hierarchy>(host)->parent == hostParent.persistentId);
     AuthoredPortalPair pair; pair.first.placed = pair.second.placed = true;
     pair.first.hostWallObject = host.persistentId;
@@ -283,7 +305,8 @@ TEST_CASE("queued physics commands reject invalid refs and finite input violatio
 }
 
 TEST_CASE("saved authored portal host in dynamic subtree is rejected before replacement") {
-    auto input = document(object_json(1,"null",identity,dynamic)+","+object_json(2,"1",identity));
+    const auto collider = R"({"enabled":true,"shape":0,"center":[0,0,0],"halfExtents":[0.5,0.5,0.5]})";
+    auto input = document(object_json(1,"null",identity,dynamic,collider,true)+","+object_json(2,"1",identity,"",collider,true));
     const auto portal = R"({"position":[0,0,0],"normal":[0,0,1],"up":[0,1,0],"halfWidth":0.8,"halfHeight":1.2,"hostWallObject":2})";
     const auto at = input.find("\"authoredPortals\":[]"); REQUIRE(at != std::string::npos);
     input.replace(at,std::string("\"authoredPortals\":[]").size(),"\"authoredPortals\":["+std::string(portal)+","+portal+"]");
@@ -300,6 +323,8 @@ TEST_CASE("invalid known rigid bodies and sheared dynamic loads fail transaction
     const auto rotatedChild = R"({"position":[0,0,0],"rotation":[0,0.6,0],"scale":[1,1,1]})";
     const std::vector<std::string> invalid = {
         document(object_json(1,"null",shearedParent)+","+object_json(2,"1",rotatedChild,dynamic)),
+        document(object_json(1,"null",R"({"position":[0,0,0],"rotation":[0,0,0],"scale":[0,1,1]})","",
+            R"({"enabled":false,"shape":0,"center":[0,0,0],"halfExtents":[0.5,0.5,0.5]})")+","+object_json(2,"1",identity)),
         document(object_json(1,"null",identity,R"({"motion":"Flying"})")),
         document(object_json(1,"null",identity,R"({"motion":"Dynamic","mass":0})")),
         document(object_json(1,"null",identity,R"({"motion":"Static","friction":-1})")),

@@ -37,6 +37,13 @@ class PhysicsTelemetry(unittest.TestCase):
         self.assertEqual(variant['objects'][-1]['components']['rigidBody']['motion'], 'Static')
         self.assertEqual(variant['nextPersistentId'], 9)
 
+    def test_trace_unchanged_restore_rebuild_is_rejected(self):
+        records = self.records()
+        physics_gate.check_trace_restore(records)
+        records[10]['trace'] = 1
+        with self.assertRaises(AssertionError):
+            physics_gate.check_trace_restore(records)
+
 
 if __name__ == '__main__':
     unittest.main()
