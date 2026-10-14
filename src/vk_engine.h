@@ -1030,7 +1030,7 @@ class VulkanEngine{
             const void* rgba, VkExtent3D size);
         void init_imgui();
         void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
-        void update_physics(float deltaTime);
+        void update_player_movement(float deltaTime);
         void update_time_trial(float deltaTime);
         void reset_time_trial();
         bool apply_scene_spawn_point();
@@ -1131,10 +1131,10 @@ class VulkanEngine{
             float scaleSnap{0.1f};
         };
         EditorGizmoState _editorGizmo;
-        struct PhysicsStepState {
+        struct PlayerStepState {
             float accumulator{0.0f};
             // Camera yaw is sampled once per rendered frame, but physics runs at a
-            // fixed step that can tick up to MaxPhysicsSteps times for that one
+            // fixed step that can tick up to MaxPlayerMovementSteps times for that one
             // frame.  Holding both ends of the frame's turn lets each tick receive
             // its own share of it, so air control and strafing stay the same at 30
             // and 300 fps.  Portal traversal snaps both: that rotation is a
@@ -1142,7 +1142,7 @@ class VulkanEngine{
             float previousPlayerYaw{0.0f};
             float targetPlayerYaw{0.0f};
         };
-        PhysicsStepState _physicsStep;
+        PlayerStepState _playerStep;
         struct TimeTrialState {
             float seconds{0.0f};
             float bestSeconds{-1.0f};
@@ -1152,8 +1152,8 @@ class VulkanEngine{
             bool playerInsideFinishTrigger{false};
         };
         TimeTrialState _timeTrial;
-        static constexpr float PhysicsDt = 1.0f / 120.0f;
-        static constexpr int MaxPhysicsSteps = 8;
+        static constexpr float PlayerMovementDt = 1.0f / 120.0f;
+        static constexpr int MaxPlayerMovementSteps = 8;
 
         GPUMeshBuffers _floorMesh;
         AllocatedBuffer _floorMaterialBuffer;

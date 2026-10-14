@@ -8,7 +8,7 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
-void VulkanEngine::update_physics(float deltaTime)
+void VulkanEngine::update_player_movement(float deltaTime)
 {
     // Keep the respawn target scene-authored. This happens before integrate()
     // because integrate() owns the fall-reset check.
@@ -223,8 +223,8 @@ bool VulkanEngine::try_traverse_portal(
     // ends of the interpolation onto the new value makes those ticks use it
     // directly, and leaves the next frame's turn starting from here.
     _playerInput.yaw = mainCamera.yaw;
-    _physicsStep.previousPlayerYaw = mainCamera.yaw;
-    _physicsStep.targetPlayerYaw = mainCamera.yaw;
+    _playerStep.previousPlayerYaw = mainCamera.yaw;
+    _playerStep.targetPlayerYaw = mainCamera.yaw;
 
     // Teleporting is a camera cut: screen-space history belongs to the old
     // room, and reprojecting it across the link can flash its lighting.

@@ -233,7 +233,7 @@ bool VulkanEngine::restore_play_snapshot()
 void VulkanEngine::reset_play()
 {
     if (_editorMode || !restore_play_snapshot()) return;
-    _physicsStep.accumulator = 0;
+    _playerStep.accumulator = 0;
     _playerInput.jumpPressed = false;
     fmt::print("ECS Reset Play complete: epoch={}\n", _scene.epoch());
 }
@@ -490,8 +490,8 @@ void VulkanEngine::init()
     mainCamera.position = glm::vec3(0.0f, 5.0f, 12.0f);
     mainCamera.pitch = glm::radians(-20.0f);
     mainCamera.yaw = 0.0f;
-    _physicsStep.previousPlayerYaw = mainCamera.yaw;
-    _physicsStep.targetPlayerYaw = mainCamera.yaw;
+    _playerStep.previousPlayerYaw = mainCamera.yaw;
+    _playerStep.targetPlayerYaw = mainCamera.yaw;
 
     _playerMovement.position = _playerMovement.settings.spawnPosition;
     _playerMovement.velocity = glm::vec3(0.0f);
@@ -542,7 +542,7 @@ void VulkanEngine::set_editor_mode(bool enabled)
         _noClip.down = false;
     }
     _editorCameraLooking = false;
-    _physicsStep.accumulator = 0.0f;
+    _playerStep.accumulator = 0.0f;
     _timeTrial.playerInsideStartTrigger = false;
     _timeTrial.playerInsideFinishTrigger = false;
 
@@ -1297,7 +1297,7 @@ void VulkanEngine::run(){
                     mainCamera.pitch == pausedCamera.pitch && mainCamera.yaw == pausedCamera.yaw,
                     "Tab changed the gameplay camera");
             }
-            for (int tick = 0; tick < 240; ++tick) update_physics(1.0f / 120.0f);
+            for (int tick = 0; tick < 240; ++tick) update_player_movement(1.0f / 120.0f);
             require(_playerMovement.grounded &&
                 glm::length(_playerMovement.position - pausedPosition) < 1e-4f,
                 "Resumed player did not remain supported by the floor");
@@ -1538,7 +1538,7 @@ void VulkanEngine::run(){
             _playerMovement.previousPosition = _playerMovement.position;
             testLastPosition = _playerMovement.position;
         }
-        _physicsStep.previousPlayerYaw = mainCamera.yaw;
+        _playerStep.previousPlayerYaw = mainCamera.yaw;
     }
     std::ofstream r4FrameTimes;
     std::ofstream portalLiveLog;
@@ -1591,7 +1591,7 @@ void VulkanEngine::run(){
                 testTraversed = false;
                 if (testBackAndForth) testBacking = !testBacking;
                 else mainCamera.yaw += glm::pi<float>();
-                _physicsStep.previousPlayerYaw = mainCamera.yaw;
+                _playerStep.previousPlayerYaw = mainCamera.yaw;
             }
             deltaTime = SDL_getenv("MIRABILIS_TEST_PORTAL_HIGH_FPS") ? 1.0f / 120.0f : 1.0f / 30.0f;
             const bool testMoving = _frameNumber >= 120 && !testTraversed && (!testRepeat || testTraversalCount < 12);
@@ -1608,37 +1608,37 @@ void VulkanEngine::run(){
             } else {
                 _editorCamera.update(deltaTime);
             }
-            _physicsStep.accumulator = 0.0f;
+            _playerStep.accumulator = 0.0f;
             // Leaving the editor should not make the first tick back in play
             // sweep through however far the editor camera was turned.
-            _physicsStep.previousPlayerYaw = mainCamera.yaw;
+            _playerStep.previousPlayerYaw = mainCamera.yaw;
         } else {
-            _physicsStep.accumulator = std::min(
-                _physicsStep.accumulator + deltaTime,
-                PhysicsDt * static_cast<float>(MaxPhysicsSteps));
-            // Where this frame's turn ends.  update_physics() may overwrite
+            _playerStep.accumulator = std::min(
+                _playerStep.accumulator + deltaTime,
+                PlayerMovementDt * static_cast<float>(MaxPlayerMovementSteps));
+            // Where this frame's turn ends.  update_player_movement() may overwrite
             // both ends of it partway through if the player crosses a portal,
             // which is why the loop reads the members rather than a local.
-            _physicsStep.targetPlayerYaw = mainCamera.yaw;
+            _playerStep.targetPlayerYaw = mainCamera.yaw;
             // Clamped to at least one: the accumulator can sit a hair above
-            // PhysicsDt while the division truncates to zero, and dividing by
+            // PlayerMovementDt while the division truncates to zero, and dividing by
             // that below would hand the first tick an infinite fraction.
             const int stepCount = std::max(
-                1, static_cast<int>(_physicsStep.accumulator / PhysicsDt));
+                1, static_cast<int>(_playerStep.accumulator / PlayerMovementDt));
             int stepIndex = 0;
-            while (_physicsStep.accumulator >= PhysicsDt) {
+            while (_playerStep.accumulator >= PlayerMovementDt) {
                 ++stepIndex;
                 _playerInput.yaw = lerp_yaw(
-                    _physicsStep.previousPlayerYaw,
-                    _physicsStep.targetPlayerYaw,
+                    _playerStep.previousPlayerYaw,
+                    _playerStep.targetPlayerYaw,
                     static_cast<float>(stepIndex) /
                         static_cast<float>(stepCount));
                 _scene.apply_commands();
-                update_physics(PhysicsDt);
+                update_player_movement(PlayerMovementDt);
                 drain_scene_destruction();
-                _physicsStep.accumulator -= PhysicsDt;
+                _playerStep.accumulator -= PlayerMovementDt;
             }
-            _physicsStep.previousPlayerYaw = _physicsStep.targetPlayerYaw;
+            _playerStep.previousPlayerYaw = _playerStep.targetPlayerYaw;
         }
 
         ImGui_ImplVulkan_NewFrame();
