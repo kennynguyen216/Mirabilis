@@ -13,7 +13,7 @@ import shutil
 REPO = Path(__file__).resolve().parent.parent
 OUT = None
 BASELINE = None
-FATAL = re.compile(r'GI TEST FAIL|Validation Error|VUID-|Device lost|Unhandled renderer exception|Detected Vulkan error')
+FATAL = re.compile(r'GI TEST FAIL|Validation Error|\[ERROR:|VUID-|Device lost|Unhandled renderer exception|Detected Vulkan error')
 
 def digest(path):
     with path.open('rb') as file:
@@ -120,6 +120,7 @@ def validation(gate=False):
 
 if __name__ == '__main__':
     assert (statistics.median([1,3,2]) == 2) and FATAL.search('VUID-example') and not FATAL.search('GI bounded run complete')
+    assert FATAL.search('[ERROR: Validation]') and not FATAL.search('[WARNING: General]')
     parser=argparse.ArgumentParser()
     parser.add_argument('mode',choices=['manifest','collisions','timings','validation','gate-validation'])
     parser.add_argument('--repo',type=Path,default=REPO)
