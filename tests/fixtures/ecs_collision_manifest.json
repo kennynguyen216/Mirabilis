@@ -1,0 +1,255 @@
+{
+  "empty_platform.json": {
+    "counts": {
+      "walls": 15,
+      "grounds": 3,
+      "ramps": 0
+    },
+    "sha256": "3d15c1346840b7a71b4937a784cdac945b01d5cdb23b2281a27b8321ef452744",
+    "sceneSha256": "80d6941057fad4b23000b5cd41173104969b6c3056bed09b4a75a1676d32b1a2",
+    "normalizedFixtureSha256": "dd094515aa48832c24ff867428fbead1d9feee05a7edafc93abc58587386ce4b",
+    "normalizedSceneSha256": "a51bade6560e46319ba6d57abb087ec19573c2e90bd990097dd008799f3d0e4f"
+  },
+  "gi_cornell_box.json": {
+    "counts": {
+      "walls": 7,
+      "grounds": 1,
+      "ramps": 0
+    },
+    "sha256": "abbc18631aea8ad64c6087c72bdd3773f9d9ee745b7bd29bf040b5053f8a5332",
+    "sceneSha256": "9c008aae5728b704b728c47fd22c9778429bcabecd4e5a0fe5cca60c1aeefb73",
+    "normalizedFixtureSha256": "6b7edbd691360c3750ef33547037dab51b739b877a2372cbe4f8d7520ede7488",
+    "normalizedSceneSha256": "7c0a58301ca18950c85aa72576ab2769f07e66be727ca95cab898b78e45f2237"
+  },
+  "gi_cornell_box_dark.json": {
+    "counts": {
+      "walls": 7,
+      "grounds": 1,
+      "ramps": 0
+    },
+    "sha256": "abbc18631aea8ad64c6087c72bdd3773f9d9ee745b7bd29bf040b5053f8a5332",
+    "sceneSha256": "76b4f06ccb893f33595f9c146f4e6b2ac63c65f532b88c06722433b6782f5a9f",
+    "normalizedFixtureSha256": "6b7edbd691360c3750ef33547037dab51b739b877a2372cbe4f8d7520ede7488",
+    "normalizedSceneSha256": "a7bca44fb23d19001efe59890f35abd7fdf658a9802247bca1c9379f62a4a557"
+  },
+  "gi_material_lab.json": {
+    "counts": {
+      "walls": 6,
+      "grounds": 1,
+      "ramps": 0
+    },
+    "sha256": "7c241eaad274f371cc6b4fd9411ed840708bc534cc687441305798fde20cb11d",
+    "sceneSha256": "d9925c153eab5ba54d9b4d0c819af4298a81812bf5e3fdc008b812d5ea0e5819",
+    "normalizedFixtureSha256": "9e58724ccc64a49ac8b545dc8edb1533f7c1c41ec237e294190630c29c41ef6d",
+    "normalizedSceneSha256": "9966f4c192e04500bcd49a685751c95c957915bde898ce021a003241457284a0"
+  },
+  "gi_open_box.json": {
+    "counts": {
+      "walls": 6,
+      "grounds": 1,
+      "ramps": 0
+    },
+    "sha256": "7c241eaad274f371cc6b4fd9411ed840708bc534cc687441305798fde20cb11d",
+    "sceneSha256": "00888cccfacae571c50714c659145bd8cc428dcfcbe669a31803ef4484f0738b",
+    "normalizedFixtureSha256": "9e58724ccc64a49ac8b545dc8edb1533f7c1c41ec237e294190630c29c41ef6d",
+    "normalizedSceneSha256": "467c197cf51c6731b7afad9352be1b15bbb3ff90711fc44c0c7748bf04989b78"
+  },
+  "gi_portal_cycle.json": {
+    "counts": {
+      "walls": 6,
+      "grounds": 1,
+      "ramps": 0
+    },
+    "sha256": "7c241eaad274f371cc6b4fd9411ed840708bc534cc687441305798fde20cb11d",
+    "sceneSha256": "eb511e02faa45883468bb26c8a58fe6a490ce50c6ccff25ba8fe1517502b3a8c",
+    "normalizedFixtureSha256": "9e58724ccc64a49ac8b545dc8edb1533f7c1c41ec237e294190630c29c41ef6d",
+    "normalizedSceneSha256": "f6dd544697a5721e1e9a00b2c7a7a5e06a559f35724379a0a39db3e16af7c300"
+  },
+  "gi_portal_emitter.json": {
+    "counts": {
+      "walls": 7,
+      "grounds": 1,
+      "ramps": 0
+    },
+    "sha256": "abbc18631aea8ad64c6087c72bdd3773f9d9ee745b7bd29bf040b5053f8a5332",
+    "sceneSha256": "7a9bdc069193c66332191a8385a08e9b94ca27b03f965d2a38d9f1bf39cde916",
+    "normalizedFixtureSha256": "6b7edbd691360c3750ef33547037dab51b739b877a2372cbe4f8d7520ede7488",
+    "normalizedSceneSha256": "4ee02d8beb48a96e96f7c3c654ba6cdb36fd4593d1183ee0835dfd71ebcd4c94"
+  },
+  "gi_portal_lumen_parity.json": {
+    "counts": {
+      "walls": 7,
+      "grounds": 1,
+      "ramps": 0
+    },
+    "sha256": "abbc18631aea8ad64c6087c72bdd3773f9d9ee745b7bd29bf040b5053f8a5332",
+    "sceneSha256": "9bec7c3e6b3672b2f20fac00d067550853aef5cf3360fbeabac59ade3be7d28d",
+    "normalizedFixtureSha256": "6b7edbd691360c3750ef33547037dab51b739b877a2372cbe4f8d7520ede7488",
+    "normalizedSceneSha256": "5fcd0cec46d468070fbd58f5b31fd2602436278a3a914eb48998d7057f494b4e"
+  },
+  "gi_portal_multi_pair.json": {
+    "counts": {
+      "walls": 6,
+      "grounds": 1,
+      "ramps": 0
+    },
+    "sha256": "7c241eaad274f371cc6b4fd9411ed840708bc534cc687441305798fde20cb11d",
+    "sceneSha256": "3b814ec281c8ac09d3925ab438c9c948bf3abe6fd23be814dd9bd385858800a0",
+    "normalizedFixtureSha256": "9e58724ccc64a49ac8b545dc8edb1533f7c1c41ec237e294190630c29c41ef6d",
+    "normalizedSceneSha256": "2d3f5ff055e993ba1c17ea0a73f6732d024d737c3b42c1767e1927173f71dec5"
+  },
+  "gi_portal_pair.json": {
+    "counts": {
+      "walls": 6,
+      "grounds": 1,
+      "ramps": 0
+    },
+    "sha256": "7c241eaad274f371cc6b4fd9411ed840708bc534cc687441305798fde20cb11d",
+    "sceneSha256": "e7742be20a89c805f40d96b8c813f3bf1796aedafd8ff3d17a22ec84e552952e",
+    "normalizedFixtureSha256": "9e58724ccc64a49ac8b545dc8edb1533f7c1c41ec237e294190630c29c41ef6d",
+    "normalizedSceneSha256": "33e7720ac7d9ee34e339ce68871d28509c3f8d2ab678e3afa51647a17dbb98d6"
+  },
+  "gi_portal_sun.json": {
+    "counts": {
+      "walls": 7,
+      "grounds": 1,
+      "ramps": 0
+    },
+    "sha256": "abbc18631aea8ad64c6087c72bdd3773f9d9ee745b7bd29bf040b5053f8a5332",
+    "sceneSha256": "6a64abcb5d24566202bf2bfadd2aa66f21a3894f1ece1986142904f5eb018451",
+    "normalizedFixtureSha256": "6b7edbd691360c3750ef33547037dab51b739b877a2372cbe4f8d7520ede7488",
+    "normalizedSceneSha256": "510643456991ef76aa75004b5b638a9962e89a3e872e2eb9ee0f8525a8667cdd"
+  },
+  "lighting_calibration.json": {
+    "counts": {
+      "walls": 7,
+      "grounds": 1,
+      "ramps": 0
+    },
+    "sha256": "5cdfea51252bb11d4b6df093b44c7f6c61a10bdb7cd351afc4791c1817f1a417",
+    "sceneSha256": "d78d0aab9ddd5f7d34074dd029891bbb8777e74b99a5667c8039deb276dc31db",
+    "normalizedFixtureSha256": "24ac7b2bd92b3797792834698cc86b53459a3d13e2d80204e353e188de9a5411",
+    "normalizedSceneSha256": "722592850d180e369e8037c09560c10745c8d4fbda84e62baaa94a7ccf000d81"
+  },
+  "living_room_showcase.json": {
+    "counts": {
+      "walls": 0,
+      "grounds": 1,
+      "ramps": 0
+    },
+    "sha256": "8c38823606eb81bc57e7f0d722fc084d892d5c68ca3746f6b90ff2f7c8868883",
+    "sceneSha256": "2028a01ab1aee0810612401d1f1ac0de452c7ed2d9801ac816664c4c1a834c7c",
+    "normalizedFixtureSha256": "2d63a8085a246700284d5518c7bcbbcc83b2d4337968974a5306a97aa1d87340",
+    "normalizedSceneSha256": "63fd3b8ce5582f5675519e27e288cc347da9cea264480c2ba322a6c06ecd2953"
+  },
+  "material_reference_lab.json": {
+    "counts": {
+      "walls": 0,
+      "grounds": 0,
+      "ramps": 0
+    },
+    "sha256": "41e1157944bb9f0c7f639bc82a039f8d3915e70bef94e454f03cf3bd655e1de9",
+    "sceneSha256": "e5e4679ae7612e23f029dc5e6a4d487dd2911d2f1fe954525b46345db45eae69",
+    "normalizedFixtureSha256": "5dd387f619e2fb0a2c6fccf4a4ae0c6fd0d6651e8b473ad49f31f484a8190e2e",
+    "normalizedSceneSha256": "5bdc1318e2ac02622a1f9e876c0c50c371dfd559784c8df1e4c2da563ef7ae9c"
+  },
+  "material_tangent_lab.json": {
+    "counts": {
+      "walls": 0,
+      "grounds": 0,
+      "ramps": 0
+    },
+    "sha256": "41e1157944bb9f0c7f639bc82a039f8d3915e70bef94e454f03cf3bd655e1de9",
+    "sceneSha256": "ba144a446bd2158a90119706e1bdd5a62080be55acf4e7fb36ffe0976325beef",
+    "normalizedFixtureSha256": "5dd387f619e2fb0a2c6fccf4a4ae0c6fd0d6651e8b473ad49f31f484a8190e2e",
+    "normalizedSceneSha256": "eb3a1282262f2eacbfc7bb4d2fe8b7f08bb0842b041b587448d43f336dd8d3c8"
+  },
+  "momentum_bhop_intermediate.json": {
+    "counts": {
+      "walls": 1,
+      "grounds": 17,
+      "ramps": 0
+    },
+    "sha256": "4c09a24df3af8b37e25bdd1647624ddd4a5df84db8a79d260aabf7e21a2a5665",
+    "sceneSha256": "e291a1732aa5898f990d230d7d16aee32cc358249452d54b4066029a31643997",
+    "normalizedFixtureSha256": "29a13449d03c8ec43b0c35bf3b72ff3e88fbe3562fc918c69caecbf6963deecc",
+    "normalizedSceneSha256": "19b57843a9a189b9f51a2a22e4627fea273e2f96cf64bbaf76fa87848d973f36"
+  },
+  "momentum_bhop_tutorial_adapted.json": {
+    "counts": {
+      "walls": 1,
+      "grounds": 12,
+      "ramps": 0
+    },
+    "sha256": "8f11b6a6b3545ee5897972bf8c4563e791940ff296f8f796cf93d10d4d26f311",
+    "sceneSha256": "95691e9c879599b2a5bef6c4b0f8b3c981180c9e2d71abcd7f73fa1f67428b63",
+    "normalizedFixtureSha256": "648abe851e1d11c1901442be6ac0a61a70462376e12edec76a323e6b6d310215",
+    "normalizedSceneSha256": "774f808106e3395f953941a3fcd6630c9139626774e0617481d8fdfe8e9b2c48"
+  },
+  "portal_bhop_course.json": {
+    "counts": {
+      "walls": 4,
+      "grounds": 9,
+      "ramps": 1
+    },
+    "sha256": "758235910ea33e7e52ae329fd91cdacabcb88c27e5854e13b43c0882c1118218",
+    "sceneSha256": "3b8f38e6fc31b23408440dcb416b14e0c284c6bd36b4d249ed3492c8f0a34603",
+    "normalizedFixtureSha256": "0fa836c1c3589e5b4ea9df39826500e67ecab8baa38e363b7fd50c10bbbadcc9",
+    "normalizedSceneSha256": "a1569041b3678cb8a94b993a3fb7f3a6d985a6539329b672d0c1934c177de8f1"
+  },
+  "sandbox.json": {
+    "counts": {
+      "walls": 6,
+      "grounds": 1,
+      "ramps": 0
+    },
+    "sha256": "345eb9d9befb25690f437127208a0054cf13b2bbe44bd79db38e16294df45894",
+    "sceneSha256": "ab7e3042e970e43a92ab9bd04b6f680436bc1739b2c62cf5343c414c2494bf68",
+    "normalizedFixtureSha256": "3de53e7879bbfb41e013795b3cc3c636f99836e90f5256719b1904bb95f8557e",
+    "normalizedSceneSha256": "ecf4dc3997287f99b062edc741f5542a1ad44cf541b2f7d9fcce0f6c3c59b291"
+  },
+  "screen_space_buffer_lab.json": {
+    "counts": {
+      "walls": 15,
+      "grounds": 1,
+      "ramps": 2
+    },
+    "sha256": "48cb5d3b3383312f299b3867f609cc0122e0d35a816b850b7dd479eee43c862d",
+    "sceneSha256": "05ace3cc611abdbbd482be80e8df52c628bebb06c3dc1d3766b3c42ed34352f5",
+    "normalizedFixtureSha256": "f2118a3add3a0686fa93dd364bdf2f226d572df90e7a7c6b025d8b501ee368b1",
+    "normalizedSceneSha256": "265850a714568c63a0dc066cc254bad66f5382bf03c50a150c69f75badfaa9f1"
+  },
+  "shadow_showcase.json": {
+    "counts": {
+      "walls": 21,
+      "grounds": 1,
+      "ramps": 0
+    },
+    "sha256": "55b0a4c01abe9cd62ebbec29005f5eedf7cb00f4d9b106144c2491850eeb3c9c",
+    "sceneSha256": "55dc6b3566ff9c2a0cc0a9e6a9ff5b305ee8e4312ca184e1a21132615e20fa51",
+    "normalizedFixtureSha256": "0aa9657aa06e4a7561810e25c403e048307e316a9032cd9698aa5754f53d695d",
+    "normalizedSceneSha256": "ad0e4a1c18bd4d29c34e5229fe2fee6a51eca87fcfe459cff494aeff7bb31ec6"
+  },
+  "sponza_showcase.json": {
+    "counts": {
+      "walls": 0,
+      "grounds": 0,
+      "ramps": 0
+    },
+    "sha256": "41e1157944bb9f0c7f639bc82a039f8d3915e70bef94e454f03cf3bd655e1de9",
+    "sceneSha256": "8a7b0b5faf47b770aa75cca3c5a7da29dd6842b0e88c1a31f1119e2c843aaa43",
+    "normalizedFixtureSha256": "5dd387f619e2fb0a2c6fccf4a4ae0c6fd0d6651e8b473ad49f31f484a8190e2e",
+    "normalizedSceneSha256": "04d86c89b0e7958885c55a9e6833de82c31cfdd7ef54b85907cf3a43d262d0fe"
+  },
+  "ssao_buffer_lab.json": {
+    "counts": {
+      "walls": 15,
+      "grounds": 1,
+      "ramps": 2
+    },
+    "sha256": "48cb5d3b3383312f299b3867f609cc0122e0d35a816b850b7dd479eee43c862d",
+    "sceneSha256": "50c117bceec8beef9478a0e16d8392fa5ce7eb9a3fb56012d710c5956cbcc9be",
+    "normalizedFixtureSha256": "f2118a3add3a0686fa93dd364bdf2f226d572df90e7a7c6b025d8b501ee368b1",
+    "normalizedSceneSha256": "80699956a33bb8dc178eecd77aaf0f4ce78916578b7aa1c89eb3ad0ff1b3c5d4"
+  }
+}

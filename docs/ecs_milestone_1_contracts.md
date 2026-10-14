@@ -44,6 +44,10 @@ Scene creates default Name, Transform, Hierarchy, Visibility, SceneMeshAsset,
 SceneMaterial, Collider, TimeTrial and UnknownComponents. PortalPlaceable,
 TransformDrivenExternally and RuntimeOnly are tags. GPU primitive/model data
 lives in VulkanEngine::_sceneRenderRuntimes keyed by PersistentID.
+Baseline value components are required, including disabled/empty Collider, mesh,
+material and role values; remove<T> refuses detaching these. Tags and future optional
+components can be removed. This keeps the saved component set complete and avoids
+unchecked missing-component reads in engine callers.
 
 `roots` is ordered IDs; hierarchy_order is ordered pre-order references.
 creation_order keeps baseline collision/spawn/nearest-portal ties independent of

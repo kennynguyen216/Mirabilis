@@ -58,7 +58,7 @@ bool VulkanEngine::process_event(const SDL_Event& e)
         const auto printPortal = [](const char* name, const Portal& p) {
             fmt::print("{} placed={} position={},{},{} normal={},{},{} half={}/{} host={}\n",
                 name, p.placed, p.position.x, p.position.y, p.position.z,
-                p.normal.x, p.normal.y, p.normal.z, p.halfWidth, p.halfHeight, p.hostWallObject);
+                p.normal.x, p.normal.y, p.normal.z, p.halfWidth, p.halfHeight, p.hostWallObject.value_or(InvalidSceneObject));
         };
         printPortal("Blue", _bluePortal);
         printPortal("Orange", _orangePortal);
@@ -75,7 +75,7 @@ bool VulkanEngine::process_event(const SDL_Event& e)
             const auto save = [&](const char* name, const Portal& p) {
                 state << fmt::format("{} placed={} position={},{},{} normal={},{},{} half={}/{} host={}\n",
                     name, p.placed, p.position.x, p.position.y, p.position.z,
-                    p.normal.x, p.normal.y, p.normal.z, p.halfWidth, p.halfHeight, p.hostWallObject);
+                    p.normal.x, p.normal.y, p.normal.z, p.halfWidth, p.halfHeight, p.hostWallObject.value_or(InvalidSceneObject));
             };
             save("Blue", _bluePortal); save("Orange", _orangePortal);
             state << fmt::format("renderer={} debugView={} renderScale={} tonemap={} exposure={} autoExposure={} fxaa={}\n",

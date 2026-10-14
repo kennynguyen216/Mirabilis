@@ -357,7 +357,7 @@ uint64_t VulkanEngine::collect_opaque_instances(
     std::unordered_map<uint64_t, size_t> instanceByKey;
     uint64_t drawHash = FnvOffset;
     for (const RenderObject& draw : worldDrawContext.OpaqueSurfaces) {
-        if (draw.material == nullptr ||
+        if (!draw.contributesToStaticCaches || draw.material == nullptr ||
             draw.material->passType == MaterialPass::Transparent) {
             continue;
         }

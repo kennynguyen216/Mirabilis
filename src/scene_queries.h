@@ -16,8 +16,6 @@ inline PlayerCollisionSet collect_player_collision(const Scene& scene, std::span
     return result;
 }
 
-void collect_player_collision(const mirabilis::Scene&, std::span<const Portal>, PlayerCollisionSet&);
-PlayerCollisionSet collect_player_collision(const mirabilis::Scene&, std::span<const Portal>);
 std::optional<glm::vec3> find_scene_spawn_point(const mirabilis::Scene&);
 struct TimeTrialOverlap { bool start{false}; bool finish{false}; };
 TimeTrialOverlap collect_time_trial_overlaps(const mirabilis::Scene&, const AABB& player);

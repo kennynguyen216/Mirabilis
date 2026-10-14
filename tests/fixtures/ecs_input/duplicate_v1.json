@@ -1,0 +1,222 @@
+{
+  "version": 1,
+  "nextActor": 9,
+  "objects": [
+    {
+      "id": 5,
+      "parent": -1,
+      "name": "first",
+      "position": [
+        0,
+        1.5,
+        -36.2999992
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        100.050003,
+        3,
+        0.5
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": false,
+      "baseColorTexture": "",
+      "normalTexture": "",
+      "metallicRoughnessTexture": "",
+      "materialTint": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "emissionColor": [
+        0,
+        0,
+        0
+      ],
+      "emissionStrength": 0,
+      "transmission": 0,
+      "ior": 1.5,
+      "materialMetallic": 0,
+      "materialRoughness": 0.800000012,
+      "materialDebugChecker": false,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": true,
+      "portalPlaceable": true,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "cube",
+      "modelPath": ""
+    },
+    {
+      "id": 5,
+      "parent": -1,
+      "name": "duplicate",
+      "position": [
+        0,
+        1.5,
+        -36.2999992
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        100.050003,
+        3,
+        0.5
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": false,
+      "baseColorTexture": "",
+      "normalTexture": "",
+      "metallicRoughnessTexture": "",
+      "materialTint": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "emissionColor": [
+        0,
+        0,
+        0
+      ],
+      "emissionStrength": 0,
+      "transmission": 0,
+      "ior": 1.5,
+      "materialMetallic": 0,
+      "materialRoughness": 0.800000012,
+      "materialDebugChecker": false,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": true,
+      "portalPlaceable": true,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "cube",
+      "modelPath": ""
+    },
+    {
+      "id": 6,
+      "parent": 5,
+      "name": "later-valid",
+      "position": [
+        0,
+        1.5,
+        -36.2999992
+      ],
+      "rotation": [
+        0,
+        0,
+        0
+      ],
+      "scale": [
+        100.050003,
+        3,
+        0.5
+      ],
+      "colliderCenter": [
+        0,
+        0,
+        0
+      ],
+      "colliderHalfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "materialEnabled": false,
+      "baseColorTexture": "",
+      "normalTexture": "",
+      "metallicRoughnessTexture": "",
+      "materialTint": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "emissionColor": [
+        0,
+        0,
+        0
+      ],
+      "emissionStrength": 0,
+      "transmission": 0,
+      "ior": 1.5,
+      "materialMetallic": 0,
+      "materialRoughness": 0.800000012,
+      "materialDebugChecker": false,
+      "uvScale": [
+        1,
+        1
+      ],
+      "visible": true,
+      "hasCollision": true,
+      "portalPlaceable": true,
+      "layer": 0,
+      "collisionShape": 0,
+      "timeTrialRole": "none",
+      "asset": "cube",
+      "modelPath": ""
+    }
+  ],
+  "authoredPortals": [],
+  "referenceLighting": {
+    "sunRadiance": [
+      1,
+      1,
+      1
+    ],
+    "environmentIntensity": 1,
+    "blackEnvironment": false
+  },
+  "colorGrading": {
+    "warmth": 0,
+    "tint": 0,
+    "giSaturation": 0.25
+  },
+  "lighting": {
+    "skybox": "qwantani_noon",
+    "sunDirection": [
+      -0.349999994,
+      0.850000024,
+      0.25
+    ],
+    "shadowsEnabled": true,
+    "shadowRadius": 18.9850006,
+    "shadowDepthBias": 0.00120000006,
+    "shadowNormalBias": 0.150000006
+  }
+}

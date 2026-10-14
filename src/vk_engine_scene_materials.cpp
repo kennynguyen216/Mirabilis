@@ -79,10 +79,12 @@ const AllocatedImage& VulkanEngine::load_scene_texture(
     return inserted->second;
 }
 
-MaterialInstance* VulkanEngine::resolve_scene_material(const SceneObject& object)
+MaterialInstance* VulkanEngine::resolve_scene_material(EntityRef object)
 {
-    SceneMaterialRuntime& runtime = _sceneMaterialRuntimes[object.id];
-    const SceneMaterial& source = object.material;
+    const auto* material = _scene.read<SceneMaterial>(object);
+    if (!material) return &_wallMaterial;
+    SceneMaterialRuntime& runtime = _sceneMaterialRuntimes[object.persistentId];
+    const SceneMaterial& source = *material;
     runtime.material.traceEmission=glm::vec4(source.emissionColor*source.emissionStrength,0);
     runtime.material.traceParameters=glm::vec4(source.metallic,source.roughness,source.transmission,source.ior);
     runtime.material.traceUVScale=source.uvScale;

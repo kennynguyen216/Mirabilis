@@ -33,6 +33,16 @@
 #include "imgui_impl_vulkan.h"
 #include "ImGuizmo.h"
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #ifdef NDEBUG
 constexpr bool bUseValidationLayers = false;
 #else
@@ -90,6 +100,143 @@ float lerp_yaw(float from, float to, float t)
 VulkanEngine* loadedEngine = nullptr;
 
 VulkanEngine& VulkanEngine::Get() {return *loadedEngine;}
+
+void VulkanEngine::take_play_snapshot()
+{
+    _playSnapshot = SceneDocumentSnapshot{_scene.take_snapshot(), capture_scene_settings(), _authoredPortals.pairs};
+}
+
+void VulkanEngine::drain_scene_destruction()
+{
+    bool pending = false;
+    for (const auto entity : _scene.registry().view<PendingDestroy>()) { (void)entity; pending = true; break; }
+    if (!pending) return;
+    VK_CHECK(vkDeviceWaitIdle(_device));
+    _scene.drain_destruction([&](EntityRef ref) {
+        const auto material = _sceneMaterialRuntimes.find(ref.persistentId);
+        const auto render = _sceneRenderRuntimes.find(ref.persistentId);
+        _sceneResourcesRetired |= (material != _sceneMaterialRuntimes.end() && material->second.initialized) ||
+            (render != _sceneRenderRuntimes.end() && render->second.model && render->second.model.use_count() == 1);
+        cleanup_scene_entity(ref);
+        _sceneRenderRuntimes.erase(ref.persistentId);
+    });
+}
+
+bool VulkanEngine::install_staged_scene(StagedScene&& staging)
+{
+    PersistentID root = InvalidSceneObject, floor = InvalidSceneObject;
+    for (const auto ref : staging.scene.creation_order()) {
+        const auto* hierarchy = staging.scene.read<Hierarchy>(ref);
+        const auto* name = staging.scene.read<Name>(ref);
+        const auto* mesh = staging.scene.read<SceneMeshAsset>(ref);
+        if (!hierarchy->parent && name->value == "Sandbox") root = ref.persistentId;
+        if (floor == InvalidSceneObject && mesh && mesh->assetKind == SceneAssetKind::FloorQuad) floor = ref.persistentId;
+    }
+    if (root == InvalidSceneObject || floor == InvalidSceneObject) {
+        fmt::print("Editor scene is missing its Sandbox root or Floor\n");
+        return false;
+    }
+    // Four native runtime entities must fit without exhausting the saved counter.
+    if (staging.scene.next_persistent_id() > UINT64_MAX - 5) {
+        fmt::print("Persistent ID allocator cannot accommodate runtime scene entities\n");
+        return false;
+    }
+    std::string error;
+    if (!validate_authored_scene(staging.scene, staging.settings, staging.authoredPortals, error)) {
+        fmt::print("Invalid editor scene: {}\n", error); return false;
+    }
+    VK_CHECK(vkDeviceWaitIdle(_device));
+    _scene.replace(std::move(staging.scene), [&](EntityRef ref) {
+        cleanup_scene_entity(ref);
+        _sceneRenderRuntimes.erase(ref.persistentId);
+    });
+    _sceneRenderRuntimes.clear();
+    clear_scene_material_resources();
+    _previousSceneObjectTransforms.clear();
+    _selectedSceneObject = _materialEditor.object = InvalidSceneObject;
+    _sandboxRoot = _floorObject = _playerObject = _playerModelObject = _bluePortalObject = _orangePortalObject = InvalidSceneObject;
+    _bluePortal = {}; _orangePortal = {};
+    _authoredPortals = {};
+    _playSnapshot.reset();
+    if (SDL_getenv("MIRABILIS_TEST_FRAMES")) {
+        if (!_sceneRenderRuntimes.empty() || !_sceneMaterialRuntimes.empty() || !_previousSceneObjectTransforms.empty() ||
+            _selectedSceneObject != InvalidSceneObject || _materialEditor.object != InvalidSceneObject) std::abort();
+        fmt::print("ECS replacement maps cleared: epoch={}\n", _scene.epoch());
+    }
+    _sandboxRoot = root; _floorObject = floor;
+    _authoredPortals.pairs = std::move(staging.authoredPortals);
+    apply_scene_settings(staging.settings);
+    for (const auto ref : _scene.creation_order()) {
+        const auto* mesh = _scene.read<SceneMeshAsset>(ref);
+        if (mesh) assign_scene_asset(ref, mesh->assetKind);
+    }
+    create_runtime_scene_objects();
+    if (!_editorMode) take_play_snapshot();
+    _sceneSdf.rebuildRequested = true;
+    _surfaceCache.rebuildRequested = true;
+    _traceDrawHash = 0;
+    _sunCasters.hash = 0;
+    _ssgi.historyValid = false;
+    _previousMainViewProjectionValid = false;
+    _autoExposure.snap = true;
+    respawn_player();
+    rebuild_collision_from_scene();
+    return true;
+}
+
+bool VulkanEngine::restore_play_snapshot()
+{
+    if (!_playSnapshot) return true;
+    VK_CHECK(vkDeviceWaitIdle(_device));
+    if (!_scene.restore_snapshot(_playSnapshot->entities, [&](EntityRef ref) {
+        const auto material = _sceneMaterialRuntimes.find(ref.persistentId);
+        const auto render = _sceneRenderRuntimes.find(ref.persistentId);
+        _sceneResourcesRetired |= (material != _sceneMaterialRuntimes.end() && material->second.initialized) ||
+            (render != _sceneRenderRuntimes.end() && render->second.model && render->second.model.use_count() == 1);
+        cleanup_scene_entity(ref);
+        _sceneRenderRuntimes.erase(ref.persistentId);
+    })) return false;
+    _authoredPortals.pairs = _playSnapshot->authoredPortals;
+    _authoredPortals.draft.reset();
+    apply_scene_settings(_playSnapshot->settings);
+    bool recreated = false;
+    for (const auto ref : _scene.creation_order()) {
+        if (!_sceneRenderRuntimes.contains(ref.persistentId)) {
+            const auto* mesh = _scene.read<SceneMeshAsset>(ref);
+            if (mesh) {
+                assign_scene_asset(ref, mesh->assetKind);
+                recreated |= _sceneRenderRuntimes[ref.persistentId].model != nullptr;
+            }
+        }
+    }
+    if (recreated || _sceneResourcesRetired) {
+        _sceneSdf.rebuildRequested = true;
+        _surfaceCache.rebuildRequested = true;
+        _traceDrawHash = 0;
+        _sunCasters.hash = 0;
+    }
+    _previousSceneObjectTransforms.clear();
+    for (auto& [id, runtime] : _sceneRenderRuntimes) {
+        (void)id;
+        if (runtime.model) for (auto& [name, node] : runtime.model->nodes) { (void)name; node->hasPreviousDrawTransform = false; }
+    }
+    const auto rebind = [&](PersistentID& id) { if (!_scene.valid(_scene.get(id))) id = InvalidSceneObject; };
+    rebind(_selectedSceneObject); rebind(_materialEditor.object);
+    rebind(_sandboxRoot); rebind(_floorObject); rebind(_playerObject); rebind(_playerModelObject);
+    rebind(_bluePortalObject); rebind(_orangePortalObject);
+    _ssgi.historyValid = false;
+    _previousMainViewProjectionValid = false;
+    rebuild_collision_from_scene();
+    return true;
+}
+
+void VulkanEngine::reset_play()
+{
+    if (_editorMode || !restore_play_snapshot()) return;
+    _physicsStep.accumulator = 0;
+    _playerInput.jumpPressed = false;
+    fmt::print("ECS Reset Play complete: epoch={}\n", _scene.epoch());
+}
 
 void VulkanEngine::apply_max_fidelity_settings()
 {
@@ -384,6 +531,10 @@ void VulkanEngine::set_editor_mode(bool enabled)
         return;
     }
 
+    if (enabled) {
+        if (!restore_play_snapshot()) return;
+        _playSnapshot.reset();
+    } else take_play_snapshot();
     _editorMode = enabled;
     if (enabled) {
         _noClip.enabled = false;
@@ -672,7 +823,7 @@ void VulkanEngine::cleanup()
         // Scene objects can hold the last reference to a loaded glTF, so
         // they must release it while the device is still alive.
         _sceneRenderRuntimes.clear();
-        _scene.objects.clear();
+        _scene.clear();
         loadedScenes.clear();
         _playerModel.reset();
         _mainDeletionQueue.flush();
@@ -1165,6 +1316,126 @@ void VulkanEngine::run(){
         set_editor_mode(true);
         set_mouse_capture(false);
         ImGui::GetIO().IniFilename = nullptr;
+        if (SDL_getenv("MIRABILIS_TEST_ECS_LIFECYCLE")) {
+            const auto require = [](bool ok, const char* message) {
+                if (!ok) { fmt::print("GI TEST FAIL: ECS lifecycle {}\n", message); std::abort(); }
+            };
+            const auto floor = _scene.get(_floorObject);
+            const auto original = *_scene.read<Transform>(floor);
+            const auto player = _scene.get(_playerObject);
+            const auto settings = capture_scene_settings();
+            set_editor_mode(false);
+            auto moved = original; moved.position.x += 3;
+            require(_scene.set_local_transform(floor, moved), "play transform mutation");
+            const auto created = _scene.create_object("ECS play-created test entity");
+            require(static_cast<bool>(created), "play-created entity");
+            require(_scene.destroy_object(floor), "saved entity destruction");
+            drain_scene_destruction();
+            _postProcess.whiteBalance.x = 0.75f;
+            const auto highWater = _scene.next_persistent_id();
+            require(_scene.enqueue_command(created, [](Scene& scene, EntityRef target) {
+                scene.set<Name>(target, Name{"must be discarded"});
+            }), "queued play command");
+            if (const char* scratch = SDL_getenv("MIRABILIS_TEST_SCENE_DIRECTORY")) {
+                require(std::filesystem::exists(std::filesystem::path(scratch) / "invalid_transform.json"), "malformed scratch fixture missing");
+                const auto epochBeforeFailure = _scene.epoch();
+                const auto snapshotCount = _playSnapshot->entities.entities.size();
+                require(!load_editor_scene_named("invalid_transform.json") && !_editorMode && _playSnapshot &&
+                    _scene.epoch() == epochBeforeFailure && _playSnapshot->entities.entities.size() == snapshotCount && _scene.valid(created),
+                    "malformed play load changed scene, mode or snapshot");
+                const auto filename = _sceneDocument.activeFilename;
+                require(save_editor_scene_as("ecs-authored-play.json"), "saving authored state during play");
+                _sceneDocument.activeFilename = filename;
+                std::ifstream input(std::filesystem::path(scratch) / "ecs-authored-play.json", std::ios::binary);
+                const std::string json(std::istreambuf_iterator<char>(input), {});
+                StagedScene saved;
+                std::string error;
+                require(parse_scene_json(json, "ecs-authored-play.json", settings, saved, error), "saved play snapshot reload");
+                const auto savedFloor = saved.scene.get(_floorObject);
+                require(saved.scene.valid(savedFloor) && !saved.scene.valid(saved.scene.get(created.persistentId)) &&
+                    glm::length(saved.scene.read<Transform>(savedFloor)->position - original.position) < 1e-6f &&
+                    saved.scene.next_persistent_id() >= highWater, "play save included simulated state or lost allocator high-water");
+            }
+            reset_play();
+            const auto restored = _scene.get(_floorObject);
+            require(!_scene.valid(floor) && !_scene.valid(created) && !_scene.valid(player), "old epoch references must be stale");
+            require(_scene.valid(restored) && _scene.valid(_scene.get(_playerObject)), "saved/runtime identities restored");
+            require(glm::length(_scene.read<Transform>(restored)->position - original.position) < 1e-6f, "authored transform restored");
+            require(_scene.next_persistent_id() >= highWater && _scene.queued_command_count() == 0, "high-water/queue restore");
+            require(std::abs(_postProcess.whiteBalance.x - settings.warmth) < 1e-6f && !_editorMode, "settings restored and play continues");
+            moved.position.x += 2;
+            require(_scene.set_local_transform(restored, moved), "second play mutation");
+            set_editor_mode(true);
+            require(glm::length(_scene.read<Transform>(_scene.get(_floorObject))->position - original.position) < 1e-6f,
+                "leaving play restores authored transform");
+            const auto epoch = _scene.epoch();
+            if (SDL_getenv("MIRABILIS_TEST_SCENE_DIRECTORY")) {
+                const auto before = _scene.take_snapshot();
+                const auto* snapshot = _playSnapshot ? &*_playSnapshot : nullptr;
+                require(!load_editor_scene_named("invalid_transform.json"), "malformed scratch scene accepted");
+                require(_scene.epoch() == epoch && _editorMode && !_playSnapshot && snapshot == nullptr &&
+                    _scene.take_snapshot().entities.size() == before.entities.size(), "malformed load changed live state");
+                const auto destination = std::filesystem::path(SDL_getenv("MIRABILIS_TEST_SCENE_DIRECTORY")) / _sceneDocument.activeFilename;
+                const auto bytes = [&] {
+                    std::ifstream input(destination, std::ios::binary);
+                    return std::string(std::istreambuf_iterator<char>(input), {});
+                };
+                const auto originalBytes = bytes();
+                StagedScene exhausted;
+                std::string capacityError;
+                require(parse_scene_json(originalBytes, _sceneDocument.activeFilename, settings, exhausted, capacityError) &&
+                    exhausted.scene.reserve_persistent_ids(UINT64_MAX - 1), "prepare runtime ID exhaustion");
+                require(!install_staged_scene(std::move(exhausted)) && _scene.epoch() == epoch && _editorMode,
+                    "runtime ID exhaustion replaced the live scene");
+                const auto currentFloor = _scene.get(_floorObject);
+                const auto collider = *_scene.read<Collider>(currentFloor);
+                _scene.edit<Collider>(currentFloor)->colliderHalfExtents.x = 0;
+                _sceneDocument.dirty = true;
+                require(!save_editor_scene() && _sceneDocument.dirty && bytes() == originalBytes,
+                    "invalid save must preserve file and dirty flag");
+                require(_scene.set(currentFloor, collider), "restore test collider");
+#ifdef _WIN32
+                const auto attributes = GetFileAttributesW(destination.c_str());
+                require(attributes != INVALID_FILE_ATTRIBUTES && SetFileAttributesW(destination.c_str(), attributes | FILE_ATTRIBUTE_READONLY),
+                    "prepare replacement failure");
+                const bool failed = !save_editor_scene();
+                SetFileAttributesW(destination.c_str(), attributes);
+                require(failed && _sceneDocument.dirty && bytes() == originalBytes,
+                    "replacement failure must preserve file and dirty flag");
+#endif
+                const auto parent = _scene.create_object("ECS cascade test parent", _scene.get(_sandboxRoot));
+                const auto host = _scene.create_object("ECS portal test host", parent);
+                require(_scene.set(host, Collider{true}) && _scene.set(host, PortalPlaceable{}), "prepare portal host");
+                const auto blue = _bluePortal;
+                const auto authored = _authoredPortals.pairs;
+                const auto selected = _selectedSceneObject;
+                _bluePortal = {}; _bluePortal.placed = true; _bluePortal.hostWallObject = host.persistentId;
+                _selectedSceneObject = host.persistentId;
+                require(!delete_selected_scene_object() && _scene.valid(host) && !_scene.pending(host), "direct portal host deletion protection");
+                Portal other = _bluePortal; other.hostWallObject.reset(); other.position.x += 10;
+                _authoredPortals.pairs.push_back({_bluePortal, other});
+                set_editor_mode(false);
+                require(_scene.destroy_object(parent), "cascade host destruction request");
+                drain_scene_destruction();
+                require(!_scene.valid(host) && !_bluePortal.placed && _authoredPortals.pairs.size() == authored.size(), "cascade portal cleanup");
+                reset_play();
+                require(!_scene.valid(host) && _scene.valid(_scene.get(host.persistentId)) && _authoredPortals.pairs.size() == authored.size() + 1 &&
+                    _authoredPortals.pairs.back().first.hostWallObject == host.persistentId, "authored portal host snapshot restoration");
+                set_editor_mode(true);
+                require(_scene.destroy_object(_scene.get(parent.persistentId)), "remove restored test subtree");
+                drain_scene_destruction();
+                _bluePortal = blue; _authoredPortals.pairs = authored; _selectedSceneObject = selected;
+                fmt::print("ECS document and portal checks PASS: play save, malformed play/editor loads, failed saves keep file/dirty, direct/cascade hosts\n");
+            }
+            fmt::print("ECS lifecycle PASS: reset, leave-play, created/deleted entities, epochs, runtime survival, settings and queues\n");
+        }
+        if (SDL_getenv("MIRABILIS_TEST_RESET_PLAY")) {
+            set_editor_mode(false);
+            const auto epoch = _scene.epoch();
+            reset_play();
+            if (_editorMode || _scene.epoch() <= epoch) std::abort();
+            set_editor_mode(true);
+        }
         if(const char* camera=SDL_getenv("MIRABILIS_TEST_CAMERA")) {
             std::sscanf(camera,"%f %f %f %f %f",&_editorCamera.position.x,&_editorCamera.position.y,&_editorCamera.position.z,&_editorCamera.pitch,&_editorCamera.yaw);
         }
@@ -1358,7 +1629,9 @@ void VulkanEngine::run(){
                     _physicsStep.targetPlayerYaw,
                     static_cast<float>(stepIndex) /
                         static_cast<float>(stepCount));
+                _scene.apply_commands();
                 update_physics(PhysicsDt);
+                drain_scene_destruction();
                 _physicsStep.accumulator -= PhysicsDt;
             }
             _physicsStep.previousPlayerYaw = _physicsStep.targetPlayerYaw;
@@ -1402,10 +1675,17 @@ void VulkanEngine::run(){
             if(testFrame==4) _editorCamera.position.x+=0.1f;
             if(testFrame==5) _traceSettings.maxDepth=1;
             if(testFrame>=6&&testFrame<=8) {
-                for(auto& object:_scene.objects) if(object.alive&&object.visible&&object.material.enabled) {
-                    if(testFrame==6) object.material.colorTint.r*=0.5f;
-                    if(testFrame==7) object.visible=false;
-                    if(testFrame==8) object.localTransform.position.x+=0.125f;
+                for(const auto object : _scene.creation_order()) {
+                    auto* visibility = _scene.edit<Visibility>(object);
+                    auto* material = _scene.edit<SceneMaterial>(object);
+                    if (!visibility || !material || !visibility->visible || !material->enabled) continue;
+                    if(testFrame==6) material->colorTint.r*=0.5f;
+                    if(testFrame==7) visibility->visible=false;
+                    if(testFrame==8) {
+                        auto transform = *_scene.read<Transform>(object);
+                        transform.position.x+=0.125f;
+                        _scene.set_local_transform(object, transform);
+                    }
                     break;
                 }
             }
@@ -1417,9 +1697,12 @@ void VulkanEngine::run(){
             if(testFrame==14) _traceSettings.portalLimit=1;
             if(testFrame==15) _shadow.sunlightDirection.x+=0.25f;
             if(testFrame==16) {
-                for(auto& object:_scene.objects) if(object.alive&&object.visible&&object.material.enabled) {
-                    object.material.emissionColor=glm::vec3(1);
-                    object.material.emissionStrength+=1; break;
+                for(const auto object : _scene.creation_order()) {
+                    const auto* visibility = _scene.read<Visibility>(object);
+                    auto* material = _scene.edit<SceneMaterial>(object);
+                    if (!visibility || !material || !visibility->visible || !material->enabled) continue;
+                    material->emissionColor=glm::vec3(1);
+                    material->emissionStrength+=1; break;
                 }
             }
             if(testFrame==17&&!_authoredPortals.pairs.empty()) _authoredPortals.pairs[0].first.position.x+=0.125f;
@@ -1460,6 +1743,9 @@ void VulkanEngine::run(){
             const auto balance = _postProcess.whiteBalance;
             const float saturation = _ssgi.colorSaturation;
             const std::string scene = _sceneDocument.activeFilename;
+            if (!SDL_getenv("MIRABILIS_TEST_SCENE_DIRECTORY")) {
+                fmt::print("GI TEST FAIL: color roundtrip requires a scratch MIRABILIS_TEST_SCENE_DIRECTORY\n"); std::abort();
+            }
             if (!save_editor_scene() || !load_editor_scene_named(scene) ||
                 glm::length(tint - _traceSettings.lighting.environmentTint) > 1e-5f ||
                 glm::length(balance - _postProcess.whiteBalance) > 1e-5f ||
@@ -1468,6 +1754,13 @@ void VulkanEngine::run(){
             }
             _editorCamera = camera;
             fmt::print("Color settings scene roundtrip PASS\n");
+        }
+        drain_scene_destruction();
+        _scene.consume_transform_dirty();
+        if (_sceneResourcesRetired) {
+            _sceneSdf.rebuildRequested = _surfaceCache.rebuildRequested = true;
+            _traceDrawHash = _sunCasters.hash = 0;
+            _sceneResourcesRetired = false;
         }
         draw(deltaTime);
         if (placementFrame) {

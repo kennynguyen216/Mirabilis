@@ -5,6 +5,7 @@
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <functional>
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -14,88 +15,50 @@
 #include "ImGuizmo.h"
 
 namespace {
-
 constexpr const char* EditorSceneDirectory = "../../assets/scenes";
 
-
-} // namespace
-
-static void draw_hierarchy_node(
-    Scene& scene,
-    SceneObjectID id,
-    SceneObjectID& selected)
+bool draw_hierarchy_node(Scene& scene, PersistentID id, PersistentID& selected)
 {
-    const SceneObject* object = scene.get(id);
-    if (object == nullptr) {
-        return;
-    }
-
-    // Snapshot this before drag/drop. Reparenting into an empty actor can add
-    // its first child while ImGui is drawing this node; using the mutated
-    // child list with a leaf node would call TreePop without a matching push.
-    const std::vector<SceneObjectID> childrenAtStart = object->children;
-    const bool hadChildren = !childrenAtStart.empty();
-    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
-        ImGuiTreeNodeFlags_SpanAvailWidth |
-        ImGuiTreeNodeFlags_DefaultOpen;
-    if (!hadChildren) {
-        flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
-    }
-    if (id == selected) {
-        flags |= ImGuiTreeNodeFlags_Selected;
-    }
-
-    const bool opened = ImGui::TreeNodeEx(
-        reinterpret_cast<void*>(static_cast<uintptr_t>(id)),
-        flags,
-        "%s",
-        object->name.c_str());
-    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
-        selected = id;
-    }
-
-    // Dragging a static object onto another static object makes it a child.
-    // Physics/player/portal-driven nodes deliberately stay fixed so the editor
-    // cannot create a hierarchy their owner overwrites next frame.
-    if (!object->transformDrivenExternally &&
-        ImGui::BeginDragDropSource()) {
+    const auto ref = scene.get(id);
+    if (!scene.valid(ref)) return false;
+    const auto* hierarchy = scene.read<Hierarchy>(ref);
+    const auto* name = scene.read<Name>(ref);
+    const auto children = hierarchy->children;
+    const bool hadChildren = !children.empty();
+    auto flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_DefaultOpen;
+    if (!hadChildren) flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+    if (id == selected) flags |= ImGuiTreeNodeFlags_Selected;
+    const bool opened = ImGui::TreeNodeEx(reinterpret_cast<void*>(static_cast<uintptr_t>(id)), flags, "%s", name->value.c_str());
+    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) selected = id;
+    bool changed = false;
+    if (!scene.runtime_only(ref) && !scene.pending(ref) && ImGui::BeginDragDropSource()) {
         ImGui::SetDragDropPayload("SCENE_OBJECT", &id, sizeof(id));
-        ImGui::Text("Parent %s", object->name.c_str());
-        ImGui::EndDragDropSource();
+        ImGui::Text("Parent %s", name->value.c_str()); ImGui::EndDragDropSource();
     }
     if (ImGui::BeginDragDropTarget()) {
-        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(
-                "SCENE_OBJECT")) {
-            if (payload->DataSize == sizeof(SceneObjectID)) {
-                const SceneObjectID child = *static_cast<const SceneObjectID*>(
-                    payload->Data);
-                const SceneObject* childObject = scene.get(child);
-                if (childObject != nullptr &&
-                    !childObject->transformDrivenExternally &&
-                    scene.set_parent(child, id)) {
-                    selected = child;
-                }
+        if (const auto* payload = ImGui::AcceptDragDropPayload("SCENE_OBJECT")) {
+            if (payload->DataSize == sizeof(PersistentID)) {
+                const auto child = scene.get(*static_cast<const PersistentID*>(payload->Data));
+                if (scene.valid(child) && scene.set_parent(child, ref)) { selected = child.persistentId; changed = true; }
             }
         }
         ImGui::EndDragDropTarget();
     }
-
     if (opened && hadChildren) {
-        for (const SceneObjectID child : childrenAtStart) {
-            draw_hierarchy_node(scene, child, selected);
-        }
+        for (const auto child : children) changed |= draw_hierarchy_node(scene, child, selected);
         ImGui::TreePop();
     }
+    return changed;
 }
+} // namespace
 
 void VulkanEngine::draw_hierarchy_panel()
 {
     if (ImGui::Begin("Hierarchy")) {
-        for (const SceneObject& object : _scene.objects) {
-            if (object.alive && object.parent == InvalidSceneObject) {
-                draw_hierarchy_node(_scene, object.id, _selectedSceneObject);
-            }
-        }
+        const auto roots = _scene.roots();
+        bool changed = false;
+        for (const auto id : roots) changed |= draw_hierarchy_node(_scene, id, _selectedSceneObject);
+        if (changed) { _sceneDocument.dirty = true; rebuild_collision_from_scene(); }
     }
     ImGui::End();
 }
@@ -103,68 +66,78 @@ void VulkanEngine::draw_hierarchy_panel()
 void VulkanEngine::draw_inspector_panel()
 {
     if (ImGui::Begin("Inspector")) {
-        SceneObject* object = _scene.get(_selectedSceneObject);
-        if (object == nullptr) {
+        const EntityRef ref = _scene.get(_selectedSceneObject);
+        if (!_scene.valid(ref)) {
             ImGui::TextUnformatted("No object selected.");
         } else {
-            ImGui::Text("Name: %s", object->name.c_str());
+            const auto name = *_scene.read<Name>(ref);
+            auto transform = *_scene.read<Transform>(ref);
+            auto visibility = *_scene.read<Visibility>(ref);
+            auto collider = *_scene.read<Collider>(ref);
+            auto material = *_scene.read<SceneMaterial>(ref);
+            const auto mesh = *_scene.read<SceneMeshAsset>(ref);
+            const auto role = *_scene.read<TimeTrial>(ref);
+            bool portalPlaceable = _scene.has<PortalPlaceable>(ref);
+            const bool runtimeOwned = _scene.runtime_only(ref);
+            ImGui::BeginDisabled(runtimeOwned || _scene.pending(ref));
+            ImGui::Text("Name: %s", name.value.c_str());
             ImGui::Separator();
 
             // Transforms written by physics or portal placement would be
             // overwritten again next frame, so show them read-only.
-            const bool driven = object->transformDrivenExternally;
+            const bool driven = _scene.has<TransformDrivenExternally>(ref);
             bool changed = false;
             if (driven) {
                 ImGui::TextUnformatted("Transform is driven by the simulation.");
             }
             ImGui::BeginDisabled(driven);
             changed |= ImGui::DragFloat3(
-                "Position", &object->localTransform.position.x, 0.05f);
+                "Position", &transform.position.x, 0.05f);
 
-            glm::vec3 rotationDegrees = glm::degrees(object->localTransform.rotation);
+            glm::vec3 rotationDegrees = glm::degrees(transform.rotation);
             if (ImGui::DragFloat3("Rotation", &rotationDegrees.x, 0.5f)) {
-                object->localTransform.rotation = glm::radians(rotationDegrees);
+                transform.rotation = glm::radians(rotationDegrees);
                 changed = true;
             }
 
             changed |= ImGui::DragFloat3(
-                "Scale", &object->localTransform.scale.x, 0.05f);
+                "Scale", &transform.scale.x, 0.05f);
             ImGui::EndDisabled();
 
             ImGui::Separator();
-            changed |= ImGui::Checkbox("Visible", &object->visible);
-            changed |= ImGui::Checkbox("Has Collision", &object->hasCollision);
-            changed |= ImGui::Checkbox("Portal Placeable", &object->portalPlaceable);
-            if (object->timeTrialRole != TimeTrialRole::None) {
-                const char* roleLabel = object->timeTrialRole == TimeTrialRole::SpawnPoint
+            changed |= ImGui::Checkbox("Visible", &visibility.visible);
+            changed |= ImGui::Checkbox("Has Collision", &collider.hasCollision);
+            changed |= ImGui::Checkbox("Portal Placeable", &portalPlaceable);
+            if (role.role != TimeTrialRole::None) {
+                const char* roleLabel = role.role == TimeTrialRole::SpawnPoint
                     ? "Spawn Point"
-                    : (object->timeTrialRole == TimeTrialRole::StartTrigger
+                    : (role.role == TimeTrialRole::StartTrigger
                         ? "Start Timer Trigger"
                         : "Finish Timer Trigger");
                 ImGui::TextDisabled("Time-trial role: %s", roleLabel);
             }
-            const bool needsEditableBox = object->hasCollision ||
-                object->timeTrialRole == TimeTrialRole::StartTrigger ||
-                object->timeTrialRole == TimeTrialRole::FinishTrigger;
+            const bool needsEditableBox = collider.hasCollision ||
+                role.role == TimeTrialRole::StartTrigger ||
+                role.role == TimeTrialRole::FinishTrigger;
             if (needsEditableBox &&
-                object->collisionShape == CollisionShape::Box) {
+                collider.collisionShape == CollisionShape::Box) {
                 ImGui::SeparatorText("Box Collider");
                 changed |= ImGui::DragFloat3(
-                    "Center", &object->colliderCenter.x, 0.05f);
+                    "Center", &collider.colliderCenter.x, 0.05f);
                 if (ImGui::DragFloat3(
                         "Half Extents",
-                        &object->colliderHalfExtents.x,
+                        &collider.colliderHalfExtents.x,
                         0.05f,
                         0.01f,
                         1000.0f)) {
-                    object->colliderHalfExtents = glm::max(
-                        object->colliderHalfExtents, glm::vec3(0.01f));
+                    collider.colliderHalfExtents = glm::max(
+                        collider.colliderHalfExtents, glm::vec3(0.01f));
                     changed = true;
                 }
                 ImGui::TextDisabled(
                     "Center/size are local to this actor. Full size = half extents x 2.");
-            } else if (object->hasCollision &&
-                       object->collisionShape == CollisionShape::SurfRamp) {
+            } else if (collider.hasCollision &&
+                       collider.collisionShape == CollisionShape::SurfRamp) {
                 ImGui::SeparatorText("Surf Ramp Collider");
                 ImGui::TextDisabled("Local +Z rises from the low edge to the high edge.");
                 ImGui::TextDisabled("Scale X/Y/Z controls width, height, and length.");
@@ -172,35 +145,35 @@ void VulkanEngine::draw_inspector_panel()
             }
 
             const bool supportsMaterialOverride =
-                object->assetKind == SceneAssetKind::FloorQuad ||
-                object->assetKind == SceneAssetKind::UnitCube ||
-                object->assetKind == SceneAssetKind::SurfRamp;
+                mesh.assetKind == SceneAssetKind::FloorQuad ||
+                mesh.assetKind == SceneAssetKind::UnitCube ||
+                mesh.assetKind == SceneAssetKind::SurfRamp;
             if (supportsMaterialOverride) {
                 ImGui::SeparatorText("Material");
                 changed |= ImGui::Checkbox(
-                    "Material Override", &object->material.enabled);
-                ImGui::BeginDisabled(!object->material.enabled);
+                    "Material Override", &material.enabled);
+                ImGui::BeginDisabled(!material.enabled);
                 changed |= ImGui::ColorEdit4(
-                    "Tint", &object->material.colorTint.x);
+                    "Tint", &material.colorTint.x);
                 if(_rendererMode==RendererMode::SoftwarePathTrace) {
-                    changed |= ImGui::ColorEdit3("Emission color",&object->material.emissionColor.x);
-                    changed |= ImGui::DragFloat("Emission strength",&object->material.emissionStrength,0.05f,0,10000);
-                    changed |= ImGui::SliderFloat("Dielectric transmission",&object->material.transmission,0,1);
-                    changed |= ImGui::SliderFloat("Index of refraction",&object->material.ior,1,3);
+                    changed |= ImGui::ColorEdit3("Emission color",&material.emissionColor.x);
+                    changed |= ImGui::DragFloat("Emission strength",&material.emissionStrength,0.05f,0,10000);
+                    changed |= ImGui::SliderFloat("Dielectric transmission",&material.transmission,0,1);
+                    changed |= ImGui::SliderFloat("Index of refraction",&material.ior,1,3);
                 }
                 changed |= ImGui::Checkbox(
-                    "Debug Checker Grid", &object->material.debugChecker);
+                    "Debug Checker Grid", &material.debugChecker);
                 changed |= ImGui::DragFloat(
-                    "Metallic", &object->material.metallic,
+                    "Metallic", &material.metallic,
                     0.01f, 0.0f, 1.0f, "%.2f");
                 changed |= ImGui::DragFloat(
-                    "Roughness", &object->material.roughness,
+                    "Roughness", &material.roughness,
                     0.01f, 0.0f, 1.0f, "%.2f");
                 if (ImGui::DragFloat2(
-                        "UV Tiling", &object->material.uvScale.x,
+                        "UV Tiling", &material.uvScale.x,
                         0.05f, 0.01f, 100.0f, "%.2f")) {
-                    object->material.uvScale = glm::max(
-                        object->material.uvScale, glm::vec2(0.01f));
+                    material.uvScale = glm::max(
+                        material.uvScale, glm::vec2(0.01f));
                     changed = true;
                 }
                 // One row per texture role.  The popup is opened outside the
@@ -220,7 +193,7 @@ void VulkanEngine::draw_inspector_panel()
                     }
                     ImGui::PopID();
                     if (choose) {
-                        _materialEditor.object = object->id;
+                        _materialEditor.object = ref.persistentId;
                         std::fill(
                             _materialEditor.texturePathInput.begin(),
                             _materialEditor.texturePathInput.end(),
@@ -235,11 +208,11 @@ void VulkanEngine::draw_inspector_panel()
                     }
                 };
                 texturePicker("Base color", "Base Color Texture",
-                    object->material.baseColorTexturePath, "(white)");
+                    material.baseColorTexturePath, "(white)");
                 texturePicker("Normal map", "Normal Map Texture",
-                    object->material.normalTexturePath, "(flat)");
+                    material.normalTexturePath, "(flat)");
                 texturePicker("Metallic/roughness", "Metallic Roughness Texture",
-                    object->material.metalRoughTexturePath, "(factors only)");
+                    material.metalRoughTexturePath, "(factors only)");
                 ImGui::TextDisabled(
                     "Project example: ../../assets/textures/portal_concrete.png");
                 ImGui::TextDisabled(
@@ -247,7 +220,7 @@ void VulkanEngine::draw_inspector_panel()
                 ImGui::TextDisabled(
                     "glTF packing: G roughness, B metallic.");
                 ImGui::EndDisabled();
-            } else if (object->assetKind == SceneAssetKind::ImportedGLTF) {
+            } else if (mesh.assetKind == SceneAssetKind::ImportedGLTF) {
                 ImGui::SeparatorText("Material");
                 ImGui::TextDisabled(
                     "Imported glTF materials come from the model file.");
@@ -270,13 +243,14 @@ void VulkanEngine::draw_inspector_panel()
                     "##TexturePath",
                     _materialEditor.texturePathInput.data(),
                     _materialEditor.texturePathInput.size());
-                SceneObject* materialObject =
-                    _scene.get(_materialEditor.object);
-                ImGui::BeginDisabled(materialObject == nullptr);
+                const auto materialRef = _scene.get(_materialEditor.object);
+                ImGui::BeginDisabled(!_scene.valid(materialRef) || _scene.runtime_only(materialRef) || _scene.pending(materialRef));
                 if (ImGui::Button("Apply")) {
-                    materialObject->material.enabled = true;
-                    materialObject->material.*texturePath =
-                        _materialEditor.texturePathInput.data();
+                    auto edited = *_scene.read<SceneMaterial>(materialRef);
+                    edited.enabled = true;
+                    edited.*texturePath = _materialEditor.texturePathInput.data();
+                    _scene.set(materialRef, edited);
+                    if (materialRef == ref) material = edited;
                     _sceneDocument.dirty = true;
                     ImGui::CloseCurrentPopup();
                 }
@@ -287,21 +261,32 @@ void VulkanEngine::draw_inspector_panel()
                 }
                 ImGui::EndPopup();
             }
-            if (changed && !driven) {
-                _sceneDocument.dirty = true;
-                rebuild_collision_from_scene();
+            if (changed && _scene.mutable_ref(ref)) {
+                const bool authoredHost = std::any_of(_authoredPortals.pairs.begin(), _authoredPortals.pairs.end(), [&](const AuthoredPortalPair& pair) {
+                    return pair.first.hostWallObject == ref.persistentId || pair.second.hostWallObject == ref.persistentId;
+                });
+                if (!valid_component(transform) || !valid_component(visibility) || !valid_component(collider) || !valid_component(material) ||
+                    (authoredHost && (!portalPlaceable || !collider.hasCollision || collider.collisionShape != CollisionShape::Box))) {
+                    ImGui::TextUnformatted("Invalid edit or authored portal host settings; edit refused.");
+                } else {
+                    if (!driven) _scene.set_local_transform(ref, transform);
+                    _scene.set(ref, visibility); _scene.set(ref, collider); _scene.set(ref, material);
+                    if (portalPlaceable) _scene.set(ref, PortalPlaceable{}); else _scene.remove<PortalPlaceable>(ref);
+                    _sceneDocument.dirty = true;
+                    rebuild_collision_from_scene();
+                }
             }
 
-            if ((_bluePortal.placed && _bluePortal.hostWallObject == object->id) ||
-                (_orangePortal.placed && _orangePortal.hostWallObject == object->id)) {
+            if ((_bluePortal.placed && _bluePortal.hostWallObject == ref.persistentId) ||
+                (_orangePortal.placed && _orangePortal.hostWallObject == ref.persistentId)) {
                 ImGui::TextDisabled(
                     "Translation gizmo is disabled while a portal is attached.");
             }
 
-            if (object->hasCollision &&
-                object->collisionShape != CollisionShape::GroundPlane) {
+            if (collider.hasCollision &&
+                collider.collisionShape != CollisionShape::GroundPlane) {
                 const AABB collider = collider_from_object(
-                    _scene, object->id);
+                    _scene, ref.persistentId);
                 ImGui::Text(
                     "Collider min %.2f %.2f %.2f",
                     collider.min.x, collider.min.y, collider.min.z);
@@ -310,12 +295,11 @@ void VulkanEngine::draw_inspector_panel()
                     collider.max.x, collider.max.y, collider.max.z);
             }
 
-            const bool isRequiredSandboxObject =
-                object->id == _sandboxRoot ||
-                object->transformDrivenExternally;
+            ImGui::EndDisabled();
+            const bool isRequiredSandboxObject = ref.persistentId == _sandboxRoot || runtimeOwned;
             const bool hostsPlacedPortal =
-                (_bluePortal.placed && _bluePortal.hostWallObject == object->id) ||
-                (_orangePortal.placed && _orangePortal.hostWallObject == object->id);
+                (_bluePortal.placed && _bluePortal.hostWallObject == ref.persistentId) ||
+                (_orangePortal.placed && _orangePortal.hostWallObject == ref.persistentId);
             ImGui::Separator();
             ImGui::BeginDisabled(isRequiredSandboxObject || hostsPlacedPortal);
             if (ImGui::Button("Delete Selected")) {
@@ -336,24 +320,25 @@ void VulkanEngine::draw_inspector_panel()
 
 void VulkanEngine::draw_editor_gizmo()
 {
-    SceneObject* object = _scene.get(_selectedSceneObject);
+    const auto ref = _scene.get(_selectedSceneObject);
+    const bool hasObject = _scene.valid(ref);
     Portal* authoredPortal = nullptr;
-    if (object == nullptr && _authoredPortals.selectedPair >= 0 &&
+    if (!hasObject && _authoredPortals.selectedPair >= 0 &&
         _authoredPortals.selectedPair < static_cast<int>(_authoredPortals.pairs.size())) {
         AuthoredPortalPair& pair = _authoredPortals.pairs[_authoredPortals.selectedPair];
         authoredPortal = _authoredPortals.selectedSecond ? &pair.second : &pair.first;
     }
-    if ((object == nullptr && authoredPortal == nullptr) ||
-        (object != nullptr && object->transformDrivenExternally)) {
+    if ((!hasObject && authoredPortal == nullptr) ||
+        (hasObject && (_scene.runtime_only(ref) || _scene.pending(ref) || _scene.has<TransformDrivenExternally>(ref)))) {
         return;
     }
 
     // A portal's placement data is still owned by the portal system. Moving
     // its host wall while it has a placed portal would leave that portal off
     // the wall, so block the gizmo until portal parenting is introduced.
-    if (object != nullptr &&
-        ((_bluePortal.placed && _bluePortal.hostWallObject == object->id) ||
-        (_orangePortal.placed && _orangePortal.hostWallObject == object->id))) {
+    if (hasObject &&
+        ((_bluePortal.placed && _bluePortal.hostWallObject == ref.persistentId) ||
+        (_orangePortal.placed && _orangePortal.hostWallObject == ref.persistentId))) {
         return;
     }
 
@@ -370,7 +355,7 @@ void VulkanEngine::draw_editor_gizmo()
         10000.0f);
     glm::mat4 worldTransform = authoredPortal != nullptr
         ? get_portal_frame(*authoredPortal)
-        : _scene.world_matrix(object->id);
+        : _scene.world_matrix(ref.persistentId);
 
     ImGuizmo::SetOrthographic(false);
     ImGuizmo::SetDrawlist(ImGui::GetForegroundDrawList());
@@ -424,12 +409,7 @@ void VulkanEngine::draw_editor_gizmo()
 
     // ImGuizmo edits a world matrix. Scene objects store local components, so
     // convert back through the parent's world matrix before saving the change.
-    glm::mat4 parentWorld{1.0f};
-    if (object->parent != InvalidSceneObject) {
-        parentWorld = _scene.world_matrix(object->parent);
-    }
-    const glm::mat4 localTransform = glm::inverse(parentWorld) * worldTransform;
-    object->localTransform = transform_from_matrix(localTransform);
+    if (!_scene.set_world_transform(ref, worldTransform)) return;
 
     // Keep collision and portal raycasts coherent while the arrow is dragged.
     _sceneDocument.dirty = true;
@@ -466,23 +446,25 @@ void VulkanEngine::select_scene_object_at_screen_position(
 
     std::optional<RaycastHit> closestHit;
     SceneObjectID closestObject = InvalidSceneObject;
-    for (const SceneObject& object : _scene.objects) {
+    for (const auto ref : _scene.creation_order()) {
+        const auto* visibility = _scene.read<Visibility>(ref);
+        const auto* collider = _scene.read<Collider>(ref);
         // Version 1 selects the scene's axis-aligned editable primitives.
         // Imported models get mesh picking later, once their bounds are
         // represented in the scene system.
-        if (!object.alive || !object.visible || !object.hasCollision ||
-            object.collisionShape == CollisionShape::GroundPlane) {
+        if (!visibility || !collider || _scene.pending(ref) || !visibility->visible || !collider->hasCollision ||
+            collider->collisionShape == CollisionShape::GroundPlane) {
             continue;
         }
 
         const std::optional<RaycastHit> hit = raycast_aabb(
             rayOrigin,
             rayDirection,
-            collider_from_object(_scene, object.id));
+            collider_from_object(_scene, ref.persistentId));
         if (hit.has_value() &&
             (!closestHit.has_value() || hit->distance < closestHit->distance)) {
             closestHit = hit;
-            closestObject = object.id;
+            closestObject = ref.persistentId;
         }
     }
 
@@ -584,12 +566,13 @@ void VulkanEngine::draw_editor_menu()
                                             const glm::vec3& scale) {
             const SceneObjectID id = create_editor_actor(
                 name, SceneAssetKind::UnitCube, false);
-            if (SceneObject* portrait = _scene.get(id)) {
-                portrait->localTransform.scale = scale;
-                portrait->material.enabled = true;
-                portrait->material.baseColorTexturePath = texturePath;
-                portrait->material.metallic = 0.0f;
-                portrait->material.roughness = 0.9f;
+            const auto portrait = _scene.get(id);
+            if (_scene.valid(portrait)) {
+                auto transform = *_scene.read<Transform>(portrait); transform.scale = scale;
+                auto material = *_scene.read<SceneMaterial>(portrait);
+                material.enabled = true; material.baseColorTexturePath = texturePath;
+                material.metallic = 0.f; material.roughness = 0.9f;
+                _scene.set_local_transform(portrait, transform); _scene.set(portrait, material);
             }
         };
         if (ImGui::MenuItem("Empty Actor")) {
@@ -635,10 +618,9 @@ void VulkanEngine::draw_editor_menu()
         if (ImGui::MenuItem("Spawn Point")) {
             // This first time-trial loop uses one respawn marker. Replacing
             // it leaves the old marker as an ordinary editable cube.
-            for (SceneObject& object : _scene.objects) {
-                if (object.alive && object.timeTrialRole == TimeTrialRole::SpawnPoint) {
-                    object.timeTrialRole = TimeTrialRole::None;
-                }
+            for (const auto ref : _scene.creation_order()) {
+                const auto* role = _scene.read<TimeTrial>(ref);
+                if (role && role->role == TimeTrialRole::SpawnPoint) _scene.set(ref, TimeTrial{});
             }
             create_editor_actor(
                 "Spawn Point", SceneAssetKind::UnitCube, false, false,
@@ -663,7 +645,7 @@ void VulkanEngine::draw_editor_menu()
     }
 
     if (ImGui::BeginMenu("Edit")) {
-        const bool hasSelection = _scene.get(_selectedSceneObject) != nullptr;
+        const bool hasSelection = _scene.valid(_scene.get(_selectedSceneObject));
         if (ImGui::BeginMenu("Gizmo")) {
             if (ImGui::MenuItem(
                     "Move", "W",
@@ -798,6 +780,7 @@ void VulkanEngine::draw_editor_menu()
     }
 
     if (ImGui::BeginMenu("Time Trial")) {
+        if (ImGui::MenuItem("Reset Play", nullptr, false, !_editorMode)) reset_play();
         if (ImGui::MenuItem("Reset Run")) {
             reset_time_trial();
         }
@@ -903,35 +886,11 @@ void VulkanEngine::setup_default_dock_layout(uint32_t dockspaceID)
 
 bool VulkanEngine::delete_selected_scene_object()
 {
-    SceneObject* object = _scene.get(_selectedSceneObject);
-    if (object == nullptr) {
-        return false;
-    }
-
-    // These objects are owned by the sandbox/player/portal systems. They
-    // need a dedicated replacement workflow rather than a generic delete.
-    const bool isRequiredSandboxObject =
-        object->id == _sandboxRoot ||
-        object->transformDrivenExternally;
-    const bool hostsPlacedPortal =
-        (_bluePortal.placed && _bluePortal.hostWallObject == object->id) ||
-        (_orangePortal.placed && _orangePortal.hostWallObject == object->id);
-    if (isRequiredSandboxObject || hostsPlacedPortal) {
-        return false;
-    }
-
-    VK_CHECK(vkDeviceWaitIdle(_device));
-    const auto releaseBranch = [&](const auto& self, SceneObjectID id) -> void {
-        if (const auto* node = _scene.get(id)) {
-            for (const auto child : node->children) self(self, child);
-            _sceneRenderRuntimes.erase(id);
-        }
-    };
-    releaseBranch(releaseBranch, object->id);
-    if (!_scene.destroy_object(object->id)) {
-        return false;
-    }
-
+    const auto ref = _scene.get(_selectedSceneObject);
+    if (!_editorMode || !_scene.valid(ref) || ref.persistentId == _sandboxRoot || _scene.runtime_only(ref)) return false;
+    const bool hostsPlacedPortal = (_bluePortal.placed && _bluePortal.hostWallObject == ref.persistentId) || (_orangePortal.placed && _orangePortal.hostWallObject == ref.persistentId);
+    if (hostsPlacedPortal || !_scene.destroy_object(ref)) return false;
+    drain_scene_destruction();
     _selectedSceneObject = InvalidSceneObject;
     _sceneDocument.dirty = true;
     rebuild_collision_from_scene();
@@ -940,78 +899,38 @@ bool VulkanEngine::delete_selected_scene_object()
 
 bool VulkanEngine::duplicate_selected_scene_object()
 {
-    const SceneObject* source = _scene.get(_selectedSceneObject);
-    if (source == nullptr || source->id == _sandboxRoot ||
-        source->transformDrivenExternally) {
-        return false;
-    }
-    for (const SceneObject* current = source;
-         current != nullptr;
-         current = _scene.get(current->parent)) {
-        if (current->transformDrivenExternally) {
-            return false;
-        }
-    }
-
-    // A hierarchy root is a scene-native prefab: duplicating it clones the
-    // entire subtree, preserving child-local transforms. This makes a house
-    // assembled from walls, roof, doors, and props reusable as one unit.
-    const auto duplicateBranch = [&](auto&& self,
-                                     SceneObjectID sourceID,
-                                     SceneObjectID parentID,
-                                     bool isRoot) -> SceneObjectID {
-        const SceneObject* branchSource = _scene.get(sourceID);
-        if (branchSource == nullptr) return InvalidSceneObject;
-        const std::string sourceName = branchSource->name;
-        const Transform sourceTransform = branchSource->localTransform;
-        const bool visible = branchSource->visible;
-        const bool hasCollision = branchSource->hasCollision;
-        const bool portalPlaceable = branchSource->portalPlaceable;
-        const RenderLayer layer = branchSource->layer;
-        const CollisionShape collisionShape = branchSource->collisionShape;
-        const glm::vec3 colliderCenter = branchSource->colliderCenter;
-        const glm::vec3 colliderHalfExtents = branchSource->colliderHalfExtents;
-        const SceneAssetKind assetKind = branchSource->assetKind;
-        const TimeTrialRole timeTrialRole = branchSource->timeTrialRole;
-        const SceneMaterial material = branchSource->material;
-        const std::string modelPath = branchSource->modelPath;
-        const std::shared_ptr<LoadedGLTF> model = _sceneRenderRuntimes[branchSource->id].model;
-        const std::vector<SceneObjectID> children = branchSource->children;
-
-        const SceneObjectID duplicateID = _scene.create_object(
-            isRoot ? sourceName + " Prefab " + std::to_string(_nextCreatedActorNumber++)
-                   : sourceName,
-            parentID);
-        SceneObject* duplicate = _scene.get(duplicateID);
-        if (duplicate == nullptr) return InvalidSceneObject;
-        duplicate->localTransform = sourceTransform;
-        if (isRoot) duplicate->localTransform.position += glm::vec3(0.5f, 0.0f, 0.5f);
-        duplicate->visible = visible;
-        duplicate->hasCollision = hasCollision;
-        duplicate->portalPlaceable = portalPlaceable;
-        duplicate->layer = layer;
-        duplicate->collisionShape = collisionShape;
-        duplicate->colliderCenter = colliderCenter;
-        duplicate->colliderHalfExtents = colliderHalfExtents;
-        duplicate->timeTrialRole = timeTrialRole;
-        duplicate->material = material;
-        duplicate->modelPath = modelPath;
-        if (assetKind == SceneAssetKind::ImportedGLTF) {
-            duplicate->assetKind = assetKind;
-            _sceneRenderRuntimes[duplicate->id].model = model;
-        } else {
-            assign_scene_asset(*duplicate, assetKind);
-        }
-        for (SceneObjectID child : children) {
-            self(self, child, duplicateID, false);
-        }
-        return duplicateID;
+    const auto source = _scene.get(_selectedSceneObject);
+    if (!_editorMode || !_scene.valid(source) || source.persistentId == _sandboxRoot || _scene.runtime_only(source)) return false;
+    const auto branchOrder = [&](EntityRef root) {
+        std::vector<PersistentID> ids;
+        const auto walk = [&](auto&& self, EntityRef ref) -> void {
+            if (!_scene.valid(ref) || _scene.runtime_only(ref) || _scene.pending(ref)) return;
+            ids.push_back(ref.persistentId);
+            for (const auto id : _scene.read<Hierarchy>(ref)->children) self(self, _scene.get(id));
+        };
+        walk(walk, root); return ids;
     };
-    const SceneObjectID duplicateID = duplicateBranch(
-        duplicateBranch, source->id, source->parent, true);
-    if (duplicateID == InvalidSceneObject) return false;
-
-    _selectedSceneObject = duplicateID;
+    const auto sources = branchOrder(source);
+    const auto duplicate = _scene.duplicate_subtree(source);
+    if (!_scene.valid(duplicate)) return false;
+    const auto copies = branchOrder(duplicate);
+    _scene.set(duplicate, Name{_scene.read<Name>(source)->value + " Prefab " + std::to_string(_nextCreatedActorNumber++)});
+    auto transform = *_scene.read<Transform>(duplicate);
+    transform.position += glm::vec3(0.5f, 0.f, 0.5f);
+    _scene.set_local_transform(duplicate, transform);
+    for (size_t index = 0; index < copies.size(); ++index) {
+        const auto ref = _scene.get(copies[index]);
+        if (index < sources.size()) {
+            const auto runtime = _sceneRenderRuntimes.find(sources[index]);
+            if (runtime != _sceneRenderRuntimes.end()) {
+                const auto resource = runtime->second;
+                _sceneRenderRuntimes[copies[index]] = resource;
+                continue;
+            }
+        }
+        assign_scene_asset(ref, _scene.read<SceneMeshAsset>(ref)->assetKind);
+    }
+    _selectedSceneObject = duplicate.persistentId;
     _sceneDocument.dirty = true;
     rebuild_collision_from_scene();
     return true;
@@ -1024,14 +943,17 @@ SceneObjectID VulkanEngine::create_editor_actor(
     bool portalPlaceable,
     TimeTrialRole timeTrialRole)
 {
+    if (!_editorMode) return InvalidSceneObject;
     const std::string name = std::string(baseName) + " " +
         std::to_string(_nextCreatedActorNumber++);
-    const SceneObjectID id = _scene.create_object(name, _sandboxRoot);
-    SceneObject* object = _scene.get(id);
-    if (object == nullptr) {
+    const auto ref = _scene.create_object(name, _scene.get(_sandboxRoot));
+    const auto id = ref.persistentId;
+    if (!_scene.valid(ref)) {
         return InvalidSceneObject;
     }
-    object->timeTrialRole = timeTrialRole;
+    Transform transform;
+    Collider collider;
+    _scene.set(ref, TimeTrial{timeTrialRole});
 
     const Camera& camera = render_camera();
     const glm::vec3 forward = glm::normalize(glm::vec3(
@@ -1040,42 +962,43 @@ SceneObjectID VulkanEngine::create_editor_actor(
     const glm::mat4 parentWorld = _sandboxRoot == InvalidSceneObject
         ? glm::mat4(1.0f)
         : _scene.world_matrix(_sandboxRoot);
-    object->localTransform.position = glm::vec3(
+    transform.position = glm::vec3(
         glm::inverse(parentWorld) * glm::vec4(spawnWorldPosition, 1.0f));
 
     if (assetKind != SceneAssetKind::None) {
-        assign_scene_asset(*object, assetKind);
+        assign_scene_asset(ref, assetKind);
     }
     if (assetKind == SceneAssetKind::UnitCube) {
-        object->localTransform.scale = collidable
+        transform.scale = collidable
             ? glm::vec3(4.0f, 3.0f, 0.5f)
             : glm::vec3(1.0f);
     } else if (assetKind == SceneAssetKind::FloorQuad) {
-        object->localTransform.scale = glm::vec3(10.0f, 1.0f, 10.0f);
-        object->collisionShape = CollisionShape::GroundPlane;
+        transform.scale = glm::vec3(10.0f, 1.0f, 10.0f);
+        collider.collisionShape = CollisionShape::GroundPlane;
     } else if (assetKind == SceneAssetKind::SurfRamp) {
-        object->localTransform.scale = glm::vec3(8.0f, 12.0f, 12.0f);
-        object->collisionShape = CollisionShape::SurfRamp;
+        transform.scale = glm::vec3(8.0f, 12.0f, 12.0f);
+        collider.collisionShape = CollisionShape::SurfRamp;
         // Matches the wedge's local bounding box, for editor picking/debug.
-        object->colliderCenter = glm::vec3(0.0f, 0.5f, 0.0f);
-        object->colliderHalfExtents = glm::vec3(0.5f);
+        collider.colliderCenter = glm::vec3(0.0f, 0.5f, 0.0f);
+        collider.colliderHalfExtents = glm::vec3(0.5f);
     }
 
     if (timeTrialRole == TimeTrialRole::SpawnPoint) {
         // A low marker shows the exact feet position used by fall reset.
-        object->localTransform.scale = glm::vec3(0.6f, 0.12f, 0.6f);
+        transform.scale = glm::vec3(0.6f, 0.12f, 0.6f);
     } else if (timeTrialRole == TimeTrialRole::StartTrigger ||
                timeTrialRole == TimeTrialRole::FinishTrigger) {
         // A trigger is a non-solid volume. Its visible cube and editable
         // local box use the same dimensions, so what you see is what starts
         // or finishes the run.
-        object->localTransform.scale = glm::vec3(2.0f, 1.0f, 2.0f);
-        object->colliderCenter = glm::vec3(0.0f);
-        object->colliderHalfExtents = glm::vec3(0.5f);
+        transform.scale = glm::vec3(2.0f, 1.0f, 2.0f);
+        collider.colliderCenter = glm::vec3(0.0f);
+        collider.colliderHalfExtents = glm::vec3(0.5f);
     }
 
-    object->hasCollision = collidable;
-    object->portalPlaceable = portalPlaceable;
+    collider.hasCollision = collidable;
+    _scene.set_local_transform(ref, transform); _scene.set(ref, collider);
+    if (portalPlaceable) _scene.set(ref, PortalPlaceable{});
     _selectedSceneObject = id;
     _sceneDocument.dirty = true;
     rebuild_collision_from_scene();
@@ -1084,13 +1007,15 @@ SceneObjectID VulkanEngine::create_editor_actor(
 
 SceneObjectID VulkanEngine::create_room_with_center_pole_prefab()
 {
+    if (!_editorMode) return InvalidSceneObject;
     // Keep every part local to one empty root, so the room is movable,
     // duplicable, and saveable as a single hierarchy prefab.
-    const SceneObjectID rootID = _scene.create_object(
+    const auto root = _scene.create_object(
         "Room with Center Pole " + std::to_string(_nextCreatedActorNumber++),
-        _sandboxRoot);
-    SceneObject* root = _scene.get(rootID);
-    if (root == nullptr) return InvalidSceneObject;
+        _scene.get(_sandboxRoot));
+    if (!_scene.valid(root)) return InvalidSceneObject;
+    const auto rootID = root.persistentId;
+    Transform rootTransform;
 
     const Camera& camera = render_camera();
     const glm::vec3 forward = glm::normalize(glm::vec3(
@@ -1102,36 +1027,38 @@ SceneObjectID VulkanEngine::create_room_with_center_pole_prefab()
     const glm::mat4 parentWorld = _sandboxRoot == InvalidSceneObject
         ? glm::mat4(1.0f)
         : _scene.world_matrix(_sandboxRoot);
-    root->localTransform.position = glm::vec3(
+    rootTransform.position = glm::vec3(
         glm::inverse(parentWorld) * glm::vec4(spawnWorldPosition, 1.0f));
 
+    _scene.set_local_transform(root, rootTransform);
     const auto addPart = [&](const char* name, SceneAssetKind assetKind,
                              const glm::vec3& position,
                              const glm::vec3& scale, bool collidable,
                              bool portalPlaceable) {
-        const SceneObjectID partID = _scene.create_object(name, rootID);
-        SceneObject* part = _scene.get(partID);
-        if (part == nullptr) return;
-        assign_scene_asset(*part, assetKind);
-        part->localTransform.position = position;
-        part->localTransform.scale = scale;
-        part->hasCollision = collidable;
-        part->portalPlaceable = portalPlaceable;
+        const auto part = _scene.create_object(name, root);
+        if (!_scene.valid(part)) return;
+        Transform transform; Collider collider; SceneMaterial material;
+        assign_scene_asset(part, assetKind);
+        transform.position = position;
+        transform.scale = scale;
+        collider.hasCollision = collidable;
+        if (portalPlaceable) _scene.set(part, PortalPlaceable{});
         if (assetKind == SceneAssetKind::FloorQuad) {
             // FloorQuad is a walkable horizontal platform, not a paper-thin
             // box collider. Without this the player falls through a prefab
             // room's floor and immediately hits the respawn safeguard.
-            part->collisionShape = CollisionShape::GroundPlane;
+            collider.collisionShape = CollisionShape::GroundPlane;
         }
         if (assetKind == SceneAssetKind::UnitCube) {
-            part->material.enabled = true;
-            part->material.colorTint = glm::vec4(1.0f);
-            part->material.baseColorTexturePath =
+            material.enabled = true;
+            material.colorTint = glm::vec4(1.0f);
+            material.baseColorTexturePath =
                 "../../assets/textures/room_concrete.png";
-            part->material.uvScale = glm::vec2(4.0f);
-            part->material.metallic = 0.0f;
-            part->material.roughness = 0.9f;
+            material.uvScale = glm::vec2(4.0f);
+            material.metallic = 0.0f;
+            material.roughness = 0.9f;
         }
+        _scene.set_local_transform(part, transform); _scene.set(part, collider); _scene.set(part, material);
     };
 
     // Twelve-metre square interior, six metres high. UnitCube spans one
@@ -1159,18 +1086,18 @@ SceneObjectID VulkanEngine::create_room_with_center_pole_prefab()
 
     // The prefab is immediately playable: it has its own active spawn just
     // inside the room. Keep the engine rule of one active spawn point.
-    for (SceneObject& object : _scene.objects) {
-        if (object.alive && object.timeTrialRole == TimeTrialRole::SpawnPoint) {
-            object.timeTrialRole = TimeTrialRole::None;
-        }
+    for (const auto ref : _scene.creation_order()) {
+        const auto* role = _scene.read<TimeTrial>(ref);
+        if (role && role->role == TimeTrialRole::SpawnPoint) _scene.set(ref, TimeTrial{});
     }
-    const SceneObjectID spawnID = _scene.create_object("Room Spawn Point", rootID);
-    if (SceneObject* spawn = _scene.get(spawnID)) {
-        spawn->timeTrialRole = TimeTrialRole::SpawnPoint;
-        assign_scene_asset(*spawn, SceneAssetKind::UnitCube);
-        spawn->localTransform.position = glm::vec3(0.0f, 0.05f, -3.0f);
-        spawn->localTransform.scale = glm::vec3(0.6f, 0.12f, 0.6f);
-        spawn->hasCollision = false;
+    const auto spawn = _scene.create_object("Room Spawn Point", root);
+    if (_scene.valid(spawn)) {
+        Transform transform;
+        _scene.set(spawn, TimeTrial{TimeTrialRole::SpawnPoint});
+        assign_scene_asset(spawn, SceneAssetKind::UnitCube);
+        transform.position = glm::vec3(0.0f, 0.05f, -3.0f);
+        transform.scale = glm::vec3(0.6f, 0.12f, 0.6f);
+        _scene.set_local_transform(spawn, transform);
     }
 
     _selectedSceneObject = rootID;
@@ -1181,11 +1108,13 @@ SceneObjectID VulkanEngine::create_room_with_center_pole_prefab()
 
 SceneObjectID VulkanEngine::create_closed_long_room_prefab()
 {
-    const SceneObjectID rootID = _scene.create_object(
+    if (!_editorMode) return InvalidSceneObject;
+    const auto root = _scene.create_object(
         "Long Closed Room " + std::to_string(_nextCreatedActorNumber++),
-        _sandboxRoot);
-    SceneObject* root = _scene.get(rootID);
-    if (root == nullptr) return InvalidSceneObject;
+        _scene.get(_sandboxRoot));
+    if (!_scene.valid(root)) return InvalidSceneObject;
+    const auto rootID = root.persistentId;
+    Transform rootTransform;
 
     const Camera& camera = render_camera();
     const glm::vec3 forward = glm::normalize(glm::vec3(
@@ -1195,31 +1124,33 @@ SceneObjectID VulkanEngine::create_closed_long_room_prefab()
     const glm::mat4 parentWorld = _sandboxRoot == InvalidSceneObject
         ? glm::mat4(1.0f)
         : _scene.world_matrix(_sandboxRoot);
-    root->localTransform.position = glm::vec3(
+    rootTransform.position = glm::vec3(
         glm::inverse(parentWorld) * glm::vec4(spawnWorldPosition, 1.0f));
 
+    _scene.set_local_transform(root, rootTransform);
     const auto addPart = [&](const char* name, SceneAssetKind assetKind,
                              const glm::vec3& position,
                              const glm::vec3& scale, bool collidable,
                              bool portalPlaceable) {
-        const SceneObjectID partID = _scene.create_object(name, rootID);
-        SceneObject* part = _scene.get(partID);
-        if (part == nullptr) return;
-        assign_scene_asset(*part, assetKind);
-        part->localTransform.position = position;
-        part->localTransform.scale = scale;
-        part->hasCollision = collidable;
-        part->portalPlaceable = portalPlaceable;
+        const auto part = _scene.create_object(name, root);
+        if (!_scene.valid(part)) return;
+        Transform transform; Collider collider; SceneMaterial material;
+        assign_scene_asset(part, assetKind);
+        transform.position = position;
+        transform.scale = scale;
+        collider.hasCollision = collidable;
+        if (portalPlaceable) _scene.set(part, PortalPlaceable{});
         if (assetKind == SceneAssetKind::FloorQuad) {
-            part->collisionShape = CollisionShape::GroundPlane;
+            collider.collisionShape = CollisionShape::GroundPlane;
         } else {
-            part->material.enabled = true;
-            part->material.baseColorTexturePath =
+            material.enabled = true;
+            material.baseColorTexturePath =
                 "../../assets/textures/room_concrete.png";
-            part->material.uvScale = glm::vec2(5.0f, 4.0f);
-            part->material.metallic = 0.0f;
-            part->material.roughness = 0.9f;
+            material.uvScale = glm::vec2(5.0f, 4.0f);
+            material.metallic = 0.0f;
+            material.roughness = 0.9f;
         }
+        _scene.set_local_transform(part, transform); _scene.set(part, collider); _scene.set(part, material);
     };
 
     // A sealed 12 x 20 x 6 metre room for portal/non-Euclidean experiments.
@@ -1236,18 +1167,18 @@ SceneObjectID VulkanEngine::create_closed_long_room_prefab()
     addPart("East Wall", SceneAssetKind::UnitCube,
             glm::vec3(6.0f, 3.0f, 0.0f), glm::vec3(0.3f, 6.0f, 20.0f), true, true);
 
-    for (SceneObject& object : _scene.objects) {
-        if (object.alive && object.timeTrialRole == TimeTrialRole::SpawnPoint) {
-            object.timeTrialRole = TimeTrialRole::None;
-        }
+    for (const auto ref : _scene.creation_order()) {
+        const auto* role = _scene.read<TimeTrial>(ref);
+        if (role && role->role == TimeTrialRole::SpawnPoint) _scene.set(ref, TimeTrial{});
     }
-    const SceneObjectID spawnID = _scene.create_object("Long Room Spawn Point", rootID);
-    if (SceneObject* spawn = _scene.get(spawnID)) {
-        spawn->timeTrialRole = TimeTrialRole::SpawnPoint;
-        assign_scene_asset(*spawn, SceneAssetKind::UnitCube);
-        spawn->localTransform.position = glm::vec3(0.0f, 0.05f, -7.0f);
-        spawn->localTransform.scale = glm::vec3(0.6f, 0.12f, 0.6f);
-        spawn->hasCollision = false;
+    const auto spawn = _scene.create_object("Long Room Spawn Point", root);
+    if (_scene.valid(spawn)) {
+        Transform transform;
+        _scene.set(spawn, TimeTrial{TimeTrialRole::SpawnPoint});
+        assign_scene_asset(spawn, SceneAssetKind::UnitCube);
+        transform.position = glm::vec3(0.0f, 0.05f, -7.0f);
+        transform.scale = glm::vec3(0.6f, 0.12f, 0.6f);
+        _scene.set_local_transform(spawn, transform);
     }
 
     _selectedSceneObject = rootID;
@@ -1258,7 +1189,7 @@ SceneObjectID VulkanEngine::create_closed_long_room_prefab()
 
 SceneObjectID VulkanEngine::import_gltf_actor(std::string_view modelPath)
 {
-    if (modelPath.empty()) {
+    if (!_editorMode || modelPath.empty()) {
         return InvalidSceneObject;
     }
 
@@ -1273,11 +1204,11 @@ SceneObjectID VulkanEngine::import_gltf_actor(std::string_view modelPath)
     if (baseName.empty()) {
         baseName = "GLTF Actor";
     }
-    const SceneObjectID id = _scene.create_object(
+    const auto ref = _scene.create_object(
         baseName + " " + std::to_string(_nextCreatedActorNumber++),
-        _sandboxRoot);
-    SceneObject* object = _scene.get(id);
-    if (object == nullptr) {
+        _scene.get(_sandboxRoot));
+    const auto id = ref.persistentId;
+    if (!_scene.valid(ref)) {
         return InvalidSceneObject;
     }
 
@@ -1286,11 +1217,11 @@ SceneObjectID VulkanEngine::import_gltf_actor(std::string_view modelPath)
         camera.getRotationMatrix() * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
     const glm::mat4 parentWorld = _scene.world_matrix(_sandboxRoot);
     const glm::vec3 spawnWorldPosition = camera.position + forward * 5.0f;
-    object->localTransform.position = glm::vec3(
+    Transform transform; transform.position = glm::vec3(
         glm::inverse(parentWorld) * glm::vec4(spawnWorldPosition, 1.0f));
-    object->assetKind = SceneAssetKind::ImportedGLTF;
-    object->modelPath = std::string(modelPath);
-    _sceneRenderRuntimes[object->id].model = *model;
+    _scene.set_local_transform(ref, transform);
+    _scene.set(ref, SceneMeshAsset{SceneAssetKind::ImportedGLTF, std::string(modelPath)});
+    _sceneRenderRuntimes[id].model = *model;
 
     _selectedSceneObject = id;
     _sceneDocument.dirty = true;
@@ -1298,16 +1229,21 @@ SceneObjectID VulkanEngine::import_gltf_actor(std::string_view modelPath)
 }
 
 void VulkanEngine::assign_scene_asset(
-    SceneObject& object,
+    EntityRef ref,
     SceneAssetKind assetKind)
 {
-    object.assetKind = assetKind;
-    _sceneRenderRuntimes[object.id].primitive = {};
-    _sceneRenderRuntimes[object.id].model.reset();
+    if (!_scene.valid(ref)) return;
+    auto mesh = *_scene.read<SceneMeshAsset>(ref);
+    mesh.assetKind = assetKind;
+    if (!_scene.set(ref, mesh, true)) return;
+    auto& runtime = _sceneRenderRuntimes[ref.persistentId];
+    runtime.primitive = {}; runtime.model.reset();
+    const auto* role = _scene.read<TimeTrial>(ref);
+    const auto* name = _scene.read<Name>(ref);
 
     switch (assetKind) {
     case SceneAssetKind::FloorQuad:
-        _sceneRenderRuntimes[object.id].primitive = MeshPrimitive{
+        runtime.primitive = MeshPrimitive{
             .indexCount = 6,
             .firstIndex = 0,
             .indexBuffer = _floorMesh.indexBuffer.buffer,
@@ -1316,7 +1252,7 @@ void VulkanEngine::assign_scene_asset(
             .material = &_floorMaterial};
         break;
     case SceneAssetKind::UnitCube:
-        _sceneRenderRuntimes[object.id].primitive = MeshPrimitive{
+        runtime.primitive = MeshPrimitive{
             .indexCount = 36,
             .firstIndex = 0,
             .indexBuffer = _wallMesh.indexBuffer.buffer,
@@ -1325,7 +1261,7 @@ void VulkanEngine::assign_scene_asset(
             .material = &_wallMaterial};
         break;
     case SceneAssetKind::SurfRamp:
-        _sceneRenderRuntimes[object.id].primitive = MeshPrimitive{
+        runtime.primitive = MeshPrimitive{
             .indexCount = 24,
             .firstIndex = 0,
             .indexBuffer = _rampMesh.indexBuffer.buffer,
@@ -1334,18 +1270,18 @@ void VulkanEngine::assign_scene_asset(
             .material = &_wallMaterial};
         break;
     case SceneAssetKind::ImportedGLTF: {
-        if (object.modelPath.empty()) {
-            fmt::print("Scene glTF actor '{}' has no model path.\n", object.name);
+        if (mesh.modelPath.empty()) {
+            fmt::print("Scene glTF actor '{}' has no model path.\n", name->value);
             break;
         }
-        auto model = loadGltf(this, object.modelPath);
+        auto model = loadGltf(this, mesh.modelPath);
         if (model) {
-            _sceneRenderRuntimes[object.id].model = *model;
+            runtime.model = *model;
         } else {
             fmt::print(
                 "Failed to load scene glTF '{}' for actor '{}'.\n",
-                object.modelPath,
-                object.name);
+                mesh.modelPath,
+                name->value);
         }
         break;
     }
@@ -1356,13 +1292,13 @@ void VulkanEngine::assign_scene_asset(
     // Reuse the bright portal/player materials for level-authoring markers.
     // Material pointers are rebuilt from the saved role every time a scene is
     // loaded, just like the primitive itself.
-    if (_sceneRenderRuntimes[object.id].primitive.valid()) {
-        if (object.timeTrialRole == TimeTrialRole::SpawnPoint) {
-            _sceneRenderRuntimes[object.id].primitive.material = &_playerMaterial;
-        } else if (object.timeTrialRole == TimeTrialRole::StartTrigger) {
-            _sceneRenderRuntimes[object.id].primitive.material = &_bluePortalMaterial;
-        } else if (object.timeTrialRole == TimeTrialRole::FinishTrigger) {
-            _sceneRenderRuntimes[object.id].primitive.material = &_orangePortalMaterial;
+    if (runtime.primitive.valid()) {
+        if (role->role == TimeTrialRole::SpawnPoint) {
+            runtime.primitive.material = &_playerMaterial;
+        } else if (role->role == TimeTrialRole::StartTrigger) {
+            runtime.primitive.material = &_bluePortalMaterial;
+        } else if (role->role == TimeTrialRole::FinishTrigger) {
+            runtime.primitive.material = &_orangePortalMaterial;
         }
     }
 }
@@ -1833,6 +1769,8 @@ void VulkanEngine::draw_play_overlay(float horizontalSpeed)
             ImGuiWindowFlags_AlwaysAutoResize |
             ImGuiWindowFlags_NoCollapse |
             ImGuiWindowFlags_NoSavedSettings)) {
+        if (ImGui::Button("Reset Play")) reset_play();
+        ImGui::SameLine();
         if (ImGui::Button("Respawn (F1)")) respawn_player();
         ImGui::SameLine();
         if (ImGui::Button(_noClip.enabled
@@ -1942,6 +1880,7 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
                         SkyboxDisplayNames.data(),
                         static_cast<int>(SkyboxDisplayNames.size()))) {
                     if (set_skybox(skyboxSelection)) {
+                        _authoredSkyboxId = SkyboxIds[skyboxSelection];
                         _sceneDocument.dirty = true;
                     }
                 }

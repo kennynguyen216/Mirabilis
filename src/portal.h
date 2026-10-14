@@ -17,7 +17,7 @@ struct Portal {
     bool placed{false};
     // Scene object this portal was placed on. It lets physics replace the
     // matching solid wall collider with a frame around this opening.
-    SceneObjectID hostWallObject{InvalidSceneObject};
+    std::optional<PersistentID> hostWallObject;
     glm::vec3 position{0.0f};
     glm::vec3 normal{0.0f, 0.0f, 1.0f};
     glm::vec3 up{0.0f, 1.0f, 0.0f};
