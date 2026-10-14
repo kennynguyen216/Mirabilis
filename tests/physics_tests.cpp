@@ -174,11 +174,12 @@ TEST_CASE("offset rotated collider sync retains entity origin and interpolation"
     CHECK(physics.render_world(scene,moving,.5f)[3].x == doctest::Approx(3.05f).epsilon(.0001));
     check_matrix(physics.render_world(scene,child,.5f),physics.render_world(scene,moving,.5f)*to_matrix(local));
     CHECK(resets(physics).empty());
+    const auto velocityBeforeTeleport = physics.velocity(moving);
     Transform teleported = *scene.read<Transform>(moving); teleported.position = {30,40,50};
     REQUIRE(scene.set_local_transform(moving,teleported));
     CHECK(scene.read<Transform>(moving)->position.x == doctest::Approx(3.1f).epsilon(.0001));
     CHECK(scene.queued_command_count() == 1); scene.apply_commands();
-    CHECK(physics.velocity(moving).x == doctest::Approx(12));
+    check_vector(physics.velocity(moving),velocityBeforeTeleport);
     for (float alpha : {0.0f,.5f,1.0f}) check_matrix(physics.render_world(scene,moving,alpha),to_matrix(teleported));
     const auto teleportReset = resets(physics); CHECK(teleportReset.contains(child.persistentId));
     CHECK(teleportReset.contains(moving.persistentId)); CHECK_FALSE(physics.sleeping(moving));
@@ -328,10 +329,10 @@ TEST_CASE("play creation applies queued physics commands before first body synch
     Transform target; target.position = {10,20,30};
     CHECK_FALSE(physics.has_body(spawned));
     REQUIRE(physics.queue_teleport(scene,spawned,target)); REQUIRE(physics.queue_velocity(scene,spawned,{12,0,0}));
-    CHECK(scene.apply_commands() == 2); CHECK(physics.has_body(spawned)); tick(physics,scene);
+    CHECK(scene.apply_commands() == 2); CHECK(physics.has_body(spawned));
+    CHECK(physics.velocity(spawned).x == doctest::Approx(12)); tick(physics,scene);
     CHECK(scene.read<Transform>(spawned)->position.x == doctest::Approx(10.1f).epsilon(.0001));
     CHECK(scene.read<Transform>(spawned)->position.y == doctest::Approx(20).epsilon(.0001));
-    CHECK(physics.velocity(spawned).x == doctest::Approx(12));
     const auto forced = box(scene,{100,0,0},true), impulsed = box(scene,{-100,0,0},true);
     REQUIRE(scene.set(forced,body)); REQUIRE(scene.set(impulsed,body));
     CHECK_FALSE(physics.has_body(forced)); CHECK_FALSE(physics.has_body(impulsed));
