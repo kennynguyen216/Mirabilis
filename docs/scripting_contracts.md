@@ -120,3 +120,14 @@ live handles. Headless tests validate host/boundary/lifecycle without Vulkan;
 existing GPU harness verifies renderer/portal/cache preservation. Validation must
 exercise real managed callbacks rather than native mocks alone. Fresh independent
 GPT-6 Astra High reviewer starts after workers retire at the gate.
+
+## Review refinement: diagnostics
+
+The diagnostics accessor exposes recent history: at most 256 entries and 1 MiB
+of retained message bytes, with at most 64 KiB per entry including a truncation
+suffix. Truncation preserves UTF-8 boundaries; console output remains complete.
+A single-entry assembly/type schema-and-error cache avoids repeating reflection
+and missing-type logging on each inspector frame. Saved Script data stays intact;
+schema discovery never constructs a user script. No public API or ABI changes.
+Validation independently exercises these limits through real managed logging and
+repeated metadata queries before the implementation is integrated.
