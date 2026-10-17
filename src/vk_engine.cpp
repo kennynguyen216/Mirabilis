@@ -1717,6 +1717,8 @@ void VulkanEngine::run(){
         scriptRequire(input.query(K::Control,Q::Down,false),"releasing one Control key released both");
         modifier.key.keysym.sym = SDLK_RCTRL; modifier.key.keysym.mod = KMOD_NONE; process_event(modifier);
         scriptRequire(!input.query(K::Control,Q::Down,false),"last Control release lost");
+        SDL_Event escape{}; escape.type = SDL_KEYDOWN; escape.key.keysym.sym = SDLK_ESCAPE;
+        scriptRequire(process_event(escape) && input.query(K::Escape,Q::Pressed,true),"Escape did not preserve quit and script input");
         set_mouse_capture(false);
         input.clear(); ImGui::GetIO().WantCaptureKeyboard = capturedKeyboard;
         scriptState("reopened-play");
