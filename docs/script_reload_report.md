@@ -1,5 +1,9 @@
 # Live C# script reload
 
+This is the original implementation report at `fa18bba`. Subsequent independent
+review findings, corrections, validation and the authorized main publication are
+recorded in [the review report](script_reload_review_report.md).
+
 The requested workflow is implemented: save user C# code during Play, let the
 background compiler finish, and continue with the new code in the same live scene.
 Compilation and rejected reloads leave the previous working scripts running.
