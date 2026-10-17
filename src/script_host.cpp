@@ -221,8 +221,9 @@ bool ScriptHost::initialize(const std::filesystem::path& directory) {
     auto& h=*_impl;
     if (h.ready) return true;
     if (h.attempted) return false;
-    h.attempted=true; h.directory=std::filesystem::absolute(directory);
+    h.attempted=true;
     try {
+        h.directory=std::filesystem::absolute(directory);
 #ifdef _WIN32
         // Host modules and the CLR intentionally live until process exit.
         const auto module=LoadLibraryExW((h.directory/L"nethost.dll").c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);

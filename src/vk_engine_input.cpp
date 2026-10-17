@@ -52,6 +52,8 @@ bool VulkanEngine::process_event(const SDL_Event& e)
     ImGui_ImplSDL2_ProcessEvent(&e);
 
     if(e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) {
+        if (!_editorMode && _scriptHost && _mouseCaptured && !ImGui::GetIO().WantCaptureKeyboard)
+            _scriptHost->input().event(mirabilis::scripting::Key::Escape,true,e.key.repeat != 0);
         return true;
     }
 
@@ -126,7 +128,9 @@ bool VulkanEngine::process_event(const SDL_Event& e)
     if (!_editorMode && _scriptHost && (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP)) {
         if (const auto key = script_key(e.key.keysym.sym)) {
             const bool down = e.type == SDL_KEYDOWN;
-            if (!down || (_mouseCaptured && !ImGui::GetIO().WantCaptureKeyboard))
+            const bool modifierHeld = !down && ((*key == mirabilis::scripting::Key::Control && (e.key.keysym.mod & KMOD_CTRL)) ||
+                (*key == mirabilis::scripting::Key::Shift && (e.key.keysym.mod & KMOD_SHIFT)));
+            if (!modifierHeld && (!down || (_mouseCaptured && !ImGui::GetIO().WantCaptureKeyboard)))
                 _scriptHost->input().event(*key,down,e.key.repeat != 0);
         }
     }
