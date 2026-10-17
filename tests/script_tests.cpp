@@ -4,6 +4,15 @@
 #include <simdjson.h>
 #include <limits>
 #include <thread>
+#include <chrono>
+#include <cstdio>
+#include <iostream>
+#include <stdexcept>
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 using mirabilis::ScriptHost;
 using mirabilis::ScriptInput;
@@ -425,3 +434,123 @@ TEST_CASE("OnDestroy world and body teleports reach live dynamic targets on the 
         CHECK(run.scene.queued_command_count()==0);
     }
 }
+
+namespace {
+#ifdef _WIN32
+#define SCRIPT_TEST_FD _fileno
+#define SCRIPT_TEST_DUP _dup
+#define SCRIPT_TEST_DUP2 _dup2
+#define SCRIPT_TEST_CLOSE _close
+#else
+#define SCRIPT_TEST_FD fileno
+#define SCRIPT_TEST_DUP dup
+#define SCRIPT_TEST_DUP2 dup2
+#define SCRIPT_TEST_CLOSE close
+#endif
+struct DiagnosticConsoleCapture {
+    std::filesystem::path path=std::filesystem::temp_directory_path()/
+        ("mirabilis-script-console-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".log");
+    std::FILE* file{};
+    int out{-1},err{-1};
+    void restore() {
+        std::cout.flush();std::cerr.flush();std::fflush(nullptr);
+        if(out>=0){SCRIPT_TEST_DUP2(out,SCRIPT_TEST_FD(stdout));SCRIPT_TEST_CLOSE(out);out=-1;}
+        if(err>=0){SCRIPT_TEST_DUP2(err,SCRIPT_TEST_FD(stderr));SCRIPT_TEST_CLOSE(err);err=-1;}
+    }
+    DiagnosticConsoleCapture() {
+        file=std::fopen(path.string().c_str(),"w+b");
+        if(!file)throw std::runtime_error("Cannot create console capture");
+        std::cout.flush();std::cerr.flush();std::fflush(nullptr);
+        out=SCRIPT_TEST_DUP(SCRIPT_TEST_FD(stdout));err=SCRIPT_TEST_DUP(SCRIPT_TEST_FD(stderr));
+        if(out<0 || err<0 || SCRIPT_TEST_DUP2(SCRIPT_TEST_FD(file),SCRIPT_TEST_FD(stdout))<0 ||
+            SCRIPT_TEST_DUP2(SCRIPT_TEST_FD(file),SCRIPT_TEST_FD(stderr))<0) {
+            restore();std::fclose(file);file=nullptr;std::error_code error;std::filesystem::remove(path,error);
+            throw std::runtime_error("Cannot redirect console capture");
+        }
+    }
+    std::string finish() {
+        restore();std::rewind(file);std::string text;char chunk[8192];
+        while(const auto size=std::fread(chunk,1,sizeof(chunk),file))text.append(chunk,size);
+        if(std::ferror(file))throw std::runtime_error("Cannot read console capture");
+        return text;
+    }
+    ~DiagnosticConsoleCapture() {
+        restore();if(file)std::fclose(file);std::error_code error;std::filesystem::remove(path,error);
+    }
+};
+#undef SCRIPT_TEST_FD
+#undef SCRIPT_TEST_DUP
+#undef SCRIPT_TEST_DUP2
+#undef SCRIPT_TEST_CLOSE
+}
+
+TEST_CASE("managed diagnostic history bounds count bytes and UTF8 while console stays complete") {
+    for(const int mode:{0,1,2}) {
+        INFO(mode);Runtime run;const auto ref=run.add(script("DiagnosticFloodProbe",{{"Mode",{"int",std::to_string(mode)}}}));
+        std::string console;
+        {DiagnosticConsoleCapture capture;run.host.start();console=capture.finish();}
+        CHECK_FALSE(run.host.faulted(ref));CHECK(run.host.live_count()==1);
+        const auto& history=run.host.diagnostics();REQUIRE_FALSE(history.empty());
+        CHECK(history.size()<=256);
+        size_t bytes=0;
+        for(const auto& line:history) {
+            bytes+=line.size();CHECK(line.size()<=64*1024);CHECK(simdjson::validate_utf8(line));
+        }
+        CHECK(bytes<=1024*1024);
+        if(mode==0) {
+            CHECK(history.back().find("history-count-319")!=std::string::npos);
+            for(int i=0;i<320;++i) {
+                char marker[32];std::snprintf(marker,sizeof(marker),"history-count-%03d:",i);
+                CHECK(console.find(marker)!=std::string::npos);
+            }
+        } else if(mode==1) {
+            CHECK(history.back().find("history-byte-tail-39")!=std::string::npos);
+            for(int i=0;i<40;++i) {
+                char marker[40];std::snprintf(marker,sizeof(marker),":history-byte-tail-%02d",i);
+                CHECK(console.find(std::string(40000,'x')+marker)!=std::string::npos);
+            }
+        } else {
+            CHECK(history.back().find("history-large-3")!=std::string::npos);
+            CHECK(history.back().find("history-complete-tail-3")==std::string::npos);
+            std::string payload;for(int i=0;i<12000;++i)payload+="\xe6\xbc\xa2\xf0\x9f\x99\x82";
+            for(int i=0;i<4;++i) {
+                const auto message="history-large-"+std::to_string(i)+":"+std::string(i,'a')+payload+":history-complete-tail-"+std::to_string(i);
+                CHECK(console.find(message)!=std::string::npos);
+            }
+        }
+        std::cout<<"Diagnostic flood mode "<<mode<<": console bytes="<<console.size()<<", retained messages="<<history.size()<<", retained bytes="<<bytes<<'\n';
+    }
+}
+
+TEST_CASE("native schema cache avoids repeated errors and preserves caller state across keys") {
+    Runtime run;auto authored=script("CacheMissingType",{{"Saved",{"string",R"("retained")"}},{"Future",{"new-type","{\"opaque\":true}"}}});
+    authored.enabled=false;const auto ref=run.add(authored);
+    std::vector<std::string> errors;const auto missing=run.host.describe(authored,errors);
+    REQUIRE_FALSE(errors.empty());CHECK(missing.fields.empty());
+    const auto firstErrors=errors;const auto history=run.host.diagnostics();
+    for(int i=0;i<32;++i) {
+        auto query=authored;query.enabled=i%2==0;query.fields["Saved"]={"string","\"value-"+std::to_string(i)+"\""};
+        const auto before=query;std::vector<std::string> repeated;
+        const auto result=run.host.describe(query,repeated);
+        CHECK(result.assembly==query.assembly);CHECK(result.typeName==query.typeName);CHECK(result.enabled==query.enabled);
+        CHECK(result.fields.empty());CHECK(repeated==firstErrors);CHECK(query==before);
+    }
+    CHECK(run.host.diagnostics()==history);CHECK(*run.scene.read<Script>(ref)==authored);
+    auto valid=script("FieldProbe",{{"Number",{"float","4.5"}},{"Orphan",{"string",R"("keep")"}}});valid.enabled=false;
+    std::vector<std::string> messages;const auto first=run.host.describe(valid,messages);CHECK(messages.empty());
+    CHECK(first.assembly==valid.assembly);CHECK(first.typeName==valid.typeName);CHECK_FALSE(first.enabled);
+    REQUIRE(first.fields.contains("Number"));CHECK(first.fields.at("Number").type=="float");CHECK(canonical(first.fields.at("Number").valueJson)=="0");
+    const auto saved=valid;valid.enabled=true;valid.fields["Number"].valueJson="99";
+    messages.clear();const auto second=run.host.describe(valid,messages);CHECK(messages.empty());CHECK(second.enabled);
+    check_fields(first.fields,second.fields);CHECK(valid.fields.at("Number").valueJson=="99");CHECK(saved.fields.at("Number").valueJson=="4.5");
+    messages.clear();const auto different=run.host.describe(script("LifecycleProbe"),messages);CHECK(messages.empty());
+    CHECK(different.fields.contains("Creates"));CHECK_FALSE(different.fields.contains("Number"));
+    auto differentAssembly=authored;differentAssembly.assembly="Absent.Cache.Assembly";
+    const auto previousCount=run.host.diagnostics().size();messages.clear();const auto absent=run.host.describe(differentAssembly,messages);
+    CHECK_FALSE(messages.empty());CHECK(absent.assembly==differentAssembly.assembly);CHECK(absent.fields.empty());
+    CHECK(run.host.diagnostics().size()>previousCount);
+    messages.clear();const auto constructor=run.host.describe(script("ConstructorThrows"),messages);
+    CHECK(messages.empty());CHECK(constructor.fields.contains("VisibleField"));CHECK_FALSE(logged(run.host,"fixture-constructor"));
+    CHECK(run.host.live_count()==0);CHECK(*run.scene.read<Script>(ref)==authored);
+}
+
