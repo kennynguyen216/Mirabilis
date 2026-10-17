@@ -1710,6 +1710,14 @@ void VulkanEngine::run(){
         scriptRequire(!input.query(K::E,Q::Down,false) && !input.query(K::E,Q::Pressed,true) && input.query(K::E,Q::Released,true),"focus loss did not release held input");
         input.clear(); keyEvent(true); set_mouse_capture(false);
         scriptRequire(!input.query(K::E,Q::Down,false) && input.query(K::E,Q::Released,false),"mouse release did not release held input");
+        input.clear(); set_mouse_capture(true);
+        SDL_Event modifier{}; modifier.type = SDL_KEYDOWN; modifier.key.keysym.sym = SDLK_LCTRL;
+        process_event(modifier);
+        modifier.type = SDL_KEYUP; modifier.key.keysym.mod = KMOD_RCTRL; process_event(modifier);
+        scriptRequire(input.query(K::Control,Q::Down,false),"releasing one Control key released both");
+        modifier.key.keysym.sym = SDLK_RCTRL; modifier.key.keysym.mod = KMOD_NONE; process_event(modifier);
+        scriptRequire(!input.query(K::Control,Q::Down,false),"last Control release lost");
+        set_mouse_capture(false);
         input.clear(); ImGui::GetIO().WantCaptureKeyboard = capturedKeyboard;
         scriptState("reopened-play");
     }
