@@ -48,6 +48,7 @@ internal static unsafe class Program
         throw new Exception("Expected safe API failure " + status);
     }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static uint Valid(void* c, Ref e, byte* result) { if (result != null) *result = 1; return response; }
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static uint Pending(void* c, Ref e, byte* result) { if (result != null) *result = 0; return response; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static uint Resolve(void* c, ulong id, Ref* result) { if (result != null) *result = new Ref { Epoch = 7, Handle = 9, Id = id }; return response; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static uint GetTransform(void* c, Ref e, byte world, Trs* result) { if (result != null) *result = new Trs { Scale = new V3 { X = 1, Y = 1, Z = 1 } }; return response; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static uint SetTransform(void* c, Ref e, byte world, Trs* value) => response;
@@ -68,6 +69,55 @@ internal static unsafe class Program
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static uint Log(void* c, Text text) { logged = Encoding.UTF8.GetString(new ReadOnlySpan<byte>(text.Data, checked((int)text.Size))); return response; }
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static uint Body(void* c, Ref e, uint command, V3 value) => response;
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])] private static uint Destroy(void* c, Ref e) => response;
+    private static uint Create(ref Managed api, string type, string fields, out ulong result)
+    {
+        byte[] assembly = Encoding.UTF8.GetBytes("Mirabilis.TestScripts"), name = Encoding.UTF8.GetBytes("Mirabilis.TestScripts." + type), json = Encoding.UTF8.GetBytes(fields);
+        ulong handle = 0; uint status;
+        fixed (byte* a = assembly, n = name, j = json)
+            status = api.Create(new Ref { Epoch = 7, Handle = 9, Id = 3 }, new Text { Data = a, Size = (uint)assembly.Length }, new Text { Data = n, Size = (uint)name.Length }, new Text { Data = j, Size = (uint)json.Length }, &handle);
+        result = handle; return status;
+    }
+    private static string Read(ref Managed api, ulong handle)
+    {
+        uint required = 0;
+        Check(api.Read(handle, null, 0, &required) == Code(Status.BufferTooSmall) && required > 0, "Field getter reports required length");
+        byte[] bytes = new byte[required];
+        fixed (byte* buffer = bytes) Check(api.Read(handle, buffer, required, &required) == 0, "Field getter fills caller-owned buffer");
+        return Encoding.UTF8.GetString(bytes);
+    }
+    private static void RealInstances(ref Managed managed)
+    {
+        foreach (string phase in new[] { "", "create", "update", "fixed", "destroy" })
+        {
+            uint count = 99;
+            string fields = "{\"Fail\":{\"type\":\"string\",\"value\":\"" + phase + "\"}}";
+            uint created = Create(ref managed, "LifecycleProbe", fields, out ulong handle);
+            Check(handle != 0, "Successful construction roots instance even if OnCreate will fail: status=" + created + " log=" + logged);
+            Check(managed.Count(&count) == 0 && count == 1, "Managed handle count after construction");
+            uint createResult = managed.Invoke(handle, 0, 0);
+            Check((createResult == 0) == (phase != "create"), "OnCreate exception boundary");
+            string before = Read(ref managed, handle);
+            if (phase == "create")
+            {
+                Check(managed.Invoke(handle, 1, .01f) != 0 && managed.Invoke(handle, 2, .01f) != 0, "Faulted OnCreate suppresses later updates");
+                Check(Read(ref managed, handle) == before, "Faulted instance fields stay unchanged");
+            }
+            else
+            {
+                uint update = managed.Invoke(handle, 1, .01f);
+                Check((update == 0) == (phase != "update"), "OnUpdate exception boundary");
+                if (phase != "update") Check((managed.Invoke(handle, 2, .01f) == 0) == (phase != "fixed"), "OnFixedUpdate exception boundary");
+            }
+            uint destroyed = managed.Destroy(handle);
+            Check((destroyed == 0) == (phase != "destroy"), "OnDestroy exception boundary");
+            Check(managed.Count(&count) == 0 && count == 0, "Every final cleanup releases handle including faults");
+            Check(managed.Destroy(handle) != 0, "Final cleanup runs once");
+        }
+        Check(Create(ref managed, "ConstructorThrows", "{}", out ulong failed) != 0 && failed == 0, "Constructor failure never roots callable instance");
+        Check(Create(ref managed, "AbsentType", "{}", out failed) != 0 && failed == 0, "Missing type never roots instance");
+        uint remaining = 1; Check(managed.Count(&remaining) == 0 && remaining == 0, "Failure paths leak no handles");
+    }
+
     private static int Main()
     {
         try
@@ -86,7 +136,7 @@ internal static unsafe class Program
             var method = typeof(NativeBridge).GetMethod("Initialize", BindingFlags.Static | BindingFlags.Public)!;
             Check(method.GetCustomAttribute<UnmanagedCallersOnlyAttribute>() != null, "UCO entry");
             var initialize = (delegate* unmanaged[Cdecl]<Native*, Managed*, uint>)method.MethodHandle.GetFunctionPointer();
-            Native native = new() { Version = 1, Size = (uint)sizeof(Native), Valid = &Valid, Pending = &Valid, Resolve = &Resolve,
+            Native native = new() { Version = 1, Size = (uint)sizeof(Native), Valid = &Valid, Pending = &Pending, Resolve = &Resolve,
                 GetTransform = &GetTransform, SetTransform = &SetTransform, GetName = &GetName, SetName = &SetName,
                 Input = &Input, Log = &Log, Body = &Body, Destroy = &Destroy };
             Managed managed = default;
@@ -120,10 +170,14 @@ internal static unsafe class Program
                 Throws(() => entity.RigidBody.AddImpulse(new Vec3(1, 2, 3)), status); Throws(() => entity.Destroy(), status);
             }
             response = 0;
+            RealInstances(ref managed);
             Console.WriteLine($"Managed ABI checks passed: {assertions} assertions"); return 0;
         }
         catch (Exception error) { Console.Error.WriteLine(error); return 1; }
     }
 }
+
+
+
 
 
