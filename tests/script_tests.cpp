@@ -485,18 +485,20 @@ struct DiagnosticConsoleCapture {
 }
 
 TEST_CASE("managed diagnostic history bounds count bytes and UTF8 while console stays complete") {
-    for(const int mode:{0,1,2}) {
+    for(const int mode:{0,1,2,3}) {
         INFO(mode);Runtime run;const auto ref=run.add(script("DiagnosticFloodProbe",{{"Mode",{"int",std::to_string(mode)}}}));
         std::string console;
         {DiagnosticConsoleCapture capture;run.host.start();console=capture.finish();}
         CHECK_FALSE(run.host.faulted(ref));CHECK(run.host.live_count()==1);
         const auto& history=run.host.diagnostics();REQUIRE_FALSE(history.empty());
         CHECK(history.size()<=256);
-        size_t bytes=0;
+        size_t bytes=0,capacity=0;
         for(const auto& line:history) {
             bytes+=line.size();CHECK(line.size()<=64*1024);CHECK(simdjson::validate_utf8(line));
+            capacity+=line.capacity();CHECK(line.capacity()<=2*64*1024);
         }
         CHECK(bytes<=1024*1024);
+        CHECK(capacity<=2*1024*1024);
         if(mode==0) {
             CHECK(history.back().find("history-count-319")!=std::string::npos);
             for(int i=0;i<320;++i) {
@@ -509,7 +511,7 @@ TEST_CASE("managed diagnostic history bounds count bytes and UTF8 while console 
                 char marker[40];std::snprintf(marker,sizeof(marker),":history-byte-tail-%02d",i);
                 CHECK(console.find(std::string(40000,'x')+marker)!=std::string::npos);
             }
-        } else {
+        } else if(mode==2) {
             CHECK(history.back().find("history-large-3")!=std::string::npos);
             CHECK(history.back().find("history-complete-tail-3")==std::string::npos);
             std::string payload;for(int i=0;i<12000;++i)payload+="\xe6\xbc\xa2\xf0\x9f\x99\x82";
@@ -517,8 +519,14 @@ TEST_CASE("managed diagnostic history bounds count bytes and UTF8 while console 
                 const auto message="history-large-"+std::to_string(i)+":"+std::string(i,'a')+payload+":history-complete-tail-"+std::to_string(i);
                 CHECK(console.find(message)!=std::string::npos);
             }
+        } else {
+            CHECK(history.back().find("history-giant-latest:")!=std::string::npos);
+            CHECK(history.back().find("history-giant-complete-tail")==std::string::npos);
+            std::string payload;for(int i=0;i<310000;++i)payload+="\xe6\xbc\xa2\xf0\x9f\x99\x82";
+            REQUIRE(payload.size()>=2*1024*1024);
+            CHECK(console.find("history-giant-latest:"+payload+":history-giant-complete-tail")!=std::string::npos);
         }
-        std::cout<<"Diagnostic flood mode "<<mode<<": console bytes="<<console.size()<<", retained messages="<<history.size()<<", retained bytes="<<bytes<<'\n';
+        std::cout<<"Diagnostic flood mode "<<mode<<": console bytes="<<console.size()<<", retained messages="<<history.size()<<", retained bytes="<<bytes<<", retained capacity="<<capacity<<'\n';
     }
 }
 
