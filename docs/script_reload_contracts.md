@@ -6,7 +6,7 @@ The lead owns this extension serially; preserve the user's modified demo and
 .last_scene byte-for-byte. Builds and scratch evidence stay outside OneDrive.
 
 Reload runs on the main thread between frames, never inside a callback. Compile
-SampleScripts asynchronously into a separate generation directory when its source
+user projects under scripting/ asynchronously into a separate generation directory when their source
 changes, with a manual Build & Reload action too. Compilation failures leave the
 current instances running. Never deploy over loaded ScriptCore or native binaries.
 

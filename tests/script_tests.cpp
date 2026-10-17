@@ -624,16 +624,21 @@ TEST_CASE("automatic source rebuild continues Play and compilation failure prese
     {std::ofstream file(project);file<<"<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework><AssemblyName>Mirabilis.ReloadProbe</AssemblyName><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><DefineConstants>RELOAD_1</DefineConstants></PropertyGroup><ItemGroup><Reference Include=\"Mirabilis.ScriptCore\"><HintPath>"<<std::filesystem::path(MIRABILIS_TEST_MANAGED_DIR).generic_string()<<"/Mirabilis.ScriptCore.dll</HintPath></Reference></ItemGroup></Project>";}
     const auto source=scratch/"Probe.cs";auto code=ecs_test::read_file(std::filesystem::path(MIRABILIS_TEST_SOURCE_DIR)/"tests/managed/Mirabilis.ReloadProbe/Probe.cs");
     {std::ofstream file(source);file<<code;}
-    run.host.watch_project(project,scratch/"build",MIRABILIS_SCRIPT_DOTNET,MIRABILIS_TEST_CONFIGURATION);
+    std::filesystem::create_directories(scratch/"Helper");
+    {std::ofstream file(scratch/"Helper/Helper.csproj");file<<"<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>";}
+    {std::ofstream file(scratch/"Helper/Helper.cs");file<<"internal static class Helper {}";}
+    run.host.watch_project(scratch,std::filesystem::path(scratch.string()+"-build"),MIRABILIS_SCRIPT_DOTNET,MIRABILIS_TEST_CONFIGURATION);
     code.replace(code.find("++Updates;"),10,"Updates += 100;");
     {std::ofstream file(source);file<<code;}
     const auto epoch=run.scene.epoch();int frames=0;
     const auto awaitBuild=[&](bool expectedSuccess) {
         const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(90);
+        bool started=false;
         while(std::chrono::steady_clock::now()<deadline) {
             const bool reloaded=run.host.poll_reload();
             if(reloaded) return expectedSuccess;
-            if(run.host.reload_status().starts_with("C# build failed")) return !expectedSuccess;
+            if(run.host.reload_status().starts_with("Compiling")) started=true;
+            if(started && run.host.reload_status().starts_with("C# build failed")) return !expectedSuccess;
             run.host.update(.01f);++frames;std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         return false;
@@ -645,5 +650,19 @@ TEST_CASE("automatic source rebuild continues Play and compilation failure prese
     REQUIRE_MESSAGE(awaitBuild(false),run.host.reload_status());
     updates=field_int(run.scene,ref,"Updates");run.host.update(.01f);CHECK(field_int(run.scene,ref,"Updates")==updates+100);
     CHECK(run.scene.epoch()==epoch);CHECK(run.host.live_count()==1);CHECK_FALSE(logged(run.host,"reload-destroy"));
+    {std::ofstream file(source);file<<code<<"\n// fixed compile error\n";}
+    REQUIRE_MESSAGE(awaitBuild(true),run.host.reload_status());
+    updates=field_int(run.scene,ref,"Updates");run.host.update(.01f);CHECK(field_int(run.scene,ref,"Updates")==updates+100);
+    CHECK(field_int(run.scene,ref,"Creates")==1);CHECK(run.scene.epoch()==epoch);
+}
+
+TEST_CASE("reload revives faulted instances without repeating creation") {
+    Runtime run;const auto variant=[](int n) {return std::filesystem::path(MIRABILIS_TEST_RELOAD_DIR)/("v"+std::to_string(n))/MIRABILIS_TEST_CONFIGURATION;};
+    REQUIRE(run.host.reload(variant(1)));run.scene.import_object("target",0);
+    const auto ref=run.add({"Mirabilis.ReloadProbe","Mirabilis.ReloadProbe.LiveProbe",true,{{"Target",{"entity","0"}},{"ThrowNext",{"bool","true"}}}});
+    run.host.start();run.host.update(.01f);REQUIRE(run.host.faulted(ref));
+    REQUIRE(run.host.reload(variant(2)));CHECK_FALSE(run.host.faulted(ref));
+    run.host.update(.01f);CHECK(field_int(run.scene,ref,"Updates")==10);CHECK(field_int(run.scene,ref,"Creates")==1);
+    CHECK_FALSE(logged(run.host,"reload-destroy"));
 }
 

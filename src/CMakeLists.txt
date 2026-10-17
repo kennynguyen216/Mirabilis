@@ -55,7 +55,7 @@ target_compile_definitions(mirabilis_core PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_include_directories(mirabilis_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_include_directories(mirabilis_core PRIVATE "${DOTNET_HOST_NATIVE}")
 target_compile_definitions(mirabilis_core PUBLIC
-  MIRABILIS_SCRIPT_PROJECT="${PROJECT_SOURCE_DIR}/scripting/Mirabilis.SampleScripts/Mirabilis.SampleScripts.csproj"
+  MIRABILIS_SCRIPT_PROJECT="${PROJECT_SOURCE_DIR}/scripting"
   MIRABILIS_SCRIPT_RELOAD_BUILD="${CMAKE_BINARY_DIR}/script-reload/$<CONFIG>"
   MIRABILIS_SCRIPT_DOTNET="${DOTNET_EXECUTABLE}"
   MIRABILIS_SCRIPT_CONFIGURATION="$<CONFIG>")

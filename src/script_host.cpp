@@ -85,6 +85,9 @@ struct ScriptHost::Impl {
     std::chrono::steady_clock::time_point lastScan{},lastChange{};
     bool automatic{true},buildRequested{};
     uint64_t buildGeneration{};
+    std::vector<std::filesystem::path> buildProjects;
+    size_t buildProjectIndex{};
+    bool continueBuild{};
 #ifdef _WIN32
     struct BuildJob {
         HANDLE process{},job{};
@@ -94,8 +97,9 @@ struct ScriptHost::Impl {
 #endif
     SourceStamp source_stamp() const {
         SourceStamp result;
-        for (auto it=std::filesystem::recursive_directory_iterator(project.parent_path());it!=std::filesystem::recursive_directory_iterator();++it) {
-            if (it->is_directory() && (it->path().filename()=="bin" || it->path().filename()=="obj")) { it.disable_recursion_pending(); continue; }
+        const auto root=std::filesystem::is_directory(project) ? project : project.parent_path();
+        for (auto it=std::filesystem::recursive_directory_iterator(root);it!=std::filesystem::recursive_directory_iterator();++it) {
+            if (it->is_directory() && (it->path().filename()=="bin" || it->path().filename()=="obj" || it->path().filename()=="Mirabilis.ScriptCore")) { it.disable_recursion_pending(); continue; }
             const auto extension=it->path().extension();
             if (it->is_regular_file() && (extension==".cs" || extension==".csproj" || extension==".props"))
                 result[it->path()]={it->last_write_time(),it->file_size()};
@@ -404,7 +408,7 @@ ScriptInput& ScriptHost::input() { return _impl->input; }
 const NativeApi& ScriptHost::native_api() const { return _impl->native; }
 bool ScriptHost::reload(const std::filesystem::path& directory) {
     auto& h=*_impl;
-    if (!h.ready || h.callback || std::this_thread::get_id()!=h.mainThread) return false;
+    if (std::this_thread::get_id()!=h.mainThread || !h.ready || h.callback) return false;
     const auto encoded=std::filesystem::absolute(directory).u8string();
     const std::string path(reinterpret_cast<const char*>(encoded.data()),encoded.size());
     Impl::Scope scope(h); h.reloading=true;
@@ -421,7 +425,7 @@ bool ScriptHost::reload(const std::filesystem::path& directory) {
 void ScriptHost::watch_project(const std::filesystem::path& project,const std::filesystem::path& buildDirectory,const std::filesystem::path& dotnet,std::string configuration) {
     auto& h=*_impl;
     h.project=std::filesystem::absolute(project); h.dotnet=dotnet; h.configuration=std::move(configuration);
-    h.buildRoot=std::filesystem::absolute(buildDirectory)/("session-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    h.buildRoot=std::filesystem::absolute(buildDirectory).lexically_normal()/("session-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     try { h.sources=h.source_stamp(); h.reloadStatus="Watching scripts; save a C# file to rebuild and reload"; }
     catch (const std::exception& e) { h.reloadStatus=e.what(); }
 }
@@ -431,7 +435,7 @@ void ScriptHost::set_auto_reload(bool value) { _impl->automatic=value; }
 const std::string& ScriptHost::reload_status() const { return _impl->reloadStatus; }
 bool ScriptHost::poll_reload() {
     auto& h=*_impl;
-    if (!h.ready || h.project.empty() || h.callback || std::this_thread::get_id()!=h.mainThread) return false;
+    if (std::this_thread::get_id()!=h.mainThread || !h.ready || h.project.empty() || h.callback) return false;
     const auto now=std::chrono::steady_clock::now();
     if (now-h.lastScan<std::chrono::milliseconds(250)) return false;
     h.lastScan=now;
@@ -442,6 +446,8 @@ bool ScriptHost::poll_reload() {
         if (h.build) {
             if (WaitForSingleObject(h.build->process,0)!=WAIT_OBJECT_0) return false;
             DWORD exitCode=1; GetExitCodeProcess(h.build->process,&exitCode); h.build.reset();
+            if (!exitCode && !h.buildRequested && ++h.buildProjectIndex<h.buildProjects.size()) h.continueBuild=true;
+            else {
             bool changed=false;
             if (!exitCode && !h.buildRequested) changed=reload(h.buildStage);
             if (changed) {
@@ -459,9 +465,16 @@ bool ScriptHost::poll_reload() {
                 }
             }
             return changed;
+            }
         }
+        if (!h.continueBuild) {
         if (!h.buildRequested || now-h.lastChange<std::chrono::milliseconds(350)) return false;
         h.buildRequested=false;
+        h.buildProjects.clear(); h.buildProjectIndex=0;
+        if (std::filesystem::is_directory(h.project)) {
+            for (const auto& [path,stamp]:h.sources) if (path.extension()==".csproj") h.buildProjects.push_back(path);
+        } else h.buildProjects.push_back(h.project);
+        if (h.buildProjects.empty()) throw std::runtime_error("No C# script projects found");
         h.buildStage=h.buildRoot/("generation-"+std::to_string(++h.buildGeneration));
         std::filesystem::create_directories(h.buildStage);
         for (const auto& entry:std::filesystem::directory_iterator(h.directory)) {
@@ -469,19 +482,21 @@ bool ScriptHost::poll_reload() {
             if (entry.is_regular_file() && (entry.path().extension()==".dll" || entry.path().extension()==".pdb" || name.ends_with(".deps.json")))
                 std::filesystem::copy_file(entry.path(),h.buildStage/entry.path().filename(),std::filesystem::copy_options::overwrite_existing);
         }
+        }
+        h.continueBuild=false;
         auto job=std::make_unique<Impl::BuildJob>();
         job->job=CreateJobObjectW(nullptr,nullptr);
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{}; limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         if (!job->job || !SetInformationJobObject(job->job,JobObjectExtendedLimitInformation,&limits,sizeof(limits))) throw std::runtime_error("Cannot create script compiler job");
         SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES),nullptr,TRUE};
-        const auto output=CreateFileW((h.buildStage/L"build.log").c_str(),GENERIC_WRITE,FILE_SHARE_READ,&security,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+        const auto output=CreateFileW((h.buildStage/L"build.log").c_str(),FILE_APPEND_DATA,FILE_SHARE_READ,&security,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
         const auto input=CreateFileW(L"NUL",GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,&security,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
         if (output==INVALID_HANDLE_VALUE || input==INVALID_HANDLE_VALUE) {
             if (output!=INVALID_HANDLE_VALUE) CloseHandle(output); if (input!=INVALID_HANDLE_VALUE) CloseHandle(input);
             throw std::runtime_error("Cannot open script compiler output");
         }
         const auto quote=[](const std::filesystem::path& path) { return L"\""+path.wstring()+L"\""; };
-        std::wstring command=quote(h.dotnet)+L" build "+quote(h.project)+L" -c "+std::wstring(h.configuration.begin(),h.configuration.end())+
+        std::wstring command=quote(h.dotnet)+L" build "+quote(h.buildProjects[h.buildProjectIndex])+L" -c "+std::wstring(h.configuration.begin(),h.configuration.end())+
             L" --artifacts-path "+quote(h.buildStage/L"intermediates")+L" --output "+quote(h.buildStage)+L" --ignore-failed-sources --disable-build-servers -p:NuGetAudit=false";
         STARTUPINFOW startup{}; startup.cb=sizeof(startup); startup.dwFlags=STARTF_USESTDHANDLES;
         startup.hStdOutput=startup.hStdError=output; startup.hStdInput=input;
