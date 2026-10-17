@@ -8,6 +8,25 @@
 #include "imgui_impl_sdl2.h"
 #include "ImGuizmo.h"
 
+namespace {
+std::optional<mirabilis::scripting::Key> script_key(SDL_Keycode key) {
+    using mirabilis::scripting::Key;
+    switch (key) {
+        case SDLK_w: return Key::W; case SDLK_a: return Key::A;
+        case SDLK_s: return Key::S; case SDLK_d: return Key::D;
+        case SDLK_SPACE: return Key::Space;
+        case SDLK_LCTRL: case SDLK_RCTRL: return Key::Control;
+        case SDLK_LSHIFT: case SDLK_RSHIFT: return Key::Shift;
+        case SDLK_e: return Key::E; case SDLK_f: return Key::F;
+        case SDLK_q: return Key::Q; case SDLK_r: return Key::R;
+        case SDLK_ESCAPE: return Key::Escape; case SDLK_RETURN: return Key::Enter;
+        case SDLK_UP: return Key::Up; case SDLK_DOWN: return Key::Down;
+        case SDLK_LEFT: return Key::Left; case SDLK_RIGHT: return Key::Right;
+        default: return std::nullopt;
+    }
+}
+}
+
 bool VulkanEngine::process_event(const SDL_Event& e)
 {
     // Close the window when the user presses Alt+F4 or clicks the X.
@@ -16,6 +35,7 @@ bool VulkanEngine::process_event(const SDL_Event& e)
     }
 
     if(e.type == SDL_WINDOWEVENT) {
+        if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST && _scriptHost) _scriptHost->input().focus_lost();
         if(e.window.event == SDL_WINDOWEVENT_MINIMIZED){
             stop_rendering = true;
         }
@@ -101,6 +121,14 @@ bool VulkanEngine::process_event(const SDL_Event& e)
         save_editor_scene();
         _playerInput.backward = false;
         return false;
+    }
+
+    if (!_editorMode && _scriptHost && (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP)) {
+        if (const auto key = script_key(e.key.keysym.sym)) {
+            const bool down = e.type == SDL_KEYDOWN;
+            if (!down || (_mouseCaptured && !ImGui::GetIO().WantCaptureKeyboard))
+                _scriptHost->input().event(*key,down,e.key.repeat != 0);
+        }
     }
 
     if (!_editorMode &&

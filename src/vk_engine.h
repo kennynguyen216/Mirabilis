@@ -1087,6 +1087,8 @@ class VulkanEngine{
             TimeTrialRole timeTrialRole = TimeTrialRole::None);
         SceneObjectID import_gltf_actor(std::string_view modelPath);
         void set_mouse_capture(bool captured);
+        void prepare_scripts();
+        void start_scripts();
         void set_editor_mode(bool enabled);
         const Camera& render_camera() const;
         void retract_portals();

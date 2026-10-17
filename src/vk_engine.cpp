@@ -123,7 +123,29 @@ void VulkanEngine::sync_physics_world()
         if (SDL_getenv("MIRABILIS_TEST_FRAMES")) std::abort();
     }
     stats.physics_body_count = static_cast<uint32_t>(_physicsWorld.body_count());
+    stats.script_instance_count = _scriptHost ? static_cast<uint32_t>(_scriptHost->live_count()) : 0;
     reset_physics_render_history();
+    prepare_scripts();
+}
+
+void VulkanEngine::prepare_scripts()
+{
+    if (!_scriptHost && _scene.registry().view<Script>().empty()) return;
+    if (!_scriptHost) {
+        _scriptHost = std::make_shared<mirabilis::ScriptHost>();
+        _scriptHost->bind(_scene,_physicsWorld);
+    }
+    if (!_scriptHost->available()) {
+        char* base = SDL_GetBasePath();
+        _scriptHost->initialize(base ? std::filesystem::path(base) : std::filesystem::current_path());
+        SDL_free(base);
+    }
+}
+
+void VulkanEngine::start_scripts()
+{
+    prepare_scripts();
+    if (_scriptHost) _scriptHost->start();
 }
 
 void VulkanEngine::take_play_snapshot()
@@ -172,6 +194,7 @@ bool VulkanEngine::install_staged_scene(StagedScene&& staging)
         fmt::print("Invalid editor scene: {}\n", error); return false;
     }
     VK_CHECK(vkDeviceWaitIdle(_device));
+    if (_scriptHost) _scriptHost->stop();
     _scene.replace(std::move(staging.scene), [&](EntityRef ref) {
         _physicsWorld.remove(ref);
         cleanup_scene_entity(ref);
@@ -211,6 +234,7 @@ bool VulkanEngine::install_staged_scene(StagedScene&& staging)
     respawn_player();
     sync_physics_world();
     rebuild_collision_from_scene();
+    if (!_editorMode) start_scripts();
     return true;
 }
 
@@ -218,6 +242,7 @@ bool VulkanEngine::restore_play_snapshot()
 {
     if (!_playSnapshot) return true;
     VK_CHECK(vkDeviceWaitIdle(_device));
+    if (_scriptHost) _scriptHost->stop();
     if (!_scene.restore_snapshot(_playSnapshot->entities, [&](EntityRef ref) {
         const auto material = _sceneMaterialRuntimes.find(ref.persistentId);
         const auto render = _sceneRenderRuntimes.find(ref.persistentId);
@@ -269,6 +294,7 @@ void VulkanEngine::reset_play()
     if (_editorMode || !restore_play_snapshot()) return;
     _playerStep.accumulator = 0;
     _playerInput.jumpPressed = false;
+    start_scripts();
     fmt::print("ECS Reset Play complete: epoch={}\n", _scene.epoch());
 }
 
@@ -552,6 +578,7 @@ void VulkanEngine::set_mouse_capture(bool captured)
     SDL_SetRelativeMouseMode(captured ? SDL_TRUE : SDL_FALSE);
 
     if (!captured) {
+        if (_scriptHost) _scriptHost->input().focus_lost();
         _playerInput.forward = false;
         _playerInput.backward = false;
         _playerInput.left = false;
@@ -571,6 +598,8 @@ void VulkanEngine::set_editor_mode(bool enabled)
     } else take_play_snapshot();
     _editorMode = enabled;
     sync_physics_world();
+    if (_scriptHost) _scriptHost->input().clear();
+    if (!enabled) start_scripts();
     if (enabled) {
         _noClip.enabled = false;
         _noClip.up = false;
@@ -825,6 +854,7 @@ void VulkanEngine::init_sync_structures()
 
 void VulkanEngine::cleanup()
 {
+    if (_scriptHost) _scriptHost->shutdown();
     if(_isInitialized) {
         vkDeviceWaitIdle(_device);
         destroy_path_trace();
@@ -1610,6 +1640,47 @@ void VulkanEngine::run(){
         set_mouse_capture(false);
         physicsPhase = "awake";
     }
+    const bool testScripts = frameLimit && SDL_getenv("MIRABILIS_TEST_SCRIPT_LIFECYCLE");
+    PersistentID scriptBox = InvalidSceneObject;
+    size_t scriptSandboxBodies = 0, scriptSandboxInstances = 0;
+    const auto scriptRequire = [](bool condition,const char* reason) {
+        if (!condition) { fmt::print(stderr,"SCRIPT FAIL: {}\n",reason); std::abort(); }
+    };
+    const auto scriptState = [&](const char* stage) {
+        const auto ref = _scene.get(scriptBox);
+        const auto* transform = _scene.read<Transform>(ref);
+        const auto* script = _scene.read<Script>(ref);
+        fmt::print("SCRIPT state={} frame={} epoch={} bodies={} scripts={} x={} y={} force={}\n",stage,_frameNumber,_scene.epoch(),
+            _physicsWorld.body_count(),_scriptHost ? _scriptHost->live_count() : 0,
+            transform ? transform->position.x : 0,transform ? transform->position.y : 0,
+            script && script->fields.contains("Force") ? script->fields.at("Force").valueJson : "none");
+    };
+    if (testScripts) {
+        scriptRequire(!testPhysics && frameLimit >= 265,"script lifecycle needs >=265 frames and a separate physics run");
+        scriptRequire(SDL_getenv("MIRABILIS_TEST_SCENE_DIRECTORY") != nullptr,"scratch directory required");
+        set_editor_mode(true);
+        const auto demoName = _sceneDocument.activeFilename;
+        scriptRequire(load_editor_scene_named("sandbox.json"),"cannot load sandbox baseline");
+        scriptSandboxBodies = _physicsWorld.body_count();
+        scriptSandboxInstances = _scriptHost ? _scriptHost->live_count() : 0;
+        scriptRequire(scriptSandboxInstances == 0,"sandbox unexpectedly has scripts");
+        scriptState("sandbox-baseline");
+        scriptRequire(load_editor_scene_named(demoName),"cannot reopen scripted demo");
+        for (const auto ref : _scene.creation_order()) if (_scene.has<Script>(ref)) scriptBox = ref.persistentId;
+        const auto ref = _scene.get(scriptBox);
+        scriptRequire(_scene.valid(ref),"demo has no script");
+        auto script = *_scene.read<Script>(ref);
+        script.fields["Force"] = {"vec3","[4,0,0]"};
+        scriptRequire(_scene.set(ref,script),"edit of Force failed");
+        _sceneDocument.dirty = true;
+        scriptRequire(save_editor_scene_as("scripting_gate_saved.json"),"scratch save failed");
+        scriptRequire(load_editor_scene_named("scripting_gate_saved.json"),"scratch reopen failed");
+        scriptRequire(_scene.read<Script>(_scene.get(scriptBox))->fields.at("Force").valueJson == "[4,0,0]","saved Force lost");
+        scriptRequire(_scriptHost && _scriptHost->available() && _scriptHost->live_count() == 0,"editor must have no instances");
+        set_editor_mode(false); set_mouse_capture(false);
+        scriptRequire(_scriptHost->live_count() == 1,"Play did not create one script instance");
+        scriptState("reopened-play");
+    }
     auto previousTime = std::chrono::steady_clock::now();
 
     //main loop
@@ -1646,6 +1717,41 @@ void VulkanEngine::run(){
             resize_swapchain();
             if (stop_rendering) {
                 continue;
+            }
+        }
+
+        if (testScripts) {
+            deltaTime = PlayerMovementDt;
+            if (_frameNumber == 180) {
+                const auto ref = _scene.get(scriptBox);
+                const auto position = _scene.read<Transform>(ref)->position;
+                scriptRequire(position.x > .1f && position.y > .3f && position.y < 1.2f,"scripted box did not move and collide with floor");
+                scriptRequire(!_scriptHost->faulted(ref),"PushBox faulted");
+                scriptState("floor-contact");
+                _scene.edit<Script>(ref,true)->fields["Force"].valueJson = "[99,0,0]";
+                reset_play();
+                scriptRequire(_scriptHost->live_count() == 1,"Reset leaked or lost an instance");
+                scriptRequire(_scene.read<Script>(_scene.get(scriptBox))->fields.at("Force").valueJson == "[4,0,0]","Reset did not restore authored Force");
+                scriptState("reset");
+            }
+            if (_frameNumber == 200) {
+                set_editor_mode(true);
+                scriptRequire(_scriptHost->live_count() == 0,"leaving Play leaked instances");
+                scriptRequire(_scene.read<Script>(_scene.get(scriptBox))->fields.at("Force").valueJson == "[4,0,0]","leaving Play lost authored Force");
+                scriptState("edit-restored");
+            }
+            if (_frameNumber == 220) {
+                scriptRequire(load_editor_scene_named("scripting_gate_saved.json"),"second scratch reopen failed");
+                set_editor_mode(false); set_mouse_capture(false);
+                scriptRequire(_scriptHost->live_count() == 1,"reopened Play instance count mismatch");
+                scriptState("second-play");
+            }
+            if (_frameNumber == 250) {
+                scriptRequire(load_editor_scene_named("sandbox.json"),"sandbox replacement failed");
+                scriptRequire(_physicsWorld.body_count() == scriptSandboxBodies,"sandbox body count differs from baseline");
+                scriptRequire(_scriptHost->live_count() == scriptSandboxInstances,"sandbox script count differs from baseline");
+                scriptState("sandbox-replaced");
+                fmt::print("SCRIPT lifecycle PASS: scratch edit/save/reopen/run, force/floor, reset, leave, sandbox bodies={} scripts={}\n",scriptSandboxBodies,scriptSandboxInstances);
             }
         }
 
@@ -1733,6 +1839,8 @@ void VulkanEngine::run(){
             // sweep through however far the editor camera was turned.
             _playerStep.previousPlayerYaw = mainCamera.yaw;
         } else {
+            if (_scriptHost && (!_mouseCaptured || ImGui::GetIO().WantCaptureKeyboard ||
+                !(SDL_GetWindowFlags(_window) & SDL_WINDOW_INPUT_FOCUS))) _scriptHost->input().focus_lost();
             _playerStep.accumulator = std::min(
                 _playerStep.accumulator + deltaTime,
                 PlayerMovementDt * static_cast<float>(MaxPlayerMovementSteps));
@@ -1753,6 +1861,7 @@ void VulkanEngine::run(){
                     _playerStep.targetPlayerYaw,
                     static_cast<float>(stepIndex) /
                         static_cast<float>(stepCount));
+                if (_scriptHost) _scriptHost->fixed_update(PlayerMovementDt);
                 _scene.apply_commands();
                 update_player_movement(PlayerMovementDt);
                 sync_physics_world();
@@ -1761,6 +1870,8 @@ void VulkanEngine::run(){
                 _playerStep.accumulator -= PlayerMovementDt;
             }
             _playerStep.previousPlayerYaw = _playerStep.targetPlayerYaw;
+            if (_scriptHost) _scriptHost->update(deltaTime);
+            drain_scene_destruction();
         }
 
         ImGui_ImplVulkan_NewFrame();

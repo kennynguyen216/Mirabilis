@@ -1,0 +1,322 @@
+{
+  "version": 2,
+  "nextActor": 1,
+  "nextPersistentId": 5,
+  "objects": [
+    {
+      "id": 0,
+      "parent": null,
+      "siblingIndex": 0,
+      "components": {
+        "name": {
+          "value": "Sandbox"
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "asset": "empty",
+          "modelPath": ""
+        },
+        "collider": {
+          "enabled": false,
+          "shape": 0,
+          "center": [
+            0,
+            0,
+            0
+          ],
+          "halfExtents": [
+            0.5,
+            0.5,
+            0.5
+          ]
+        }
+      }
+    },
+    {
+      "id": 1,
+      "parent": 0,
+      "siblingIndex": 0,
+      "components": {
+        "name": {
+          "value": "Floor"
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            20,
+            1,
+            20
+          ]
+        },
+        "mesh": {
+          "asset": "floor",
+          "modelPath": ""
+        },
+        "collider": {
+          "enabled": true,
+          "shape": 1,
+          "center": [
+            0,
+            0,
+            0
+          ],
+          "halfExtents": [
+            0.5,
+            0.5,
+            0.5
+          ]
+        },
+        "material": {
+          "enabled": true,
+          "tint": [
+            0.55,
+            0.55,
+            0.55,
+            1
+          ],
+          "roughness": 0.8
+        }
+      }
+    },
+    {
+      "id": 2,
+      "parent": 0,
+      "siblingIndex": 1,
+      "components": {
+        "name": {
+          "value": "Static obstacle"
+        },
+        "transform": {
+          "position": [
+            2,
+            0.5,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            3
+          ]
+        },
+        "mesh": {
+          "asset": "cube",
+          "modelPath": ""
+        },
+        "collider": {
+          "enabled": true,
+          "shape": 0,
+          "center": [
+            0,
+            0,
+            0
+          ],
+          "halfExtents": [
+            0.5,
+            0.5,
+            0.5
+          ]
+        },
+        "material": {
+          "enabled": true,
+          "tint": [
+            0.15,
+            0.3,
+            0.55,
+            1
+          ],
+          "roughness": 0.8
+        }
+      }
+    },
+    {
+      "id": 3,
+      "parent": null,
+      "siblingIndex": 1,
+      "components": {
+        "name": {
+          "value": "Falling box"
+        },
+        "transform": {
+          "position": [
+            0,
+            5,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "asset": "cube",
+          "modelPath": ""
+        },
+        "collider": {
+          "enabled": true,
+          "shape": 0,
+          "center": [
+            0,
+            0,
+            0
+          ],
+          "halfExtents": [
+            0.5,
+            0.5,
+            0.5
+          ]
+        },
+        "material": {
+          "enabled": true,
+          "tint": [
+            0.85,
+            0.18,
+            0.04,
+            1
+          ],
+          "roughness": 0.8
+        },
+        "rigidBody": {
+          "motion": "Dynamic",
+          "mass": 2,
+          "friction": 0.5,
+          "restitution": 0,
+          "gravityFactor": 1
+        },
+        "script": {
+          "assembly": "Mirabilis.SampleScripts",
+          "type": "Mirabilis.SampleScripts.PushBox",
+          "enabled": true,
+          "fields": {
+            "Force": {
+              "type": "vec3",
+              "value": [
+                1.5,
+                0,
+                0
+              ]
+            },
+            "Impulse": {
+              "type": "vec3",
+              "value": [
+                0,
+                4,
+                0
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "parent": 0,
+      "siblingIndex": 2,
+      "components": {
+        "name": {
+          "value": "Spawn point"
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            9
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "asset": "empty",
+          "modelPath": ""
+        },
+        "collider": {
+          "enabled": false,
+          "shape": 0,
+          "center": [
+            0,
+            0,
+            0
+          ],
+          "halfExtents": [
+            0.5,
+            0.5,
+            0.5
+          ]
+        },
+        "timeTrialRole": {
+          "role": "spawn"
+        }
+      }
+    }
+  ],
+  "authoredPortals": [],
+  "referenceLighting": {
+    "sunRadiance": [
+      1,
+      1,
+      1
+    ],
+    "environmentIntensity": 1,
+    "blackEnvironment": false
+  },
+  "colorGrading": {
+    "warmth": 0,
+    "tint": 0,
+    "giSaturation": 1
+  },
+  "lighting": {
+    "skybox": "qwantani_noon",
+    "sunDirection": [
+      -0.35,
+      0.85,
+      0.25
+    ],
+    "shadowsEnabled": true,
+    "shadowRadius": 20,
+    "shadowDepthBias": 0.0012,
+    "shadowNormalBias": 0.15
+  }
+}

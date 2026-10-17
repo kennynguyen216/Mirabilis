@@ -1,13 +1,65 @@
-add_library(mirabilis_core STATIC scene.cpp scene_math.cpp scene_queries.cpp scene_serialization.cpp player_movement.cpp physics_world.cpp)
+find_program(DOTNET_EXECUTABLE dotnet REQUIRED)
+get_filename_component(DOTNET_ROOT "${DOTNET_EXECUTABLE}" DIRECTORY)
+file(GLOB DOTNET_HOST_PACKS "${DOTNET_ROOT}/packs/Microsoft.NETCore.App.Host.win-x64/10.0.*")
+list(SORT DOTNET_HOST_PACKS COMPARE NATURAL ORDER DESCENDING)
+if(NOT DOTNET_HOST_PACKS)
+  message(FATAL_ERROR "Install the x64 .NET 10 SDK, including Microsoft.NETCore.App.Host.win-x64")
+endif()
+list(GET DOTNET_HOST_PACKS 0 DOTNET_HOST_PACK)
+set(DOTNET_HOST_NATIVE "${DOTNET_HOST_PACK}/runtimes/win-x64/native")
+message(STATUS "Using .NET hosting pack: ${DOTNET_HOST_PACK}")
+set(MIRABILIS_MANAGED_DIR "${CMAKE_BINARY_DIR}/managed/$<CONFIG>")
+add_custom_target(mirabilis_managed ALL
+  COMMAND "${DOTNET_EXECUTABLE}" build "${PROJECT_SOURCE_DIR}/scripting/Mirabilis.SampleScripts/Mirabilis.SampleScripts.csproj"
+    -c $<CONFIG> --artifacts-path "${CMAKE_BINARY_DIR}/dotnet" --output "${MIRABILIS_MANAGED_DIR}" --ignore-failed-sources -p:NuGetAudit=false
+  VERBATIM)
+if(BUILD_TESTING)
+  foreach(PROJECT Mirabilis.TestScripts Mirabilis.ScriptTests)
+    add_custom_command(TARGET mirabilis_managed POST_BUILD
+      COMMAND "${DOTNET_EXECUTABLE}" build "${PROJECT_SOURCE_DIR}/tests/managed/${PROJECT}/${PROJECT}.csproj"
+        -c $<CONFIG> --artifacts-path "${CMAKE_BINARY_DIR}/dotnet" --output "${MIRABILIS_MANAGED_DIR}" --ignore-failed-sources -p:NuGetAudit=false
+      VERBATIM)
+  endforeach()
+  add_test(NAME mirabilis_managed_tests COMMAND "${DOTNET_EXECUTABLE}" "${MIRABILIS_MANAGED_DIR}/Mirabilis.ScriptTests.dll")
+  set(MIRABILIS_BAD_BRIDGE_DIR "${CMAKE_BINARY_DIR}/badbridge/$<CONFIG>")
+  add_custom_target(mirabilis_bad_bridge ALL
+    COMMAND "${DOTNET_EXECUTABLE}" build "${PROJECT_SOURCE_DIR}/tests/managed/Mirabilis.BadBridge/Mirabilis.BadBridge.csproj"
+      -c $<CONFIG> --artifacts-path "${CMAKE_BINARY_DIR}/dotnet-badbridge" --output "${MIRABILIS_BAD_BRIDGE_DIR}" --ignore-failed-sources -p:NuGetAudit=false
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DOTNET_HOST_NATIVE}/nethost.dll" "${MIRABILIS_BAD_BRIDGE_DIR}"
+    VERBATIM)
+endif()
+add_custom_target(mirabilis_deploy_managed ALL DEPENDS mirabilis_managed)
+function(mirabilis_deploy_scripts TARGET)
+  add_dependencies(${TARGET} mirabilis_managed)
+  add_custom_command(TARGET ${TARGET} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${MIRABILIS_MANAGED_DIR}" "$<TARGET_FILE_DIR:${TARGET}>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DOTNET_HOST_NATIVE}/nethost.dll" "$<TARGET_FILE_DIR:${TARGET}>"
+    VERBATIM)
+  add_custom_command(TARGET mirabilis_deploy_managed POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${MIRABILIS_MANAGED_DIR}" "$<TARGET_FILE_DIR:${TARGET}>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DOTNET_HOST_NATIVE}/nethost.dll" "$<TARGET_FILE_DIR:${TARGET}>"
+    VERBATIM)
+endfunction()
+
+add_library(mirabilis_core STATIC scene.cpp scene_math.cpp scene_queries.cpp scene_serialization.cpp player_movement.cpp physics_world.cpp script_host.cpp)
 target_compile_features(mirabilis_core PUBLIC cxx_std_20)
 target_compile_definitions(mirabilis_core PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_include_directories(mirabilis_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_include_directories(mirabilis_core PRIVATE "${DOTNET_HOST_NATIVE}")
 target_link_libraries(mirabilis_core PUBLIC glm EnTT::EnTT fastgltf_simdjson Jolt)
 if(BUILD_TESTING)
-  add_executable(mirabilis_core_tests ../tests/core_smoke.cpp ../tests/scene_ecs_tests.cpp ../tests/scene_serialization_tests.cpp ../tests/physics_tests.cpp)
+  add_executable(mirabilis_core_tests ../tests/core_smoke.cpp ../tests/scene_ecs_tests.cpp ../tests/scene_serialization_tests.cpp ../tests/physics_tests.cpp ../tests/script_tests.cpp)
   target_link_libraries(mirabilis_core_tests PRIVATE mirabilis_core doctest::doctest)
   target_compile_definitions(mirabilis_core_tests PRIVATE MIRABILIS_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+  target_compile_definitions(mirabilis_core_tests PRIVATE MIRABILIS_TEST_MANAGED_DIR="$<TARGET_FILE_DIR:mirabilis_core_tests>")
+  mirabilis_deploy_scripts(mirabilis_core_tests)
   add_test(NAME mirabilis_core_tests COMMAND mirabilis_core_tests)
+  add_executable(mirabilis_script_abi_probe ../tests/script_abi_probe.cpp)
+  target_link_libraries(mirabilis_script_abi_probe PRIVATE mirabilis_core)
+  add_dependencies(mirabilis_script_abi_probe mirabilis_bad_bridge)
+  foreach(MISMATCH version size null)
+    add_test(NAME mirabilis_script_bad_${MISMATCH} COMMAND mirabilis_script_abi_probe "${MIRABILIS_BAD_BRIDGE_DIR}" ${MISMATCH})
+  endforeach()
 endif()
 if(MIRABILIS_BUILD_ENGINE)
 
@@ -67,6 +119,7 @@ target_compile_definitions(engine PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_include_directories(engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
 target_link_libraries(engine PUBLIC mirabilis_core vma glm Vulkan::Vulkan fmt::fmt stb_image SDL2::SDL2 vkbootstrap imgui imguizmo fastgltf::fastgltf fastgltf_simdjson)
+mirabilis_deploy_scripts(engine)
 
 target_precompile_headers(engine PUBLIC <optional> <vector> <memory> <string> <vector> <unordered_map> <glm/mat4x4.hpp>  <glm/vec4.hpp> <vulkan/vulkan.h>)
 
