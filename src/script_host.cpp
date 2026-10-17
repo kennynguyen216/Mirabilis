@@ -439,7 +439,7 @@ void ScriptHost::watch_project(const std::filesystem::path& project,const std::f
     }
     catch (const std::exception& e) { h.project.clear(); h.reloadStatus=e.what(); }
 }
-void ScriptHost::request_reload() { _impl->buildRequested=true; _impl->lastChange={}; }
+void ScriptHost::request_reload() { if (can_build_scripts()) { _impl->buildRequested=true; _impl->lastChange={}; } }
 bool ScriptHost::auto_reload() const { return _impl->automatic; }
 void ScriptHost::set_auto_reload(bool value) {
     if (value && !_impl->automatic) request_reload();

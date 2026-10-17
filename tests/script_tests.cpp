@@ -592,6 +592,8 @@ TEST_CASE("live reload changes code preserves runtime fields and leaves physics 
     CHECK(field_int(run.scene,ref,"Updates")==11);CHECK(field_int(run.scene,ref,"Creates")==1);
     CHECK(field_int(run.scene,ref,"PrivateObserved")==12);CHECK(field_int(run.scene,ref,"InheritedObserved")==22);
     CHECK(field_int(run.scene,ref,"PropertyObserved")==32);CHECK(field_int(run.scene,ref,"EphemeralObserved")==6);
+    CHECK(field_int(run.scene,ref,"PublicEphemeralObserved")==8);
+    CHECK_FALSE(run.scene.read<Script>(ref)->fields.contains("PublicEphemeral"));
     CHECK(field_int(run.scene,ref,"StaticObserved")==1);CHECK(field_int(run.scene,ref,"Added")==77);
     CHECK(run.scene.read<Script>(ref)->fields.at("OldField")==ScriptField{"int","73"});
     for(const int broken:{3,4,5}) {

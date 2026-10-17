@@ -111,7 +111,7 @@ is `Mirabilis.SampleScripts`, with `Mirabilis.SampleScripts.PushBox`,
 
 The inspector exposes writable public instance fields of exactly `float`, `int`,
 `bool`, `string`, `Vec3`, and `Entity`. Other types, static fields, and readonly
-fields are excluded. Metadata discovery never constructs a user type and shows
+fields and `[NonSerialized]` fields are excluded. Metadata discovery never constructs a user type and shows
 zero/empty/null metadata defaults. Actual field initializers run during instance
 construction; existing saved values override matching initializers.
 

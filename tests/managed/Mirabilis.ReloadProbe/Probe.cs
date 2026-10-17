@@ -18,6 +18,8 @@ public sealed class LiveProbe : ProbeBase
     private static int constructors;
 #endif
     [NonSerialized] private int ephemeral = 5;
+    [NonSerialized] public int PublicEphemeral = 7;
+    public int PublicEphemeralObserved;
     public int Creates, Updates, PrivateObserved, InheritedObserved, PropertyObserved, EphemeralObserved, StaticObserved;
     public Entity Target;
     public bool ThrowNext;
@@ -50,6 +52,7 @@ public sealed class LiveProbe : ProbeBase
 #endif
         PrivateObserved = ++counter; InheritedObserved = AdvanceBase(); PropertyObserved = ++Hidden;
         EphemeralObserved = ++ephemeral; StaticObserved = ++global;
+        PublicEphemeralObserved = ++PublicEphemeral;
         if (!Target.IsValid || Target.PersistentId != 0) throw new InvalidOperationException("reload lost entity reference");
     }
     public override void OnDestroy() => Log.Write("reload-destroy");

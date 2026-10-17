@@ -72,7 +72,7 @@ public static unsafe partial class NativeBridge
         return type;
     }
     private static IEnumerable<FieldInfo> EditableFields(Type type) => type.GetFields(BindingFlags.Public | BindingFlags.Instance)
-        .Where(field => !field.IsInitOnly && !field.IsLiteral && FieldType(field.FieldType) != null)
+        .Where(field => !field.IsInitOnly && !field.IsLiteral && !field.IsDefined(typeof(NonSerializedAttribute)) && FieldType(field.FieldType) != null)
         .OrderBy(field => field.Name, StringComparer.Ordinal);
     private static string? FieldType(Type type) => type == typeof(float) ? "float" : type == typeof(int) ? "int"
         : type == typeof(bool) ? "bool" : type == typeof(string) ? "string" : type == typeof(Vec3) ? "vec3"
