@@ -441,7 +441,10 @@ void ScriptHost::watch_project(const std::filesystem::path& project,const std::f
 }
 void ScriptHost::request_reload() { _impl->buildRequested=true; _impl->lastChange={}; }
 bool ScriptHost::auto_reload() const { return _impl->automatic; }
-void ScriptHost::set_auto_reload(bool value) { _impl->automatic=value; }
+void ScriptHost::set_auto_reload(bool value) {
+    if (value && !_impl->automatic) request_reload();
+    _impl->automatic=value;
+}
 const std::string& ScriptHost::reload_status() const { return _impl->reloadStatus; }
 bool ScriptHost::can_build_scripts() const { return _impl->ready && !_impl->project.empty(); }
 bool ScriptHost::poll_reload() {

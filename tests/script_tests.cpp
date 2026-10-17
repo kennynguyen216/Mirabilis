@@ -634,8 +634,12 @@ TEST_CASE("automatic source rebuild continues Play and compilation failure prese
     {std::ofstream file(scratch/"Helper/Helper.cs");file<<"internal static class Helper {}";}
     run.host.watch_project(scratch,std::filesystem::path(scratch.string()+"-build"),MIRABILIS_SCRIPT_DOTNET,MIRABILIS_TEST_CONFIGURATION);
     CHECK(run.host.can_build_scripts());
+    run.host.set_auto_reload(false);CHECK_FALSE(run.host.auto_reload());
     code.replace(code.find("++Updates;"),10,"Updates += 100;");
     {std::ofstream file(source);file<<code;}
+    CHECK_FALSE(run.host.poll_reload());std::this_thread::sleep_for(std::chrono::milliseconds(400));CHECK_FALSE(run.host.poll_reload());
+    CHECK_FALSE(run.host.reload_status().starts_with("Compiling"));
+    run.host.set_auto_reload(true);CHECK(run.host.auto_reload());
     const auto epoch=run.scene.epoch();int frames=0;
     const auto awaitBuild=[&](bool expectedSuccess) {
         const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(90);
