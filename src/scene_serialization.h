@@ -43,3 +43,5 @@ bool serialize_scene_json(const mirabilis::Scene&, const SceneSettings&,
     std::span<const AuthoredPortalPair>, std::string& json, std::string& error);
 bool save_scene_atomic(const std::filesystem::path&, const mirabilis::Scene&,
     const SceneSettings&, std::span<const AuthoredPortalPair>, std::string& error);
+std::string serialize_script_fields(const std::map<std::string,ScriptField>&);
+bool parse_script_fields(std::string_view,std::map<std::string,ScriptField>&,std::string& error);

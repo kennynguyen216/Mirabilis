@@ -32,6 +32,18 @@ struct RigidBody {
 };
 // Runtime-only activation state; never serialized or snapshotted.
 struct PhysicsState { bool sleeping{false}; };
+struct ScriptField {
+    std::string type;
+    std::string valueJson;
+    bool operator==(const ScriptField&) const = default;
+};
+struct Script {
+    std::string assembly;
+    std::string typeName;
+    bool enabled{true};
+    std::map<std::string, ScriptField> fields;
+    bool operator==(const Script&) const = default;
+};
 struct PortalPlaceable {};
 struct TimeTrial { TimeTrialRole role{TimeTrialRole::None}; };
 struct TransformDrivenExternally {};
@@ -47,6 +59,7 @@ bool valid_component(const SceneMaterial&);
 bool valid_component(const Collider&);
 bool valid_component(const TimeTrial&);
 bool valid_component(const RigidBody&);
+bool valid_component(const Script&);
 
 // Transient authored copies for duplication and play snapshots, never live authority.
 struct EntityState {
@@ -64,6 +77,7 @@ struct EntityState {
     bool transformDrivenExternally{false};
     UnknownComponents unknown;
     std::optional<RigidBody> rigidBody;
+    std::optional<Script> script;
 };
 struct SceneSnapshot {
     std::vector<EntityState> entities;

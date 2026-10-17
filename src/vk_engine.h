@@ -1,4 +1,5 @@
 #include "physics_world.h"
+#include "script_host.h"
 #pragma once
 #include "path_trace_scene.h"
 
@@ -222,6 +223,7 @@ struct ColliderDebugPushConstants {
 };
 
 struct EngineStats {
+    uint32_t script_instance_count{0};
     uint32_t physics_body_count{0};
     uint64_t sdf_rebuild_count{0}, surface_cache_rebuild_count{0}, trace_rebuild_count{0}, sun_shadow_rebuild_count{0};
     float frametime{0.0f};
@@ -1739,6 +1741,7 @@ class VulkanEngine{
         // these objects.  Nothing about the level is hard-coded twice.
         Scene _scene;
         mirabilis::PhysicsWorld _physicsWorld;
+        std::shared_ptr<mirabilis::ScriptHost> _scriptHost;
         float _physicsInterpolation{0};
         uint32_t _physicsHistoryResetCount{0};
         void sync_physics_world();

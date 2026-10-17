@@ -10,6 +10,8 @@ class Scene {
 public:
     using DestroyCallback = std::function<void(EntityRef)>;
     using CommandAction = std::function<void(Scene&, EntityRef)>;
+    void set_script_cleanup_handler(DestroyCallback handler) { _scriptCleanup = std::move(handler); }
+    void cleanup_script(EntityRef);
     Scene() = default;
     Scene(Scene&&) noexcept = default;
     Scene& operator=(Scene&&) noexcept = default;
@@ -65,6 +67,10 @@ public:
         if (_inDestroyCallback) {
             return enqueue_command(ref, [value, owner](Scene& scene, EntityRef target) { scene.set<T>(target, value, owner); });
         }
+        if constexpr (std::is_same_v<T, Script>) {
+            if (has<Script>(ref)) cleanup_script(ref);
+            if (!mutable_ref(ref, owner)) return false;
+        }
         _registry.emplace_or_replace<T>(ref.entity, value);
         if constexpr (std::is_same_v<T, Transform> || std::is_same_v<T, Collider> || std::is_same_v<T, RigidBody>) mark_transform_dirty(ref);
         return true;
@@ -78,6 +84,10 @@ public:
             return fail("Required core components cannot be detached; use their disabled/empty values");
         }
         if (_inDestroyCallback) return enqueue_command(ref, [owner](Scene& scene, EntityRef target) { scene.remove<T>(target, owner); });
+        if constexpr (std::is_same_v<T, Script>) {
+            if (has<Script>(ref)) cleanup_script(ref);
+            if (!mutable_ref(ref, owner)) return false;
+        }
         _registry.remove<T>(ref.entity);
         if constexpr (std::is_same_v<T, Collider> || std::is_same_v<T, RigidBody>) mark_transform_dirty(ref);
         return true;
@@ -122,6 +132,7 @@ private:
     bool _inDestroyCallback{false};
     bool _physicsPlay{false};
     TeleportHandler _teleportHandler;
+    DestroyCallback _scriptCleanup;
     std::vector<PersistentID> _authoredPortalHosts;
     mutable std::string _lastError;
     bool fail(std::string message) const;
