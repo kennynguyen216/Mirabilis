@@ -255,7 +255,10 @@ bool Scene::set_sibling_index(EntityRef ref, size_t index, bool owner) {
 bool Scene::set_local_transform(EntityRef ref, const Transform& transform, bool owner) { return set<Transform>(ref, transform, owner); }
 bool Scene::set_world_transform(EntityRef ref, const glm::mat4& world, bool owner) {
     if (!mutable_ref(ref, owner) || !finite_matrix(world)) return fail("Invalid world transform");
-    if (_inDestroyCallback) return enqueue_command(ref, [world, owner](Scene& scene, EntityRef target) {
+    const auto* body = read<RigidBody>(ref);
+    const bool queuedTeleport = !owner && _physicsPlay && body && body->motion == BodyMotion::Dynamic;
+    // Dynamic setters already queue a teleport; wrapping one here would defer it twice.
+    if (_inDestroyCallback && !queuedTeleport) return enqueue_command(ref, [world, owner](Scene& scene, EntityRef target) {
         scene.set_world_transform(target, world, owner);
     });
     const auto& hierarchy = *read<Hierarchy>(ref);
