@@ -1,4 +1,6 @@
 #include "scene.h"
+#include "scene_serialization.h"
+#include <charconv>
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -72,6 +74,14 @@ bool valid_component(const RigidBody& value) {
         std::isfinite(value.friction) && value.friction >= 0 &&
         std::isfinite(value.restitution) && value.restitution >= 0 && value.restitution <= 1 &&
         std::isfinite(value.gravityFactor);
+}
+bool valid_component(const Script& value) {
+    std::map<std::string,ScriptField> checked;
+    std::string error;
+    try {
+        return !value.assembly.empty() && !value.typeName.empty() &&
+            parse_script_fields(serialize_script_fields(value.fields),checked,error);
+    } catch (...) { return false; }
 }
 
 namespace mirabilis {
@@ -314,6 +324,7 @@ size_t Scene::drain_destruction(const DestroyCallback& beforeDestroy, size_t cap
     while (!_destruction.empty() && count < cap) {
         const auto ref = _destruction.front(); _destruction.pop_front();
         if (!valid(ref) || !pending(ref)) continue;
+        cleanup_script(ref);
         if (beforeDestroy) {
             const bool previous = _inDestroyCallback; _inDestroyCallback = true;
             try { beforeDestroy(ref); }
@@ -332,6 +343,15 @@ size_t Scene::drain_destruction(const DestroyCallback& beforeDestroy, size_t cap
     }
     if (!_destruction.empty()) fail("Destruction drain cap reached; pending work retained");
     return count;
+}
+void Scene::cleanup_script(EntityRef ref) {
+    if (!_scriptCleanup || !valid(ref)) return;
+    const bool previous = _inDestroyCallback;
+    _inDestroyCallback = true;
+    try { _scriptCleanup(ref); }
+    catch (const std::exception& error) { fail(std::string("Script cleanup: ") + error.what()); }
+    catch (...) { fail("Script cleanup failed"); }
+    _inDestroyCallback = previous;
 }
 bool Scene::enqueue_command(EntityRef target, CommandAction action) {
     if (!valid(target) || pending(target) || !action) return fail("Cannot queue a stale or pending target");
@@ -362,7 +382,8 @@ EntityState Scene::capture_entity(EntityRef ref) const {
         read<TimeTrial>(ref) ? *read<TimeTrial>(ref) : TimeTrial{},
         has<PortalPlaceable>(ref), has<TransformDrivenExternally>(ref),
         read<UnknownComponents>(ref) ? *read<UnknownComponents>(ref) : UnknownComponents{},
-        read<RigidBody>(ref) ? std::optional(*read<RigidBody>(ref)) : std::nullopt};
+        read<RigidBody>(ref) ? std::optional(*read<RigidBody>(ref)) : std::nullopt,
+        read<Script>(ref) ? std::optional(*read<Script>(ref)) : std::nullopt};
 }
 void Scene::restore_entity(const EntityState& state) {
     auto ref = get(state.id);
@@ -379,6 +400,8 @@ void Scene::restore_entity(const EntityState& state) {
     _registry.emplace_or_replace<UnknownComponents>(ref.entity, state.unknown);
     if (state.rigidBody) _registry.emplace_or_replace<RigidBody>(ref.entity, *state.rigidBody);
     else _registry.remove<RigidBody>(ref.entity);
+    if (state.script) _registry.emplace_or_replace<Script>(ref.entity, *state.script);
+    else _registry.remove<Script>(ref.entity);
     _registry.remove<PhysicsState>(ref.entity);
     if (state.portalPlaceable) _registry.emplace_or_replace<PortalPlaceable>(ref.entity);
     else _registry.remove<PortalPlaceable>(ref.entity);
@@ -420,6 +443,14 @@ EntityRef Scene::duplicate_subtree(EntityRef root) {
         state.creationOrder = read<CreationOrder>(get(state.id))->index;
         if (state.hierarchy.parent && copies.contains(*state.hierarchy.parent)) state.hierarchy.parent = copies.at(*state.hierarchy.parent);
         state.hierarchy.children.clear();
+        if (state.script) for (auto& [name,field] : state.script->fields) {
+            if (field.type != "entity") continue;
+            PersistentID target{};
+            const auto* begin = field.valueJson.data();
+            const auto result = std::from_chars(begin,begin + field.valueJson.size(),target);
+            if (result.ec == std::errc{} && result.ptr == begin + field.valueJson.size() && copies.contains(target))
+                field.valueJson = std::to_string(copies.at(target));
+        }
         for (const auto child : read<Hierarchy>(get(original))->children) if (copies.contains(child)) state.hierarchy.children.push_back(copies.at(child));
         restore_entity(state);
         std::erase(_roots, state.id);
@@ -435,12 +466,14 @@ bool Scene::restore_snapshot(const SceneSnapshot& snapshot, const DestroyCallbac
     std::unordered_set<PersistentID> saved;
     for (const auto& state : snapshot.entities) {
         if (state.id == UINT64_MAX || !saved.insert(state.id).second ||
-            !valid_component(state.transform) || !valid_component(state.mesh) || !valid_component(state.material) || !valid_component(state.collider) || (state.rigidBody && !valid_component(*state.rigidBody))) {
+            !valid_component(state.transform) || !valid_component(state.mesh) || !valid_component(state.material) || !valid_component(state.collider) || (state.rigidBody && !valid_component(*state.rigidBody)) || (state.script && !valid_component(*state.script))) {
             return fail("Invalid scene snapshot");
         }
     }
     std::unordered_set<PersistentID> keep = saved;
     keep.insert(snapshot.runtimeIds.begin(), snapshot.runtimeIds.end());
+    const auto cleanupOrder = hierarchy_order();
+    for (auto it = cleanupOrder.rbegin(); it != cleanupOrder.rend(); ++it) cleanup_script(*it);
     // Synchronous restoration must finish the finite scene, independent of the per-frame cap.
     drain_destruction(beforeDestroy, std::max<size_t>(4096, _entities.size()));
     // Remove play-created entities individually: a surviving authored child may have moved under one.
@@ -484,7 +517,9 @@ void Scene::replace(Scene&& staging, const DestroyCallback& beforeDestroy) {
     if (_epoch == UINT64_MAX) throw std::runtime_error("Scene epoch exhausted");
     const auto nextEpoch = _epoch + 1;
     clear(beforeDestroy);
+    auto scriptCleanup = std::move(_scriptCleanup);
     *this = std::move(staging);
+    _scriptCleanup = std::move(scriptCleanup);
     _epoch = nextEpoch;
     clear_queues();
     for (const auto ref : hierarchy_order()) mark_transform_dirty(ref);
