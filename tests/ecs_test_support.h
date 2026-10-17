@@ -54,6 +54,7 @@ inline void check_state(const EntityState& a, const EntityState& b) {
     CHECK(a.portalPlaceable == b.portalPlaceable);
     CHECK(a.transformDrivenExternally == b.transformDrivenExternally);
     CHECK(a.unknown.blocks == b.unknown.blocks);
+    CHECK(a.script == b.script);
     REQUIRE(a.rigidBody.has_value() == b.rigidBody.has_value());
     if (a.rigidBody) {
         CHECK(a.rigidBody->motion == b.rigidBody->motion);
@@ -94,3 +95,4 @@ inline void check_portal(const Portal& a, const Portal& b) {
     CHECK(near_float(a.halfWidth,b.halfWidth)); CHECK(near_float(a.halfHeight,b.halfHeight));
 }
 } // namespace ecs_test
+
