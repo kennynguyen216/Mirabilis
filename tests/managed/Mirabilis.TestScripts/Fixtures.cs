@@ -212,3 +212,18 @@ public sealed class DestroyOtherProbe : LifecycleProbe
         if (Target.IsValid && !Target.IsPendingDestroy) Target.Destroy();
     }
 }
+
+public sealed class CleanupWorldProbe : Script
+{
+    public Entity Target;
+    public int Mode;
+    public override void OnDestroy()
+    {
+        var target = Target; var transform = Transform.Identity;
+        transform.Position = new Vec3(7, 8, 9); transform.Rotation = new Vec3(.2f, .4f, .6f);
+        if (Mode == 0) target.WorldTransform = transform;
+        else if (Mode == 1) target.RigidBody.SetTransform(transform);
+        else target.LocalTransform = transform;
+        Log.Write("cleanup-world-queued");
+    }
+}
