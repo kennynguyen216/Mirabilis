@@ -16,7 +16,14 @@ int main(int argc,char** argv) {
     if(host.initialize(argv[1]) || host.available() || host.error().empty()) {
         std::cerr<<"Bad managed "<<argv[2]<<" table was not rejected: "<<host.error()<<'\n';return 1;
     }
+    const auto& error=host.error();
+    const bool runtime=std::string_view(argv[2])=="runtime";
+    if(runtime ? (error.find("runtime")==std::string::npos || error.find("initialization")==std::string::npos)
+               : error.find("ABI version/layout")==std::string::npos) {
+        std::cerr<<"Initialization failed for the wrong reason: "<<error<<'\n';return 1;
+    }
     host.start();host.update(.01f);host.fixed_update(.01f);host.stop();
     if(host.live_count()!=0 || !scene.read<Script>(entity) || *scene.read<Script>(entity)!=saved || !scene.valid(entity))return 1;
     std::cout<<"Native managed-ABI rejection PASS: "<<argv[2]<<"; "<<host.error()<<'\n';return 0;
 }
+

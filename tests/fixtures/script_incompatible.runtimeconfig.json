@@ -1,0 +1,7 @@
+{
+  "runtimeOptions": {
+    "tfm": "net10.0",
+    "framework": { "name": "Microsoft.NETCore.App", "version": "99.0.0" },
+    "rollForward": "Disable"
+  }
+}
