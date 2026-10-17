@@ -7,6 +7,9 @@
 #include <filesystem>
 #include <limits>
 #include <functional>
+#include <iomanip>
+#include <sstream>
+#include <simdjson.h>
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -18,6 +21,87 @@
 namespace {
 constexpr const char* EditorSceneDirectory = "../../assets/scenes";
 std::string EditorEditMessage;
+
+bool script_text_input(const char* label, std::string& value, ImGuiInputTextFlags flags = 0)
+{
+    return ImGui::InputText(label, value.data(), value.capacity() + 1,
+        flags | ImGuiInputTextFlags_CallbackResize, [](ImGuiInputTextCallbackData* data) {
+            auto& text = *static_cast<std::string*>(data->UserData);
+            text.resize(data->BufTextLen);
+            data->Buf = text.data();
+            return 0;
+        }, &value);
+}
+
+std::string script_string_json(std::string_view text)
+{
+    std::ostringstream out;out << '"';
+    for(unsigned char ch:text) {
+        if(ch=='"' || ch=='\\')out << '\\' << char(ch);
+        else if(ch<0x20)out << "\\u00" << std::hex << std::setw(2) << std::setfill('0') << int(ch) << std::dec;
+        else out << char(ch);
+    }
+    out << '"';return out.str();
+}
+
+bool draw_script_field(const char* label, ScriptField& field, const Scene& scene)
+{
+    simdjson::dom::parser parser;simdjson::dom::element value;
+    const simdjson::padded_string padded(field.valueJson);
+    if(parser.parse(padded).get(value)) {
+        ImGui::TextWrapped("%s: invalid saved JSON (retained)", label);return false;
+    }
+    bool changed=false;
+    std::ostringstream out;out << std::setprecision(std::numeric_limits<float>::max_digits10) << std::boolalpha;
+    if(field.type=="float") {
+        float number=static_cast<float>(value.get_double().value());
+        changed=ImGui::DragFloat(label,&number,0.05f);out << number;
+    } else if(field.type=="int") {
+        int32_t number=static_cast<int32_t>(value.get_int64().value());
+        changed=ImGui::InputScalar(label,ImGuiDataType_S32,&number);out << number;
+    } else if(field.type=="bool") {
+        bool checked=value.get_bool().value();
+        changed=ImGui::Checkbox(label,&checked);out << checked;
+    } else if(field.type=="vec3") {
+        glm::vec3 vector;size_t index=0;
+        for(auto item:value.get_array().value())vector[static_cast<int>(index++)]=static_cast<float>(item.get_double().value());
+        changed=ImGui::DragFloat3(label,&vector.x,0.05f);
+        out << '[' << vector.x << ',' << vector.y << ',' << vector.z << ']';
+    } else if(field.type=="entity") {
+        bool assigned=!value.is_null();uint64_t id=assigned?value.get_uint64().value():0;
+        ImGui::PushID(label);
+        changed=ImGui::Checkbox("Assigned",&assigned);ImGui::SameLine();
+        ImGui::BeginDisabled(!assigned);
+        changed|=ImGui::InputScalar(label,ImGuiDataType_U64,&id);
+        ImGui::EndDisabled();ImGui::PopID();
+        if(assigned) {
+            out << id;
+            const auto target=scene.get(id);
+            if(const auto name=scene.read<Name>(target))ImGui::TextDisabled("Target: %s",name->value.c_str());
+            else ImGui::TextWrapped("Unresolved entity reference %llu (retained)",static_cast<unsigned long long>(id));
+        } else out << "null";
+    } else if(field.type=="string") {
+        std::string text(value.get_string().value());
+        if(text.find('\0')!=std::string::npos) {
+            text=field.valueJson;
+            ImGui::TextDisabled("Embedded NUL: edit the JSON string, including quotes.");
+            changed=script_text_input(label,text,ImGuiInputTextFlags_EnterReturnsTrue);
+            out << text;
+        } else {
+            changed=script_text_input(label,text);out << script_string_json(text);
+        }
+    } else {
+        ImGui::TextWrapped("%s: unsupported field type '%s' (retained)",label,field.type.c_str());return false;
+    }
+    if(changed) {
+        ScriptField edited{field.type,out.str()};
+        try {
+            serialize_script_fields({{"field",edited}});
+            field=std::move(edited);return true;
+        } catch(const std::exception& exception) { EditorEditMessage=exception.what(); }
+    }
+    return false;
+}
 
 bool draw_hierarchy_node(Scene& scene, PersistentID id, PersistentID& selected)
 {
@@ -324,6 +408,61 @@ void VulkanEngine::draw_inspector_panel()
                     rebuild_collision_from_scene();
                     EditorEditMessage.clear();
                 }
+            }
+            ImGui::SeparatorText("Script");
+            const auto existingScript = _scene.read<Script>(ref);
+            if (existingScript) {
+                Script script = *existingScript;
+                bool scriptChanged = script_text_input("Assembly", script.assembly);
+                scriptChanged |= script_text_input("Full Type", script.typeName);
+                scriptChanged |= ImGui::Checkbox("Script Enabled", &script.enabled);
+                const bool detach = ImGui::Button("Detach Script");
+                if (detach) {
+                    if (_editorMode && _scene.remove<Script>(ref)) {
+                        _sceneDocument.dirty = true;EditorEditMessage.clear();
+                    } else EditorEditMessage = _scene.last_error();
+                } else {
+                    std::vector<std::string> diagnostics;
+                    Script metadata;
+                    if (_scriptHost) {
+                        metadata = _scriptHost->describe(script, diagnostics);
+                        if (!_scriptHost->available()) ImGui::TextWrapped("Scripting unavailable: %s", _scriptHost->error().c_str());
+                        if (_scriptHost->faulted(ref)) ImGui::TextWrapped("Script is faulted; updates are disabled until the next Play session.");
+                    } else ImGui::TextWrapped("Script runtime is unavailable. Saved data is retained.");
+                    for (const auto& diagnostic : diagnostics) ImGui::TextWrapped("%s", diagnostic.c_str());
+                    ImGui::TextDisabled("Assembly identity and full namespace-qualified type name identify the script.");
+                    if (!_editorMode) ImGui::TextDisabled("Script configuration is read-only during Play.");
+                    for (const auto& [fieldName, description] : metadata.fields) {
+                        const auto saved = script.fields.find(fieldName);
+                        if (saved != script.fields.end() && saved->second.type != description.type) continue;
+                        ScriptField field = saved == script.fields.end() ? description : saved->second;
+                        ImGui::PushID(fieldName.c_str());
+                        if (draw_script_field(fieldName.c_str(), field, _scene)) {
+                            script.fields[fieldName] = std::move(field);scriptChanged = true;
+                        }
+                        ImGui::PopID();
+                    }
+                    for (const auto& [fieldName, field] : script.fields) {
+                        const auto declared = metadata.fields.find(fieldName);
+                        if (declared != metadata.fields.end() && declared->second.type == field.type) continue;
+                        ImGui::TextWrapped("Saved field '%s' (%s) cannot bind; value retained: %s", fieldName.c_str(), field.type.c_str(), field.valueJson.c_str());
+                    }
+                    if (scriptChanged && _editorMode) {
+                        if (_scene.set(ref, script)) { _sceneDocument.dirty = true;EditorEditMessage.clear(); }
+                        else EditorEditMessage = _scene.last_error();
+                    }
+                }
+            } else {
+                static Script draft;
+                script_text_input("Assembly", draft.assembly);
+                script_text_input("Full Type", draft.typeName);
+                ImGui::TextDisabled("Example: Mirabilis.SampleScripts / Mirabilis.SampleScripts.PushBox");
+                ImGui::BeginDisabled(draft.assembly.empty() || draft.typeName.empty());
+                if (ImGui::Button("Attach Script") && _editorMode) {
+                    if (_scene.set(ref, draft)) { _sceneDocument.dirty = true;EditorEditMessage.clear(); }
+                    else EditorEditMessage = _scene.last_error();
+                }
+                ImGui::EndDisabled();
             }
             if (!EditorEditMessage.empty()) ImGui::TextWrapped("Edit refused: %s", EditorEditMessage.c_str());
 
