@@ -578,6 +578,7 @@ TEST_CASE("live reload changes code preserves runtime fields and leaves physics 
     run.host.start();run.host.update(.01f);
     CHECK(field_int(run.scene,ref,"Creates")==1);CHECK(field_int(run.scene,ref,"Updates")==1);
     CHECK(field_int(run.scene,ref,"PrivateObserved")==11);CHECK(field_int(run.scene,ref,"InheritedObserved")==21);
+    CHECK(field_int(run.scene,ref,"MovedField")==42);
     const auto pose=*run.physics.body_world(ref);const auto velocity=run.physics.velocity(ref);const auto epoch=run.scene.epoch();
     auto pending=run.scene.create_object("pending");REQUIRE(run.scene.destroy_object(pending));
     REQUIRE(run.physics.queue_impulse(run.scene,ref,{1,0,0}));const auto queued=run.scene.queued_command_count();
@@ -595,6 +596,7 @@ TEST_CASE("live reload changes code preserves runtime fields and leaves physics 
     CHECK(field_int(run.scene,ref,"PublicEphemeralObserved")==8);
     CHECK_FALSE(run.scene.read<Script>(ref)->fields.contains("PublicEphemeral"));
     CHECK(field_int(run.scene,ref,"StaticObserved")==1);CHECK(field_int(run.scene,ref,"Added")==77);
+    CHECK(field_int(run.scene,ref,"MovedField")==99);
     CHECK(run.scene.read<Script>(ref)->fields.at("OldField")==ScriptField{"int","73"});
     for(const int broken:{3,4,5}) {
         const auto count=field_int(run.scene,ref,"Updates");
@@ -614,6 +616,23 @@ TEST_CASE("live reload changes code preserves runtime fields and leaves physics 
     REQUIRE(run.scene.restore_snapshot(authored));CHECK_FALSE(run.scene.valid(ref));
     CHECK(run.scene.read<Script>(run.scene.get(ref.persistentId))->fields.size()==2);
     CHECK(run.scene.read<Script>(run.scene.get(ref.persistentId))->fields.at("OldField")==ScriptField{"int","73"});
+}
+
+TEST_CASE("reload preserves unresolved authored references until fresh instance creation") {
+    Runtime run;
+    const auto variant=[](int version) { return std::filesystem::path(MIRABILIS_TEST_RELOAD_DIR)/("v"+std::to_string(version))/MIRABILIS_TEST_CONFIGURATION; };
+    REQUIRE(run.host.reload(variant(1)));
+    const auto ref=run.add({"Mirabilis.ReloadProbe","Mirabilis.ReloadProbe.ReferenceProbe",true,{{"Target",{"entity","42"}}}});
+    run.host.start();run.host.update(.01f);
+    CHECK(run.scene.read<Script>(ref)->fields.at("Target")==ScriptField{"entity","42"});
+    CHECK(run.scene.read<Script>(ref)->fields.at("TargetValid").valueJson=="false");
+    REQUIRE(run.scene.valid(run.scene.import_object("late target",42)));
+    REQUIRE(run.host.reload(variant(2)));run.host.update(.01f);
+    CHECK(run.scene.read<Script>(ref)->fields.at("Target")==ScriptField{"entity","42"});
+    CHECK(run.scene.read<Script>(ref)->fields.at("TargetValid").valueJson=="false");
+    run.host.stop();run.host.start();run.host.update(.01f);
+    CHECK(run.scene.read<Script>(ref)->fields.at("Target")==ScriptField{"entity","42"});
+    CHECK(run.scene.read<Script>(ref)->fields.at("TargetValid").valueJson=="true");
 }
 
 TEST_CASE("automatic source rebuild continues Play and compilation failure preserves running code") {

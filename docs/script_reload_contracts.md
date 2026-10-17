@@ -26,6 +26,9 @@ Statics reset with the user context. Unsupported runtime object graphs/threads
 are outside the current script API. Do not serialize runtime private fields into
 scene files. Existing scene snapshots and authored public fields stay authoritative
 for later Reset/leave Play. ScriptCore/native API changes still need restart.
+Reload validates saved data without rebinding it by public name; only the strict
+runtime field match assigns values. Carry prior unbound-field bookkeeping through
+reload so unresolved saved entity IDs survive until normal instance creation.
 
 No scene restore, epoch change, body recreation, velocity reset, pending-command
 discard or interpolation/history reset occurs during reload. Preserve all engine

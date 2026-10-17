@@ -46,7 +46,8 @@ public static unsafe partial class NativeBridge
                 var script = (Script)Activator.CreateInstance(type)!;
                 script.Entity = old.Script.Entity;
                 var replacement = new Instance(script, ParseFields(CurrentFields(old))) { Created = old.Created };
-                BindFields(replacement);
+                BindFields(replacement, restoreValues: false);
+                replacement.Unbound.UnionWith(old.Unbound);
                 foreach (var field in ReloadFields(type))
                     if (fields.TryGetValue(FieldKey(field), out var saved) && saved.Kind == FieldType(field.FieldType))
                         field.SetValue(script, saved.Value);

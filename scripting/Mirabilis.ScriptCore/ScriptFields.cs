@@ -100,7 +100,7 @@ public static unsafe partial class NativeBridge
         if (!float.IsFinite(number)) throw new JsonException("Field float must be finite.");
         return number;
     }
-    private static void BindFields(Instance instance)
+    private static void BindFields(Instance instance, bool restoreValues = true)
     {
         var fields = EditableFields(instance.Script.GetType()).ToDictionary(field => field.Name, StringComparer.Ordinal);
         foreach (var (name, saved) in instance.Saved)
@@ -118,7 +118,7 @@ public static unsafe partial class NativeBridge
                         ? new Vec3(Finite(value[0]), Finite(value[1]), Finite(value[2])) : throw new JsonException("Expected three finite floats."),
                     "entity" => BindEntity(value), _ => throw new JsonException("Unsupported field type.")
                 };
-                field.SetValue(instance.Script, bound);
+                if (restoreValues) field.SetValue(instance.Script, bound);
             }
             catch (Exception error)
             {

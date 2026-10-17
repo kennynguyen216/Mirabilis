@@ -26,6 +26,11 @@ removed/type-changed authored fields remain saved with a diagnostic. Private
 runtime fields are never written into scene files. Reset/leave Play still restores
 the original authored snapshot.
 
+Reload matches runtime fields by declaring type, name, and type. Moving a field
+to another declaring class gives it its new initializer. Previously unbound saved
+fields retain their raw data through reload; normal instance creation, including
+Reset or re-entering Play, tries authored entity binding again.
+
 Reload reconstructs managed objects without repeating `OnCreate` or `OnDestroy`.
 Constructors run, but cannot mutate native scene state during preparation. These
 two callbacks remain actual entity/Play lifecycle events. Compilation, missing

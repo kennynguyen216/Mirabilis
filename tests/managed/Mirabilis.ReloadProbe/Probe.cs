@@ -3,6 +3,9 @@ namespace Mirabilis.ReloadProbe;
 
 public class ProbeBase : Script
 {
+#if RELOAD_1
+    public int MovedField = 1;
+#endif
     private int inherited = 20;
     protected int AdvanceBase() => ++inherited;
 }
@@ -11,6 +14,9 @@ public sealed class RemovedProbe : ProbeBase { }
 #else
 public sealed class LiveProbe : ProbeBase
 {
+#if !RELOAD_1
+    public int MovedField = 99;
+#endif
     private int counter = 10;
     private int Hidden { get; set; } = 30;
     private static int global;
@@ -47,6 +53,7 @@ public sealed class LiveProbe : ProbeBase
 #if RELOAD_1
         if (ThrowNext) throw new InvalidOperationException("reload-recoverable-fault");
         ++Updates;
+        MovedField = 42;
 #else
         Updates += 10;
 #endif
@@ -58,3 +65,10 @@ public sealed class LiveProbe : ProbeBase
     public override void OnDestroy() => Log.Write("reload-destroy");
 }
 #endif
+
+public sealed class ReferenceProbe : Script
+{
+    public Entity Target;
+    public bool TargetValid;
+    public override void OnUpdate(float dt) => TargetValid = Target.IsValid;
+}
