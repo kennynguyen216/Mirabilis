@@ -47,6 +47,7 @@ public:
     bool auto_reload() const;
     void set_auto_reload(bool);
     const std::string& reload_status() const;
+    bool can_build_scripts() const;
 private:
     struct Impl;
     std::unique_ptr<Impl> _impl;

@@ -14,6 +14,9 @@ public sealed class LiveProbe : ProbeBase
     private int counter = 10;
     private int Hidden { get; set; } = 30;
     private static int global;
+#if RELOAD_6
+    private static int constructors;
+#endif
     [NonSerialized] private int ephemeral = 5;
     public int Creates, Updates, PrivateObserved, InheritedObserved, PropertyObserved, EphemeralObserved, StaticObserved;
     public Entity Target;
@@ -26,6 +29,9 @@ public sealed class LiveProbe : ProbeBase
 #endif
     public LiveProbe()
     {
+#if RELOAD_6
+        if (++constructors==2) throw new InvalidOperationException("reload-second-constructor-failure");
+#endif
 #if RELOAD_3
         throw new InvalidOperationException("reload-constructor-failure");
 #endif

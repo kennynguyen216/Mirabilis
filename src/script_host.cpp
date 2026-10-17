@@ -429,16 +429,21 @@ void ScriptHost::watch_project(const std::filesystem::path& project,const std::f
     h.buildRoot=std::filesystem::absolute(buildDirectory).lexically_normal()/("session-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     h.coreSourceDirectory=(std::filesystem::is_directory(h.project) ? h.project : h.project.parent_path().parent_path())/"Mirabilis.ScriptCore";
     try {
+        if (!std::filesystem::exists(h.project) || !std::filesystem::exists(h.dotnet)) {
+            h.project.clear(); h.reloadStatus="Source project or .NET SDK unavailable; deployed scripts can still run."; return;
+        }
+        h.coreSources.clear();
         h.sources=h.source_stamp();
         if (std::filesystem::is_directory(h.coreSourceDirectory)) h.coreSources=h.source_stamp(h.coreSourceDirectory);
         h.reloadStatus="Watching scripts; save a C# file to rebuild and reload";
     }
-    catch (const std::exception& e) { h.reloadStatus=e.what(); }
+    catch (const std::exception& e) { h.project.clear(); h.reloadStatus=e.what(); }
 }
 void ScriptHost::request_reload() { _impl->buildRequested=true; _impl->lastChange={}; }
 bool ScriptHost::auto_reload() const { return _impl->automatic; }
 void ScriptHost::set_auto_reload(bool value) { _impl->automatic=value; }
 const std::string& ScriptHost::reload_status() const { return _impl->reloadStatus; }
+bool ScriptHost::can_build_scripts() const { return _impl->ready && !_impl->project.empty(); }
 bool ScriptHost::poll_reload() {
     auto& h=*_impl;
     if (std::this_thread::get_id()!=h.mainThread || !h.ready || h.project.empty() || h.callback) return false;

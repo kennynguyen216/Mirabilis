@@ -616,6 +616,9 @@ TEST_CASE("live reload changes code preserves runtime fields and leaves physics 
 
 TEST_CASE("automatic source rebuild continues Play and compilation failure preserves running code") {
     Runtime run;
+    run.host.watch_project("missing-script-source-project",MIRABILIS_TEST_RELOAD_DIR,MIRABILIS_SCRIPT_DOTNET,MIRABILIS_TEST_CONFIGURATION);
+    CHECK_FALSE(run.host.can_build_scripts());const auto startupLog=run.host.diagnostics();
+    run.host.request_reload();CHECK_FALSE(run.host.poll_reload());CHECK(run.host.diagnostics()==startupLog);
     const auto v1=std::filesystem::path(MIRABILIS_TEST_RELOAD_DIR)/"v1"/MIRABILIS_TEST_CONFIGURATION;
     REQUIRE(run.host.reload(v1));run.scene.import_object("target",0);
     const auto ref=run.add({"Mirabilis.ReloadProbe","Mirabilis.ReloadProbe.LiveProbe",true,{{"Target",{"entity","0"}}}});
@@ -630,6 +633,7 @@ TEST_CASE("automatic source rebuild continues Play and compilation failure prese
     {std::ofstream file(scratch/"Helper/Helper.csproj");file<<"<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>";}
     {std::ofstream file(scratch/"Helper/Helper.cs");file<<"internal static class Helper {}";}
     run.host.watch_project(scratch,std::filesystem::path(scratch.string()+"-build"),MIRABILIS_SCRIPT_DOTNET,MIRABILIS_TEST_CONFIGURATION);
+    CHECK(run.host.can_build_scripts());
     code.replace(code.find("++Updates;"),10,"Updates += 100;");
     {std::ofstream file(source);file<<code;}
     const auto epoch=run.scene.epoch();int frames=0;
@@ -670,6 +674,18 @@ TEST_CASE("reload revives faulted instances without repeating creation") {
     run.host.start();run.host.update(.01f);REQUIRE(run.host.faulted(ref));
     REQUIRE(run.host.reload(variant(2)));CHECK_FALSE(run.host.faulted(ref));
     run.host.update(.01f);CHECK(field_int(run.scene,ref,"Updates")==10);CHECK(field_int(run.scene,ref,"Creates")==1);
+    CHECK_FALSE(logged(run.host,"reload-destroy"));
+}
+
+TEST_CASE("reload rejection cannot partially replace a group of scripts") {
+    Runtime run;const auto variant=[](int n) {return std::filesystem::path(MIRABILIS_TEST_RELOAD_DIR)/("v"+std::to_string(n))/MIRABILIS_TEST_CONFIGURATION;};
+    REQUIRE(run.host.reload(variant(1)));run.scene.import_object("target",0);
+    const Script component{"Mirabilis.ReloadProbe","Mirabilis.ReloadProbe.LiveProbe",true,{{"Target",{"entity","0"}}}};
+    const auto first=run.add(component),second=run.add(component);run.host.start();run.host.update(.01f);
+    REQUIRE(run.host.live_count()==2);REQUIRE(field_int(run.scene,first,"Updates")==1);REQUIRE(field_int(run.scene,second,"Updates")==1);
+    CHECK_FALSE(run.host.reload(variant(6)));run.host.update(.01f);
+    CHECK(run.host.live_count()==2);CHECK(field_int(run.scene,first,"Updates")==2);CHECK(field_int(run.scene,second,"Updates")==2);
+    CHECK(field_int(run.scene,first,"Creates")==1);CHECK(field_int(run.scene,second,"Creates")==1);
     CHECK_FALSE(logged(run.host,"reload-destroy"));
 }
 

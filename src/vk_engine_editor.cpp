@@ -981,9 +981,11 @@ void VulkanEngine::draw_editor_menu()
     }
     if (ImGui::BeginMenu("Scripts")) {
         if (_scriptHost) {
+            ImGui::BeginDisabled(!_scriptHost->can_build_scripts());
             bool automatic=_scriptHost->auto_reload();
             if (ImGui::MenuItem("Auto Build & Reload",nullptr,&automatic)) _scriptHost->set_auto_reload(automatic);
             if (ImGui::MenuItem("Build & Reload Scripts")) _scriptHost->request_reload();
+            ImGui::EndDisabled();
             ImGui::TextWrapped("%s",_scriptHost->reload_status().c_str());
         } else ImGui::TextDisabled("Attach a script to enable script compilation.");
         ImGui::EndMenu();

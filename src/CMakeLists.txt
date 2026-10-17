@@ -20,7 +20,7 @@ if(BUILD_TESTING)
         -c $<CONFIG> --artifacts-path "${CMAKE_BINARY_DIR}/dotnet" --output "${MIRABILIS_MANAGED_DIR}" --ignore-failed-sources -p:NuGetAudit=false
       VERBATIM)
   endforeach()
-  foreach(VERSION RANGE 1 5)
+  foreach(VERSION RANGE 1 6)
     set(RELOAD_OUTPUT "${CMAKE_BINARY_DIR}/reload-fixtures/v${VERSION}/$<CONFIG>")
     add_custom_command(TARGET mirabilis_managed POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_directory "${MIRABILIS_MANAGED_DIR}" "${RELOAD_OUTPUT}"

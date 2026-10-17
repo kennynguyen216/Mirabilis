@@ -1726,6 +1726,10 @@ void VulkanEngine::run(){
     }
     auto previousTime = std::chrono::steady_clock::now();
     const bool testReload=frameLimit && SDL_getenv("MIRABILIS_TEST_SCRIPT_RELOAD");
+    if (testReload) {
+        set_editor_mode(false);set_mouse_capture(false);
+        scriptRequire(_scriptHost && _scriptHost->available() && _scriptHost->live_count()==1,"reload test requires one playing script");
+    }
     bool reloadVerified=false;
     int reloadUpdates=0,reloadPrivate=0;
     uint64_t reloadFrame=0;
