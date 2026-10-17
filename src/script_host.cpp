@@ -313,7 +313,10 @@ void ScriptHost::stop() {
 }
 void ScriptHost::shutdown() {
     stop();
-    if (_impl->scene) _impl->scene->set_script_cleanup_handler({});
+    if (_impl->scene) {
+        _impl->scene->clear_queues();
+        _impl->scene->set_script_cleanup_handler({});
+    }
     _impl->scene=nullptr; _impl->physics=nullptr;
 }
 void ScriptHost::destroy(EntityRef ref) {

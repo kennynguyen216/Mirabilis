@@ -446,9 +446,13 @@ EntityRef Scene::duplicate_subtree(EntityRef root) {
         if (state.script) for (auto& [name,field] : state.script->fields) {
             if (field.type != "entity") continue;
             PersistentID target{};
-            const auto* begin = field.valueJson.data();
-            const auto result = std::from_chars(begin,begin + field.valueJson.size(),target);
-            if (result.ec == std::errc{} && result.ptr == begin + field.valueJson.size() && copies.contains(target))
+            const auto first = field.valueJson.find_first_not_of(" \t\r\n");
+            if (first == std::string::npos) continue;
+            const auto end = field.valueJson.find_last_not_of(" \t\r\n") + 1;
+            const auto* begin = field.valueJson.data() + first;
+            const auto* finish = field.valueJson.data() + end;
+            const auto result = std::from_chars(begin,finish,target);
+            if (result.ec == std::errc{} && result.ptr == finish && copies.contains(target))
                 field.valueJson = std::to_string(copies.at(target));
         }
         for (const auto child : read<Hierarchy>(get(original))->children) if (copies.contains(child)) state.hierarchy.children.push_back(copies.at(child));
@@ -463,6 +467,7 @@ EntityRef Scene::duplicate_subtree(EntityRef root) {
     return duplicate;
 }
 bool Scene::restore_snapshot(const SceneSnapshot& snapshot, const DestroyCallback& beforeDestroy) {
+    if (_epoch == UINT64_MAX) return fail("Scene epoch exhausted");
     std::unordered_set<PersistentID> saved;
     for (const auto& state : snapshot.entities) {
         if (state.id == UINT64_MAX || !saved.insert(state.id).second ||
