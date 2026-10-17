@@ -84,7 +84,7 @@ struct ScriptHost::Impl {
         if (message.size()>maxEntryBytes) {
             size_t cut=maxEntryBytes-suffix.size();
             while (cut && (static_cast<unsigned char>(message[cut]) & 0xc0)==0x80) --cut;
-            message.resize(cut); message.append(suffix);
+            std::string truncated(message,0,cut); truncated.append(suffix); message.swap(truncated);
         }
         while (!diagnostics.empty() && (diagnostics.size()>=maxEntries || diagnosticBytes+message.size()>maxBytes)) {
             diagnosticBytes-=diagnostics.front().size(); diagnostics.erase(diagnostics.begin());
