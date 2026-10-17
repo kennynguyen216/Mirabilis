@@ -21,6 +21,12 @@ if(BUILD_TESTING)
       VERBATIM)
   endforeach()
   add_test(NAME mirabilis_managed_tests COMMAND "${DOTNET_EXECUTABLE}" "${MIRABILIS_MANAGED_DIR}/Mirabilis.ScriptTests.dll")
+  set(MIRABILIS_BAD_BRIDGE_DIR "${CMAKE_BINARY_DIR}/badbridge/$<CONFIG>")
+  add_custom_target(mirabilis_bad_bridge ALL
+    COMMAND "${DOTNET_EXECUTABLE}" build "${PROJECT_SOURCE_DIR}/tests/managed/Mirabilis.BadBridge/Mirabilis.BadBridge.csproj"
+      -c $<CONFIG> --artifacts-path "${CMAKE_BINARY_DIR}/dotnet-badbridge" --output "${MIRABILIS_BAD_BRIDGE_DIR}" --ignore-failed-sources -p:NuGetAudit=false
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DOTNET_HOST_NATIVE}/nethost.dll" "${MIRABILIS_BAD_BRIDGE_DIR}"
+    VERBATIM)
 endif()
 add_custom_target(mirabilis_deploy_managed ALL DEPENDS mirabilis_managed)
 function(mirabilis_deploy_scripts TARGET)
@@ -48,6 +54,12 @@ if(BUILD_TESTING)
   target_compile_definitions(mirabilis_core_tests PRIVATE MIRABILIS_TEST_MANAGED_DIR="$<TARGET_FILE_DIR:mirabilis_core_tests>")
   mirabilis_deploy_scripts(mirabilis_core_tests)
   add_test(NAME mirabilis_core_tests COMMAND mirabilis_core_tests)
+  add_executable(mirabilis_script_abi_probe ../tests/script_abi_probe.cpp)
+  target_link_libraries(mirabilis_script_abi_probe PRIVATE mirabilis_core)
+  add_dependencies(mirabilis_script_abi_probe mirabilis_bad_bridge)
+  foreach(MISMATCH version size null)
+    add_test(NAME mirabilis_script_bad_${MISMATCH} COMMAND mirabilis_script_abi_probe "${MIRABILIS_BAD_BRIDGE_DIR}" ${MISMATCH})
+  endforeach()
 endif()
 if(MIRABILIS_BUILD_ENGINE)
 
