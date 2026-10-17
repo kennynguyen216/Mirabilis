@@ -33,14 +33,9 @@ if(BUILD_TESTING)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/tests/fixtures/script_incompatible.runtimeconfig.json" "${MIRABILIS_BAD_RUNTIME_DIR}/Mirabilis.ScriptCore.runtimeconfig.json"
     VERBATIM)
 endif()
-add_custom_target(mirabilis_deploy_managed ALL DEPENDS mirabilis_managed)
 function(mirabilis_deploy_scripts TARGET)
   add_dependencies(${TARGET} mirabilis_managed)
-  add_custom_command(TARGET ${TARGET} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${MIRABILIS_MANAGED_DIR}" "$<TARGET_FILE_DIR:${TARGET}>"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DOTNET_HOST_NATIVE}/nethost.dll" "$<TARGET_FILE_DIR:${TARGET}>"
-    VERBATIM)
-  add_custom_command(TARGET mirabilis_deploy_managed POST_BUILD
+  add_custom_command(TARGET mirabilis_managed POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${MIRABILIS_MANAGED_DIR}" "$<TARGET_FILE_DIR:${TARGET}>"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DOTNET_HOST_NATIVE}/nethost.dll" "$<TARGET_FILE_DIR:${TARGET}>"
     VERBATIM)

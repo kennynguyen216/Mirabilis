@@ -33,6 +33,9 @@ its runtimeconfig; the native host uses that file to select .NET 10. No runtime
 is embedded into the engine. An unavailable/incompatible runtime disables scripting
 with a diagnostic, retaining scene components and saved fields.
 
+CMake builds and deploys these files automatically, including an incremental
+`cmake --build <build-directory> --config Debug --target engine` after a C# edit.
+
 The native hosting headers, `nethost.lib` and `nethost.dll` come from the installed
 host pack, for example
 `C:/Program Files/dotnet/packs/Microsoft.NETCore.App.Host.win-x64/10.0.7/runtimes/win-x64/native`.
@@ -128,6 +131,11 @@ entities for the next fixed tick. Teardown discards those commands before changi
 epochs. Never retain a background thread that accesses scene state: native calls
 require the engine thread and an active script callback. `Log.Write` also permits
 host/metadata diagnostics outside a callback on that thread.
+
+Console diagnostics remain complete. The host keeps only recent history: up to
+256 messages and 1 MiB total, with individual entries truncated at a UTF-8
+boundary to at most 64 KiB. Repeated inspector metadata queries reuse the last
+assembly/type result, including errors; restart to load a rebuilt assembly.
 
 `IsValid`/`IsPendingDestroy` return false for stale/missing entities; `Resolve`
 returns default for a missing target. Other native failures throw
