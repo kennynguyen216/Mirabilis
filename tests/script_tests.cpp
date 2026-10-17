@@ -118,7 +118,7 @@ TEST_CASE("script fields validate known types and preserve unknown JSON transact
 
 TEST_CASE("script snapshots duplication and scene IO keep authored fields and persistent references") {
     Scene scene; const auto root=scene.import_object("root",0),child=scene.create_object("child",root),outside=scene.create_object("outside");
-    const auto original=script("MissingType",{{"Inside",{"entity",std::to_string(child.persistentId)}},{"Root",{"entity","0"}},
+    const auto original=script("MissingType",{{"Inside",{"entity"," \n"+std::to_string(child.persistentId)+"\t "}},{"Root",{"entity"," 0 "}},
         {"Outside",{"entity",std::to_string(outside.persistentId)}},{"None",{"entity","null"}},
         {"Orphan",{"removed-type",R"({"saved":true})"}},{"Value",{"float","3.5"}}});
     REQUIRE(scene.set(root,original)); const auto snapshot=scene.take_snapshot();
@@ -324,7 +324,8 @@ TEST_CASE("teardown generated commands are discarded before reset replacement an
         const auto snapshot=run.scene.take_snapshot();run.host.start();
         if(mode==2)run.host.shutdown();else run.host.stop();
         CHECK(logged(run.host,marker(ref,"cleanup-ok")));
-        run.scene.clear_queues();
+        if(mode==2)CHECK(run.scene.queued_command_count()==0);
+        else run.scene.clear_queues();
         if(mode==0)REQUIRE(run.scene.restore_snapshot(snapshot));
         else if(mode==1){Scene next;next.import_object("authored",target.persistentId);run.scene.replace(std::move(next));}
         CHECK(run.scene.apply_commands()==0);CHECK(run.scene.read<Name>(run.scene.get(target.persistentId))->value=="authored");
@@ -392,3 +393,4 @@ TEST_CASE("scripted authored demo round trips and real PushBox forces the native
     CHECK(run.scene.world_matrix(moving)[3].y>=.45f);CHECK(run.scene.world_matrix(moving)[3].y<original.y);
     CHECK(run.physics.body_count()==3);
 }
+
