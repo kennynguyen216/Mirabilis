@@ -394,3 +394,13 @@ TEST_CASE("scripted authored demo round trips and real PushBox forces the native
     CHECK(run.physics.body_count()==3);
 }
 
+
+TEST_CASE("managed callback iteration skips a later entity marked pending by an earlier script") {
+    Runtime run;const auto killer=run.add(script("DestroyOtherProbe")),victim=run.add();
+    REQUIRE(run.scene.set(killer,script("DestroyOtherProbe",{{"Target",{"entity",std::to_string(victim.persistentId)}}})));
+    run.host.start();run.host.update(.01f);run.host.fixed_update(.01f);
+    CHECK(run.scene.valid(victim));CHECK(run.scene.pending(victim));CHECK(run.host.live_count()==2);
+    CHECK(field_int(run.scene,victim,"Updates")==0);CHECK(field_int(run.scene,victim,"Fixed")==0);
+    CHECK_FALSE(logged(run.host,marker(victim,"update")));CHECK_FALSE(logged(run.host,marker(victim,"fixed")));
+    run.scene.drain_destruction();CHECK(run.host.live_count()==1);CHECK(occurrences(run.host,marker(victim,"destroy"))==1);
+}

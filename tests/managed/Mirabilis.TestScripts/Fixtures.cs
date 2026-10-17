@@ -202,3 +202,13 @@ public sealed class ParentMoveProbe : Script
 
 
 
+
+public sealed class DestroyOtherProbe : LifecycleProbe
+{
+    public Entity Target;
+    public override void OnUpdate(float dt)
+    {
+        base.OnUpdate(dt);
+        if (Target.IsValid && !Target.IsPendingDestroy) Target.Destroy();
+    }
+}
