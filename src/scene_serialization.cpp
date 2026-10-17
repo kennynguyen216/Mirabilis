@@ -21,7 +21,7 @@
 namespace {
 using Json = simdjson::dom::element;
 using Object = simdjson::dom::object;
-constexpr std::string_view KnownComponents[]{"name", "transform", "visibility", "mesh", "material", "collider", "portalPlaceable", "timeTrialRole", "transformDrivenExternally", "rigidBody"};
+constexpr std::string_view KnownComponents[]{"name", "transform", "visibility", "mesh", "material", "collider", "portalPlaceable", "timeTrialRole", "transformDrivenExternally", "rigidBody", "script"};
 [[noreturn]] void invalid(std::string message) { throw std::runtime_error(std::move(message)); }
 Object object(Json value) { Object result; if (value.get_object().get(result)) invalid("Expected JSON object"); return result; }
 simdjson::dom::array array(Json value) { simdjson::dom::array result; if (value.get_array().get(result)) invalid("Expected JSON array"); return result; }
@@ -51,6 +51,30 @@ template<class T> T vector(Json value) {
         result[static_cast<typename T::length_type>(index++)] = number(component);
     }
     if (index != static_cast<size_t>(result.length())) invalid("Vector has too few components");
+    return result;
+}
+void validate_script_value(std::string_view type, Json value) {
+    if(type=="float")number(value);
+    else if(type=="int") {
+        const auto result=signed_integer(value);
+        if(result<INT32_MIN || result>INT32_MAX)invalid("Script int is out of range");
+    } else if(type=="bool")boolean(value);
+    else if(type=="string")string(value);
+    else if(type=="vec3")vector<glm::vec3>(value);
+    else if(type=="entity" && !value.is_null())integer(value);
+}
+std::map<std::string,ScriptField> read_script_fields(Json json) {
+    std::map<std::string,ScriptField> result;
+    for(const auto field:object(json)) {
+        const auto descriptor=object(field.value);
+        std::set<std::string> keys;
+        for(const auto entry:descriptor)if(!keys.emplace(entry.key).second)invalid("Duplicate script field descriptor key");
+        const auto type=string(required(descriptor,"type"));
+        const auto value=required(descriptor,"value");
+        validate_script_value(type,value);
+        if(!result.emplace(std::string(field.key),ScriptField{type,simdjson::minify(value)}).second)
+            invalid("Duplicate script field name: "+std::string(field.key));
+    }
     return result;
 }
 template<class T, class F> void read_optional(Object value, std::string_view key, T& target, F convert) {
@@ -179,6 +203,17 @@ std::optional<RigidBody> read_components(Object json, uint64_t version, mirabili
             read_float(value,"restitution",rigidBody->restitution); read_float(value,"gravityFactor",rigidBody->gravityFactor);
             if(!valid_component(*rigidBody))invalid("Invalid rigid-body value");
         }
+        if(const auto item=optional(components,"script")) {
+            const auto value=object(*item);
+            std::set<std::string> keys;
+            for(const auto entry:value)if(!keys.emplace(entry.key).second)invalid("Duplicate script key");
+            Script script;
+            script.assembly=string(required(value,"assembly"));
+            script.typeName=string(required(value,"type"));
+            read_bool(value,"enabled",script.enabled);
+            if(const auto fields=optional(value,"fields"))script.fields=read_script_fields(*fields);
+            if(!scene.set(ref,script))invalid("Invalid script component: "+scene.last_error());
+        }
         if(const auto item=optional(components,"timeTrialRole"))role.role=role_kind(required(object(*item),"role"));
         if(const auto item=optional(components,"portalPlaceable")) { if(object(*item).size()!=0)invalid("PortalPlaceable tag must be empty"); portalPlaceable=true; }
         if(const auto item=optional(components,"transformDrivenExternally")) { if(object(*item).size()!=0)invalid("TransformDrivenExternally tag must be empty"); externallyDriven=true; }
@@ -212,6 +247,30 @@ void validate_portal(const mirabilis::Scene& scene,const Portal& portal) {
         if(scene.dynamic_ancestor(ref))invalid("Authored portal host is inside a dynamic subtree");
     }
 }
+}
+
+std::string serialize_script_fields(const std::map<std::string,ScriptField>& fields) {
+    std::ostringstream out;out<<'{';bool first=true;
+    for(const auto& [name,field]:fields) {
+        simdjson::dom::parser parser;Json value;const simdjson::padded_string padded(field.valueJson);
+        if(parser.parse(padded).get(value))invalid("Invalid script field JSON: "+name);
+        validate_script_value(field.type,value);
+        if(!first)out<<',';first=false;
+        out<<quote(name)<<":{\"type\":"<<quote(field.type)<<",\"value\":"<<field.valueJson<<'}';
+    }
+    out<<'}';auto result=out.str();
+    simdjson::dom::parser parser;Json value;const simdjson::padded_string padded(result);
+    if(parser.parse(padded).get(value))invalid("Invalid script field name/type UTF-8");
+    return result;
+}
+
+bool parse_script_fields(std::string_view json,std::map<std::string,ScriptField>& fields,std::string& error) {
+    try {
+        simdjson::dom::parser parser;Json value;const simdjson::padded_string padded(json);
+        if(parser.parse(padded).get(value))invalid("Could not parse script fields JSON");
+        auto result=read_script_fields(value);
+        fields=std::move(result);error.clear();return true;
+    }catch(const std::exception& exception){error=exception.what();return false;}
 }
 
 bool parse_scene_json(std::string_view json,std::string_view sourceFilename,const SceneSettings& defaults,StagedScene& out,std::string& error) {
@@ -317,6 +376,10 @@ bool validate_authored_scene(const mirabilis::Scene& scene,const SceneSettings& 
             if(!scene.read<Name>(ref)||!transform||!visibility||!mesh||!material||!collider||!role||!valid_component(*transform)||!valid_component(*visibility)||!valid_component(*mesh)||!valid_component(*material)||!valid_component(*collider)||!valid_component(*role))invalid("Invalid saved component value");
             const auto body=scene.read<RigidBody>(ref);
             if((body&&!valid_component(*body)) || !scene.validate_physics_edit(ref,body,collider,transform))invalid("Invalid saved physics settings: "+scene.last_error());
+            if(const auto script=scene.read<Script>(ref)) {
+                if(!valid_component(*script))invalid("Invalid saved script component");
+                serialize_script_fields(script->fields);
+            }
             if(collider->hasCollision) {
                 const auto world=scene.world_matrix(ref);
                 for(int axis=0;axis<3;++axis) {
@@ -356,6 +419,7 @@ bool serialize_scene_json(const mirabilis::Scene& scene,const SceneSettings& set
         out<<", \"uvScale\": ";write_vector(out,material.uvScale);out<<", \"metallic\": "<<material.metallic<<", \"roughness\": "<<material.roughness<<", \"debugChecker\": "<<material.debugChecker<<", \"emissionColor\": ";write_vector(out,material.emissionColor);out<<", \"emissionStrength\": "<<material.emissionStrength<<", \"transmission\": "<<material.transmission<<", \"ior\": "<<material.ior<<"}, \"collider\": {\"enabled\": "<<collider.hasCollision<<", \"shape\": "<<static_cast<int>(collider.collisionShape)<<", \"center\": ";write_vector(out,collider.colliderCenter);out<<", \"halfExtents\": ";write_vector(out,collider.colliderHalfExtents);out<<"}, \"timeTrialRole\": {\"role\": "<<quote(role_name(role.role))<<'}';
         if(scene.has<PortalPlaceable>(ref))out<<", \"portalPlaceable\": {}";
         if(const auto body=scene.read<RigidBody>(ref))out<<", \"rigidBody\": {\"motion\": "<<quote(body->motion==BodyMotion::Dynamic?"Dynamic":"Static")<<", \"mass\": "<<body->mass<<", \"friction\": "<<body->friction<<", \"restitution\": "<<body->restitution<<", \"gravityFactor\": "<<body->gravityFactor<<'}';
+        if(const auto script=scene.read<Script>(ref))out<<", \"script\": {\"assembly\": "<<quote(script->assembly)<<", \"type\": "<<quote(script->typeName)<<", \"enabled\": "<<script->enabled<<", \"fields\": "<<serialize_script_fields(script->fields)<<'}';
         if(scene.has<TransformDrivenExternally>(ref))out<<", \"transformDrivenExternally\": {}";
         if(const auto unknown=scene.read<UnknownComponents>(ref))for(const auto& [key,value]:unknown->blocks)out<<", "<<quote(key)<<": "<<value;
         out<<"}}";

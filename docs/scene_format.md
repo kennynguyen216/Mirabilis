@@ -25,6 +25,7 @@ Invalid parents and cycles are rejected.
 | `material` | `{enabled, baseColorTexture, normalTexture, metallicRoughnessTexture, tint: vec4, uvScale: vec2, metallic, roughness, debugChecker, emissionColor: vec3, emissionStrength, transmission, ior}` |
 | `collider` | `{enabled: bool, shape: 0/1/2, center: vec3, halfExtents: vec3}` |
 | `rigidBody` | `{motion: Static/Dynamic, mass: float, friction: float, restitution: float, gravityFactor: float}` (optional) |
+| `script` | `{assembly: string, type: string, enabled: bool, fields: object}` (optional) |
 | `timeTrialRole` | `{role: none/spawn/start/finish}` |
 | `portalPlaceable` | `{}` |
 | `transformDrivenExternally` | `{}` |
@@ -33,9 +34,40 @@ Vectors are JSON arrays. Transform rotation uses Euler radians in Y * X * Z
 order. Collider shapes are Box, GroundPlane and SurfRamp respectively. Basic
 value components include disabled/default values. Missing component blocks use
 defaults. Unknown component blocks retain their JSON values and are written in
-name order; this preserves future component data, including scripts, without executing it.
+name order; this preserves future component data without executing it.
 GPU resources are reconstructed separately; unavailable assets retain their
 authored paths.
+
+Script assembly identity and full type name are required. `enabled` defaults to
+true and `fields` to an empty object. Each field is keyed by its public instance
+field name and has `{type: string, value: JSON}`. The six editable types are:
+
+| Field type | Value |
+| --- | --- |
+| `float` | Finite number representable as a float |
+| `int` | Integer in the signed 32-bit range |
+| `bool` | JSON boolean |
+| `string` | UTF-8 JSON string, including empty and embedded-NUL strings |
+| `vec3` | Array of exactly three finite floats |
+| `entity` | `null` or an unsigned 64-bit persistent ID; zero is a valid target |
+
+Known field types are validated before scene replacement and before saving.
+Duplicate field names or descriptor keys are rejected. Unknown field types keep
+their type and JSON value. Missing assemblies/types and removed, renamed or
+type-changed fields retain their saved values with inspector diagnostics.
+Unresolved entity references also retain their IDs. A mismatched saved field is
+never overwritten by a new field's default value. Static, read-only and
+unsupported managed fields are not exposed as editable fields. Binding metadata
+alone never adds zero defaults to the saved component; an explicit field edit
+saves its value, and otherwise managed field initializers apply at creation.
+
+The inspector attaches/detaches by assembly identity and full type name and
+edits enabled and supported fields only in Edit mode. During Play it shows
+current values read-only. Embedded-NUL strings use JSON-escaped text in the
+inspector to keep all bytes editable. Runtime instance handles, faults and
+diagnostics are never saved. Subtree duplication remaps entity fields targeting
+copied entities and retains external targets and null references. Play snapshots
+restore authored script configuration and values.
 
 Rigid-body defaults are Static motion, mass 1, friction 0.5, restitution 0 and
 gravity factor 1. Every numeric value must be finite. Friction must be
