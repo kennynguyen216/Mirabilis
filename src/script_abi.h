@@ -50,5 +50,10 @@ struct ManagedApi {
 using Initialize = Status (MIRABILIS_SCRIPT_CALL *)(const NativeApi*,ManagedApi*);
 static_assert(sizeof(Entity)==24 && offsetof(Entity,epoch)==0 && offsetof(Entity,entity)==8 && offsetof(Entity,reserved)==12 && offsetof(Entity,persistentId)==16);
 static_assert(sizeof(Vec3)==12 && sizeof(Trs)==36);
+static_assert(offsetof(Vec3,x)==0 && offsetof(Vec3,y)==4 && offsetof(Vec3,z)==8);
+static_assert(offsetof(Trs,position)==0 && offsetof(Trs,rotation)==12 && offsetof(Trs,scale)==24);
+static_assert(offsetof(Utf8,data)==0 && offsetof(Utf8,size)==sizeof(void*) && sizeof(Utf8)==(sizeof(void*)==8 ? 16 : 8));
 static_assert(offsetof(NativeApi,version)==0 && offsetof(NativeApi,size)==4 && offsetof(NativeApi,context)==8);
+static_assert(sizeof(NativeApi)==8+12*sizeof(void*) && offsetof(NativeApi,is_valid)==8+sizeof(void*) && offsetof(NativeApi,destroy_entity)==8+11*sizeof(void*));
+static_assert(sizeof(ManagedApi)==8+6*sizeof(void*) && offsetof(ManagedApi,describe)==8 && offsetof(ManagedApi,live_count)==8+5*sizeof(void*));
 }
