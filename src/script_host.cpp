@@ -81,7 +81,8 @@ struct ScriptHost::Impl {
     std::filesystem::path project,buildRoot,dotnet,buildStage,activeStage,previousStage,failedStage;
     std::string configuration,reloadStatus="Script reload not configured";
     using SourceStamp=std::map<std::filesystem::path,std::pair<std::filesystem::file_time_type,uintmax_t>>;
-    SourceStamp sources;
+    SourceStamp sources,coreSources;
+    std::filesystem::path coreSourceDirectory;
     std::chrono::steady_clock::time_point lastScan{},lastChange{};
     bool automatic{true},buildRequested{};
     uint64_t buildGeneration{};
@@ -95,9 +96,9 @@ struct ScriptHost::Impl {
     };
     std::unique_ptr<BuildJob> build;
 #endif
-    SourceStamp source_stamp() const {
+    SourceStamp source_stamp(const std::filesystem::path& requestedRoot={}) const {
         SourceStamp result;
-        const auto root=std::filesystem::is_directory(project) ? project : project.parent_path();
+        const auto root=!requestedRoot.empty() ? requestedRoot : std::filesystem::is_directory(project) ? project : project.parent_path();
         for (auto it=std::filesystem::recursive_directory_iterator(root);it!=std::filesystem::recursive_directory_iterator();++it) {
             if (it->is_directory() && (it->path().filename()=="bin" || it->path().filename()=="obj" || it->path().filename()=="Mirabilis.ScriptCore")) { it.disable_recursion_pending(); continue; }
             const auto extension=it->path().extension();
@@ -426,7 +427,12 @@ void ScriptHost::watch_project(const std::filesystem::path& project,const std::f
     auto& h=*_impl;
     h.project=std::filesystem::absolute(project); h.dotnet=dotnet; h.configuration=std::move(configuration);
     h.buildRoot=std::filesystem::absolute(buildDirectory).lexically_normal()/("session-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-    try { h.sources=h.source_stamp(); h.reloadStatus="Watching scripts; save a C# file to rebuild and reload"; }
+    h.coreSourceDirectory=(std::filesystem::is_directory(h.project) ? h.project : h.project.parent_path().parent_path())/"Mirabilis.ScriptCore";
+    try {
+        h.sources=h.source_stamp();
+        if (std::filesystem::is_directory(h.coreSourceDirectory)) h.coreSources=h.source_stamp(h.coreSourceDirectory);
+        h.reloadStatus="Watching scripts; save a C# file to rebuild and reload";
+    }
     catch (const std::exception& e) { h.reloadStatus=e.what(); }
 }
 void ScriptHost::request_reload() { _impl->buildRequested=true; _impl->lastChange={}; }
@@ -440,6 +446,10 @@ bool ScriptHost::poll_reload() {
     if (now-h.lastScan<std::chrono::milliseconds(250)) return false;
     h.lastScan=now;
     try {
+        if (std::filesystem::is_directory(h.coreSourceDirectory) && h.source_stamp(h.coreSourceDirectory)!=h.coreSources) {
+            h.reloadStatus="ScriptCore changed; rebuild and restart the engine. Current scripts are still running.";
+            return false;
+        }
         auto files=h.source_stamp();
         if (files!=h.sources) { h.sources=std::move(files); if (h.automatic) { h.buildRequested=true; h.lastChange=now; } }
 #ifdef _WIN32
@@ -448,40 +458,42 @@ bool ScriptHost::poll_reload() {
             DWORD exitCode=1; GetExitCodeProcess(h.build->process,&exitCode); h.build.reset();
             if (!exitCode && !h.buildRequested && ++h.buildProjectIndex<h.buildProjects.size()) h.continueBuild=true;
             else {
-            bool changed=false;
-            if (!exitCode && !h.buildRequested) changed=reload(h.buildStage);
-            if (changed) {
-                h.discard_stage(h.previousStage); h.previousStage=h.activeStage; h.activeStage=h.buildStage;
-                h.reloadStatus="Scripts reloaded; Play and runtime fields preserved";
-            } else {
-                h.discard_stage(h.failedStage); h.failedStage=h.buildStage;
-                if (h.buildRequested) h.reloadStatus="Scripts changed during build; rebuilding latest source";
-                else {
-                    std::ifstream log(h.buildStage/"build.log");
-                    std::string details((std::istreambuf_iterator<char>(log)),{});
-                    h.reloadStatus=exitCode ? "C# build failed; previous scripts still running" : "Reload rejected; previous scripts still running";
-                    h.report(h.reloadStatus+"\n"+details);
-                    if (exitCode) h.reloadStatus+="\n"+details.substr(0,4096);
+                bool changed=false;
+                if (!exitCode && !h.buildRequested) changed=reload(h.buildStage);
+                if (changed) {
+                    h.discard_stage(h.previousStage); h.previousStage=h.activeStage; h.activeStage=h.buildStage;
+                    h.reloadStatus="Scripts reloaded; Play and runtime fields preserved";
+                } else {
+                    h.discard_stage(h.failedStage); h.failedStage=h.buildStage;
+                    if (h.buildRequested) h.reloadStatus="Scripts changed during build; rebuilding latest source";
+                    else {
+                        std::ifstream log(h.buildStage/"build.log");
+                        std::string details((std::istreambuf_iterator<char>(log)),{});
+                        h.reloadStatus=exitCode ? "C# build failed; previous scripts still running" : "Reload rejected; previous scripts still running";
+                        h.report(h.reloadStatus+"\n"+details);
+                        if (exitCode) h.reloadStatus+="\n"+details.substr(0,4096);
+                    }
                 }
-            }
-            return changed;
+                return changed;
             }
         }
         if (!h.continueBuild) {
-        if (!h.buildRequested || now-h.lastChange<std::chrono::milliseconds(350)) return false;
-        h.buildRequested=false;
-        h.buildProjects.clear(); h.buildProjectIndex=0;
-        if (std::filesystem::is_directory(h.project)) {
-            for (const auto& [path,stamp]:h.sources) if (path.extension()==".csproj") h.buildProjects.push_back(path);
-        } else h.buildProjects.push_back(h.project);
-        if (h.buildProjects.empty()) throw std::runtime_error("No C# script projects found");
-        h.buildStage=h.buildRoot/("generation-"+std::to_string(++h.buildGeneration));
-        std::filesystem::create_directories(h.buildStage);
-        for (const auto& entry:std::filesystem::directory_iterator(h.directory)) {
-            const auto name=entry.path().filename().string();
-            if (entry.is_regular_file() && (entry.path().extension()==".dll" || entry.path().extension()==".pdb" || name.ends_with(".deps.json")))
-                std::filesystem::copy_file(entry.path(),h.buildStage/entry.path().filename(),std::filesystem::copy_options::overwrite_existing);
-        }
+            if (!h.buildRequested || now-h.lastChange<std::chrono::milliseconds(350)) return false;
+            h.buildRequested=false;
+            h.buildProjects.clear(); h.buildProjectIndex=0;
+            if (std::filesystem::is_directory(h.project)) {
+                for (const auto& [path,stamp]:h.sources) if (path.extension()==".csproj") h.buildProjects.push_back(path);
+            } else h.buildProjects.push_back(h.project);
+            if (h.buildProjects.empty()) throw std::runtime_error("No C# script projects found");
+            h.buildStage=h.buildRoot/("generation-"+std::to_string(++h.buildGeneration));
+            std::filesystem::create_directories(h.buildStage);
+            for (const auto& entry:std::filesystem::directory_iterator(h.directory)) {
+                const auto name=entry.path().filename().string();
+                auto assembly=entry.path(); assembly.replace_extension(".dll");
+                const bool symbols=entry.path().extension()==".pdb" && std::filesystem::exists(assembly);
+                if (entry.is_regular_file() && (entry.path().extension()==".dll" || symbols || name.ends_with(".deps.json")))
+                    std::filesystem::copy_file(entry.path(),h.buildStage/entry.path().filename(),std::filesystem::copy_options::overwrite_existing);
+            }
         }
         h.continueBuild=false;
         auto job=std::make_unique<Impl::BuildJob>();

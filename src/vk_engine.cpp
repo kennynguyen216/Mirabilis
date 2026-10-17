@@ -1725,6 +1725,11 @@ void VulkanEngine::run(){
         scriptState("reopened-play");
     }
     auto previousTime = std::chrono::steady_clock::now();
+    const bool testReload=frameLimit && SDL_getenv("MIRABILIS_TEST_SCRIPT_RELOAD");
+    bool reloadVerified=false;
+    int reloadUpdates=0,reloadPrivate=0;
+    uint64_t reloadFrame=0;
+    const auto reloadField=[&](const char* name) { return std::stoi(_scene.read<Script>(_scene.get(3))->fields.at(name).valueJson); };
 
     //main loop
     while(!bQuit) {
@@ -1746,7 +1751,39 @@ void VulkanEngine::run(){
             }
             bQuit = process_event(e) || bQuit;
         }
-        if (_scriptHost && _scriptHost->poll_reload()) previousTime=std::chrono::steady_clock::now();
+        if (_scriptHost) {
+            const auto ref=testReload ? _scene.get(3) : EntityRef{};
+            const auto epoch=_scene.epoch();
+            const auto pose=testReload ? _scene.world_matrix(ref) : glm::mat4(1);
+            const auto velocity=testReload ? _physicsWorld.velocity(ref) : glm::vec3(0);
+            const auto playerPosition=_playerMovement.position;
+            const auto bodies=_physicsWorld.body_count();
+            const auto scripts=_scriptHost->live_count();
+            const auto commands=_scene.queued_command_count();
+            const auto accumulator=_playerStep.accumulator;
+            const auto history=_physicsHistoryResetCount;
+            if (_scriptHost->poll_reload()) {
+                previousTime=std::chrono::steady_clock::now();
+                if (testReload) {
+                    scriptRequire(!_editorMode && _scene.epoch()==epoch && _scene.valid(ref),"reload reset Play or entity identity");
+                    scriptRequire(_scene.world_matrix(ref)==pose && _physicsWorld.velocity(ref)==velocity,"reload reset live physics pose/velocity");
+                    scriptRequire(_playerMovement.position==playerPosition && _playerStep.accumulator==accumulator,"reload reset player or fixed accumulator");
+                    scriptRequire(_physicsWorld.body_count()==bodies && _scriptHost->live_count()==scripts && scripts==1,"reload changed body/instance counts");
+                    scriptRequire(_scene.queued_command_count()==commands && _physicsHistoryResetCount==history,"reload discarded commands or motion history");
+                    scriptRequire(reloadField("Creates")==1,"reload repeated OnCreate");
+                    reloadUpdates=reloadField("Updates");reloadPrivate=reloadField("PrivateObserved");reloadFrame=_frameNumber;reloadVerified=true;
+                    fmt::print("SCRIPT reload PRESERVED: frame={} epoch={} bodies={} scripts={} updates={} private={} x={} velocity={}\n",_frameNumber,epoch,bodies,scripts,reloadUpdates,reloadPrivate,pose[3].x,velocity.x);
+                    std::fflush(stdout);
+                }
+            }
+        }
+        if (testReload && _frameNumber==30) { fmt::print("SCRIPT reload READY\n");std::fflush(stdout); }
+        if (testReload && reloadVerified && _frameNumber==reloadFrame+1) {
+            scriptRequire(reloadField("Updates")==reloadUpdates+10 && reloadField("PrivateObserved")==reloadPrivate+1,"new code or private state did not survive reload");
+            scriptRequire(reloadField("Creates")==1,"creation callback repeated after reload");
+            fmt::print("SCRIPT reload PASS: changed code, preserved private state, live world, velocity, identity, queues and history\n");std::fflush(stdout);
+            bQuit=true;
+        }
         // do not draw if we are minimized
         if(stop_rendering) {
             if(frameLimit&&std::getenv("MIRABILIS_TEST_CYCLE")&&testMinimized&&!testRestored) {

@@ -582,6 +582,8 @@ TEST_CASE("live reload changes code preserves runtime fields and leaves physics 
     auto pending=run.scene.create_object("pending");REQUIRE(run.scene.destroy_object(pending));
     REQUIRE(run.physics.queue_impulse(run.scene,ref,{1,0,0}));const auto queued=run.scene.queued_command_count();
     REQUIRE(run.host.reload(variant(2)));
+    bool foreignReload=true;
+    std::thread foreign([&]{foreignReload=run.host.reload(variant(1));});foreign.join();CHECK_FALSE(foreignReload);
     CHECK(run.scene.epoch()==epoch);CHECK(run.scene.valid(target));CHECK(run.scene.valid(ref));CHECK(run.scene.pending(pending));
     CHECK(run.physics.body_count()==1);ecs_test::check_matrix(*run.physics.body_world(ref),pose);CHECK(run.physics.velocity(ref)==velocity);
     CHECK(run.physics.consume_history_resets().empty());CHECK(run.scene.queued_command_count()==queued);
@@ -654,6 +656,11 @@ TEST_CASE("automatic source rebuild continues Play and compilation failure prese
     REQUIRE_MESSAGE(awaitBuild(true),run.host.reload_status());
     updates=field_int(run.scene,ref,"Updates");run.host.update(.01f);CHECK(field_int(run.scene,ref,"Updates")==updates+100);
     CHECK(field_int(run.scene,ref,"Creates")==1);CHECK(run.scene.epoch()==epoch);
+    std::filesystem::create_directories(scratch/"Mirabilis.ScriptCore");
+    {std::ofstream file(scratch/"Mirabilis.ScriptCore/Sentinel.cs");file<<"internal class CoreChange {}";}
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));CHECK_FALSE(run.host.poll_reload());
+    CHECK(run.host.reload_status().starts_with("ScriptCore changed"));
+    updates=field_int(run.scene,ref,"Updates");run.host.update(.01f);CHECK(field_int(run.scene,ref,"Updates")==updates+100);
 }
 
 TEST_CASE("reload revives faulted instances without repeating creation") {

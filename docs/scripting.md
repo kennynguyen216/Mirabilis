@@ -7,6 +7,37 @@ runtime **10.0.7**, and host pack **10.0.7**. .NET is MIT licensed. The SDK and
 runtime are installed prerequisites, with no NuGet package dependencies or
 configure-time downloads.
 
+## Edit code while playing
+
+After attaching a script, **Scripts > Auto Build & Reload** is enabled by default.
+Save a C# source file in a user project under `scripting/`; the engine builds the
+user projects in the background and replaces their assemblies between frames.
+**Scripts > Build & Reload Scripts** requests a build manually. The menu shows
+compilation/reload status and compiler errors. Keep custom script class libraries
+under `scripting/` and reference ScriptCore, as the bundled SampleScripts does.
+
+Play continues during compilation. A successful reload preserves the current
+scene, entities, physics positions/velocities, pending commands and interpolation
+history. Existing script instances retain writable public and private fields of
+types float, int, bool, string, Vec3 and Entity, including inherited private fields
+and auto-property backing fields. Static fields reset; `[NonSerialized]`, readonly
+and unsupported fields use new initializers. Added fields use their initializer;
+removed/type-changed authored fields remain saved with a diagnostic. Private
+runtime fields are never written into scene files. Reset/leave Play still restores
+the original authored snapshot.
+
+Reload reconstructs managed objects without repeating `OnCreate` or `OnDestroy`.
+Constructors run, but cannot mutate native scene state during preparation. These
+two callbacks remain actual entity/Play lifecycle events. Compilation, missing
+type/dependency and constructor failures keep the previous working scripts alive.
+Fix the error and save again. Faulted callbacks can recover on a successful reload.
+
+ScriptCore and native C++ changes require rebuilding and restarting the engine.
+The automatic watcher deliberately excludes ScriptCore and generated bin/obj
+folders. Script-created background threads and externally retained delegates must
+be released before another reload; a context that cannot unload blocks further
+reloads with a diagnostic instead of accumulating old versions.
+
 From a checkout **outside OneDrive**, build both configurations:
 
 ```powershell
@@ -135,7 +166,7 @@ host/metadata diagnostics outside a callback on that thread.
 Console diagnostics remain complete. The host keeps only recent history: up to
 256 messages and 1 MiB total, with individual entries truncated at a UTF-8
 boundary to at most 64 KiB. Repeated inspector metadata queries reuse the last
-assembly/type result, including errors; restart to load a rebuilt assembly.
+assembly/type result, including errors; a successful reload invalidates that cache.
 
 `IsValid`/`IsPendingDestroy` return false for stale/missing entities; `Resolve`
 returns default for a missing target. Other native failures throw
@@ -153,7 +184,7 @@ survive zero-tick frames, and a same-frame press/release preserves both flags.
 The API coalesces repeated edges, rather than supplying an event queue.
 
 ScriptCore and its Cdecl `UnmanagedCallersOnly` bridge stay in the default
-`AssemblyLoadContext`. User assemblies load once into the collectible
+`AssemblyLoadContext`. Each user assembly generation loads into a collectible
 `Mirabilis.Scripts` context, sharing the default ScriptCore identity. Instance
-roots are released at cleanup; the context and .NET runtime remain alive. There
-is no hot reload/unload workflow: restart the process to use rebuilt assemblies.
+roots are released at cleanup. User contexts are replaced during code reload;
+ScriptCore and the .NET runtime remain alive until process exit.

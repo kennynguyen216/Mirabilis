@@ -30,6 +30,7 @@ public static unsafe class NativeBridge
             case "version": table->Version = 1; break;
             case "size": table->Size = 8; break;
             case "null": table->Describe = null; break;
+            case "reload-null": table->Reload = null; break;
             default: return 3;
         }
         return 0;
