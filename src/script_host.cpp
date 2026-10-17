@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <climits>
 #include <iostream>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 #ifdef _WIN32
@@ -69,11 +70,27 @@ struct ScriptHost::Impl {
     std::filesystem::path directory;
     std::string error;
     std::vector<std::string> diagnostics;
+    size_t diagnosticBytes{};
+    std::optional<Script> metadata;
+    std::vector<std::string> metadataDiagnostics;
     bool ready{},attempted{},running{},callback{},fixed{},stopping{};
     struct Instance { EntityRef ref; uint64_t handle{}; std::string assembly,type; bool faulted{}; };
     std::unordered_map<PersistentID,Instance> instances;
 
-    void report(std::string message) { std::cerr << "Scripting: " << message << '\n'; diagnostics.push_back(std::move(message)); }
+    void report(std::string message) {
+        std::cerr << "Scripting: " << message << '\n';
+        constexpr size_t maxEntries=256, maxBytes=1024*1024, maxEntryBytes=64*1024;
+        constexpr std::string_view suffix=" [truncated]";
+        if (message.size()>maxEntryBytes) {
+            size_t cut=maxEntryBytes-suffix.size();
+            while (cut && (static_cast<unsigned char>(message[cut]) & 0xc0)==0x80) --cut;
+            message.resize(cut); message.append(suffix);
+        }
+        while (!diagnostics.empty() && (diagnostics.size()>=maxEntries || diagnosticBytes+message.size()>maxBytes)) {
+            diagnosticBytes-=diagnostics.front().size(); diagnostics.erase(diagnostics.begin());
+        }
+        diagnosticBytes+=message.size(); diagnostics.push_back(std::move(message));
+    }
     Status access() const {
         if (std::this_thread::get_id() != mainThread) return Status::WrongThread;
         if (!callback || !scene || !physics) return Status::OutsideCallback;
@@ -272,11 +289,17 @@ const std::vector<std::string>& ScriptHost::diagnostics() const { return _impl->
 Script ScriptHost::describe(const Script& component,std::vector<std::string>& diagnostics) {
     auto& h=*_impl; Script result=component; result.fields.clear();
     if (!h.ready) { diagnostics.push_back(h.error.empty() ? "Scripting runtime is not initialized" : h.error); return result; }
-    try {
-        const auto json=h.read_buffer([&](uint8_t* p,uint32_t c,uint32_t* n) { return h.managed.describe(utf8(component.assembly),utf8(component.typeName),p,c,n); });
-        std::string message;
-        if (!parse_script_fields(json,result.fields,message)) diagnostics.push_back(message);
-    } catch (const std::exception& e) { diagnostics.push_back(e.what()); }
+    if (!h.metadata || h.metadata->assembly!=component.assembly || h.metadata->typeName!=component.typeName) {
+        h.metadataDiagnostics.clear();
+        try {
+            const auto json=h.read_buffer([&](uint8_t* p,uint32_t c,uint32_t* n) { return h.managed.describe(utf8(component.assembly),utf8(component.typeName),p,c,n); });
+            std::string message;
+            if (!parse_script_fields(json,result.fields,message)) h.metadataDiagnostics.push_back(message);
+        } catch (const std::exception& e) { h.metadataDiagnostics.push_back(component.assembly + "::" + component.typeName + ": " + e.what()); }
+        h.metadata=result;
+    }
+    result.fields=h.metadata->fields;
+    diagnostics.insert(diagnostics.end(),h.metadataDiagnostics.begin(),h.metadataDiagnostics.end());
     return result;
 }
 void ScriptHost::start() { _impl->input.clear(); _impl->running=true; reconcile(); }
