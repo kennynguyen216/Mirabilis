@@ -50,7 +50,11 @@ public sealed class CleanupProbe : LifecycleProbe
             Assert.Status(() => Entity.RigidBody.AddImpulse(new Vec3(1, 0, 0)), Status.PendingDestroy);
             Entity.Destroy(); Entity.Destroy();
         }
-        if (Target.IsValid)
+        if (Target.IsValid && Target.IsPendingDestroy)
+        {
+            Assert.Status(() => Target.Name = "forbidden-target", Status.PendingDestroy);
+        }
+        else if (Target.IsValid)
         {
             if (DestroyTarget) { Target.Destroy(); Target.Destroy(); }
             else { Target.Name = "cleanup-target"; var transform = Target.LocalTransform; transform.Position = new Vec3(8, 9, 10); Target.LocalTransform = transform; }
@@ -195,5 +199,6 @@ public sealed class ParentMoveProbe : Script
         Log.Write("parent-moved");
     }
 }
+
 
 
