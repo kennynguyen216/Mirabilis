@@ -123,7 +123,29 @@ void VulkanEngine::sync_physics_world()
         if (SDL_getenv("MIRABILIS_TEST_FRAMES")) std::abort();
     }
     stats.physics_body_count = static_cast<uint32_t>(_physicsWorld.body_count());
+    stats.script_instance_count = _scriptHost ? static_cast<uint32_t>(_scriptHost->live_count()) : 0;
     reset_physics_render_history();
+    prepare_scripts();
+}
+
+void VulkanEngine::prepare_scripts()
+{
+    if (!_scriptHost && _scene.registry().view<Script>().empty()) return;
+    if (!_scriptHost) {
+        _scriptHost = std::make_shared<mirabilis::ScriptHost>();
+        _scriptHost->bind(_scene,_physicsWorld);
+    }
+    if (!_scriptHost->available()) {
+        char* base = SDL_GetBasePath();
+        _scriptHost->initialize(base ? std::filesystem::path(base) : std::filesystem::current_path());
+        SDL_free(base);
+    }
+}
+
+void VulkanEngine::start_scripts()
+{
+    prepare_scripts();
+    if (_scriptHost) _scriptHost->start();
 }
 
 void VulkanEngine::take_play_snapshot()
@@ -172,6 +194,7 @@ bool VulkanEngine::install_staged_scene(StagedScene&& staging)
         fmt::print("Invalid editor scene: {}\n", error); return false;
     }
     VK_CHECK(vkDeviceWaitIdle(_device));
+    if (_scriptHost) _scriptHost->stop();
     _scene.replace(std::move(staging.scene), [&](EntityRef ref) {
         _physicsWorld.remove(ref);
         cleanup_scene_entity(ref);
@@ -211,6 +234,7 @@ bool VulkanEngine::install_staged_scene(StagedScene&& staging)
     respawn_player();
     sync_physics_world();
     rebuild_collision_from_scene();
+    if (!_editorMode) start_scripts();
     return true;
 }
 
@@ -218,6 +242,7 @@ bool VulkanEngine::restore_play_snapshot()
 {
     if (!_playSnapshot) return true;
     VK_CHECK(vkDeviceWaitIdle(_device));
+    if (_scriptHost) _scriptHost->stop();
     if (!_scene.restore_snapshot(_playSnapshot->entities, [&](EntityRef ref) {
         const auto material = _sceneMaterialRuntimes.find(ref.persistentId);
         const auto render = _sceneRenderRuntimes.find(ref.persistentId);
@@ -269,6 +294,7 @@ void VulkanEngine::reset_play()
     if (_editorMode || !restore_play_snapshot()) return;
     _playerStep.accumulator = 0;
     _playerInput.jumpPressed = false;
+    start_scripts();
     fmt::print("ECS Reset Play complete: epoch={}\n", _scene.epoch());
 }
 
@@ -552,6 +578,7 @@ void VulkanEngine::set_mouse_capture(bool captured)
     SDL_SetRelativeMouseMode(captured ? SDL_TRUE : SDL_FALSE);
 
     if (!captured) {
+        if (_scriptHost) _scriptHost->input().focus_lost();
         _playerInput.forward = false;
         _playerInput.backward = false;
         _playerInput.left = false;
@@ -571,6 +598,8 @@ void VulkanEngine::set_editor_mode(bool enabled)
     } else take_play_snapshot();
     _editorMode = enabled;
     sync_physics_world();
+    if (_scriptHost) _scriptHost->input().clear();
+    if (!enabled) start_scripts();
     if (enabled) {
         _noClip.enabled = false;
         _noClip.up = false;
@@ -825,6 +854,7 @@ void VulkanEngine::init_sync_structures()
 
 void VulkanEngine::cleanup()
 {
+    if (_scriptHost) _scriptHost->shutdown();
     if(_isInitialized) {
         vkDeviceWaitIdle(_device);
         destroy_path_trace();
@@ -1733,6 +1763,8 @@ void VulkanEngine::run(){
             // sweep through however far the editor camera was turned.
             _playerStep.previousPlayerYaw = mainCamera.yaw;
         } else {
+            if (_scriptHost && (!_mouseCaptured || ImGui::GetIO().WantCaptureKeyboard ||
+                !(SDL_GetWindowFlags(_window) & SDL_WINDOW_INPUT_FOCUS))) _scriptHost->input().focus_lost();
             _playerStep.accumulator = std::min(
                 _playerStep.accumulator + deltaTime,
                 PlayerMovementDt * static_cast<float>(MaxPlayerMovementSteps));
@@ -1753,6 +1785,7 @@ void VulkanEngine::run(){
                     _playerStep.targetPlayerYaw,
                     static_cast<float>(stepIndex) /
                         static_cast<float>(stepCount));
+                if (_scriptHost) _scriptHost->fixed_update(PlayerMovementDt);
                 _scene.apply_commands();
                 update_player_movement(PlayerMovementDt);
                 sync_physics_world();
@@ -1761,6 +1794,8 @@ void VulkanEngine::run(){
                 _playerStep.accumulator -= PlayerMovementDt;
             }
             _playerStep.previousPlayerYaw = _playerStep.targetPlayerYaw;
+            if (_scriptHost) _scriptHost->update(deltaTime);
+            drain_scene_destruction();
         }
 
         ImGui_ImplVulkan_NewFrame();
