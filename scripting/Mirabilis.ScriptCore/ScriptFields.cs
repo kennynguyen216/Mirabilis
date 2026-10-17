@@ -15,7 +15,9 @@ public static unsafe partial class NativeBridge
             var name = requested.Name ?? throw new TypeLoadException("Empty script assembly identity.");
             if (name.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar, ':']) >= 0)
                 throw new TypeLoadException("Script assembly must be an assembly identity, not a path.");
-            var assembly = Assemblies.FirstOrDefault(value => string.Equals(value.GetName().Name, name, StringComparison.OrdinalIgnoreCase));
+            var assembly = string.Equals(name, typeof(Script).Assembly.GetName().Name, StringComparison.OrdinalIgnoreCase)
+                ? typeof(Script).Assembly
+                : Assemblies.FirstOrDefault(value => string.Equals(value.GetName().Name, name, StringComparison.OrdinalIgnoreCase));
             if (assembly == null)
             {
                 var path = Path.Combine(Path.GetDirectoryName(typeof(Script).Assembly.Location)!, name + ".dll");
@@ -55,7 +57,7 @@ public static unsafe partial class NativeBridge
         if (string.IsNullOrWhiteSpace(assembly) || string.IsNullOrWhiteSpace(typeName))
             throw new TypeLoadException("Script assembly and full type name are required.");
         var type = userContext.LoadUser(assembly).GetType(typeName, throwOnError: true)!;
-        if (!type.IsPublic || type.IsAbstract || type.ContainsGenericParameters || !typeof(Script).IsAssignableFrom(type)
+        if (!type.IsVisible || type.IsAbstract || type.ContainsGenericParameters || !typeof(Script).IsAssignableFrom(type)
             || type.GetConstructor(Type.EmptyTypes) == null)
             throw new TypeLoadException($"'{typeName}' must be a public concrete Script with a public parameterless constructor.");
         return type;
