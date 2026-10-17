@@ -20,6 +20,14 @@ if(BUILD_TESTING)
         -c $<CONFIG> --artifacts-path "${CMAKE_BINARY_DIR}/dotnet" --output "${MIRABILIS_MANAGED_DIR}" --ignore-failed-sources -p:NuGetAudit=false
       VERBATIM)
   endforeach()
+  foreach(VERSION RANGE 1 5)
+    set(RELOAD_OUTPUT "${CMAKE_BINARY_DIR}/reload-fixtures/v${VERSION}/$<CONFIG>")
+    add_custom_command(TARGET mirabilis_managed POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${MIRABILIS_MANAGED_DIR}" "${RELOAD_OUTPUT}"
+      COMMAND "${DOTNET_EXECUTABLE}" build "${PROJECT_SOURCE_DIR}/tests/managed/Mirabilis.ReloadProbe/Mirabilis.ReloadProbe.csproj"
+        -c $<CONFIG> --artifacts-path "${CMAKE_BINARY_DIR}/reload-fixtures/obj-v${VERSION}" --output "${RELOAD_OUTPUT}" --ignore-failed-sources -p:NuGetAudit=false -p:ReloadVersion=${VERSION}
+      VERBATIM)
+  endforeach()
   add_test(NAME mirabilis_managed_tests COMMAND "${DOTNET_EXECUTABLE}" "${MIRABILIS_MANAGED_DIR}/Mirabilis.ScriptTests.dll")
   set(MIRABILIS_BAD_BRIDGE_DIR "${CMAKE_BINARY_DIR}/badbridge/$<CONFIG>")
   set(MIRABILIS_BAD_RUNTIME_DIR "${CMAKE_BINARY_DIR}/badruntime/$<CONFIG>")
@@ -46,12 +54,19 @@ target_compile_features(mirabilis_core PUBLIC cxx_std_20)
 target_compile_definitions(mirabilis_core PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_include_directories(mirabilis_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_include_directories(mirabilis_core PRIVATE "${DOTNET_HOST_NATIVE}")
+target_compile_definitions(mirabilis_core PUBLIC
+  MIRABILIS_SCRIPT_PROJECT="${PROJECT_SOURCE_DIR}/scripting/Mirabilis.SampleScripts/Mirabilis.SampleScripts.csproj"
+  MIRABILIS_SCRIPT_RELOAD_BUILD="${CMAKE_BINARY_DIR}/script-reload/$<CONFIG>"
+  MIRABILIS_SCRIPT_DOTNET="${DOTNET_EXECUTABLE}"
+  MIRABILIS_SCRIPT_CONFIGURATION="$<CONFIG>")
 target_link_libraries(mirabilis_core PUBLIC glm EnTT::EnTT fastgltf_simdjson Jolt)
 if(BUILD_TESTING)
   add_executable(mirabilis_core_tests ../tests/core_smoke.cpp ../tests/scene_ecs_tests.cpp ../tests/scene_serialization_tests.cpp ../tests/physics_tests.cpp ../tests/script_tests.cpp)
   target_link_libraries(mirabilis_core_tests PRIVATE mirabilis_core doctest::doctest)
   target_compile_definitions(mirabilis_core_tests PRIVATE MIRABILIS_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   target_compile_definitions(mirabilis_core_tests PRIVATE MIRABILIS_TEST_MANAGED_DIR="$<TARGET_FILE_DIR:mirabilis_core_tests>")
+  target_compile_definitions(mirabilis_core_tests PRIVATE MIRABILIS_TEST_RELOAD_DIR="${CMAKE_BINARY_DIR}/reload-fixtures")
+  target_compile_definitions(mirabilis_core_tests PRIVATE MIRABILIS_TEST_CONFIGURATION="$<CONFIG>")
   mirabilis_deploy_scripts(mirabilis_core_tests)
   add_test(NAME mirabilis_core_tests COMMAND mirabilis_core_tests)
   add_executable(mirabilis_script_abi_probe ../tests/script_abi_probe.cpp)

@@ -40,6 +40,13 @@ public:
     bool faulted(EntityRef) const;
     ScriptInput& input();
     const scripting::NativeApi& native_api() const;
+    bool reload(const std::filesystem::path& directory);
+    void watch_project(const std::filesystem::path& project,const std::filesystem::path& buildDirectory,const std::filesystem::path& dotnet,std::string configuration);
+    void request_reload();
+    bool poll_reload();
+    bool auto_reload() const;
+    void set_auto_reload(bool);
+    const std::string& reload_status() const;
 private:
     struct Impl;
     std::unique_ptr<Impl> _impl;

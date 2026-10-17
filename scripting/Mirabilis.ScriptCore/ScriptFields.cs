@@ -6,7 +6,7 @@ namespace Mirabilis.ScriptCore;
 
 public static unsafe partial class NativeBridge
 {
-    private sealed class UserContext() : AssemblyLoadContext("Mirabilis.Scripts", isCollectible: true)
+    private sealed class UserContext(string directory) : AssemblyLoadContext("Mirabilis.Scripts", isCollectible: true)
     {
         private readonly List<AssemblyDependencyResolver> resolvers = [];
         public Assembly LoadUser(string identity)
@@ -20,15 +20,23 @@ public static unsafe partial class NativeBridge
                 : Assemblies.FirstOrDefault(value => string.Equals(value.GetName().Name, name, StringComparison.OrdinalIgnoreCase));
             if (assembly == null)
             {
-                var path = Path.Combine(Path.GetDirectoryName(typeof(Script).Assembly.Location)!, name + ".dll");
+                var path = Path.Combine(directory, name + ".dll");
                 if (!File.Exists(path)) throw new FileNotFoundException($"Script assembly '{identity}' is missing.", path);
                 resolvers.Add(new AssemblyDependencyResolver(path));
-                assembly = LoadFromAssemblyPath(path);
+                assembly = LoadManaged(path);
             }
             if (identity.Contains(',') && !string.Equals(requested.FullName, assembly.GetName().FullName, StringComparison.OrdinalIgnoreCase))
                 throw new TypeLoadException($"Assembly identity mismatch: requested '{identity}', found '{assembly.FullName}'.");
             return assembly;
         }
+        private Assembly LoadManaged(string path)
+        {
+            using var bytes = new MemoryStream(File.ReadAllBytes(path));
+            var pdb = Path.ChangeExtension(path, ".pdb");
+            using var symbols = File.Exists(pdb) ? new MemoryStream(File.ReadAllBytes(pdb)) : null;
+            return LoadFromStream(bytes, symbols);
+        }
+        public void Retire() { resolvers.Clear(); Unload(); }
         protected override Assembly? Load(AssemblyName name)
         {
             if (string.Equals(name.Name, typeof(Script).Assembly.GetName().Name, StringComparison.OrdinalIgnoreCase))
@@ -36,7 +44,7 @@ public static unsafe partial class NativeBridge
             foreach (var resolver in resolvers)
             {
                 var path = resolver.ResolveAssemblyToPath(name);
-                if (path != null) return LoadFromAssemblyPath(path);
+                if (path != null) return LoadManaged(path);
             }
             return null;
         }
@@ -51,12 +59,13 @@ public static unsafe partial class NativeBridge
         }
     }
 
-    private static readonly UserContext userContext = new();
-    private static Type FindType(string assembly, string typeName)
+    private static UserContext userContext = new(Path.GetDirectoryName(typeof(Script).Assembly.Location)!);
+    private static Type FindType(string assembly, string typeName) => FindType(userContext, assembly, typeName);
+    private static Type FindType(UserContext context, string assembly, string typeName)
     {
         if (string.IsNullOrWhiteSpace(assembly) || string.IsNullOrWhiteSpace(typeName))
             throw new TypeLoadException("Script assembly and full type name are required.");
-        var type = userContext.LoadUser(assembly).GetType(typeName, throwOnError: true)!;
+        var type = context.LoadUser(assembly).GetType(typeName, throwOnError: true)!;
         if (!type.IsVisible || type.IsAbstract || type.ContainsGenericParameters || !typeof(Script).IsAssignableFrom(type)
             || type.GetConstructor(Type.EmptyTypes) == null)
             throw new TypeLoadException($"'{typeName}' must be a public concrete Script with a public parameterless constructor.");

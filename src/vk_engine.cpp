@@ -134,6 +134,7 @@ void VulkanEngine::prepare_scripts()
     if (!_scriptHost) {
         _scriptHost = std::make_shared<mirabilis::ScriptHost>();
         _scriptHost->bind(_scene,_physicsWorld);
+        _scriptHost->watch_project(MIRABILIS_SCRIPT_PROJECT,MIRABILIS_SCRIPT_RELOAD_BUILD,MIRABILIS_SCRIPT_DOTNET,MIRABILIS_SCRIPT_CONFIGURATION);
     }
     if (!_scriptHost->available()) {
         char* base = SDL_GetBasePath();
@@ -1745,6 +1746,7 @@ void VulkanEngine::run(){
             }
             bQuit = process_event(e) || bQuit;
         }
+        if (_scriptHost && _scriptHost->poll_reload()) previousTime=std::chrono::steady_clock::now();
         // do not draw if we are minimized
         if(stop_rendering) {
             if(frameLimit&&std::getenv("MIRABILIS_TEST_CYCLE")&&testMinimized&&!testRestored) {

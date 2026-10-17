@@ -73,7 +73,7 @@ TEST_CASE("script ABI has fixed widths offsets and complete tables") {
     static_assert(sizeof(abi::Vec3)==12 && offsetof(abi::Trs,rotation)==12 && offsetof(abi::Trs,scale)==24);
     static_assert(sizeof(abi::Status)==4 && sizeof(abi::Key)==4);
     CHECK(sizeof(abi::NativeApi)==16+11*sizeof(void*));
-    CHECK(sizeof(abi::ManagedApi)==8+6*sizeof(void*));
+    CHECK(sizeof(abi::ManagedApi)==8+7*sizeof(void*));
     CHECK(offsetof(abi::NativeApi,is_valid)==16);
     CHECK(offsetof(abi::NativeApi,destroy_entity)==16+10*sizeof(void*));
     CHECK(offsetof(abi::ManagedApi,describe)==8);
@@ -560,5 +560,90 @@ TEST_CASE("native schema cache avoids repeated errors and preserves caller state
     messages.clear();const auto constructor=run.host.describe(script("ConstructorThrows"),messages);
     CHECK(messages.empty());CHECK(constructor.fields.contains("VisibleField"));CHECK_FALSE(logged(run.host,"fixture-constructor"));
     CHECK(run.host.live_count()==0);CHECK(*run.scene.read<Script>(ref)==authored);
+}
+
+TEST_CASE("live reload changes code preserves runtime fields and leaves physics queues and snapshots intact") {
+    Runtime run;
+    const auto variant=[](int version) { return std::filesystem::path(MIRABILIS_TEST_RELOAD_DIR)/("v"+std::to_string(version))/MIRABILIS_TEST_CONFIGURATION; };
+    REQUIRE(run.host.reload(variant(1)));
+    const auto target=run.scene.import_object("reference-target",0);
+    const auto ref=run.add({"Mirabilis.ReloadProbe","Mirabilis.ReloadProbe.LiveProbe",true,{{"Target",{"entity","0"}},{"OldField",{"int","73"}}}});
+    Collider collider;collider.hasCollision=true;collider.collisionShape=CollisionShape::Box;
+    REQUIRE(run.scene.set(ref,collider));RigidBody body;body.motion=BodyMotion::Dynamic;body.gravityFactor=0;
+    REQUIRE(run.scene.set(ref,body));
+    const auto authored=run.scene.take_snapshot();
+    run.scene.set_physics_play(true);REQUIRE(run.physics.synchronize(run.scene,false));
+    REQUIRE(run.physics.queue_velocity(run.scene,ref,{3,0,0}));run.scene.apply_commands();
+    run.physics.step(run.scene,1.f/120);run.physics.consume_history_resets();
+    run.host.start();run.host.update(.01f);
+    CHECK(field_int(run.scene,ref,"Creates")==1);CHECK(field_int(run.scene,ref,"Updates")==1);
+    CHECK(field_int(run.scene,ref,"PrivateObserved")==11);CHECK(field_int(run.scene,ref,"InheritedObserved")==21);
+    const auto pose=*run.physics.body_world(ref);const auto velocity=run.physics.velocity(ref);const auto epoch=run.scene.epoch();
+    auto pending=run.scene.create_object("pending");REQUIRE(run.scene.destroy_object(pending));
+    REQUIRE(run.physics.queue_impulse(run.scene,ref,{1,0,0}));const auto queued=run.scene.queued_command_count();
+    REQUIRE(run.host.reload(variant(2)));
+    CHECK(run.scene.epoch()==epoch);CHECK(run.scene.valid(target));CHECK(run.scene.valid(ref));CHECK(run.scene.pending(pending));
+    CHECK(run.physics.body_count()==1);ecs_test::check_matrix(*run.physics.body_world(ref),pose);CHECK(run.physics.velocity(ref)==velocity);
+    CHECK(run.physics.consume_history_resets().empty());CHECK(run.scene.queued_command_count()==queued);
+    CHECK(run.host.live_count()==1);CHECK(occurrences(run.host,"reload-create")==1);CHECK_FALSE(logged(run.host,"reload-destroy"));
+    run.host.update(.01f);
+    CHECK(field_int(run.scene,ref,"Updates")==11);CHECK(field_int(run.scene,ref,"Creates")==1);
+    CHECK(field_int(run.scene,ref,"PrivateObserved")==12);CHECK(field_int(run.scene,ref,"InheritedObserved")==22);
+    CHECK(field_int(run.scene,ref,"PropertyObserved")==32);CHECK(field_int(run.scene,ref,"EphemeralObserved")==6);
+    CHECK(field_int(run.scene,ref,"StaticObserved")==1);CHECK(field_int(run.scene,ref,"Added")==77);
+    CHECK(run.scene.read<Script>(ref)->fields.at("OldField")==ScriptField{"int","73"});
+    for(const int broken:{3,4,5}) {
+        const auto count=field_int(run.scene,ref,"Updates");
+        CHECK_FALSE(run.host.reload(variant(broken)));CHECK(run.scene.valid(target));CHECK_FALSE(run.scene.pending(target));
+        CHECK(run.scene.queued_command_count()==queued);CHECK(run.host.live_count()==1);
+        run.host.update(.01f);CHECK(field_int(run.scene,ref,"Updates")==count+10);
+    }
+    CHECK_FALSE(run.host.reload(variant(1)/"missing"));
+    for(int i=0;i<12;++i) {
+        const auto before=field_int(run.scene,ref,"Updates");const auto privateBefore=field_int(run.scene,ref,"PrivateObserved");
+        REQUIRE(run.host.reload(variant(2)));run.host.update(.01f);
+        CHECK(field_int(run.scene,ref,"Updates")==before+10);CHECK(field_int(run.scene,ref,"PrivateObserved")==privateBefore+1);
+        CHECK(run.host.live_count()==1);CHECK(run.scene.epoch()==epoch);
+    }
+    run.scene.apply_commands();CHECK(run.physics.velocity(ref).x>velocity.x);run.scene.drain_destruction();CHECK_FALSE(run.scene.valid(pending));
+    run.host.stop();CHECK(occurrences(run.host,"reload-destroy")==1);CHECK(run.host.live_count()==0);
+    REQUIRE(run.scene.restore_snapshot(authored));CHECK_FALSE(run.scene.valid(ref));
+    CHECK(run.scene.read<Script>(run.scene.get(ref.persistentId))->fields.size()==2);
+    CHECK(run.scene.read<Script>(run.scene.get(ref.persistentId))->fields.at("OldField")==ScriptField{"int","73"});
+}
+
+TEST_CASE("automatic source rebuild continues Play and compilation failure preserves running code") {
+    Runtime run;
+    const auto v1=std::filesystem::path(MIRABILIS_TEST_RELOAD_DIR)/"v1"/MIRABILIS_TEST_CONFIGURATION;
+    REQUIRE(run.host.reload(v1));run.scene.import_object("target",0);
+    const auto ref=run.add({"Mirabilis.ReloadProbe","Mirabilis.ReloadProbe.LiveProbe",true,{{"Target",{"entity","0"}}}});
+    run.host.start();run.host.update(.01f);
+    const auto scratch=std::filesystem::path(MIRABILIS_TEST_RELOAD_DIR)/("source-test-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(scratch);
+    const auto project=scratch/"Probe.csproj";
+    {std::ofstream file(project);file<<"<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework><AssemblyName>Mirabilis.ReloadProbe</AssemblyName><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><DefineConstants>RELOAD_1</DefineConstants></PropertyGroup><ItemGroup><Reference Include=\"Mirabilis.ScriptCore\"><HintPath>"<<std::filesystem::path(MIRABILIS_TEST_MANAGED_DIR).generic_string()<<"/Mirabilis.ScriptCore.dll</HintPath></Reference></ItemGroup></Project>";}
+    const auto source=scratch/"Probe.cs";auto code=ecs_test::read_file(std::filesystem::path(MIRABILIS_TEST_SOURCE_DIR)/"tests/managed/Mirabilis.ReloadProbe/Probe.cs");
+    {std::ofstream file(source);file<<code;}
+    run.host.watch_project(project,scratch/"build",MIRABILIS_SCRIPT_DOTNET,MIRABILIS_TEST_CONFIGURATION);
+    code.replace(code.find("++Updates;"),10,"Updates += 100;");
+    {std::ofstream file(source);file<<code;}
+    const auto epoch=run.scene.epoch();int frames=0;
+    const auto awaitBuild=[&](bool expectedSuccess) {
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(90);
+        while(std::chrono::steady_clock::now()<deadline) {
+            const bool reloaded=run.host.poll_reload();
+            if(reloaded) return expectedSuccess;
+            if(run.host.reload_status().starts_with("C# build failed")) return !expectedSuccess;
+            run.host.update(.01f);++frames;std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return false;
+    };
+    REQUIRE_MESSAGE(awaitBuild(true),run.host.reload_status());CHECK(frames>1);
+    auto updates=field_int(run.scene,ref,"Updates");run.host.update(.01f);CHECK(field_int(run.scene,ref,"Updates")==updates+100);
+    CHECK(run.scene.epoch()==epoch);CHECK(field_int(run.scene,ref,"Creates")==1);CHECK(run.host.live_count()==1);
+    {std::ofstream file(source);file<<"not valid C#";}
+    REQUIRE_MESSAGE(awaitBuild(false),run.host.reload_status());
+    updates=field_int(run.scene,ref,"Updates");run.host.update(.01f);CHECK(field_int(run.scene,ref,"Updates")==updates+100);
+    CHECK(run.scene.epoch()==epoch);CHECK(run.host.live_count()==1);CHECK_FALSE(logged(run.host,"reload-destroy"));
 }
 

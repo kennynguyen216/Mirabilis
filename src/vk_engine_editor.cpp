@@ -979,6 +979,15 @@ void VulkanEngine::draw_editor_menu()
             "Create Spawn Point, Start Timer Trigger, and Finish Timer Trigger.");
         ImGui::EndMenu();
     }
+    if (ImGui::BeginMenu("Scripts")) {
+        if (_scriptHost) {
+            bool automatic=_scriptHost->auto_reload();
+            if (ImGui::MenuItem("Auto Build & Reload",nullptr,&automatic)) _scriptHost->set_auto_reload(automatic);
+            if (ImGui::MenuItem("Build & Reload Scripts")) _scriptHost->request_reload();
+            ImGui::TextWrapped("%s",_scriptHost->reload_status().c_str());
+        } else ImGui::TextDisabled("Attach a script to enable script compilation.");
+        ImGui::EndMenu();
+    }
 
     if (ImGui::BeginMenu("Window")) {
         ImGui::MenuItem("Show Debug Panels", nullptr, &_editorUi.showDebugPanels);

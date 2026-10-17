@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
+    <DefineConstants>$(DefineConstants);RELOAD_$(ReloadVersion)</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../../scripting/Mirabilis.ScriptCore/Mirabilis.ScriptCore.csproj" /></ItemGroup>
+</Project>

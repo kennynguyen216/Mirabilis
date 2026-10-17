@@ -9,7 +9,7 @@
 #endif
 
 namespace mirabilis::scripting {
-inline constexpr uint32_t AbiVersion = 1;
+inline constexpr uint32_t AbiVersion = 2;
 enum class Status : uint32_t {
     Ok, InvalidEntity, PendingDestroy, InvalidArgument, WrongThread,
     OutsideCallback, IncompatibleAbi, NotFound, Failure, Faulted, BufferTooSmall
@@ -46,6 +46,7 @@ struct ManagedApi {
     Status (MIRABILIS_SCRIPT_CALL *destroy)(uint64_t);
     Status (MIRABILIS_SCRIPT_CALL *read_fields)(uint64_t,uint8_t*,uint32_t,uint32_t*);
     Status (MIRABILIS_SCRIPT_CALL *live_count)(uint32_t*);
+    Status (MIRABILIS_SCRIPT_CALL *reload)(Utf8);
 };
 using Initialize = Status (MIRABILIS_SCRIPT_CALL *)(const NativeApi*,ManagedApi*);
 static_assert(sizeof(Entity)==24 && offsetof(Entity,epoch)==0 && offsetof(Entity,entity)==8 && offsetof(Entity,reserved)==12 && offsetof(Entity,persistentId)==16);
@@ -55,5 +56,5 @@ static_assert(offsetof(Trs,position)==0 && offsetof(Trs,rotation)==12 && offseto
 static_assert(offsetof(Utf8,data)==0 && offsetof(Utf8,size)==sizeof(void*) && sizeof(Utf8)==(sizeof(void*)==8 ? 16 : 8));
 static_assert(offsetof(NativeApi,version)==0 && offsetof(NativeApi,size)==4 && offsetof(NativeApi,context)==8);
 static_assert(sizeof(NativeApi)==8+12*sizeof(void*) && offsetof(NativeApi,is_valid)==8+sizeof(void*) && offsetof(NativeApi,destroy_entity)==8+11*sizeof(void*));
-static_assert(sizeof(ManagedApi)==8+6*sizeof(void*) && offsetof(ManagedApi,describe)==8 && offsetof(ManagedApi,live_count)==8+5*sizeof(void*));
+static_assert(sizeof(ManagedApi)==8+7*sizeof(void*) && offsetof(ManagedApi,describe)==8 && offsetof(ManagedApi,live_count)==8+5*sizeof(void*));
 }

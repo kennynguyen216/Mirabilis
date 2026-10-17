@@ -6,6 +6,8 @@
 #include <optional>
 #include <thread>
 #include <unordered_map>
+#include <fstream>
+#include <chrono>
 #ifdef _WIN32
 #define NOMINMAX
 #include <Windows.h>
@@ -73,9 +75,37 @@ struct ScriptHost::Impl {
     size_t diagnosticBytes{};
     std::optional<Script> metadata;
     std::vector<std::string> metadataDiagnostics;
-    bool ready{},attempted{},running{},callback{},fixed{},stopping{};
+    bool ready{},attempted{},running{},callback{},fixed{},stopping{},reloading{};
     struct Instance { EntityRef ref; uint64_t handle{}; std::string assembly,type; bool faulted{}; };
     std::unordered_map<PersistentID,Instance> instances;
+    std::filesystem::path project,buildRoot,dotnet,buildStage,activeStage,previousStage,failedStage;
+    std::string configuration,reloadStatus="Script reload not configured";
+    using SourceStamp=std::map<std::filesystem::path,std::pair<std::filesystem::file_time_type,uintmax_t>>;
+    SourceStamp sources;
+    std::chrono::steady_clock::time_point lastScan{},lastChange{};
+    bool automatic{true},buildRequested{};
+    uint64_t buildGeneration{};
+#ifdef _WIN32
+    struct BuildJob {
+        HANDLE process{},job{};
+        ~BuildJob() { if (job) CloseHandle(job); if (process) CloseHandle(process); }
+    };
+    std::unique_ptr<BuildJob> build;
+#endif
+    SourceStamp source_stamp() const {
+        SourceStamp result;
+        for (auto it=std::filesystem::recursive_directory_iterator(project.parent_path());it!=std::filesystem::recursive_directory_iterator();++it) {
+            if (it->is_directory() && (it->path().filename()=="bin" || it->path().filename()=="obj")) { it.disable_recursion_pending(); continue; }
+            const auto extension=it->path().extension();
+            if (it->is_regular_file() && (extension==".cs" || extension==".csproj" || extension==".props"))
+                result[it->path()]={it->last_write_time(),it->file_size()};
+        }
+        return result;
+    }
+    void discard_stage(const std::filesystem::path& path) {
+        if (path.empty() || path.parent_path()!=buildRoot || path.filename().string().find("generation-")!=0) return;
+        std::error_code ignored; std::filesystem::remove_all(path,ignored);
+    }
 
     void report(std::string message) {
         std::cerr << "Scripting: " << message << '\n';
@@ -98,6 +128,7 @@ struct ScriptHost::Impl {
     }
     Status entity_access(Entity entity,bool mutation) const {
         auto status = access(); if (status != Status::Ok) return status;
+        if (reloading && mutation) return Status::OutsideCallback;
         if (entity.reserved) return Status::InvalidArgument;
         const auto ref = native_entity(entity);
         if (!scene->valid(ref)) return Status::InvalidEntity;
@@ -182,6 +213,7 @@ struct ScriptHost::Impl {
         }); };
         native.destroy_entity=[](void* p,Entity e)->Status { return guarded(p,[&](Impl& h) {
             const auto status=h.entity_access(e,false); if (status!=Status::Ok) return status;
+            if (h.reloading) return Status::OutsideCallback;
             return h.scene->destroy_object(native_entity(e)) ? Status::Ok : Status::InvalidArgument;
         }); };
     }
@@ -273,7 +305,7 @@ bool ScriptHost::initialize(const std::filesystem::path& directory) {
         if (result<0 || !bridge) throw std::runtime_error("Cannot load compatible Mirabilis.ScriptCore native bridge");
         h.managed.version=AbiVersion; h.managed.size=sizeof(ManagedApi);
         const auto status=bridge(&h.native,&h.managed);
-        if (status!=Status::Ok || h.managed.version!=AbiVersion || h.managed.size!=sizeof(ManagedApi) || !h.managed.describe || !h.managed.create || !h.managed.invoke || !h.managed.destroy || !h.managed.read_fields || !h.managed.live_count)
+        if (status!=Status::Ok || h.managed.version!=AbiVersion || h.managed.size!=sizeof(ManagedApi) || !h.managed.describe || !h.managed.create || !h.managed.invoke || !h.managed.destroy || !h.managed.read_fields || !h.managed.live_count || !h.managed.reload)
             throw std::runtime_error("Script ABI version/layout mismatch; scripting disabled and saved fields retained");
         h.ready=true; return true;
 #else
@@ -337,6 +369,9 @@ void ScriptHost::stop() {
 }
 void ScriptHost::shutdown() {
     stop();
+#ifdef _WIN32
+    _impl->build.reset();
+#endif
     if (_impl->scene) {
         _impl->scene->clear_queues();
         _impl->scene->set_script_cleanup_handler({});
@@ -367,4 +402,103 @@ size_t ScriptHost::live_count() const {
 bool ScriptHost::faulted(EntityRef ref) const { const auto it=_impl->instances.find(ref.persistentId); return it!=_impl->instances.end() && it->second.ref==ref && it->second.faulted; }
 ScriptInput& ScriptHost::input() { return _impl->input; }
 const NativeApi& ScriptHost::native_api() const { return _impl->native; }
+bool ScriptHost::reload(const std::filesystem::path& directory) {
+    auto& h=*_impl;
+    if (!h.ready || h.callback || std::this_thread::get_id()!=h.mainThread) return false;
+    const auto encoded=std::filesystem::absolute(directory).u8string();
+    const std::string path(reinterpret_cast<const char*>(encoded.data()),encoded.size());
+    Impl::Scope scope(h); h.reloading=true;
+    const auto status=h.managed.reload(utf8(path));
+    h.reloading=false;
+    if (status!=Status::Ok) return false;
+    h.metadata.reset(); h.metadataDiagnostics.clear();
+    for (auto it=h.instances.begin();it!=h.instances.end();) {
+        if (!it->second.handle) it=h.instances.erase(it);
+        else { it->second.faulted=false; ++it; }
+    }
+    return true;
+}
+void ScriptHost::watch_project(const std::filesystem::path& project,const std::filesystem::path& buildDirectory,const std::filesystem::path& dotnet,std::string configuration) {
+    auto& h=*_impl;
+    h.project=std::filesystem::absolute(project); h.dotnet=dotnet; h.configuration=std::move(configuration);
+    h.buildRoot=std::filesystem::absolute(buildDirectory)/("session-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    try { h.sources=h.source_stamp(); h.reloadStatus="Watching scripts; save a C# file to rebuild and reload"; }
+    catch (const std::exception& e) { h.reloadStatus=e.what(); }
+}
+void ScriptHost::request_reload() { _impl->buildRequested=true; _impl->lastChange={}; }
+bool ScriptHost::auto_reload() const { return _impl->automatic; }
+void ScriptHost::set_auto_reload(bool value) { _impl->automatic=value; }
+const std::string& ScriptHost::reload_status() const { return _impl->reloadStatus; }
+bool ScriptHost::poll_reload() {
+    auto& h=*_impl;
+    if (!h.ready || h.project.empty() || h.callback || std::this_thread::get_id()!=h.mainThread) return false;
+    const auto now=std::chrono::steady_clock::now();
+    if (now-h.lastScan<std::chrono::milliseconds(250)) return false;
+    h.lastScan=now;
+    try {
+        auto files=h.source_stamp();
+        if (files!=h.sources) { h.sources=std::move(files); if (h.automatic) { h.buildRequested=true; h.lastChange=now; } }
+#ifdef _WIN32
+        if (h.build) {
+            if (WaitForSingleObject(h.build->process,0)!=WAIT_OBJECT_0) return false;
+            DWORD exitCode=1; GetExitCodeProcess(h.build->process,&exitCode); h.build.reset();
+            bool changed=false;
+            if (!exitCode && !h.buildRequested) changed=reload(h.buildStage);
+            if (changed) {
+                h.discard_stage(h.previousStage); h.previousStage=h.activeStage; h.activeStage=h.buildStage;
+                h.reloadStatus="Scripts reloaded; Play and runtime fields preserved";
+            } else {
+                h.discard_stage(h.failedStage); h.failedStage=h.buildStage;
+                if (h.buildRequested) h.reloadStatus="Scripts changed during build; rebuilding latest source";
+                else {
+                    std::ifstream log(h.buildStage/"build.log");
+                    std::string details((std::istreambuf_iterator<char>(log)),{});
+                    h.reloadStatus=exitCode ? "C# build failed; previous scripts still running" : "Reload rejected; previous scripts still running";
+                    h.report(h.reloadStatus+"\n"+details);
+                    if (exitCode) h.reloadStatus+="\n"+details.substr(0,4096);
+                }
+            }
+            return changed;
+        }
+        if (!h.buildRequested || now-h.lastChange<std::chrono::milliseconds(350)) return false;
+        h.buildRequested=false;
+        h.buildStage=h.buildRoot/("generation-"+std::to_string(++h.buildGeneration));
+        std::filesystem::create_directories(h.buildStage);
+        for (const auto& entry:std::filesystem::directory_iterator(h.directory)) {
+            const auto name=entry.path().filename().string();
+            if (entry.is_regular_file() && (entry.path().extension()==".dll" || entry.path().extension()==".pdb" || name.ends_with(".deps.json")))
+                std::filesystem::copy_file(entry.path(),h.buildStage/entry.path().filename(),std::filesystem::copy_options::overwrite_existing);
+        }
+        auto job=std::make_unique<Impl::BuildJob>();
+        job->job=CreateJobObjectW(nullptr,nullptr);
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{}; limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!job->job || !SetInformationJobObject(job->job,JobObjectExtendedLimitInformation,&limits,sizeof(limits))) throw std::runtime_error("Cannot create script compiler job");
+        SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES),nullptr,TRUE};
+        const auto output=CreateFileW((h.buildStage/L"build.log").c_str(),GENERIC_WRITE,FILE_SHARE_READ,&security,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+        const auto input=CreateFileW(L"NUL",GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,&security,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if (output==INVALID_HANDLE_VALUE || input==INVALID_HANDLE_VALUE) {
+            if (output!=INVALID_HANDLE_VALUE) CloseHandle(output); if (input!=INVALID_HANDLE_VALUE) CloseHandle(input);
+            throw std::runtime_error("Cannot open script compiler output");
+        }
+        const auto quote=[](const std::filesystem::path& path) { return L"\""+path.wstring()+L"\""; };
+        std::wstring command=quote(h.dotnet)+L" build "+quote(h.project)+L" -c "+std::wstring(h.configuration.begin(),h.configuration.end())+
+            L" --artifacts-path "+quote(h.buildStage/L"intermediates")+L" --output "+quote(h.buildStage)+L" --ignore-failed-sources --disable-build-servers -p:NuGetAudit=false";
+        STARTUPINFOW startup{}; startup.cb=sizeof(startup); startup.dwFlags=STARTF_USESTDHANDLES;
+        startup.hStdOutput=startup.hStdError=output; startup.hStdInput=input;
+        PROCESS_INFORMATION process{};
+        const bool launched=CreateProcessW(h.dotnet.c_str(),command.data(),nullptr,nullptr,TRUE,CREATE_NO_WINDOW|CREATE_SUSPENDED,nullptr,nullptr,&startup,&process)!=0;
+        CloseHandle(output); CloseHandle(input);
+        if (!launched) throw std::runtime_error("Cannot start dotnet build");
+        job->process=process.hProcess;
+        if (!AssignProcessToJobObject(job->job,process.hProcess)) {
+            TerminateProcess(process.hProcess,1); CloseHandle(process.hThread); throw std::runtime_error("Cannot contain script compiler job");
+        }
+        ResumeThread(process.hThread); CloseHandle(process.hThread); h.build=std::move(job);
+        h.reloadStatus="Compiling C#; Play continues";
+#else
+        h.reloadStatus="Live script compilation requires Windows x64"; h.buildRequested=false;
+#endif
+    } catch (const std::exception& e) { h.reloadStatus=std::string("Script reload: ")+e.what(); h.report(h.reloadStatus); }
+    return false;
+}
 }

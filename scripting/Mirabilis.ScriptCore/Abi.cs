@@ -38,4 +38,5 @@ public unsafe struct ManagedApi
     public delegate* unmanaged[Cdecl]<ulong, Status> Destroy;
     public delegate* unmanaged[Cdecl]<ulong, byte*, uint, uint*, Status> ReadFields;
     public delegate* unmanaged[Cdecl]<uint*, Status> LiveCount;
+    public delegate* unmanaged[Cdecl]<Utf8, Status> Reload;
 }

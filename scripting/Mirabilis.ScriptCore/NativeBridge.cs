@@ -8,12 +8,12 @@ namespace Mirabilis.ScriptCore;
 
 public static unsafe partial class NativeBridge
 {
-    private const uint AbiVersion = 1;
+    private const uint AbiVersion = 2;
     private static NativeApi native;
     private static int mainThread;
     private static bool initialized;
     private static ulong nextHandle;
-    private static readonly Dictionary<ulong, Instance> instances = [];
+    private static Dictionary<ulong, Instance> instances = [];
     private static readonly UTF8Encoding utf8 = new(false, true);
 
     private sealed class Instance(Script script, Dictionary<string, JsonElement> saved)
@@ -45,9 +45,9 @@ public static unsafe partial class NativeBridge
             *result = new ManagedApi
             {
                 Version = AbiVersion, Size = (uint)sizeof(ManagedApi), Describe = &Describe,
-                Create = &Create, Invoke = &Invoke, Destroy = &Destroy, ReadFields = &ReadFields, LiveCount = &LiveCount
+                Create = &Create, Invoke = &Invoke, Destroy = &Destroy, ReadFields = &ReadFields, LiveCount = &LiveCount, Reload = &Reload
             };
-            Diagnostic("ScriptCore initialized in default AssemblyLoadContext; user assemblies use one collectible Mirabilis.Scripts context.");
+            Diagnostic("ScriptCore initialized in default AssemblyLoadContext; user assemblies use replaceable collectible Mirabilis.Scripts contexts.");
             return Status.Ok;
         }
         catch (Exception error) { Report("Initialize", null, error); return Status.Failure; }
@@ -61,7 +61,7 @@ public static unsafe partial class NativeBridge
             nameof(NativeApi.GetTransform), nameof(NativeApi.SetTransform), nameof(NativeApi.GetName), nameof(NativeApi.SetName),
             nameof(NativeApi.Input), nameof(NativeApi.Log), nameof(NativeApi.BodyCommand), nameof(NativeApi.DestroyEntity)];
         string[] managedPointers = [nameof(ManagedApi.Describe), nameof(ManagedApi.Create), nameof(ManagedApi.Invoke),
-            nameof(ManagedApi.Destroy), nameof(ManagedApi.ReadFields), nameof(ManagedApi.LiveCount)];
+            nameof(ManagedApi.Destroy), nameof(ManagedApi.ReadFields), nameof(ManagedApi.LiveCount), nameof(ManagedApi.Reload)];
         return nativePointers.Select((name, index) => Offset<NativeApi>(name) == 8 + (index + 1) * pointer).All(valid => valid)
             && managedPointers.Select((name, index) => Offset<ManagedApi>(name) == 8 + index * pointer).All(valid => valid)
             && sizeof(Entity) == 24 && Offset<Entity>(nameof(Entity.Epoch)) == 0
@@ -71,7 +71,7 @@ public static unsafe partial class NativeBridge
             && sizeof(Transform) == 36 && Offset<Transform>(nameof(Transform.Rotation)) == 12
             && Offset<Transform>(nameof(Transform.Scale)) == 24
             && sizeof(Utf8) == (pointer == 8 ? 16 : 8) && Offset<Utf8>(nameof(Utf8.Size)) == pointer
-            && sizeof(NativeApi) == 8 + 12 * pointer && sizeof(ManagedApi) == 8 + 6 * pointer
+            && sizeof(NativeApi) == 8 + 12 * pointer && sizeof(ManagedApi) == 8 + 7 * pointer
             && Offset<NativeApi>(nameof(NativeApi.Version)) == 0 && Offset<NativeApi>(nameof(NativeApi.Size)) == 4
             && Offset<NativeApi>(nameof(NativeApi.Context)) == 8
             && Offset<ManagedApi>(nameof(ManagedApi.Version)) == 0 && Offset<ManagedApi>(nameof(ManagedApi.Size)) == 4;

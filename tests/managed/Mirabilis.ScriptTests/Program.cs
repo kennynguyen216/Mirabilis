@@ -34,6 +34,7 @@ internal static unsafe class Program
         public delegate* unmanaged[Cdecl]<ulong, uint> Destroy;
         public delegate* unmanaged[Cdecl]<ulong, byte*, uint, uint*, uint> Read;
         public delegate* unmanaged[Cdecl]<uint*, uint> Count;
+        public delegate* unmanaged[Cdecl]<Text, uint> Reload;
     }
     private static int assertions;
     private static string storedName = "";
@@ -130,25 +131,25 @@ internal static unsafe class Program
             Check(Marshal.SizeOf<Vec3>() == 12 && Marshal.SizeOf<Transform>() == 36, "Vector/TRS size");
             Check(Marshal.OffsetOf<Transform>(nameof(Transform.Rotation)).ToInt32() == 12 && Marshal.OffsetOf<Transform>(nameof(Transform.Scale)).ToInt32() == 24, "TRS offsets");
             Check(Marshal.SizeOf<NativeApi>() == sizeof(Native) && sizeof(Native) == 104, "Native table layout");
-            Check(Marshal.SizeOf<ManagedApi>() == sizeof(Managed) && sizeof(Managed) == 56, "Managed table layout");
+            Check(Marshal.SizeOf<ManagedApi>() == sizeof(Managed) && sizeof(Managed) == 64, "Managed table layout");
             Check(Marshal.SizeOf<Utf8>() == sizeof(Text) && sizeof(Text) == 16, "UTF8 pointer alignment");
             Check(Enum.GetUnderlyingType(typeof(Status)) == typeof(uint), "Status fixed width");
             var method = typeof(NativeBridge).GetMethod("Initialize", BindingFlags.Static | BindingFlags.Public)!;
             Check(method.GetCustomAttribute<UnmanagedCallersOnlyAttribute>() != null, "UCO entry");
             var initialize = (delegate* unmanaged[Cdecl]<Native*, Managed*, uint>)method.MethodHandle.GetFunctionPointer();
-            Native native = new() { Version = 1, Size = (uint)sizeof(Native), Valid = &Valid, Pending = &Pending, Resolve = &Resolve,
+            Native native = new() { Version = 2, Size = (uint)sizeof(Native), Valid = &Valid, Pending = &Pending, Resolve = &Resolve,
                 GetTransform = &GetTransform, SetTransform = &SetTransform, GetName = &GetName, SetName = &SetName,
                 Input = &Input, Log = &Log, Body = &Body, Destroy = &Destroy };
             Managed managed = default;
             Check(initialize(null, &managed) != 0, "Null native table");
-            native.Version = 2; Check(initialize(&native, &managed) == Code(Status.IncompatibleAbi), "Bad ABI version"); native.Version = 1;
+            native.Version = 1; Check(initialize(&native, &managed) == Code(Status.IncompatibleAbi), "Bad ABI version"); native.Version = 2;
             native.Size--; Check(initialize(&native, &managed) == Code(Status.IncompatibleAbi), "Truncated table"); native.Size++;
             var saved = native.Destroy; native.Destroy = null;
             Check(initialize(&native, &managed) == Code(Status.IncompatibleAbi), "Missing native function"); native.Destroy = saved;
             Check(initialize(&native, null) != 0, "Null managed output");
             Check(initialize(&native, &managed) == 0, "Valid ABI initialization");
-            Check(managed.Version == 1 && managed.Size == sizeof(Managed), "Returned ABI header");
-            Check(managed.Describe != null && managed.Create != null && managed.Invoke != null && managed.Destroy != null && managed.Read != null && managed.Count != null, "Complete managed table");
+            Check(managed.Version == 2 && managed.Size == sizeof(Managed), "Returned ABI header");
+            Check(managed.Describe != null && managed.Create != null && managed.Invoke != null && managed.Destroy != null && managed.Read != null && managed.Count != null && managed.Reload != null, "Complete managed table");
             uint count = 99; Check(managed.Count(&count) == 0 && count == 0, "No handles at startup");
             Check(managed.Count(null) != 0, "Null count output");
             uint required = 0; Check(managed.Describe(new Text { Size = 1 }, default, null, 0, &required) != 0, "Null UTF8 input with nonzero length");
