@@ -22,10 +22,15 @@ if(BUILD_TESTING)
   endforeach()
   add_test(NAME mirabilis_managed_tests COMMAND "${DOTNET_EXECUTABLE}" "${MIRABILIS_MANAGED_DIR}/Mirabilis.ScriptTests.dll")
   set(MIRABILIS_BAD_BRIDGE_DIR "${CMAKE_BINARY_DIR}/badbridge/$<CONFIG>")
+  set(MIRABILIS_BAD_RUNTIME_DIR "${CMAKE_BINARY_DIR}/badruntime/$<CONFIG>")
   add_custom_target(mirabilis_bad_bridge ALL
     COMMAND "${DOTNET_EXECUTABLE}" build "${PROJECT_SOURCE_DIR}/tests/managed/Mirabilis.BadBridge/Mirabilis.BadBridge.csproj"
       -c $<CONFIG> --artifacts-path "${CMAKE_BINARY_DIR}/dotnet-badbridge" --output "${MIRABILIS_BAD_BRIDGE_DIR}" --ignore-failed-sources -p:NuGetAudit=false
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DOTNET_HOST_NATIVE}/nethost.dll" "${MIRABILIS_BAD_BRIDGE_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${MIRABILIS_BAD_RUNTIME_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DOTNET_HOST_NATIVE}/nethost.dll" "${MIRABILIS_BAD_RUNTIME_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${MIRABILIS_BAD_BRIDGE_DIR}/Mirabilis.ScriptCore.dll" "${MIRABILIS_BAD_RUNTIME_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/tests/fixtures/script_incompatible.runtimeconfig.json" "${MIRABILIS_BAD_RUNTIME_DIR}/Mirabilis.ScriptCore.runtimeconfig.json"
     VERBATIM)
 endif()
 add_custom_target(mirabilis_deploy_managed ALL DEPENDS mirabilis_managed)
@@ -60,6 +65,7 @@ if(BUILD_TESTING)
   foreach(MISMATCH version size null)
     add_test(NAME mirabilis_script_bad_${MISMATCH} COMMAND mirabilis_script_abi_probe "${MIRABILIS_BAD_BRIDGE_DIR}" ${MISMATCH})
   endforeach()
+  add_test(NAME mirabilis_script_missing_runtime COMMAND mirabilis_script_abi_probe "${MIRABILIS_BAD_RUNTIME_DIR}" runtime)
 endif()
 if(MIRABILIS_BUILD_ENGINE)
 
