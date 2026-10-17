@@ -404,3 +404,24 @@ TEST_CASE("managed callback iteration skips a later entity marked pending by an 
     CHECK_FALSE(logged(run.host,marker(victim,"update")));CHECK_FALSE(logged(run.host,marker(victim,"fixed")));
     run.scene.drain_destruction();CHECK(run.host.live_count()==1);CHECK(occurrences(run.host,marker(victim,"destroy"))==1);
 }
+
+TEST_CASE("OnDestroy world and body teleports reach live dynamic targets on the very next fixed step") {
+    for(const int mode:{0,1,2}) {
+        INFO(mode);Runtime run;const auto target=run.scene.create_object("dynamic target");
+        Collider collider;collider.hasCollision=true;REQUIRE(run.scene.set(target,collider));
+        RigidBody body;body.motion=BodyMotion::Dynamic;body.gravityFactor=0;REQUIRE(run.scene.set(target,body));
+        run.scene.set_physics_play(true);run.scene.set_teleport_handler([&](EntityRef ref,const Transform& transform){return run.physics.queue_teleport(run.scene,ref,transform);});
+        REQUIRE(run.physics.synchronize(run.scene,false));
+        const auto owner=run.add(script("CleanupWorldProbe",{{"Target",{"entity",std::to_string(target.persistentId)}},{"Mode",{"int",std::to_string(mode)}}}));
+        run.host.start();REQUIRE(run.scene.destroy_object(owner));run.scene.drain_destruction();
+        CHECK(logged(run.host,"cleanup-world-queued"));CHECK(run.host.live_count()==0);
+        CHECK(run.scene.read<Transform>(target)->position.x==doctest::Approx(0));
+        CHECK(run.scene.queued_command_count()>0);
+        run.scene.apply_commands(); // exactly one step-2 command phase, not a recursive drain
+        REQUIRE(run.physics.synchronize(run.scene,false));run.physics.step(run.scene,1.f/120);
+        Transform expected;expected.position={7,8,9};expected.rotation={.2f,.4f,.6f};
+        ecs_test::check_matrix(run.scene.world_matrix(target),to_matrix(expected));
+        REQUIRE(run.physics.body_world(target));ecs_test::check_matrix(*run.physics.body_world(target),to_matrix(expected));
+        CHECK(run.scene.queued_command_count()==0);
+    }
+}
