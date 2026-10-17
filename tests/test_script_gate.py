@@ -10,6 +10,7 @@ class ScriptGateTests(unittest.TestCase):
             bodies=7 if state.startswith('sandbox-') else 3
             force='[4,0,0]' if state in ('reopened-play','reset','edit-restored') else 'none'
             lines.append(f'SCRIPT state={state} frame={i*40} epoch={i+1} bodies={bodies} scripts={int(play)} x=1 y=0.5 force={force}')
+        lines.append('SCRIPT input PASS: SDL repeats, capture, focus and Play transitions')
         lines.append('SCRIPT lifecycle PASS: scratch edit/save/reopen/run, force/floor, reset, leave, sandbox bodies=7 scripts=0')
         return '\n'.join(lines)
     def test_complete_realistic_transitions(self):
@@ -24,6 +25,8 @@ class ScriptGateTests(unittest.TestCase):
                     log.replace('bodies=3 scripts=1','bodies=3 scripts=0',1),log.replace('epoch=4','epoch=1')):
             with self.assertRaises(AssertionError):script_gate.check(bad)
     def test_missing_terminal_pass_is_rejected(self):
-        with self.assertRaises(AssertionError):script_gate.check(self.log().split('SCRIPT lifecycle PASS:')[0])
+        for marker in ('SCRIPT lifecycle PASS:','SCRIPT input PASS:'):
+            with self.assertRaises(AssertionError):script_gate.check(self.log().replace(marker,'MISSING:'))
 
 if __name__=='__main__':unittest.main()
+

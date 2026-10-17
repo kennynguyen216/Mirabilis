@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import shutil
@@ -16,6 +17,8 @@ def check(logs):
             assert state not in records, f'duplicate phase {state}'
             records[state]={'frame':int(frame),'epoch':int(epoch),'bodies':int(bodies),'scripts':int(scripts),'x':float(x),'y':float(y),'force':None if force=='none' else json.loads(force)}
     assert tuple(records)==STATES, f'phases missing/out of order: {tuple(records)}'
+    assert all(math.isfinite(row[key]) for row in records.values() for key in ('x','y')), 'Nonfinite script pose'
+    assert all(b['frame'] >= a['frame'] for a,b in zip(records.values(),list(records.values())[1:])), 'Phase frame order'
     for state in ('reopened-play','floor-contact','reset','second-play'):
         assert records[state]['scripts']==1 and records[state]['bodies']==3, state
     assert records['edit-restored']['scripts']==0 and records['edit-restored']['bodies']==3
@@ -29,6 +32,7 @@ def check(logs):
     assert records['reset']['epoch']>records['floor-contact']['epoch']
     assert records['edit-restored']['epoch']>records['reset']['epoch']
     assert end['epoch']>records['second-play']['epoch']
+    assert 'SCRIPT input PASS: SDL repeats, capture, focus and Play transitions' in logs, 'SDL input path not exercised'
     assert 'SCRIPT lifecycle PASS: scratch edit/save/reopen/run, force/floor, reset, leave, sandbox bodies=' in logs
     return records
 
@@ -57,3 +61,4 @@ def main():
     print('SCRIPT GPU GATE PASS',flush=True)
 
 if __name__=='__main__':main()
+
