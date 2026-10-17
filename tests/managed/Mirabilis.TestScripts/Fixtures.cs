@@ -237,11 +237,13 @@ public sealed class DiagnosticFloodProbe : Script
             for (int i = 0; i < 320; ++i) Log.Write($"history-count-{i:D3}: café漢🙂");
         else if (Mode == 1)
             for (int i = 0; i < 40; ++i) Log.Write($"history-bytes-{i:D2}:" + new string('x', 40000) + $":history-byte-tail-{i:D2}");
-        else
+        else if (Mode == 2)
         {
             string payload = string.Concat(Enumerable.Repeat("漢🙂", 12000));
             for (int i = 0; i < 4; ++i)
                 Log.Write($"history-large-{i}:" + new string('a', i) + payload + $":history-complete-tail-{i}");
         }
+        else
+            Log.Write("history-giant-latest:" + string.Concat(Enumerable.Repeat("漢🙂", 310000)) + ":history-giant-complete-tail");
     }
 }
