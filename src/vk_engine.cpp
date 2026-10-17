@@ -1677,8 +1677,40 @@ void VulkanEngine::run(){
         scriptRequire(load_editor_scene_named("scripting_gate_saved.json"),"scratch reopen failed");
         scriptRequire(_scene.read<Script>(_scene.get(scriptBox))->fields.at("Force").valueJson == "[4,0,0]","saved Force lost");
         scriptRequire(_scriptHost && _scriptHost->available() && _scriptHost->live_count() == 0,"editor must have no instances");
+        _scriptHost->input().event(mirabilis::scripting::Key::E,true);
         set_editor_mode(false); set_mouse_capture(false);
         scriptRequire(_scriptHost->live_count() == 1,"Play did not create one script instance");
+        using K = mirabilis::scripting::Key;
+        using Q = mirabilis::scripting::InputQuery;
+        auto& input = _scriptHost->input();
+        scriptRequire(!input.query(K::E,Q::Down,false) && !input.query(K::E,Q::Pressed,true),"entering Play retained input");
+        const bool capturedKeyboard = ImGui::GetIO().WantCaptureKeyboard;
+        const auto keyEvent = [&](bool down,bool repeat = false) {
+            SDL_Event event{}; event.type = down ? SDL_KEYDOWN : SDL_KEYUP;
+            event.key.keysym.sym = SDLK_e; event.key.repeat = repeat ? 1 : 0;
+            process_event(event);
+        };
+        ImGui::GetIO().WantCaptureKeyboard = false;
+        set_mouse_capture(true); keyEvent(true);
+        scriptRequire(input.query(K::E,Q::Pressed,false) && input.query(K::E,Q::Pressed,true),"SDL press did not reach both input latches");
+        input.finish_frame(); input.finish_fixed_tick(); keyEvent(true,true);
+        scriptRequire(!input.query(K::E,Q::Pressed,false) && !input.query(K::E,Q::Pressed,true),"SDL repeat created an edge");
+        keyEvent(false);
+        scriptRequire(!input.query(K::E,Q::Down,false) && input.query(K::E,Q::Released,true),"SDL release lost");
+        input.clear(); set_mouse_capture(false); keyEvent(true);
+        scriptRequire(!input.query(K::E,Q::Down,false) && !input.query(K::E,Q::Pressed,true),"uncaptured mouse accepted a press");
+        set_mouse_capture(true); ImGui::GetIO().WantCaptureKeyboard = true; keyEvent(true);
+        scriptRequire(!input.query(K::E,Q::Down,false),"UI capture accepted a press");
+        ImGui::GetIO().WantCaptureKeyboard = false; keyEvent(true);
+        ImGui::GetIO().WantCaptureKeyboard = true; keyEvent(false);
+        scriptRequire(!input.query(K::E,Q::Down,false) && input.query(K::E,Q::Released,false),"UI capture lost a release");
+        input.clear(); ImGui::GetIO().WantCaptureKeyboard = false; keyEvent(true);
+        SDL_Event focus{}; focus.type = SDL_WINDOWEVENT; focus.window.event = SDL_WINDOWEVENT_FOCUS_LOST;
+        process_event(focus);
+        scriptRequire(!input.query(K::E,Q::Down,false) && !input.query(K::E,Q::Pressed,true) && input.query(K::E,Q::Released,true),"focus loss did not release held input");
+        input.clear(); keyEvent(true); set_mouse_capture(false);
+        scriptRequire(!input.query(K::E,Q::Down,false) && input.query(K::E,Q::Released,false),"mouse release did not release held input");
+        input.clear(); ImGui::GetIO().WantCaptureKeyboard = capturedKeyboard;
         scriptState("reopened-play");
     }
     auto previousTime = std::chrono::steady_clock::now();
@@ -1729,16 +1761,21 @@ void VulkanEngine::run(){
                 scriptRequire(!_scriptHost->faulted(ref),"PushBox faulted");
                 scriptState("floor-contact");
                 _scene.edit<Script>(ref,true)->fields["Force"].valueJson = "[99,0,0]";
+                _scriptHost->input().event(mirabilis::scripting::Key::E,true);
                 reset_play();
+                scriptRequire(!_scriptHost->input().query(mirabilis::scripting::Key::E,mirabilis::scripting::InputQuery::Pressed,true),"Reset retained input");
                 scriptRequire(_scriptHost->live_count() == 1,"Reset leaked or lost an instance");
                 scriptRequire(_scene.read<Script>(_scene.get(scriptBox))->fields.at("Force").valueJson == "[4,0,0]","Reset did not restore authored Force");
                 scriptState("reset");
             }
             if (_frameNumber == 200) {
+                _scriptHost->input().event(mirabilis::scripting::Key::E,true);
                 set_editor_mode(true);
+                scriptRequire(!_scriptHost->input().query(mirabilis::scripting::Key::E,mirabilis::scripting::InputQuery::Down,false),"leaving Play retained input");
                 scriptRequire(_scriptHost->live_count() == 0,"leaving Play leaked instances");
                 scriptRequire(_scene.read<Script>(_scene.get(scriptBox))->fields.at("Force").valueJson == "[4,0,0]","leaving Play lost authored Force");
                 scriptState("edit-restored");
+                fmt::print("SCRIPT input PASS: SDL repeats, capture, focus and Play transitions\n");
             }
             if (_frameNumber == 220) {
                 scriptRequire(load_editor_scene_named("scripting_gate_saved.json"),"second scratch reopen failed");
