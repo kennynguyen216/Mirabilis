@@ -126,6 +126,9 @@ GPT-6 Astra High reviewer starts after workers retire at the gate.
 The diagnostics accessor exposes recent history: at most 256 entries and 1 MiB
 of retained message bytes, with at most 64 KiB per entry including a truncation
 suffix. Truncation preserves UTF-8 boundaries; console output remains complete.
+Truncated entries release the original oversized allocation before retention;
+retained string capacity is bounded by the prefix plus normal allocator growth,
+not by the original message size.
 A single-entry assembly/type schema-and-error cache avoids repeating reflection
 and missing-type logging on each inspector frame. Saved Script data stays intact;
 schema discovery never constructs a user script. No public API or ABI changes.
