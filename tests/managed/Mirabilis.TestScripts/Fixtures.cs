@@ -1,5 +1,6 @@
 using Mirabilis.ScriptCore;
 using System.Threading;
+using System.Runtime.Loader;
 using Script = Mirabilis.ScriptCore.Script;
 
 namespace Mirabilis.TestScripts;
@@ -20,7 +21,7 @@ public class LifecycleProbe : Script
     public int Creates, Updates, Fixed;
     public string Label = "initializer", Fail = "";
     protected void Mark(string phase) => Log.Write($"probe:{Entity.PersistentId}:{phase}");
-    public override void OnCreate() { ++Creates; Mark("create"); if (Fail == "create") throw new Exception("fixture-create"); }
+    public override void OnCreate() { Assert.That(AssemblyLoadContext.GetLoadContext(GetType().Assembly)!.IsCollectible, "user assembly must be collectible"); Assert.That(AssemblyLoadContext.GetLoadContext(typeof(Script).Assembly) == AssemblyLoadContext.Default, "ScriptCore identity is shared in default context"); ++Creates; Mark("create"); if (Fail == "create") throw new Exception("fixture-create"); }
     public override void OnUpdate(float dt) { ++Updates; Mark("update"); if (Fail == "update") throw new Exception("fixture-update"); }
     public override void OnFixedUpdate(float dt) { ++Fixed; Mark("fixed"); if (Fail == "fixed") throw new Exception("fixture-fixed"); }
     public override void OnDestroy() { Mark("destroy"); if (Fail == "destroy") throw new Exception("fixture-destroy"); }
@@ -28,6 +29,7 @@ public class LifecycleProbe : Script
 
 public sealed class ConstructorThrows : Script
 {
+    public int VisibleField;
     public ConstructorThrows() => throw new Exception("fixture-constructor");
     public override void OnDestroy() => Log.Write($"probe:{Entity.PersistentId}:destroy");
 }
@@ -85,9 +87,16 @@ public sealed class FieldProbe : Script
     }
 }
 
-public sealed class BoundaryProbe : Script
+public sealed unsafe class BoundaryProbe : Script
 {
     private static Entity previous;
+    private static void InvalidReserved(Entity entity)
+    {
+        var invalid = entity;
+        ((uint*)&invalid)[3] = 1;
+        var captured = invalid;
+        Assert.Status(() => _ = captured.Name, Status.InvalidArgument);
+    }
     public override void OnCreate()
     {
         var self = Entity;
@@ -108,6 +117,8 @@ public sealed class BoundaryProbe : Script
         var handle = new Entity(Entity.Epoch, Entity.Handle ^ 0x01000000u, Entity.PersistentId);
         Assert.That(!handle.IsValid, "full versioned handle");
         Assert.That(!Entity.Resolve(ulong.MaxValue).IsValid, "missing resolution");
+        InvalidReserved(Entity);
+        Assert.Status(() => _ = Input.IsKeyDown((Key)uint.MaxValue), Status.InvalidArgument);
         var nan = Transform.Identity; nan.Position.X = float.NaN;
         Assert.Status(() => self.LocalTransform = nan, Status.InvalidArgument);
         Assert.Status(() => Entity.RigidBody.AddForce(new Vec3(float.PositiveInfinity, 0, 0)), Status.InvalidArgument);
@@ -159,4 +170,30 @@ public sealed class PhysicsProbe : Script
         if (DestroyAfter) { Entity.Destroy(); Entity.Destroy(); }
     }
 }
+
+
+
+public sealed class SelfDestroyProbe : LifecycleProbe
+{
+    public override void OnCreate()
+    {
+        base.OnCreate(); Entity.Destroy(); Entity.Destroy();
+        Assert.That(Entity.IsValid && Entity.IsPendingDestroy, "OnCreate self destruction must defer");
+    }
+}
+
+public sealed class ParentMoveProbe : Script
+{
+    public Entity Target;
+    private bool moved;
+    public override void OnFixedUpdate(float dt)
+    {
+        if (moved) return; moved = true;
+        var target = Target; var transform = target.LocalTransform; transform.Position = new Vec3(10, 0, 0);
+        target.LocalTransform = transform;
+        Assert.That(target.LocalTransform.Position.X == 10, "static parent write is immediately visible");
+        Log.Write("parent-moved");
+    }
+}
+
 

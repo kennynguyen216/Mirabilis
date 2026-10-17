@@ -1,5 +1,6 @@
 #include "ecs_test_support.h"
 #include "script_host.h"
+#include "scene_queries.h"
 #include <simdjson.h>
 #include <limits>
 #include <thread>
@@ -306,3 +307,88 @@ TEST_CASE("managed scene replacement and shutdown release handles while teardown
     CHECK(api.is_valid(api.context,{fresh.epoch,uint32_t(fresh.entity),0,fresh.persistentId},&valid)!=abi::Status::Ok);
 }
 
+
+TEST_CASE("OnCreate self destruction keeps its instance until deferred cleanup and suppresses updates") {
+    Runtime run;const auto ref=run.add(script("SelfDestroyProbe"));run.host.start();
+    CHECK(run.scene.valid(ref));CHECK(run.scene.pending(ref));CHECK(run.host.live_count()==1);
+    run.host.update(.01f);run.host.fixed_update(.01f);
+    CHECK_FALSE(logged(run.host,marker(ref,"fixed")));CHECK_FALSE(logged(run.host,marker(ref,"update")));
+    run.scene.drain_destruction();CHECK(run.host.live_count()==0);CHECK_FALSE(run.scene.valid(ref));
+    CHECK(occurrences(run.host,marker(ref,"destroy"))==1);
+}
+
+TEST_CASE("teardown generated commands are discarded before reset replacement and shutdown") {
+    for(const int mode:{0,1,2}) {
+        INFO(mode);Runtime run;const auto target=run.scene.create_object("authored");
+        const auto ref=run.add(script("CleanupProbe",{{"Target",{"entity",std::to_string(target.persistentId)}}}));
+        const auto snapshot=run.scene.take_snapshot();run.host.start();
+        if(mode==2)run.host.shutdown();else run.host.stop();
+        CHECK(logged(run.host,marker(ref,"cleanup-ok")));
+        run.scene.clear_queues();
+        if(mode==0)REQUIRE(run.scene.restore_snapshot(snapshot));
+        else if(mode==1){Scene next;next.import_object("authored",target.persistentId);run.scene.replace(std::move(next));}
+        CHECK(run.scene.apply_commands()==0);CHECK(run.scene.read<Name>(run.scene.get(target.persistentId))->value=="authored");
+        CHECK(run.host.live_count()==0);
+    }
+}
+
+TEST_CASE("script moving static parent flushes collider player and render transforms before physics") {
+    Runtime run;const auto parent=run.scene.create_object("support-parent"),support=run.scene.create_object("support",parent),body=run.scene.create_object("resting-box");
+    Collider collider;collider.hasCollision=true;collider.colliderHalfExtents={2,.5f,2};REQUIRE(run.scene.set(support,collider));
+    collider.colliderHalfExtents={.5f,.5f,.5f};REQUIRE(run.scene.set(body,collider));
+    RigidBody dynamic;dynamic.motion=BodyMotion::Dynamic;REQUIRE(run.scene.set(body,dynamic));
+    Transform pose;pose.position={0,2,0};REQUIRE(run.scene.set_local_transform(body,pose));
+    run.scene.set_physics_play(true);for(int i=0;i<600;++i)run.tick();CHECK(run.physics.sleeping(body));
+    const auto mover=run.add(script("ParentMoveProbe",{{"Target",{"entity",std::to_string(parent.persistentId)}}}));run.host.start();run.host.fixed_update(1.f/120);
+    CHECK_FALSE(run.host.faulted(mover));CHECK(logged(run.host,"parent-moved"));
+    CHECK(run.scene.world_matrix(support)[3].x==doctest::Approx(10));
+    run.scene.apply_commands();REQUIRE(run.physics.synchronize(run.scene,false));
+    REQUIRE(run.physics.body_world(support));ecs_test::check_matrix(*run.physics.body_world(support),run.scene.world_matrix(support));
+    const auto collision=collect_player_collision(run.scene,{});REQUIRE(collision.walls.size()==1);
+    CHECK(collision.walls[0].min.x==doctest::Approx(8));CHECK(collision.walls[0].max.x==doctest::Approx(12));
+    run.physics.step(run.scene,1.f/120);CHECK_FALSE(run.physics.sleeping(body));
+}
+
+
+TEST_CASE("metadata does not construct scripts and unresolved saved references retain their IDs") {
+    Runtime run;std::vector<std::string> messages;
+    const auto described=run.host.describe(script("ConstructorThrows"),messages);
+    CHECK(described.fields.contains("VisibleField"));CHECK_FALSE(logged(run.host,"fixture-constructor"));CHECK(run.host.live_count()==0);
+    const auto ref=run.add(script("FieldProbe",{{"MissingEntity",{"entity","987654321"}}}));
+    run.host.start();run.host.update(.01f);run.host.fixed_update(.01f);
+    CHECK_FALSE(run.host.faulted(ref));CHECK(run.scene.read<Script>(ref)->fields.at("MissingEntity").valueJson=="987654321");
+}
+
+TEST_CASE("direct live Scene restore and replacement clean old managed instances and discard teardown writes") {
+    for(const bool replace:{false,true}) {
+        Runtime run;const auto target=run.scene.import_object("authored-target",0);
+        const auto ref=run.add(script("CleanupProbe",{{"Target",{"entity","0"}}}));const auto snapshot=run.scene.take_snapshot();
+        run.host.start();CHECK(run.host.live_count()==1);
+        if(replace) {Scene next;next.import_object("authored-target",0);const auto copied=next.import_object("new-script",ref.persistentId);REQUIRE(next.set(copied,script()));run.scene.replace(std::move(next));}
+        else REQUIRE(run.scene.restore_snapshot(snapshot));
+        CHECK(run.host.live_count()==0);CHECK(logged(run.host,marker(ref,"cleanup-ok")));
+        CHECK_FALSE(run.scene.valid(ref));CHECK_FALSE(run.scene.valid(target));CHECK(run.scene.apply_commands()==0);
+        CHECK(run.scene.read<Name>(run.scene.get(0))->value=="authored-target");
+        run.host.start();CHECK(run.host.live_count()==1);CHECK_FALSE(run.host.faulted(run.scene.get(ref.persistentId)));
+    }
+}
+
+TEST_CASE("scripted authored demo round trips and real PushBox forces the native falling box") {
+    const auto source=std::filesystem::path(MIRABILIS_TEST_SOURCE_DIR)/"assets/scenes/scripted_physics_demo.json";
+    StagedScene staged,reopened;std::string error,json;
+    REQUIRE_MESSAGE(parse_scene_json(ecs_test::read_file(source),source.filename().string(),{},staged,error),error);
+    REQUIRE_MESSAGE(serialize_scene_json(staged.scene,staged.settings,staged.authoredPortals,json,error),error);
+    REQUIRE_MESSAGE(parse_scene_json(json,"scripted-copy.json",{},reopened,error),error);
+    ecs_test::check_snapshot(staged.scene.take_snapshot(),reopened.scene.take_snapshot());
+    Runtime run;run.scene.replace(std::move(reopened.scene));run.host.bind(run.scene,run.physics);
+    const auto moving=run.scene.get(3);REQUIRE(run.scene.read<Script>(moving));
+    CHECK(run.scene.read<Script>(moving)->assembly=="Mirabilis.SampleScripts");
+    CHECK(run.scene.read<Script>(moving)->typeName=="Mirabilis.SampleScripts.PushBox");
+    run.scene.set_physics_play(true);run.scene.set_teleport_handler([&](EntityRef r,const Transform& t){return run.physics.queue_teleport(run.scene,r,t);});
+    REQUIRE(run.physics.synchronize(run.scene,false));run.host.start();CHECK(run.host.live_count()==1);
+    const auto original=run.scene.world_matrix(moving)[3];
+    for(int i=0;i<240;++i)run.tick();
+    CHECK_FALSE(run.host.faulted(moving));CHECK(run.scene.world_matrix(moving)[3].x>original.x);
+    CHECK(run.scene.world_matrix(moving)[3].y>=.45f);CHECK(run.scene.world_matrix(moving)[3].y<original.y);
+    CHECK(run.physics.body_count()==3);
+}
