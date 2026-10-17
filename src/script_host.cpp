@@ -1,6 +1,7 @@
 #include "script_host.h"
 #include "scene_serialization.h"
 #include <algorithm>
+#include <climits>
 #include <iostream>
 #include <thread>
 #include <unordered_map>
@@ -38,7 +39,15 @@ namespace {
 Entity bridge_entity(EntityRef ref) { return {ref.epoch,entt::to_integral(ref.entity),0,ref.persistentId}; }
 EntityRef native_entity(Entity ref) { return {ref.epoch,static_cast<entt::entity>(ref.entity),ref.persistentId}; }
 Utf8 utf8(const std::string& text) { return {reinterpret_cast<const uint8_t*>(text.data()),static_cast<uint32_t>(text.size())}; }
-bool valid_utf8_argument(Utf8 value) { return value.size == 0 || value.data != nullptr; }
+bool valid_utf8_argument(Utf8 value) {
+    if (!value.size) return true;
+    if (!value.data || value.size > INT_MAX) return false;
+#ifdef _WIN32
+    return MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,reinterpret_cast<const char*>(value.data),static_cast<int>(value.size),nullptr,0)>0;
+#else
+    return true;
+#endif
+}
 std::string owned(Utf8 value) { return value.size ? std::string(reinterpret_cast<const char*>(value.data),value.size) : std::string{}; }
 Vec3 bridge_vec(glm::vec3 value) { return {value.x,value.y,value.z}; }
 glm::vec3 native_vec(Vec3 value) { return {value.x,value.y,value.z}; }
@@ -195,7 +204,8 @@ struct ScriptHost::Impl {
         Scope scope(*this,kind==Callback::FixedUpdate);
         const auto status=managed.invoke(instance.handle,static_cast<uint32_t>(kind),dt);
         if (status!=Status::Ok) instance.faulted=true;
-        sync_fields(instance);
+        try { sync_fields(instance); }
+        catch (const std::exception& e) { instance.faulted=true; report(instance.type + " fields: " + e.what()); }
     }
 };
 
@@ -272,6 +282,7 @@ void ScriptHost::start() { _impl->input.clear(); _impl->running=true; reconcile(
 void ScriptHost::reconcile() {
     auto& h=*_impl;
     if (!h.running || !h.ready || !h.scene || h.stopping) return;
+    if (h.instances.empty() && h.scene->registry().view<Script>().empty()) return;
     std::vector<EntityRef> retire;
     for (const auto& [id,instance] : h.instances) {
         const auto* component=h.scene->read<Script>(instance.ref);
@@ -311,14 +322,14 @@ void ScriptHost::destroy(EntityRef ref) {
 }
 void ScriptHost::fixed_update(float dt) {
     reconcile(); auto& h=*_impl;
-    if (h.running && h.ready && h.scene) for (const auto ref : h.scene->creation_order()) {
+    if (h.running && h.ready && h.scene && !h.instances.empty()) for (const auto ref : h.scene->creation_order()) {
         const auto it=h.instances.find(ref.persistentId); if (it!=h.instances.end()) h.invoke(it->second,Callback::FixedUpdate,dt);
     }
     h.input.finish_fixed_tick();
 }
 void ScriptHost::update(float dt) {
     reconcile(); auto& h=*_impl;
-    if (h.running && h.ready && h.scene) for (const auto ref : h.scene->creation_order()) {
+    if (h.running && h.ready && h.scene && !h.instances.empty()) for (const auto ref : h.scene->creation_order()) {
         const auto it=h.instances.find(ref.persistentId); if (it!=h.instances.end()) h.invoke(it->second,Callback::Update,dt);
     }
     h.input.finish_frame();
