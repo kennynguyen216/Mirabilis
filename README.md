@@ -1,8 +1,8 @@
 # Mirabilis
 
-Mirabilis is a C++ Vulkan-based real-time engine prototype focused on editor-authored scenes, Source/Quake-style movement, and momentum-preserving linked portals.
+Mirabilis is a C++20/Vulkan engine prototype for editor-authored scenes, Source/Quake-style movement, and momentum-preserving player portals. It combines an EnTT scene system, Jolt rigid-body physics, and C# gameplay scripts that can reload while the scene keeps running.
 
-[Watch the current milestone demo](https://kennynguyen216.github.io/portfolio/media/mirabilis-milestone2-demo.mp4) | [View my portfolio](https://kennynguyen216.github.io/portfolio/)
+[Watch the project demo](https://kennynguyen216.github.io/portfolio/media/mirabilis-milestone2-demo.mp4) | [View my portfolio](https://kennynguyen216.github.io/portfolio/) | [C# scripting guide](docs/scripting.md)
 
 ## Latest captures
 
@@ -26,6 +26,7 @@ Click the preview to watch the run.
 
 - Renders GPU mesh and material pipelines with glTF/GLB scene loading.
 - Manages Vulkan command buffers, synchronization, descriptor sets, dynamic rendering, and swapchain presentation.
+- Includes real-time shadows, ambient occlusion, and screen-space global illumination, with experimental probe/SDF lighting and a software path-tracing reference mode.
 - Includes a compute-rendered background and ongoing portal-rendering experiments.
 
 ### Linked portals
@@ -38,10 +39,24 @@ Click the preview to watch the run.
 
 ### Scene editor and tooling
 
+- Uses EnTT entities with versioned identities, hierarchical transforms, and deferred scene changes.
 - Provides an ImGui editor with a scene hierarchy, object inspector, selection, duplication, and deletion.
 - Supports translate, rotate, and scale gizmos with optional snapping.
 - Exposes editable box colliders and gameplay roles for scene-authored objects.
-- Saves and loads scene hierarchies, transforms, collider data, imported assets, and actor roles as JSON.
+- Saves and loads scene hierarchies, transforms, colliders, rigid bodies, scripts, imported assets, and gameplay roles in version 2 JSON scenes.
+
+### Jolt physics
+
+- Integrates static and dynamic rigid bodies, gravity, contact, friction, restitution, forces, and impulses.
+- Exposes body settings in the inspector and synchronizes simulated transforms with scene rendering, interpolation, and motion history.
+- Restores the authored scene when leaving or resetting Play, and keeps visual children attached to moving bodies.
+
+### C# scripting and hot reload
+
+- Hosts .NET 10 scripts with `OnCreate`, `OnFixedUpdate`, `OnUpdate`, and `OnDestroy` callbacks.
+- Exposes entity references, transforms, input, logging, and rigid-body commands through a managed API, with editable public fields in the inspector.
+- Builds saved user-script changes in the background and reloads them during Play, preserving the live scene, physics state, and supported public/private fields.
+- Keeps the previous working scripts running when compilation or reload fails. ScriptCore and native C++ changes require a restart.
 
 ### Movement and time trials
 
@@ -50,33 +65,40 @@ Click the preview to watch the run.
 
 ## Technology
 
-- **Language:** C++
+- **Languages:** C++20, C# / .NET 10
 - **Graphics:** Vulkan, GLSL
+- **Scene entities:** EnTT
+- **Rigid-body physics:** Jolt Physics
 - **Platform and input:** SDL2
 - **Editor UI:** ImGui and ImGuizmo
 - **Assets and math:** fastgltf, simdjson, GLM, stb_image
 - **Build:** CMake
 
-SDL2, fmt, vk-bootstrap, VMA, GLM, ImGui, ImGuizmo, fastgltf, simdjson, and other supporting libraries are included under `third_party/`. Mirabilis uses these libraries as dependencies; the engine, renderer integration, editor systems, movement, collision, and portal features live in this project.
+EnTT, Jolt, SDL2, fmt, vk-bootstrap, VMA, GLM, ImGui, ImGuizmo, fastgltf, simdjson, and other supporting libraries are included under `third_party/`. EnTT provides entity storage and Jolt provides rigid-body simulation; Mirabilis implements their scene lifecycle, editor, rendering, and gameplay integration, alongside its movement, portals, and .NET host.
 
 ## Build and run
 
 ### Requirements
 
-On Windows, install:
+The current build targets Windows x64. Install:
 
 - Git
-- CMake 3.8 or newer
-- Visual Studio with the **Desktop development with C++** workload
+- CMake 3.21 or newer
+- Visual Studio with the **Desktop development with C++** workload and a C++20-capable compiler
 - The [Vulkan SDK](https://vulkan.lunarg.com/sdk/home/)
+- The x64 .NET 10 SDK, including the Windows x64 hosting pack
+
+A Vulkan 1.3-capable GPU is required for the editor. The .NET SDK includes the runtime needed by scripts; the SDK is also required to compile scripts and build the native host.
 
 The Vulkan SDK installer should configure the `VULKAN_SDK` environment variable. Restart your terminal after installing it.
 
 ### Clone
 
+Keep the checkout and build output outside OneDrive or other synced folders. For example:
+
 ```powershell
-git clone https://github.com/kennynguyen216/Mirabilis.git
-cd Mirabilis
+git clone https://github.com/kennynguyen216/Mirabilis.git C:/dev/Mirabilis
+cd C:/dev/Mirabilis
 ```
 
 ### Configure and build
@@ -85,6 +107,8 @@ cd Mirabilis
 cmake -S . -B build
 cmake --build build --config Debug --parallel
 ```
+
+CMake builds and deploys ScriptCore, the sample scripts, and the hosting DLL beside the executable automatically.
 
 ### Run
 
@@ -96,18 +120,11 @@ Pop-Location
 
 Press `Esc` or close the window to exit.
 
-### Included bhop course
-
-`assets/scenes/momentum_bhop_tutorial_adapted.json` is a native Mirabilis
-adaptation of Momentum Mod's public `bhop_tutorial` source layout. Open it from
-the editor's **File > Open Scene** menu. It progresses from wide, low pads to
-tighter rising diagonal jumps and ends at a timed finish platform.
-
-The original Source `.vmf`/`.bsp` cannot be loaded directly by Mirabilis, so
-the course is rebuilt with the engine's own floor primitives, colliders, spawn,
-and time-trial triggers. Source reference: https://github.com/momentum-mod/level-design
-
 ## Status
+
+ECS scenes, Jolt physics, C# scripting, and live script reload are implemented and validated. Mirabilis remains an active engine and rendering prototype, with experimental lighting paths and a deliberately limited gameplay API.
+
+Dynamic rigid bodies currently use root-level box colliders. The player retains its dedicated movement controller, and rigid bodies do not yet travel through portals. Hot reload preserves the six supported field types; complex object graphs and collections are not migrated. See the [scripting guide](docs/scripting.md) for the supported API and reload behavior.
 
 Ambient occlusion has a persistent **Globally Enabled** switch and quality/
 blur preferences in Render Settings. These are saved in SDL's per-user
@@ -117,16 +134,4 @@ project defaults (radius 0.75, normal offset bias 0.075, intensity 1, power 1.5)
 Enable **Override For This Scene** to edit and save level-specific values;
 **Reset to Project Defaults** removes that override on the next scene save.
 Existing scene `ssao` blocks remain explicit overrides.
-
-SSAO coordinate reference checks can be run with:
-
-```cmd
-python -m unittest discover -s tests
-```
-
-These exercise odd render dimensions, reconstruction on grazing surfaces,
-kernel rotation, and coplanar rejection. They complement GPU validation and
-visual testing of Raw/Final AO on walls, corners, and narrow gaps.
-
-Mirabilis is an active engine and rendering prototype. Features, controls, and scene formats may change as portal rendering, movement, and editor tooling evolve.
 
