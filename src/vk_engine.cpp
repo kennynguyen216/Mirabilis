@@ -1039,13 +1039,6 @@ void VulkanEngine::draw(float deltaTime)
 			SSGITimestampsPerFrame);
 		_ssgi.timingWritten[_frameNumber % FRAME_OVERLAP] = false;
 	}
-    // First in the frame, where the blocking submission used to run, so every
-    // later pass sees this update's page.
-    if (surfaceCacheActive) {
-        record_surface_cache_lighting(cmd);
-        update_surface_cache_radiosity(cmd);
-    }
-
 	// The shadow and prepass counters are recorded before the main pass
 	// resets its own, so they are cleared here instead.
 	stats.shadow_drawcall_count = 0;
@@ -1054,14 +1047,19 @@ void VulkanEngine::draw(float deltaTime)
 	stats.prepass_triangle_count = 0;
 	stats.prepass_record_time = 0.0f;
 
+    // Uncached GI hits also sample the masked/player shadow map. Initialize
+    // it before radiosity, including when the reference renderer is active.
+    draw_shadow_map(cmd);
+    if (surfaceCacheActive) {
+        record_surface_cache_lighting(cmd);
+        update_surface_cache_radiosity(cmd);
+    }
+
     VkImage presentSource = _drawImage.image;
     if (_rendererMode == RendererMode::SoftwarePathTrace && _traceSupported) {
         draw_path_trace(cmd);
     } else {
     _traceRuntime.wasActive=false;
-	// Render the sunlight depth map first: every later pass, main camera and
-	// portal cameras alike, samples it while shading.
-	draw_shadow_map(cmd);
     draw_local_shadows(cmd);
 
 	// Camera depth and view-space normals for the screen-space passes.  A

@@ -99,6 +99,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--repo', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--configuration', choices=('Debug','Release'), default='Debug')
     args = parser.parse_args()
     repo, output = args.repo.resolve(), args.output.resolve()
     assert not output.exists() or not any(output.iterdir()), 'Use fresh evidence directory'
@@ -114,7 +115,7 @@ def main():
         shutil.copy2(scene, scratch/scene.name)
     original = json.loads((scratch/'physics_drop_demo.json').read_text())
     (scratch/'physics_child_demo.json').write_text(json.dumps(child_variant(original), indent=2))
-    preflight_logs, _ = ecs_gate.run('sdf-preflight', 'Debug', {'MIRABILIS_TEST_SCENE': 'physics_child_demo.json',
+    preflight_logs, _ = ecs_gate.run('sdf-preflight', args.configuration, {'MIRABILIS_TEST_SCENE': 'physics_child_demo.json',
         'MIRABILIS_TEST_SCENE_DIRECTORY': str(scratch), 'MIRABILIS_TEST_FRAMES': '2',
         'MIRABILIS_TEST_RESET_PLAY': '1', 'MIRABILIS_TEST_WINDOW': '1600x900', 'MIRABILIS_LUMEN_LITE': '1'})
     if 'distance-field-bakes-required=false' in preflight_logs:
@@ -144,10 +145,11 @@ def main():
                  'MIRABILIS_TEST_CAMERA': '0 2.5 12 -0.08 0',
                  'MIRABILIS_TEST_PHYSICS_CAPTURE_DIRECTORY': str(captures),
                  'MIRABILIS_LUMEN_LITE': '1', 'MIRABILIS_IQ_RT_SHADOWS': '1',
+                 'VK_INSTANCE_LAYERS': 'VK_LAYER_KHRONOS_validation',
                  'VK_LAYER_VALIDATE_SYNC': '1', 'VK_KHRONOS_VALIDATION_VALIDATE_SYNC': 'true'}
         if trace:
             flags.update(MIRABILIS_TEST_TRACE='1', MIRABILIS_CAPTURE=str(captures/'trace'))
-        logs, result = ecs_gate.run(name, 'Debug', flags, seconds=900)
+        logs, result = ecs_gate.run(name, args.configuration, flags, seconds=900)
         records = telemetry(logs)
         if trace:
             assert 'renderer=software' in logs and ('PHYSICS trace PASS' if frames <= 200 else 'PHYSICS lifecycle PASS') in logs
