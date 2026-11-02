@@ -176,6 +176,7 @@ void read_settings(Object document, uint64_t version, const SceneSettings& defau
         read_float(json,"celEdge",settings.celEdge); read_bool(json,"bloom",settings.bloom);
         read_float(json,"bloomStrength",settings.bloomStrength); read_float(json,"bloomThreshold",settings.bloomThreshold);
         read_float(json,"bloomScatter",settings.bloomScatter);
+        read_bool(json,"sceneReflections",settings.sceneReflections); read_bool(json,"lumenGI",settings.lumenGI); read_float(json,"reflectionRoughness",settings.reflectionRoughness);
         if(const auto value=optional(json,"tonemapOperator")) {const auto op=integer(*value);if(op>2)invalid("Unknown tonemap operator");settings.tonemapOperator=int(op);}
     }
     if(const auto item=optional(document,"ssao")) {
@@ -264,7 +265,7 @@ bool finite(glm::vec3 value) { return finite(value.x)&&finite(value.y)&&finite(v
 void validate_settings(const SceneSettings& s) {
     if(s.nextActor==0 || s.skybox.empty() || !finite(s.sunDirection) || glm::dot(s.sunDirection,s.sunDirection)<0.000001f || !finite(s.shadowRadius) || s.shadowRadius<=0 || !finite(s.shadowDepthBias) || s.shadowDepthBias<0 || !finite(s.shadowNormalBias) || s.shadowNormalBias<0 || !finite(s.sunRadiance) || glm::any(glm::lessThan(s.sunRadiance,glm::vec3(0))) || !finite(s.environmentIntensity) || s.environmentIntensity<0 || !finite(s.environmentTint) || glm::any(glm::lessThan(s.environmentTint,glm::vec3(0))) || !finite(s.warmth) || std::abs(s.warmth)>1 || !finite(s.tint) || std::abs(s.tint)>1 || !finite(s.giSaturation) || s.giSaturation<0 || s.giSaturation>1)invalid("Invalid scene settings");
     if(!finite(s.celBands)||s.celBands<2||s.celBands>16||!finite(s.celEdge)||s.celEdge<0||s.celEdge>1||
-        !finite(s.bloomStrength)||s.bloomStrength<0||s.bloomStrength>2||!finite(s.bloomThreshold)||s.bloomThreshold<0||
+        !finite(s.reflectionRoughness)||s.reflectionRoughness<0||s.reflectionRoughness>1||!finite(s.bloomStrength)||s.bloomStrength<0||s.bloomStrength>2||!finite(s.bloomThreshold)||s.bloomThreshold<0||
         !finite(s.bloomScatter)||s.bloomScatter<0||s.bloomScatter>1||s.tonemapOperator<0||s.tonemapOperator>2)invalid("Invalid rendering settings");
     if(s.ssao) { const auto& ao=*s.ssao; if(!finite(ao.radius)||ao.radius<=0||!finite(ao.bias)||ao.bias<0||!finite(ao.intensity)||ao.intensity<0||!finite(ao.power)||ao.power<=0)invalid("Invalid SSAO settings"); }
 }
@@ -438,7 +439,7 @@ bool serialize_scene_json(const mirabilis::Scene& scene,const SceneSettings& set
     out<<", \"environmentIntensity\": "<<settings.environmentIntensity<<", \"blackEnvironment\": "<<settings.blackEnvironment<<", \"environmentTint\": ";write_vector(out,settings.environmentTint);out<<"},\n  \"colorGrading\": {\"warmth\": "<<settings.warmth<<", \"tint\": "<<settings.tint<<", \"giSaturation\": "<<settings.giSaturation<<'}';
     out<<",\n  \"rendering\": {\"celShading\": "<<settings.celShading<<", \"celBands\": "<<settings.celBands
        <<", \"celEdge\": "<<settings.celEdge<<", \"bloom\": "<<settings.bloom<<", \"bloomStrength\": "<<settings.bloomStrength
-       <<", \"bloomThreshold\": "<<settings.bloomThreshold<<", \"bloomScatter\": "<<settings.bloomScatter<<", \"tonemapOperator\": "<<settings.tonemapOperator<<'}';
+       <<", \"bloomThreshold\": "<<settings.bloomThreshold<<", \"bloomScatter\": "<<settings.bloomScatter<<", \"tonemapOperator\": "<<settings.tonemapOperator<<", \"sceneReflections\": "<<settings.sceneReflections<<", \"lumenGI\": "<<settings.lumenGI<<", \"reflectionRoughness\": "<<settings.reflectionRoughness<<'}';
     if(settings.ssao){const auto& ao=*settings.ssao;out<<",\n  \"ssao\": {\"enabled\": "<<ao.enabled<<", \"radius\": "<<ao.radius<<", \"bias\": "<<ao.bias<<", \"intensity\": "<<ao.intensity<<", \"power\": "<<ao.power<<'}';}
     out<<",\n  \"authoredPortals\": [";bool first=true;
     const auto writePortal=[&](const Portal& p){if(!first)out<<", ";first=false;out<<"{\"hostWallObject\": ";write_reference(out,p.hostWallObject);out<<", \"position\": ";write_vector(out,p.position);out<<", \"normal\": ";write_vector(out,p.normal);out<<", \"up\": ";write_vector(out,p.up);out<<", \"halfWidth\": "<<p.halfWidth<<", \"halfHeight\": "<<p.halfHeight<<'}';};

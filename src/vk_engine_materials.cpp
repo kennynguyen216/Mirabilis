@@ -106,11 +106,12 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
     builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
     builder.set_multisampling_none();
-    const std::array<VkFormat, 4> mainFormats{
+    const std::array<VkFormat, 5> mainFormats{
         engine->_drawImage.imageFormat,
         engine->_sceneTargets.gbufferAlbedo.imageFormat,
         engine->_sceneTargets.gbufferVelocity.imageFormat,
-        engine->_sceneTargets.directLighting.imageFormat};
+        engine->_sceneTargets.directLighting.imageFormat,
+        engine->_sceneTargets.gbufferSpecular.imageFormat};
     builder.set_color_attachment_formats(mainFormats);
     builder.disable_blending();
     builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);

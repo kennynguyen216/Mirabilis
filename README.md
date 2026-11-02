@@ -26,7 +26,10 @@ Click the preview to watch the run.
 
 - Renders GPU mesh and material pipelines with glTF/GLB scene loading.
 - Manages Vulkan command buffers, synchronization, descriptor sets, dynamic rendering, and swapchain presentation.
-- Includes real-time shadows, ambient occlusion, and screen-space global illumination, with experimental probe/SDF lighting and a software path-tracing reference mode.
+- Includes real-time shadows, ambient occlusion, screen-space GI, optional Lumen-inspired world GI, and a software path-tracing reference mode.
+- On ray-query devices, world GI uses reusable mesh BLASes and frame-local TLASes, including moving opaque bodies, without requiring distance-field bakes. Software world tracing retains its bake requirement.
+- Relights the surface cache in bounded strips in the frame command buffer, retaining sky/emission pages during sun or punctual-light edits. Raster, cache and reference lighting share punctual-light attenuation.
+- Offers optional smooth/rough opaque scene reflections with GGX visible-normal sampling and separate static-view temporal history. Moving cameras, moving geometry and lighting changes reject that history. Cache-lit hits and scalar-material direct fallback are approximations; textured uncached hits remain conservative.
 - Includes shadowed point/spot lights, two-sided cloth lighting, material AO/specular controls, approximate thin-surface subsurface and screen-space glass refraction.
 - Offers optional cel shading, multi-scale HDR bloom, and ACES/Reinhard/PBR Neutral tone mapping.
 - Uses CPU-precomputed normal matrices in the prepass and instance batches, fast push-constant transforms for ordinary draws, with opt-in static-mesh GPU cluster culling for the main camera.
@@ -44,7 +47,7 @@ Click the preview to watch the run.
 
 - Uses EnTT entities with versioned identities, hierarchical transforms, and deferred scene changes.
 - Provides a dark Qt host with an embedded Vulkan viewport, breadcrumb navigation, asset cards and asynchronous texture thumbnails, scene tree, and selection/duplicate/delete actions.
-- Exposes rendering styles, bloom, tone mapping, GI presets, primitive material properties, and point/spot light authoring in Qt. `graphics_showcase.json` demonstrates the new rendering features.
+- Exposes rendering styles, bloom, tone mapping, world GI, scene reflections, experimental screen probes, GI presets, primitive material properties, and point/spot light authoring in Qt. `graphics_showcase.json` demonstrates the new rendering features.
 - Keeps ImGui for profiler, render settings, and component diagnostics; advanced component controls remain there during the Qt properties migration.
 - Supports translate, rotate, and scale gizmos with optional snapping.
 - Exposes editable box colliders and gameplay roles for scene-authored objects.
@@ -281,6 +284,27 @@ backends, pool exhaustion, nested tasks, cancellation, shutdown and allocator
 alignment/overflow/OOM paths.
 
 ### Comparing engine performance
+
+The world-GI correctness gate and focused benchmark use fresh output directories:
+
+```powershell
+python tests/lumen_gate.py --output C:/temp/mirabilis-lumen-check --configuration Debug
+python tests/lumen_benchmark.py --output C:/temp/mirabilis-lumen-timing
+python tests/lumen_benchmark.py --output C:/temp/mirabilis-relight-timing --hitches
+```
+
+The gate checks point/spot bounce, darkness, offscreen emissive reflections,
+roughness ownership, white-furnace energy, compact-upload parity and both portal
+paths with Vulkan synchronization validation. It requires actual hardware world
+GI, finite HDR output and unchanged authored scene selection. The benchmark
+alternates three runs of plain SSGI, world GI, probes and reflections at a fixed
+camera. It rejects missing focus, fallback and unfinished cache warm-up. The
+relight comparison uses a forced blocking/full-relight control and the budgeted
+source-reuse path during a scripted light edit; it is not a historical binary
+comparison. CSV percentiles measure render-loop work. Startup CPU BVH brute-force
+validation is explicitly skipped during these timings, but stays enabled in
+correctness gates. `--atlas 2048` bounds cache size for memory-limited scenes;
+the default is 4096. Probes remain experimental and off by default.
 
 Build both checkouts in Release with matching assets and generated shaders, then
 run GPU workloads sequentially with the comparison harness:

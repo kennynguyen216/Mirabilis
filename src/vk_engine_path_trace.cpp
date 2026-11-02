@@ -430,7 +430,12 @@ void VulkanEngine::update_trace_scene() {
     // albedo volume and relit the whole surface cache.  It is rewritten on its
     // own, and draw_path_trace's hash restarts accumulation when it changes.
     _traceSettings.lighting.sunDirection=glm::vec4(glm::normalize(glm::dot(_shadow.sunlightDirection,_shadow.sunlightDirection)>1e-10f?_shadow.sunlightDirection:glm::vec3(0,1,0)),0);
+    _traceSettings.lighting.punctual.count.x = uint32_t(sceneData.graphicsSettings.x);
+    for (uint32_t i=0;i<_traceSettings.lighting.punctual.count.x;++i)
+        _traceSettings.lighting.punctual.lights[i] = {sceneData.localLightPosition[i],
+            sceneData.localLightColor[i],sceneData.localLightDirection[i],sceneData.localLightCone[i]};
     auto uploadLighting=[&] {
+        if (_rendererMode != RendererMode::SoftwarePathTrace) return;
         if(std::memcmp(_traceLightBuffer.info.pMappedData,&_traceSettings.lighting,sizeof(TraceLighting))==0) return;
         VK_CHECK(vkDeviceWaitIdle(_device)); // A path trace in flight may still read it.
         std::memcpy(_traceLightBuffer.info.pMappedData,&_traceSettings.lighting,sizeof(TraceLighting));
@@ -536,18 +541,32 @@ void VulkanEngine::update_trace_scene() {
         if(glm::length(glm::vec3(m.emission))>0) _traceEmitters.push_back(i);
     }
     _traceSettings.lighting.counts.x=uint32_t(_traceEmitters.size());
-    if(std::getenv("MIRABILIS_TEST_FRAMES")) validate_trace_bvh(_traceTriangles,_traceNodes);
+    if(std::getenv("MIRABILIS_TEST_FRAMES") && !SDL_getenv("MIRABILIS_BENCHMARK_SKIP_CPU_BVH_VALIDATION")) validate_trace_bvh(_traceTriangles,_traceNodes);
     auto upload=[&](AllocatedBuffer& buffer,const void* data,size_t bytes,size_t minimum) {
         destroy_buffer(buffer); buffer=create_buffer(std::max(bytes,minimum),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
         std::memset(buffer.info.pMappedData,0,std::max(bytes,minimum));
         if(bytes) std::memcpy(buffer.info.pMappedData,data,bytes);
         vmaFlushAllocation(_allocator,buffer.allocation,0,VK_WHOLE_SIZE);
     };
-    upload(_traceTriangleBuffer,_traceTriangles.data(),_traceTriangles.size()*sizeof(TraceTriangle),sizeof(TraceTriangle));
+    // Hardware raster GI only needs emitter triangles on the GPU. Texture
+    // texels and the complete software BVH remain CPU/reference data.
+    const bool fullGpuTrace=_rendererMode==RendererMode::SoftwarePathTrace || !_rayQueryShadows ||
+        SDL_getenv("MIRABILIS_TEST_FULL_TRACE_UPLOAD");
+    std::vector<TraceTriangle> emitterTriangles;
+    std::vector<uint32_t> emitterIndices;
+    if (!fullGpuTrace) for (uint32_t index:_traceEmitters) {
+        emitterIndices.push_back(uint32_t(emitterTriangles.size()));
+        emitterTriangles.push_back(_traceTriangles.at(index));
+    }
+    const auto& gpuTriangles=fullGpuTrace?_traceTriangles:emitterTriangles;
+    const auto& gpuEmitters=fullGpuTrace?_traceEmitters:emitterIndices;
+    upload(_traceTriangleBuffer,gpuTriangles.data(),gpuTriangles.size()*sizeof(TraceTriangle),sizeof(TraceTriangle));
     upload(_traceMaterialBuffer,_traceMaterials.data(),_traceMaterials.size()*sizeof(TraceMaterial),sizeof(TraceMaterial));
-    upload(_traceNodeBuffer,_traceNodes.data(),_traceNodes.size()*sizeof(TraceBVHNode),sizeof(TraceBVHNode));
-    upload(_traceEmitterBuffer,_traceEmitters.data(),_traceEmitters.size()*sizeof(uint32_t),sizeof(uint32_t));
-    upload(_traceTexelBuffer,_traceTexels.data(),_traceTexels.size()*sizeof(uint32_t),sizeof(uint32_t));
+    upload(_traceNodeBuffer,_traceNodes.data(),fullGpuTrace?_traceNodes.size()*sizeof(TraceBVHNode):0,sizeof(TraceBVHNode));
+    upload(_traceEmitterBuffer,gpuEmitters.data(),gpuEmitters.size()*sizeof(uint32_t),sizeof(uint32_t));
+    upload(_traceTexelBuffer,_traceTexels.data(),fullGpuTrace?_traceTexels.size()*sizeof(uint32_t):0,sizeof(uint32_t));
+    fmt::print("GI GPU trace payload: mode={} triangles={} texels={} CPU-triangles={} CPU-texels={}\n",
+        fullGpuTrace?"full":"hardware-raster",gpuTriangles.size(),fullGpuTrace?_traceTexels.size():0,_traceTriangles.size(),_traceTexels.size());
     if (_tracePortals.size() > MaxPortalSurfaces) std::abort();
     upload(_tracePortalBuffer,_tracePortals.data(),_tracePortals.size()*sizeof(TracePortal),MaxPortalSurfaces*sizeof(TracePortal));
     _tracePortalBufferDirty = false;

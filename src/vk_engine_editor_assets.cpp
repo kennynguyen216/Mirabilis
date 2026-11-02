@@ -21,7 +21,7 @@ EditorSnapshot VulkanEngine::editor_snapshot() const {
     }
     result.rendering={_postProcess.celShading?1.f:0.f,_postProcess.celBands,_postProcess.celEdge,
         _postProcess.bloomEnabled?1.f:0.f,_postProcess.bloomStrength,_postProcess.bloomThreshold,_postProcess.bloomScatter,
-        float(_postProcess.tonemapOperator),float(_ssgi.qualityPreset),renderScale,_meshVisibility.enabled?1.f:0.f};
+        float(_postProcess.tonemapOperator),float(_ssgi.qualityPreset),renderScale,_meshVisibility.enabled?1.f:0.f,_reflections.enabled?1.f:0.f,_reflections.roughnessLimit,_ssgi.lumenEnabled?1.f:0.f,_ssgi.probesEnabled?1.f:0.f};
     result.selected = _scene.get(_selectedSceneObject);
     if (_scene.valid(result.selected)) {
         result.selectedName = _scene.read<Name>(result.selected)->value;
@@ -92,9 +92,13 @@ void VulkanEngine::apply_editor_requests() {
                 case 8:valid=v>=0&&v<=5&&v==std::floor(v);if(valid)apply_ssgi_quality_preset(int(v));break;
                 case 9:valid=v>=0.25f&&v<=1;if(valid){renderScale=v;_ssgi.historyValid=false;}break;
                 case 10:_meshVisibility.enabled=v>0.5f&&_meshVisibility.supported;break;
+                case 11:_reflections.enabled=v>0.5f;_reflections.historyValid=false;break;
+                case 12:valid=v>=0&&v<=1;if(valid){_reflections.roughnessLimit=v;_reflections.historyValid=false;}break;
+                case 13:_ssgi.lumenEnabled=v>0.5f;_ssgi.historyValid=false;break;
+                case 14:_ssgi.probesEnabled=v>0.5f;_ssgi.historyValid=false;break;
                 default:valid=false;break;
                 }
-                if(valid&&request.field<8)_sceneDocument.dirty=true;
+                if(valid&&(request.field<8||(request.field>=11&&request.field<=13)))_sceneDocument.dirty=true;
                 _editorAssetStatus=valid?"Rendering updated":"Invalid rendering value";continue;
             }
             if(request.command==EditorCommand::SetLight || request.command==EditorCommand::SetMaterial) {

@@ -61,11 +61,14 @@ void install_qt_browser_test_driver(QtEditorWindow& window, VulkanEngine& engine
             case 0: {
                 if(!snapshot.editing)return;
                 auto* cel=window.findChild<QCheckBox*>("CelShading");auto* bloom=window.findChild<QCheckBox*>("Bloom");
-                require(cel&&bloom,"missing Qt rendering controls");cel->click();bloom->click();click("CreatePointLight");break;
+                require(cel&&bloom,"missing Qt rendering controls");cel->click();bloom->click();
+                auto* world=window.findChild<QCheckBox*>("WorldGI");auto* reflections=window.findChild<QCheckBox*>("SceneReflections");
+                require(world&&reflections,"missing Qt GI/reflection controls");world->click();reflections->click();click("CreatePointLight");break;
             }
             case 1: {
                 if(!snapshot.light)return;
                 require(snapshot.rendering[0]>0.5f&&snapshot.rendering[3]>0.5f,"Qt cel/bloom edit did not reach renderer");
+                require(snapshot.rendering[11]>0.5f&&snapshot.rendering[13]>0.5f,"Qt GI/reflection edit did not reach renderer");
                 auto* range=window.findChild<QDoubleSpinBox*>("Light3");require(range,"missing Qt light inspector");
                 range->setValue(8.5);QMetaObject::invokeMethod(range,"editingFinished");break;
             }

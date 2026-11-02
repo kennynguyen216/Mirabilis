@@ -385,6 +385,35 @@ void VulkanEngine::update_scene_sdf()
 
     std::vector<SceneOpaqueInstance> sceneInstances;
     const uint64_t drawHash = collect_opaque_instances(sceneInstances);
+    const bool hardware=_rayQueryShadows && !(_debugViews.view==RenderDebugView::SDFTrace && _sdf.source==1);
+    if (hardware!=_sceneSdf.hardwareProxy) { _sceneSdf.drawHash=0; _sceneSdf.fieldValid=false; }
+    _sceneSdf.hardwareProxy=hardware;
+    if (hardware) {
+        if (_sceneSdf.fieldValid && drawHash==_sceneSdf.drawHash && !_sceneSdf.rebuildRequested) return;
+        glm::vec3 lo(std::numeric_limits<float>::max()),hi(-std::numeric_limits<float>::max());
+        for (const auto& instance:sceneInstances) for (const auto& draw:instance.draws) for (int corner=0;corner<8;++corner) {
+            glm::vec3 signs(corner&1?1.f:-1.f,corner&2?1.f:-1.f,corner&4?1.f:-1.f);
+            glm::vec3 point=glm::vec3(draw.transform*glm::vec4(draw.bounds.origin+signs*draw.bounds.extents,1));
+            lo=glm::min(lo,point);hi=glm::max(hi,point);
+        }
+        if(sceneInstances.empty()) {lo=glm::vec3(-1);hi=glm::vec3(1);}
+        _sceneSdf.fieldMin=lo-glm::vec3(.1f); _sceneSdf.fieldMax=hi+glm::vec3(.1f);
+        // Keep the existing coarse material-volume and lookup scale; the
+        // triangle backend never samples the placeholder as a distance field.
+        glm::vec3 boundsExtent=_sceneSdf.fieldMax-_sceneSdf.fieldMin;
+        _sceneSdf.voxelSize=std::max(std::max({boundsExtent.x,boundsExtent.y,boundsExtent.z})/380.f,1e-4f);
+        if (_sceneSdf.field.image==VK_NULL_HANDLE || _sceneSdf.fieldDimensions!=glm::uvec3(1,1,2)) {
+            if (_sceneSdf.field.image) { VK_CHECK(vkDeviceWaitIdle(_device));destroy_image(_sceneSdf.field); }
+            float empty[2]={1e9f,1e9f};
+            _sceneSdf.field=create_image(empty,sizeof(empty),{1,1,2},VK_FORMAT_R32_SFLOAT,VK_IMAGE_USAGE_SAMPLED_BIT,false);
+            _sceneSdf.fieldDimensions=glm::uvec3(1,1,2);
+        }
+        _sceneSdf.fieldValid=true; _sceneSdf.drawHash=drawHash; _sceneSdf.rebuildRequested=false;
+        _sceneSdf.instanceCount=int(sceneInstances.size());_sceneSdf.placedCount=0;
+        _sceneSdf.status="Triangle ray-query world: no distance-field bakes required";
+        fmt::print("GI world backend=triangles instances={} distance-field-bakes-required=false\n",sceneInstances.size());
+        return;
+    }
     struct Instance {
         VkDeviceAddress address;
         glm::mat4 transform;

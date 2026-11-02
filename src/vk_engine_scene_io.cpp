@@ -1,4 +1,5 @@
 #include "vk_engine.h"
+#include "env_flags.h"
 
 #include <cmath>
 #include <filesystem>
@@ -49,6 +50,8 @@ SceneSettings VulkanEngine::capture_scene_settings() const
     settings.warmth = _postProcess.whiteBalance.x;
     settings.tint = _postProcess.whiteBalance.y;
     settings.giSaturation = _ssgi.colorSaturation;
+    settings.lumenGI=_ssgi.lumenEnabled;
+    settings.sceneReflections=_reflections.enabled;settings.reflectionRoughness=_reflections.roughnessLimit;
     settings.celShading=_postProcess.celShading;settings.celBands=_postProcess.celBands;settings.celEdge=_postProcess.celEdge;
     settings.bloom=_postProcess.bloomEnabled;settings.bloomStrength=_postProcess.bloomStrength;
     settings.bloomThreshold=_postProcess.bloomThreshold;settings.bloomScatter=_postProcess.bloomScatter;
@@ -75,6 +78,10 @@ void VulkanEngine::apply_scene_settings(const SceneSettings& settings)
     _traceSettings.lighting.environmentTint = glm::vec4(settings.environmentTint, 0);
     _postProcess.whiteBalance = glm::vec2(settings.warmth, settings.tint);
     _ssgi.colorSaturation = settings.giSaturation;
+    _ssgi.lumenEnabled=settings.lumenGI;
+    if (SDL_getenv("MIRABILIS_LUMEN_LITE")) _ssgi.lumenEnabled=parse_env_bool(SDL_getenv("MIRABILIS_LUMEN_LITE"))==EnvBool::On;
+    _reflections.enabled=settings.sceneReflections;_reflections.roughnessLimit=settings.reflectionRoughness;_reflections.historyValid=false;
+    if (SDL_getenv("MIRABILIS_SCENE_REFLECTIONS")) _reflections.enabled=parse_env_bool(SDL_getenv("MIRABILIS_SCENE_REFLECTIONS"))==EnvBool::On;
     _postProcess.celShading=settings.celShading;_postProcess.celBands=settings.celBands;_postProcess.celEdge=settings.celEdge;
     _postProcess.bloomEnabled=settings.bloom;_postProcess.bloomStrength=settings.bloomStrength;
     _postProcess.bloomThreshold=settings.bloomThreshold;_postProcess.bloomScatter=settings.bloomScatter;

@@ -50,8 +50,8 @@ private:
     QHBoxLayout* crumbs_{};
     QToolButton *backButton_{}, *forwardButton_{};
     QLabel* assetCount_{};
-    std::array<QDoubleSpinBox*,9> renderNumbers_{};
-    QCheckBox *cel_{}, *bloom_{}, *meshCulling_{};
+    std::array<QDoubleSpinBox*,13> renderNumbers_{};
+    QCheckBox *cel_{}, *bloom_{}, *meshCulling_{}, *reflections_{}, *lumen_{}, *probes_{};
     QComboBox *tonemap_{}, *giQuality_{};
     std::array<QDoubleSpinBox*,10> lightFields_{};
     QGroupBox* lightGroup_{};

@@ -25,6 +25,8 @@ layout(location = 3) in vec3 inWorldPosition;
 layout(location = 4) in vec4 inTangent;
 layout(location = 0) out vec4 outFragColor;
 
+#define REFLECTION_CACHE_LOOKUP(p,n) surface_cache_lookup(p,n,false,true,true)
+#include "scene_reflection.glsl"
 void main()
 {
     vec4 baseColor = inColor * texture(colorTex, inUV);
@@ -99,9 +101,18 @@ void main()
         indirect_color(portal_indirect(inWorldPosition, lightingGeometricNormal), sceneData.environmentTint.w) * sceneData.portalIndirectSettings.z
         : vec3(0.0);
 
+    vec3 reflected=vec3(0);
+#ifndef MIRABILIS_COLOR_ONLY
+    if (reflection_roughness_owned(surface.roughness)) {
+        ReflectionHit reflectionHit;
+        reflected=scene_reflection(inWorldPosition,surface.normal,lightingGeometricNormal,surface.view,
+            surface.f0,surface.roughness,uint(gl_FragCoord.x)*1973u^uint(gl_FragCoord.y)*9277u,reflectionHit);
+        ambientSpecular=vec3(0); emitterSpecular=vec3(0);
+    }
+#endif
     outFragColor = vec4(
         directDiffuse + directSpecular + ambientDiffuse + ambientSpecular +
-            emission + emitterDiffuse + emitterSpecular + indirect,
+            emission + emitterDiffuse + emitterSpecular + indirect + reflected,
         1.0);
     if(materialData.materialFlags.w>0.5 && sceneData.graphicsSettings.y<0.5)
         outFragColor.rgb=cel_bands(outFragColor.rgb,4.0)*mix(0.15,1.0,step(0.18,surface.noV));

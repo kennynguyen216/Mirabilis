@@ -8,6 +8,7 @@
 #include "local_lights.glsl"
 #include "material_transmission.glsl"
 #include "cel_shading.glsl"
+#include "reflection_settings.glsl"
 
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec4 inColor;
@@ -26,6 +27,7 @@ layout(location = 0) out vec4 outFragColor;
 layout(location = 1) out vec4 outAlbedo;
 layout(location = 2) out vec4 outVelocity;
 layout(location = 3) out vec4 outDirectLighting;
+layout(location = 4) out vec4 outSpecular;
 #endif
 
 void main()
@@ -93,6 +95,11 @@ void main()
     vec3 emitterSpecular;
     material_emitters(surface, inWorldPosition, lightingGeometricNormal, gl_FragCoord.xy,
         emitterDiffuse, emitterSpecular);
+    #ifndef MIRABILIS_COLOR_ONLY
+    if (reflection_roughness_owned(surface.roughness)) {
+        ambientSpecular=vec3(0); emitterSpecular=vec3(0);
+    }
+    #endif
     // While emitters are sampled explicitly, their first bounce is owned here,
     // so emission must not also reach SSGI through the transport target: the
     // path tracer likewise drops emission a BSDF-sampled ray finds after a
@@ -150,7 +157,10 @@ void main()
     vec2 previousUV = inPreviousClip.xy / max(inPreviousClip.w, 0.00001) * 0.5 + 0.5;
     // Add this displacement to a current UV to find the same point in the
     // previous frame.
-    outVelocity = vec4(previousUV - currentUV, 0.0, 1.0);
+    vec3 oct=surface.normal/(abs(surface.normal.x)+abs(surface.normal.y)+abs(surface.normal.z));
+    vec2 packedNormal=oct.z>=0?oct.xy:(1-abs(oct.yx))*mix(vec2(-1),vec2(1),greaterThanEqual(oct.xy,vec2(0)));
+    outVelocity = vec4(previousUV-currentUV,packedNormal);
+    outSpecular = vec4(surface.f0,surface.roughness);
     // SSGI reads this as the radiance leaving a surface towards other
     // surfaces.  Specular depends on the direction it leaves in, and only the
     // camera's was evaluated, so it stays out.  Emission leaves in every

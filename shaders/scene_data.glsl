@@ -73,5 +73,6 @@ layout(set = 0, binding = 0) uniform SceneData {
     vec4 localLightDirection[16];
     vec4 localLightCone[16];
     mat4 localShadowMatrix[7];
+    vec4 reflectionSettings;
     vec4 graphicsSettings;
 } sceneData;

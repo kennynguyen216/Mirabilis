@@ -1,4 +1,5 @@
 #include "vk_engine.h"
+#include "r4_contributions.h"
 #include "vk_engine_render_helpers.h"
 
 #include <algorithm>
@@ -193,6 +194,7 @@ void VulkanEngine::init_scene_descriptors()
         builder.add_binding(15, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         builder.add_binding(22, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(23, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(24, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         for (uint32_t binding = 17; binding <= 21; ++binding)
             builder.add_binding(binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         // IQ2: the sun casters' TLAS, only on the ray-query device, where
@@ -367,7 +369,7 @@ void VulkanEngine::draw_geometry(
     auto profileScope = _profiler.scope(mirabilis::CpuZone::Geometry);
     const auto startTime = std::chrono::steady_clock::now();
 
-    std::array<VkRenderingAttachmentInfo, 4> colorAttachments{};
+    std::array<VkRenderingAttachmentInfo, 5> colorAttachments{};
     colorAttachments[0] = vkinit::attachment_info(
         _drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkClearValue clear{};
@@ -381,6 +383,7 @@ void VulkanEngine::draw_geometry(
         colorAttachments[3] = vkinit::attachment_info(
             _sceneTargets.directLighting.imageView, &clear,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        colorAttachments[4]=vkinit::attachment_info(_sceneTargets.gbufferSpecular.imageView,&clear,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     }
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
         _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
@@ -391,7 +394,7 @@ void VulkanEngine::draw_geometry(
 
     VkRenderingInfo renderInfo = vkinit::rendering_info(
         _drawExtent, colorAttachments.data(), &depthAttachment);
-    renderInfo.colorAttachmentCount = writeGBuffer ? 4u : 1u;
+    renderInfo.colorAttachmentCount = writeGBuffer ? 5u : 1u;
     renderInfo.pStencilAttachment = &stencilAttachment;
 
     vkCmdBeginRendering(cmd, &renderInfo);
@@ -566,6 +569,8 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
     GPUSceneData data{};
     data.view = view;
     build_local_lights(data);
+    data.reflectionSettings=glm::vec4(_reflections.enabled && _materialShading.specular && (_r4Contributions.forward & r4::EnvSpecular)!=0 && _ssgi.enabled && _ssgi.lumenEnabled && _rayQueryShadows && lumen_lite_ready() && !is_forward_material_debug_view(_debugViews.view)?1.f:0.f,_reflections.roughnessLimit,2,1000);
+    if (SDL_getenv("MIRABILIS_TEST_FRAMES") && SDL_getenv("MIRABILIS_TEST_REFLECTION_FURNACE")) data.reflectionSettings.w=-1;
     // Passing far, then near, intentionally builds the reversed-depth
     // projection used by the existing GREATER_OR_EQUAL depth pipeline.
     data.proj = glm::perspective(
@@ -659,6 +664,7 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
     // R4 forward owners kept in the final image (src/r4_contributions.h);
     // exact in a float, and all six unless an R4 capture removed some.
     data.materialDebug.y = static_cast<float>(_r4Contributions.forward);
+    data.materialDebug.z = static_cast<float>(_r4Contributions.cacheSources);
     data.iblSettings = glm::vec4(
         _materialShading.imageBasedLighting ? 1.0f : 0.0f,
         static_cast<float>(IblPrefilterLevels - 1),
@@ -721,6 +727,7 @@ void VulkanEngine::write_emitter_descriptors(FrameData& frame)
     const auto write = [&](VkDescriptorSet set) {
         DescriptorWriter writer;
         writer.write_image(22,_localShadowAtlas.imageView,_shadow.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.write_buffer(24,buffer(frame.rayHitInstances,_rayQueryShadows),VK_WHOLE_SIZE,0,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         writer.write_image(23,_postProcess.sceneCopy.imageView,_postProcess.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         const std::array<std::pair<uint32_t, VkImageView>, 4> pages{{
             {6, page(_surfaceCache.albedo)}, {10, page(_surfaceCache.emissive)},

@@ -264,6 +264,8 @@ void VulkanEngine::init_ssgi_resources()
         "HDR/velocity");
 
     const VkExtent3D extent = _drawImage.imageExtent;
+    _sceneTargets.gbufferSpecular=create_image(extent,VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);
     _sceneTargets.gbufferAlbedo = create_image(
         extent, VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -356,7 +358,8 @@ void VulkanEngine::init_ssgi_resources()
     // The history contents remain invalid until the first forward pass copies
     // into one side of the pair.
     immediate_submit([&](VkCommandBuffer cmd) {
-        const std::array<AllocatedImage*, 6> sampledImages{
+        const std::array<AllocatedImage*, 7> sampledImages{
+            &_sceneTargets.gbufferSpecular,
             &_sceneTargets.gbufferAlbedo,
             &_sceneTargets.gbufferVelocity,
             &_sceneTargets.directLighting,
@@ -403,6 +406,7 @@ void VulkanEngine::init_ssgi_resources()
 
     _mainDeletionQueue.push_function([this]() {
         destroy_image(_sceneTargets.gbufferAlbedo);
+        destroy_image(_sceneTargets.gbufferSpecular);
         destroy_image(_sceneTargets.gbufferVelocity);
         destroy_image(_sceneTargets.directLighting);
         destroy_image(_sceneTargets.portalMask);
@@ -672,6 +676,7 @@ void VulkanEngine::init_ssgi_pipelines()
 
 void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
 {
+    vkutil::transition_image(cmd,_sceneTargets.gbufferSpecular.image,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     // The forward MRT outputs become read-only inputs for both SSGI and the
     // debug views. Direct lighting is copied into a ping-pong history so the
     // march never samples an image being rendered this frame.
@@ -754,6 +759,11 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             get_current_frame().sceneDescriptor,
             _ssgi.descriptors[writeIndex]};
         const bool lumen = _ssgi.lumenEnabled && lumen_lite_ready();
+        if (_ssgi.reportedLumen != int(lumen)) {
+            fmt::print("GI effective mode={} requested-lumen={} SDF={}/{} cache-lit={}\n",
+                lumen?"lumen-lite":"plain-ssgi",_ssgi.lumenEnabled,_sceneSdf.placedCount,_sceneSdf.instanceCount,_surfaceCache.lightingValid);
+            _ssgi.reportedLumen=int(lumen);
+        }
         VkPipelineLayout traceLayout = _ssgi.pipelineLayout;
         if (lumen) {
             VkDescriptorSet lumenSet = get_current_frame()._frameDescriptors.allocate(

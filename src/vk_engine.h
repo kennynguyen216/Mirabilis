@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -21,6 +22,8 @@
 #include <scene.h>
 #include "scene_serialization.h"
 #include "scene_render_data.h"
+#include "surface_update_schedule.h"
+#include "ray_scene.h"
 #include <world.h>
 
 struct DeletionQueue
@@ -55,6 +58,13 @@ struct FrameData {
         size_t clusterCapacity{}, clusterInstanceCapacity{};
         std::vector<std::pair<uint32_t,uint32_t>> clusterRanges;
         VkDescriptorSet sceneDescriptor{};
+        VkAccelerationStructureKHR rayTlas{};
+        AllocatedBuffer rayTlasBuffer, rayInstances, rayScratch, rayHitInstances;
+        size_t rayHitCapacity{};
+        VkDeviceSize rayTlasCapacity{}, rayInstanceCapacity{}, rayScratchCapacity{};
+        uint64_t rayHash{};
+        uint32_t rayCount{};
+        bool rayBuildPending{};
         std::array<AllocatedBuffer, PortalViewCount> portalSceneBuffers;
         std::array<VkDescriptorSet, PortalViewCount> portalSceneDescriptors{};
     };
@@ -966,6 +976,8 @@ class VulkanEngine{
         // Direct sunlight into the cache's direct page, shadowed through the
         // scene distance field.
         void light_surface_cache();
+        void record_surface_cache_lighting(VkCommandBuffer cmd);
+        void run_surface_cache_diagnostics();
         // Card and card-grid storage buffers for looking the cache up at an
         // arbitrary world position.
         void measure_surface_cache_coverage();
@@ -1343,13 +1355,22 @@ class VulkanEngine{
             PFN_vkCmdWriteAccelerationStructuresPropertiesKHR writeProperties{};
             PFN_vkCmdCopyAccelerationStructureKHR copy{};
             VkDeviceSize scratchAlignment{256};
-            VkAccelerationStructureKHR blas{}, tlas{};
-            AllocatedBuffer blasBuffer{}, tlasBuffer{};
+            struct Mesh {
+                VkDeviceAddress vertices{}; VkBuffer indices{};
+                uint32_t first{}, count{};
+                std::weak_ptr<TraceMeshSource> source;
+                VkAccelerationStructureKHR structure{};
+                AllocatedBuffer buffer;
+            };
+            std::vector<Mesh> meshes;
+            VkAccelerationStructureKHR tlas{};
+            uint64_t blasBuilds{}, tlasBuilds{};
             uint64_t hash{0};
         };
         SunCasterScene _sunCasters;
         bool ray_query_caster(const RenderObject& object) const;
         void update_sun_casters();
+        void record_sun_casters(VkCommandBuffer cmd);
         void destroy_sun_casters();
         glm::mat4 _previousMainViewProjection{1.0f};
         bool _previousMainViewProjectionValid{false};
@@ -1376,12 +1397,27 @@ class VulkanEngine{
         PrepassState _prepass;
         struct SceneRenderTargets {
             AllocatedImage gbufferAlbedo;
+            AllocatedImage gbufferSpecular;
             AllocatedImage gbufferVelocity;
             AllocatedImage directLighting;
             AllocatedImage portalMask;
             std::array<AllocatedImage, 2> directLightingHistory{};
         };
         SceneRenderTargets _sceneTargets;
+        struct ReflectionState {
+            bool enabled{}, historyValid{};
+            float roughnessLimit{0.4f};
+            VkDescriptorSetLayout layout{};
+            MaterialPipeline pipeline;
+            AllocatedImage raw{}, rawHit{};
+            std::array<AllocatedImage,2> radiance{}, hit{}, metadata{};
+            uint32_t writeIndex{};
+            uint64_t lastSceneHash{}, lastLightingHash{};
+            glm::mat4 lastViewProjection{1};
+            VkExtent2D liveExtent{};
+        } _reflections;
+        void init_reflections();
+        void draw_reflections(VkCommandBuffer cmd);
         struct SSGIState {
             AllocatedImage rawImage;
             AllocatedImage debugImage;
@@ -1433,6 +1469,7 @@ class VulkanEngine{
             // Lumen-lite: screen misses trace the scene distance field and
             // read the surface cache instead of the environment.
             bool lumenEnabled{false};
+            int reportedLumen{-1};
             bool screenTraceEnabled{true};
             VkDescriptorSetLayout lumenLayout{};
             VkPipelineLayout lumenPipelineLayout{};
@@ -1483,11 +1520,11 @@ class VulkanEngine{
             uint32_t forward{0xffu};
             uint32_t ray{0xfffu};
             bool rayCoverage{false};
-            // Direct sources the cache keeps (bit 0 sun, 1 sky, 2 emitters);
-            // a diagnostic mask, all three by default (R4.13).
-            uint32_t cacheSources{0x7u};
-            // Scene light sources kept (bit 0 sun, 1 sky), R4.13.
-            uint32_t lightSources{0x3u};
+            // Direct sources the cache keeps (bit 0 sun, 1 sky, 2 emitters, 3 punctual);
+            // a diagnostic mask, all four by default (R4.13).
+            uint32_t cacheSources{0xfu};
+            // Scene light sources kept (bit 0 sun, 1 sky, 2 punctual), R4.13.
+            uint32_t lightSources{0x7u};
             bool sunVisibilityCheck{false};
         } _r4Contributions;
         struct SdfVolumeState {
@@ -1540,6 +1577,7 @@ class VulkanEngine{
             // initialisers are what make the null-handle checks meaningful.
             AllocatedImage field{};
             bool fieldValid{false};
+            bool hardwareProxy{false};
             glm::vec3 fieldMin{0.0f};
             glm::vec3 fieldMax{0.0f};
             glm::uvec3 fieldDimensions{0};
@@ -1652,6 +1690,14 @@ class VulkanEngine{
             bool lightingValid{false};
             // Sun and field state the direct page was lit with.
             uint64_t lightingHash{0};
+            uint64_t pendingLightingHash{}, pendingRestHash{}, diagnosticLightingHash{};
+            SurfaceUpdateSchedule lightingSchedule;
+            std::array<glm::vec4,12> pendingSky{};
+            PunctualLights pendingPunctual;
+            glm::vec4 pendingSunDirection{}, pendingSunColor{};
+            bool lightingPending{}, pendingSunOnly{};
+            uint64_t lightingBatchTexels{}, relightFrames{}, completedRelights{}, initialLightingRemaining{};
+            std::chrono::steady_clock::time_point relightStarted;
             // The same without the sun (IQ13): unchanged, a sun-only relight
             // suffices.  MIRABILIS_IQ13_SUN_ONLY_RELIGHT=0 always relights fully.
             uint64_t lightingRestHash{0};

@@ -173,6 +173,14 @@ QtEditorWindow::QtEditorWindow(VulkanEngine& engine) : engine_(engine) {
     connect(bloom_,&QCheckBox::clicked,this,[this](bool on){edit_property(EditorCommand::SetRendering,3,on?1.f:0.f,bloom_);});
     const std::array<std::pair<int,const char*>,5> renderNames{{{1,"Cel bands"},{2,"Cel silhouette"},{4,"Bloom strength"},{5,"Bloom threshold"},{6,"Bloom scatter"}}};
     for(auto [field,title]:renderNames)renderNumbers_[field]=propertyNumber(renderingForm,title,EditorCommand::SetRendering,field,field==1?2:0,field==1?16:field==5?100:field==4?2:1,field==1?1:0.05);
+    lumen_=new QCheckBox("Lumen-inspired world GI",renderingWidget);lumen_->setObjectName("WorldGI");renderingForm->addRow(lumen_);
+    connect(lumen_,&QCheckBox::clicked,this,[this](bool on){edit_property(EditorCommand::SetRendering,13,on?1.f:0.f,lumen_);});
+    probes_=new QCheckBox("Screen probes (experimental)",renderingWidget);probes_->setObjectName("ScreenProbes");renderingForm->addRow(probes_);
+    connect(probes_,&QCheckBox::clicked,this,[this](bool on){edit_property(EditorCommand::SetRendering,14,on?1.f:0.f,probes_);});
+    reflections_=new QCheckBox("Scene reflections",renderingWidget);reflections_->setObjectName("SceneReflections");renderingForm->addRow(reflections_);
+    reflections_->setToolTip("Requires ready Lumen lighting and hardware ray queries. One reflected surface interaction.");
+    connect(reflections_,&QCheckBox::clicked,this,[this](bool on){edit_property(EditorCommand::SetRendering,11,on?1.f:0.f,reflections_);});
+    renderNumbers_[12]=propertyNumber(renderingForm,"Reflection roughness limit",EditorCommand::SetRendering,12,0,1,0.05);
     meshCulling_=new QCheckBox("GPU cluster culling (experimental)",renderingWidget);renderingForm->addRow(meshCulling_);
     meshCulling_->setToolTip("Static opaque geometry in the main camera. Performance depends on scene and GPU.");
     connect(meshCulling_,&QCheckBox::clicked,this,[this](bool on){edit_property(EditorCommand::SetRendering,10,on?1.f:0.f,meshCulling_);});
@@ -357,6 +365,10 @@ void QtEditorWindow::refresh_scene() {
     const auto number=[&](QDoubleSpinBox* widget,double value,bool enabled){bind(widget,enabled);if(!widget->hasFocus()){QSignalBlocker block(widget);widget->setValue(value);}};
     const auto check=[&](QCheckBox* widget,bool value,bool enabled){bind(widget,enabled);QSignalBlocker block(widget);widget->setChecked(value);};
     check(meshCulling_,state.rendering[10]>0.5f,state.editing);
+    check(reflections_,state.rendering[11]>0.5f,state.editing);
+    check(lumen_,state.rendering[13]>0.5f,state.editing);
+    check(probes_,state.rendering[14]>0.5f,state.editing);
+    number(renderNumbers_[12],state.rendering[12],state.editing);
     check(cel_,state.rendering[0]>0.5f,state.editing);check(bloom_,state.rendering[3]>0.5f,state.editing);
     for(int field:{1,2,4,5,6})number(renderNumbers_[field],state.rendering[field],state.editing);
     number(renderNumbers_[8],state.rendering[9],state.editing);

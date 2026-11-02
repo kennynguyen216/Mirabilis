@@ -36,5 +36,5 @@ struct EditorSnapshot {
     std::optional<Light> light;
     std::optional<SceneMaterial> material;
     bool importedModel{};
-    std::array<float,11> rendering{};
+    std::array<float,15> rendering{};
 };

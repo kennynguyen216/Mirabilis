@@ -213,6 +213,7 @@ struct GPUSceneData {
     glm::vec4 localLightDirection[16]{}; // xyz direction, w inner cosine
     glm::vec4 localLightCone[16]{}; // x outer cosine, y shadow base slot (-1 off)
     glm::mat4 localShadowMatrix[7]{};
+    glm::vec4 reflectionSettings{0,0.4f,2,1000};
     glm::vec4 graphicsSettings{0}; // x local light count; y global cel
 
 };

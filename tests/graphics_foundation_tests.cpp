@@ -90,6 +90,7 @@ TEST_CASE("lighting and material authoring survive save reload duplication and p
     material.thickness = 0.3f;
     REQUIRE(scene.set(ref, material));
     SceneSettings settings;
+    settings.sceneReflections=true; settings.lumenGI=true; settings.reflectionRoughness=0.35f;
     settings.celShading = true;
     settings.bloom = true;
     settings.celBands = 6;
@@ -105,6 +106,8 @@ TEST_CASE("lighting and material authoring survive save reload duplication and p
     CHECK(loaded.scene.read<Light>(restored)->intensity == 40);
     REQUIRE(loaded.scene.read<SceneMaterial>(restored));
     CHECK(*loaded.scene.read<SceneMaterial>(restored) == material);
+    CHECK(loaded.settings.sceneReflections); CHECK(loaded.settings.lumenGI);
+    CHECK(loaded.settings.reflectionRoughness==doctest::Approx(0.35f));
     CHECK(loaded.settings.celShading);
     CHECK(loaded.settings.bloom);
     CHECK(loaded.settings.celBands == 6);
@@ -168,4 +171,46 @@ TEST_CASE("inactive lights preserve authored values without consuming rendering 
     CHECK(light.emits_light());
     light.enabled = false;
     CHECK_FALSE(light.emits_light());
+}
+
+#include "surface_update_schedule.h"
+TEST_CASE("surface relighting sweeps uneven cards within a strict strip budget") {
+    std::vector<glm::uvec4> rects{{0,0,7,9},{7,0,3,5},{10,0,11,3}};
+    SurfaceUpdateSchedule schedule;
+    schedule.restart(rects,false);
+    std::vector<std::vector<int>> visits{{std::vector<int>(9)},{std::vector<int>(5)},{std::vector<int>(3)}};
+    uint64_t total=0;
+    for(int frame=0;schedule.remaining && frame<100;++frame) {
+        uint64_t used=0;
+        for(auto strip:schedule.take(rects,22)) {
+            CHECK(strip.row+strip.rows<=rects[strip.card].w);
+            for(uint32_t y=strip.row;y<strip.row+strip.rows;++y) ++visits[strip.card][y];
+            used+=uint64_t(strip.rows)*rects[strip.card].z;
+        }
+        CHECK(used<=22); CHECK(used>0); total+=used;
+    }
+    CHECK(schedule.remaining==0); CHECK(total==111);
+    for(const auto& card:visits) for(auto row:card) CHECK(row==1);
+}
+TEST_CASE("continuous light edits preserve relight cursor and reach later cards") {
+    std::vector<glm::uvec4> rects(5,glm::uvec4(0,0,8,8));
+    SurfaceUpdateSchedule schedule;
+    schedule.restart(rects,false);
+    std::set<uint32_t> visited;
+    for(int frame=0;frame<40;++frame) {
+        schedule.restart(rects,true);
+        for(auto strip:schedule.take(rects,16)) visited.insert(strip.card);
+    }
+    CHECK(visited.size()==5);
+    schedule.restart(rects,false); CHECK(schedule.card==0); CHECK(schedule.row==0);
+    CHECK(schedule.take(rects,0).empty());
+}
+TEST_CASE("partial card dispatch preserves full-card world coordinates") {
+    glm::mat4 card=glm::translate(glm::mat4(1),glm::vec3(3,4,5))*glm::scale(glm::mat4(1),glm::vec3(2,7,3));
+    glm::mat4 strip=card; strip[3]+=strip[1]*(13.f/47); strip[1]*=9.f/47;
+    for(int row=0;row<9;++row) {
+        glm::vec4 a=card*glm::vec4(.3f,(13+row+.5f)/47,.4f,1);
+        glm::vec4 b=strip*glm::vec4(.3f,(row+.5f)/9,.4f,1);
+        CHECK(glm::length(a-b)<1e-5f);
+    }
 }

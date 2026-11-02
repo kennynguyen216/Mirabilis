@@ -19,6 +19,8 @@
 // cache texels anywhere in the scene need lighting.
 
 layout(local_size_x = 8, local_size_y = 8) in;
+#include "punctual_lights.glsl"
+layout(std140,set=0,binding=13) uniform PunctualData { uvec4 count; PunctualLight lights[16]; } punctual;
 
 layout(rgba16f, set = 0, binding = 0) uniform image2D directPage;
 // Emitter light alone (R4.12): rgb = the emitter share of the direct page,
@@ -113,6 +115,10 @@ float emitter_field_distance(vec3 world)
     return field_distance(world);
 }
 #define EMITTER_FIELD_VISIBILITY
+#ifdef MIRABILIS_RT_SHADOWS
+float emitter_hardware_visibility(vec3 origin,vec3 target);
+#define EMITTER_HARDWARE_VISIBILITY(o,t) emitter_hardware_visibility(o,t)
+#endif
 #include "emitter_sampling.glsl"
 
 // The cache is lit once, so each texel takes enough stratified samples for a
@@ -152,14 +158,14 @@ layout(set = 0, binding = 12) uniform accelerationStructureEXT sunCasters;
 
 // Same double-sided triangle and BVH hit convention as the CPU R4 diagnostic.
 // Invalid traversal cannot be interpreted as an opening.
-bool sky_visible_exact(vec3 origin, vec3 direction)
+bool segment_visible_exact(vec3 origin, vec3 direction, float maxDistance)
 {
 #ifdef MIRABILIS_RT_SHADOWS
     // No culling (TLAS instance flag) and the same 0.1 mm minimum hit distance.
     rayQueryEXT query;
     rayQueryInitializeEXT(query, sunCasters,
         gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFF,
-        origin, 0.0001, direction, 1.0e6);
+        origin, 0.0001, direction, maxDistance);
     while (rayQueryProceedEXT(query)) {
     }
     return rayQueryGetIntersectionTypeEXT(query, true) ==
@@ -173,7 +179,7 @@ bool sky_visible_exact(vec3 origin, vec3 direction)
         uint index = stack[--top];
         if (index >= nodes.length()) return false;
         BVHNode node = nodes[index];
-        float low = 0.0001, high = 1e30;
+        float low = 0.0001, high = maxDistance;
         for (int axis = 0; axis < 3; ++axis) {
             if (abs(direction[axis]) < 1e-20) {
                 if (origin[axis] < node.minimum[axis] || origin[axis] > node.maximum[axis]) high = -1.0;
@@ -204,11 +210,34 @@ bool sky_visible_exact(vec3 origin, vec3 direction)
             vec3 q = cross(s, e1);
             float v = dot(direction, q) / det;
             if (v < 0.0 || u + v > 1.0) continue;
-            if (dot(e2, q) / det > 0.0001) return false;
+            float t=dot(e2,q)/det;
+            if (t>0.0001 && t<maxDistance) return false;
         }
     }
     return true;
 #endif
+}
+
+float emitter_hardware_visibility(vec3 origin,vec3 target) {
+    vec3 delta=target-origin;float endpoint=length(delta);
+    return endpoint<=0.0003 || segment_visible_exact(origin,delta/max(endpoint,1e-8),endpoint-0.0002)?1.0:0.0;
+}
+bool sky_visible_exact(vec3 origin,vec3 direction) { return segment_visible_exact(origin,direction,1.0e6); }
+vec3 punctual_irradiance_at_surface(vec3 world,vec3 normal)
+{
+    vec3 result=vec3(0);
+    float epsilon=max(0.0002,max(max(abs(world.x),abs(world.y)),abs(world.z))*0.000002);
+    vec3 origin=world+normal*epsilon;
+    for (uint i=0u;i<punctual.count.x;++i) {
+        PunctualLight light=punctual.lights[i];
+        vec3 direction; float distance;
+        vec3 value=punctual_irradiance(light,world,direction,distance)*max(dot(normal,direction),0);
+        if (!any(greaterThan(value,vec3(0)))) continue;
+        vec3 delta=light.position.xyz-origin;
+        float endpoint=length(delta);
+        if (light.cone.y<0 || (endpoint>0.0003 && segment_visible_exact(origin,delta/endpoint,endpoint-0.0002))) result+=value;
+    }
+    return result;
 }
 
 vec3 sky_irradiance(vec3 world, vec3 normal, ivec2 texel)
@@ -268,6 +297,9 @@ vec3 emitter_irradiance(vec3 world, vec3 normal, ivec2 texel, out float visibleF
         return vec3(0.0);
     }
     float voxel = PushConstants.fieldMin.w;
+#ifdef MIRABILIS_RT_SHADOWS
+    voxel=max(0.0002,max(max(abs(world.x),abs(world.y)),abs(world.z))*0.000002)/EmitterClearanceVoxels;
+#endif
     vec3 origin = world + normal * (EmitterClearanceVoxels * voxel);
     vec3 rotation = emitter_rotation(uint(texel.x) * 1973u ^ uint(texel.y) * 9277u ^ 0x68bc21ebu);
     const vec3 Luminance = vec3(0.2126, 0.7152, 0.0722);
@@ -315,7 +347,7 @@ void main()
     float noL = dot(normal, lightDirection);
     uint sources = sky.settings.z;
     vec3 light = vec3(0.0);
-    if (noL > 0.0 && (sources & 1u) != 0u) {
+    if (noL > 0.0 && (sources & 1u) != 0u && any(greaterThan(PushConstants.sunColor.rgb,vec3(0)))) {
         float visibility = 1.0;
         if (PushConstants.sunDirection.w > 0.5 && sky.settings.w != 0u) {
             // One exact BVH ray, as the sky uses: the field's shell falsely
@@ -330,6 +362,7 @@ void main()
         }
         light = PushConstants.sunColor.rgb * noL * visibility;
     }
+    if ((sources & 8u)!=0u) light += punctual_irradiance_at_surface(world,normal);
     // IQ13: only the sun moved since this texel's last full relight, whose
     // sky and emitter light are still in their own pages.
     if (PushConstants.fieldMax.w > 0.5) {
@@ -339,7 +372,7 @@ void main()
     }
     // The sky over the whole hemisphere this texel faces: outdoors most of
     // it, indoors whatever reaches through the windows.
-    vec3 skyLight = (sources & 2u) != 0u
+    vec3 skyLight = (sources & 2u) != 0u && PushConstants.sunColor.w>0.0
         ? sky_irradiance(world, normal, texel) * PushConstants.sunColor.w
         : vec3(0.0);
     light += skyLight;

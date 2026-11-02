@@ -8,6 +8,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
+#include <stdexcept>
 #include <fstream>
 #include <map>
 #include <random>
@@ -335,6 +337,7 @@ void VulkanEngine::init_surface_cache_resources()
         if (_rayQueryShadows) {
             builder.add_binding(12, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
         }
+        builder.add_binding(13, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         _surfaceCache.directLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
         VkPushConstantRange directRange{
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -429,7 +432,7 @@ void VulkanEngine::init_surface_cache_resources()
         VK_CHECK(vkCreatePipelineLayout(
             _device, &info, nullptr, &_surfaceCache.radiosityPipelineLayout));
         ScopedShaderModule shader(_device);
-        if (shader.load("../../shaders/surface_cache_radiosity.comp.spv")) {
+        if (shader.load(ray_query_shader("surface_cache_radiosity.comp").c_str())) {
             VkPipelineShaderStageCreateInfo stage{
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
             stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -488,6 +491,12 @@ void VulkanEngine::init_surface_cache_resources()
         vkDestroyDescriptorSetLayout(_device, _surfaceCache.debugLayout, nullptr);
     });
 
+    if (const char* value=SDL_getenv("MIRABILIS_SURFACE_CACHE_ATLAS_SIZE")) {
+        char* end=nullptr;long size=std::strtol(value,&end,10);
+        if(!*value || *end || size<512 || size>4096 || (size&(size-1)))
+            throw std::runtime_error("MIRABILIS_SURFACE_CACHE_ATLAS_SIZE requires 512, 1024, 2048 or 4096");
+        _surfaceCache.maxAtlasSize=int(size);
+    }
     if (const char* page = SDL_getenv("MIRABILIS_SURFACE_CACHE_PAGE")) {
         _surfaceCache.debugPage = std::clamp(std::atoi(page), 0, 13);
     }
@@ -523,6 +532,7 @@ void VulkanEngine::update_surface_cache()
     if (drawHash == _surfaceCache.drawHash && !_surfaceCache.rebuildRequested) {
         if (_surfaceCache.valid) {
             light_surface_cache();
+            run_surface_cache_diagnostics();
         }
         return;
     }
@@ -671,13 +681,13 @@ void VulkanEngine::update_surface_cache()
             extent, CaptureDepthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
         _surfaceCache.direct = create_image(extent, VK_FORMAT_R16G16B16A16_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         _surfaceCache.emitter = create_image(extent, VK_FORMAT_R16G16B16A16_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         _surfaceCache.sky = create_image(extent, VK_FORMAT_R16G16B16A16_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         // Transfer destination too: a recapture clears it to zero.
         _surfaceCache.indirect = create_image(extent, VK_FORMAT_R16G16B16A16_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -805,13 +815,16 @@ void VulkanEngine::update_surface_cache()
 
     _surfaceCache.lightingValid = false;
     _surfaceCache.lightingHash = 0;
+    _surfaceCache.lightingPending = false;
+    _surfaceCache.initialLightingRemaining=0;
     // A recapture moves cards, so bounce light starts again from zero, in
     // both pages: radiosity relies on them being equal between updates.
     immediate_submit([&](VkCommandBuffer cmd) {
         VkClearColorValue zero{};
         const VkImageSubresourceRange range =
             vkinit::image_subresource_range(VK_IMAGE_ASPECT_COLOR_BIT);
-        for (VkImage page : {_surfaceCache.indirect.image, _surfaceCache.indirectPrevious.image}) {
+        for (VkImage page : {_surfaceCache.indirect.image, _surfaceCache.indirectPrevious.image,
+                _surfaceCache.direct.image, _surfaceCache.sky.image, _surfaceCache.emitter.image}) {
             vkutil::transition_image(cmd, page,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
             vkCmdClearColorImage(cmd, page, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
@@ -830,6 +843,13 @@ void VulkanEngine::update_surface_cache()
     if (_surfaceCache.measureCoverage) {
         measure_surface_cache_coverage();
     }
+}
+
+void VulkanEngine::run_surface_cache_diagnostics()
+{
+    if (!_surfaceCache.lightingValid || _surfaceCache.lightingPending ||
+        _surfaceCache.diagnosticLightingHash==_surfaceCache.lightingHash) return;
+    _surfaceCache.diagnosticLightingHash=_surfaceCache.lightingHash;
     if (_surfaceCache.measureShadows) {
         measure_surface_cache_shadows();
     }
@@ -909,51 +929,68 @@ void VulkanEngine::light_surface_cache()
     mix(&_sceneSdf.fieldMin, sizeof(_sceneSdf.fieldMin));
     mix(&_sceneSdf.voxelSize, sizeof(_sceneSdf.voxelSize));
     mix(&_surfaceCache.drawHash, sizeof(_surfaceCache.drawHash));
+    mix(&_sunCasters.hash,sizeof(_sunCasters.hash));
+    PunctualLights punctual;
+    punctual.count.x = uint32_t(sceneData.graphicsSettings.x);
+    for (uint32_t i=0;i<punctual.count.x;++i)
+        punctual.lights[i] = {sceneData.localLightPosition[i],sceneData.localLightColor[i],
+            sceneData.localLightDirection[i],sceneData.localLightCone[i]};
     // The sun last (IQ13): when nothing before it changed, the sky and emitter
     // pages still hold every texel's light, and only the sun ray is traced
     // again.  A dragged sun slider otherwise relit the whole cache per frame.
     const uint64_t restHash = hash;
+    mix(&punctual,sizeof(punctual));
     mix(&sunDirection, sizeof(sunDirection));
     mix(&sunColor, sizeof(sunColor));
-    if (_surfaceCache.lightingValid && hash == _surfaceCache.lightingHash) {
-        return;
-    }
+    if ((_surfaceCache.lightingPending && hash == _surfaceCache.pendingLightingHash) ||
+        (!_surfaceCache.lightingPending && _surfaceCache.lightingValid && hash == _surfaceCache.lightingHash)) return;
+    const bool retainCursor = _surfaceCache.lightingPending;
     const bool sunOnly = _surfaceCache.sunOnlyRelight && _surfaceCache.lightingValid &&
         restHash == _surfaceCache.lightingRestHash;
-    if (!_traceSupported) {
-        fmt::print("Surface cache: emissive triangles unsampled (software trace unavailable)\n");
-    }
-    const auto started = std::chrono::steady_clock::now();
+    auto& pending = _surfaceCache;
+    pending.pendingLightingHash=hash; pending.pendingRestHash=restHash;
+    pending.pendingSunOnly=sunOnly; pending.lightingPending=true;
+    std::copy(_ibl.environmentSH.begin(),_ibl.environmentSH.end(),pending.pendingSky.begin());
+    const glm::uvec4 settings(panoramaSky,emitterCount,_r4Contributions.cacheSources,
+        _traceSupported && !_traceNodes.empty()?1u:0u);
+    std::memcpy(&pending.pendingSky[9],&settings,sizeof(settings));
+    pending.pendingSky[10]=skyEnvironment;
+    pending.pendingSky[11]=_traceSettings.lighting.environmentTint;
+    pending.pendingPunctual=punctual;
+    pending.pendingSunDirection=glm::vec4(sunDirection,_shadow.enabled?1.f:0.f);
+    pending.pendingSunColor=glm::vec4(sunColor,skyIntensity);
+    std::vector<glm::uvec4> rects;
+    for (const auto& card:pending.cards) rects.push_back(card.rect);
+    pending.lightingSchedule.restart(rects,retainCursor);
+    if (!retainCursor && !pending.lightingValid) pending.initialLightingRemaining=pending.lightingSchedule.remaining;
+    if (!retainCursor) { pending.relightFrames=0; pending.relightStarted=std::chrono::steady_clock::now(); }
+    _ssgi.historyValid=false;
+}
 
-    // Bindings 5, 6, 7 and 10 are storage buffers; 12 is the TLAS (IQ8).
-    std::vector<DescriptorAllocatorGrowable::PoolSizeRatio> ratios{{
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3.0f},
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4.0f},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1.0f},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4.0f}}};
-    if (_rayQueryShadows) {
-        ratios.push_back({VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1.0f});
-    }
-    DescriptorAllocatorGrowable pool;
-    pool.init(_device, 1, ratios);
-    VkDescriptorSet set = pool.allocate(_device, _surfaceCache.directLayout);
-    // The sky the cards are lit by, as the same band-2 irradiance the forward
-    // pass reads.  Lighting is hash-gated, so this buffer is built only when
-    // the cache is actually re-lit.
+void VulkanEngine::record_surface_cache_lighting(VkCommandBuffer cmd)
+{
+    auto& pending=_surfaceCache;
+    pending.lightingBatchTexels=0;
+    if (!pending.lightingPending || !pending.valid || !_sceneSdf.fieldValid) return;
+    std::vector<glm::uvec4> rects;
+    uint64_t widest=1;
+    for (const auto& card:pending.cards) { rects.push_back(card.rect); widest=std::max(widest,uint64_t(card.rect.z)); }
+    const uint64_t skySamples=uint64_t(std::max(pending.pendingSky[10].z,32.f));
+    const uint64_t budget=pending.pendingSunOnly ? 1500000 : 3000000/(2+skySamples+64);
+    auto batch=pending.lightingSchedule.take(rects,std::max(budget,widest));
+    if (batch.empty()) return;
+    ++pending.relightFrames;
+    VkDescriptorSet set=get_current_frame()._frameDescriptors.allocate(_device,pending.directLayout);
     AllocatedBuffer skyBuffer = create_buffer(
         sizeof(glm::vec4) * 12,
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU);
-    std::memcpy(skyBuffer.info.pMappedData, _ibl.environmentSH.data(),
-        sizeof(glm::vec4) * 9);
-    const glm::uvec4 skySettings(panoramaSky, emitterCount, _r4Contributions.cacheSources,
-        _traceSupported && !_traceNodes.empty() ? 1u : 0u);
-    std::memcpy(static_cast<char*>(skyBuffer.info.pMappedData) + sizeof(glm::vec4) * 9,
-        &skySettings, sizeof(skySettings));
-    std::memcpy(static_cast<char*>(skyBuffer.info.pMappedData) + sizeof(glm::vec4) * 10,
-        &skyEnvironment, sizeof(skyEnvironment));
-    std::memcpy(static_cast<char*>(skyBuffer.info.pMappedData) + sizeof(glm::vec4) * 11,
-        &_traceSettings.lighting.environmentTint, sizeof(glm::vec4));
+    std::memcpy(skyBuffer.info.pMappedData, _surfaceCache.pendingSky.data(), sizeof(_surfaceCache.pendingSky));
+    AllocatedBuffer punctualBuffer = create_buffer(sizeof(PunctualLights),
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
+    std::memcpy(punctualBuffer.info.pMappedData,&_surfaceCache.pendingPunctual,sizeof(PunctualLights));
+    vmaFlushAllocation(_allocator,skyBuffer.allocation,0,VK_WHOLE_SIZE);
+    vmaFlushAllocation(_allocator,punctualBuffer.allocation,0,VK_WHOLE_SIZE);
     // Bound even when unused, so the descriptor set is always complete.
     AllocatedBuffer placeholder = create_buffer(sizeof(glm::vec4) * 16,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
@@ -990,81 +1027,49 @@ void VulkanEngine::light_surface_cache()
     if (_rayQueryShadows) {
         writer.write_acceleration_structure(12, _sunCasters.tlas);
     }
+    writer.write_buffer(13,punctualBuffer.buffer,sizeof(PunctualLights),0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
     writer.update_set(_device, set);
-
-    VK_CHECK(vkDeviceWaitIdle(_device));
-    immediate_submit([&](VkCommandBuffer cmd) {
-        vkutil::transition_image(cmd, _surfaceCache.direct.image,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
-        vkutil::transition_image(cmd, _surfaceCache.emitter.image,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
-        vkutil::transition_image(cmd, _surfaceCache.sky.image,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    get_current_frame()._deletionQueue.push_function([this,skyBuffer,punctualBuffer,placeholder]() {
+        destroy_buffer(skyBuffer); destroy_buffer(punctualBuffer); destroy_buffer(placeholder);
     });
 
-    // Every texel marches shadow rays, so batches are bounded by texel count
-    // to keep each submission well inside the driver's GPU timeout.  The
-    // budget was sized for two marches; the hemispherical sky takes 32 and
-    // emitter sampling 64 more, and it shrinks by the same factor (R4.14).
-    const uint64_t TexelBudget = sunOnly ? 1'500'000ull
-        : 1'500'000ull * 2 / (2 + skySamples + (emitterCount > 0 ? 64 : 0));
-    size_t next = 0;
-    const auto& cards = _surfaceCache.cards;
-    while (next < cards.size()) {
-        const size_t first = next;
-        uint64_t texels = 0;
-        while (next < cards.size() && (next == first || texels < TexelBudget)) {
-            texels += uint64_t(cards[next].rect.z) * cards[next].rect.w;
-            ++next;
-        }
-        immediate_submit([&](VkCommandBuffer cmd) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _surfaceCache.directPipeline);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                _surfaceCache.directPipelineLayout, 0, 1, &set, 0, nullptr);
-            for (size_t i = first; i < next; ++i) {
-                const SurfaceCard& card = cards[i];
-                SurfaceCacheDirectPushConstants push{};
-                push.cardToWorld0 = glm::row(card.cardToWorld, 0);
-                push.cardToWorld1 = glm::row(card.cardToWorld, 1);
-                push.cardToWorld2 = glm::row(card.cardToWorld, 2);
-                push.rect = card.rect;
-                push.sunDirection = glm::vec4(sunDirection, _shadow.enabled ? 1.0f : 0.0f);
-                push.sunColor = glm::vec4(sunColor, skyIntensity);
-                push.fieldMin = glm::vec4(_sceneSdf.fieldMin, _sceneSdf.voxelSize);
-                push.fieldMax = glm::vec4(_sceneSdf.fieldMax, sunOnly ? 1.0f : 0.0f);
-                vkCmdPushConstants(cmd, _surfaceCache.directPipelineLayout,
-                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-                vkCmdDispatch(cmd, (card.rect.z + 7) / 8, (card.rect.w + 7) / 8, 1);
-            }
-        });
+
+    for (VkImage image:{pending.direct.image,pending.emitter.image,pending.sky.image})
+        vkutil::transition_image(cmd,image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL);
+    vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,pending.directPipeline);
+    vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,pending.directPipelineLayout,0,1,&set,0,nullptr);
+    for (auto strip:batch) {
+        const auto& card=pending.cards[strip.card];
+        glm::mat4 transform=card.cardToWorld;
+        transform[3]+=transform[1]*(float(strip.row)/card.rect.w);
+        transform[1]*=float(strip.rows)/card.rect.w;
+        SurfaceCacheDirectPushConstants push{};
+        push.cardToWorld0=glm::row(transform,0); push.cardToWorld1=glm::row(transform,1); push.cardToWorld2=glm::row(transform,2);
+        push.rect=card.rect; push.rect.y+=strip.row; push.rect.w=strip.rows;
+        push.sunDirection=pending.pendingSunDirection; push.sunColor=pending.pendingSunColor;
+        push.fieldMin=glm::vec4(_sceneSdf.fieldMin,_sceneSdf.voxelSize);
+        push.fieldMax=glm::vec4(_sceneSdf.fieldMax,pending.pendingSunOnly?1.f:0.f);
+        vkCmdPushConstants(cmd,pending.directPipelineLayout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(push),&push);
+        vkCmdDispatch(cmd,(push.rect.z+7)/8,(push.rect.w+7)/8,1);
+        pending.lightingBatchTexels+=uint64_t(push.rect.z)*push.rect.w;
     }
-    immediate_submit([&](VkCommandBuffer cmd) {
-        vkutil::transition_image(cmd, _surfaceCache.direct.image,
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        vkutil::transition_image(cmd, _surfaceCache.emitter.image,
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        vkutil::transition_image(cmd, _surfaceCache.sky.image,
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    });
-    pool.destroy_pools(_device);
-    destroy_buffer(skyBuffer);
-    destroy_buffer(placeholder);
-
-    _surfaceCache.lightingHash = hash;
-    _surfaceCache.lightingRestHash = restHash;
-    _surfaceCache.lightingValid = true;
-    // New lighting starts a new estimate. Static cache samples can then
-    // converge by actual update count rather than forgetting between visits.
-    std::fill(_surfaceCache.cardUpdates.begin(), _surfaceCache.cardUpdates.end(), 0);
-    _surfaceCache.radiosityCursor = 0;
-    _surfaceCache.radiosityRow = 0;
-    _surfaceCache.radiosityPendingBlend = 1.0f;
-    _ssgi.historyValid = false;
-    _surfaceCache.lightingMilliseconds = std::chrono::duration<float, std::milli>(
-        std::chrono::steady_clock::now() - started).count();
-    fmt::print("Surface cache lit{}: {} cards, {} emitter triangles, {} sky in {:.1f} ms\n",
-        sunOnly ? " (sun only)" : "", cards.size(), emitterCount,
-        panoramaSky ? "panorama" : "gradient", _surfaceCache.lightingMilliseconds);
+    for (VkImage image:{pending.direct.image,pending.emitter.image,pending.sky.image})
+        vkutil::transition_image(cmd,image,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (!pending.lightingValid) {
+        pending.initialLightingRemaining-=std::min(pending.initialLightingRemaining,pending.lightingBatchTexels);
+        if (!pending.initialLightingRemaining) { pending.lightingValid=true; _ssgi.historyValid=false; }
+    }
+    if (!pending.lightingSchedule.remaining) {
+        pending.lightingPending=false; pending.lightingValid=true;
+        pending.lightingHash=pending.pendingLightingHash; pending.lightingRestHash=pending.pendingRestHash;
+        std::fill(pending.cardUpdates.begin(),pending.cardUpdates.end(),0);
+        pending.radiosityCursor=pending.radiosityRow=0; pending.radiosityPendingBlend=1;
+        pending.lightingMilliseconds=std::chrono::duration<float,std::milli>(std::chrono::steady_clock::now()-pending.relightStarted).count();
+        ++pending.completedRelights;
+        _ssgi.historyValid=false;
+        fmt::print("Surface cache lit: {} cards over {} frames, {} local lights; converged in {:.1f} ms (no blocking relight submissions)\n",
+            pending.cards.size(),pending.relightFrames,pending.pendingPunctual.count.x,pending.lightingMilliseconds);
+    }
 }
 
 void VulkanEngine::measure_surface_cache_coverage()
@@ -1346,6 +1351,7 @@ void VulkanEngine::build_surface_cache_lookup()
 bool VulkanEngine::lumen_lite_ready() const
 {
     return _ssgi.lumenPipeline != VK_NULL_HANDLE && _sceneSdf.fieldValid &&
+        (_sceneSdf.hardwareProxy || _sceneSdf.placedCount==_sceneSdf.instanceCount) &&
         _surfaceCache.valid && _surfaceCache.lightingValid && _surfaceCache.lookupValid &&
         _surfaceCache.albedoVolume.image != VK_NULL_HANDLE;
 }

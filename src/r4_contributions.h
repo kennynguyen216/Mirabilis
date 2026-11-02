@@ -125,10 +125,11 @@ static_assert(!parse_contributions("sun").valid);
 static_assert(!parse_contributions("ssgi").valid);
 
 // MIRABILIS_R4_CACHE_SOURCES: which direct sources the surface cache keeps
-// (R4.13 diagnostic).  Absent keeps all three; anything unknown is invalid.
+// (R4.13 diagnostic).  Absent keeps all four; anything unknown is invalid.
 inline constexpr uint32_t CacheSun = 1u << 0;
 inline constexpr uint32_t CacheSky = 1u << 1;
 inline constexpr uint32_t CacheEmitters = 1u << 2;
+inline constexpr uint32_t CachePunctual = 1u << 3;
 
 struct CacheSources {
     bool valid;
@@ -143,7 +144,7 @@ struct CacheSources {
 constexpr CacheSources parse_cache_sources(const char* value)
 {
     if (value == nullptr) {
-        return {true, CacheSun | CacheSky | CacheEmitters};
+        return {true, CacheSun | CacheSky | CacheEmitters | CachePunctual};
     }
     std::string_view rest = value;
     uint32_t mask = 0;
@@ -153,13 +154,14 @@ constexpr CacheSources parse_cache_sources(const char* value)
         if (name == "sun") mask |= CacheSun;
         else if (name == "sky") mask |= CacheSky;
         else if (name == "emitter") mask |= CacheEmitters;
+        else if (name == "punctual") mask |= CachePunctual;
         else return {false, 0};
         if (comma == std::string_view::npos) return {true, mask};
         rest = rest.substr(comma + 1);
     }
 }
 
-static_assert(parse_cache_sources(nullptr) == CacheSources{true, 7u});
+static_assert(parse_cache_sources(nullptr) == CacheSources{true, 15u});
 static_assert(parse_cache_sources("sun") == CacheSources{true, CacheSun});
 static_assert(parse_cache_sources("sky, emitter") == CacheSources{true, CacheSky | CacheEmitters});
 static_assert(!parse_cache_sources("").valid);
@@ -172,11 +174,12 @@ static_assert(!parse_cache_sources("moon").valid);
 // and an isolated candidate see the same light.  Absent keeps both.
 inline constexpr uint32_t LightSun = 1u << 0;
 inline constexpr uint32_t LightSky = 1u << 1;
+inline constexpr uint32_t LightPunctual = 1u << 2;
 
 constexpr CacheSources parse_light_sources(const char* value)
 {
     if (value == nullptr) {
-        return {true, LightSun | LightSky};
+        return {true, LightSun | LightSky | LightPunctual};
     }
     std::string_view rest = value;
     uint32_t mask = 0;
@@ -185,15 +188,19 @@ constexpr CacheSources parse_light_sources(const char* value)
         const std::string_view name = env_flags_detail::trim(rest.substr(0, comma));
         if (name == "sun") mask |= LightSun;
         else if (name == "sky") mask |= LightSky;
+        else if (name == "punctual") mask |= LightPunctual;
         else return {false, 0};
         if (comma == std::string_view::npos) return {true, mask};
         rest = rest.substr(comma + 1);
     }
 }
 
-static_assert(parse_light_sources(nullptr) == CacheSources{true, 3u});
+static_assert(parse_light_sources(nullptr) == CacheSources{true, 7u});
 static_assert(parse_light_sources("sky") == CacheSources{true, LightSky});
 static_assert(!parse_light_sources("emitter").valid);
 static_assert(!parse_light_sources("").valid);
 
 }  // namespace r4
+
+static_assert(r4::parse_cache_sources("punctual").mask==r4::CachePunctual);
+static_assert(r4::parse_light_sources("punctual").mask==r4::LightPunctual);

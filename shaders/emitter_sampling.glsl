@@ -25,6 +25,9 @@ const float EmitterClearanceVoxels = 2.5;
 // Hard visibility along the whole segment through the scene field.
 float emitter_visibility(vec3 origin, vec3 target, float voxel)
 {
+#ifdef EMITTER_HARDWARE_VISIBILITY
+    return EMITTER_HARDWARE_VISIBILITY(origin,target);
+#else
     vec3 delta = target - origin;
     float span = length(delta);
     if (span <= 1e-6) {
@@ -40,6 +43,7 @@ float emitter_visibility(vec3 origin, vec3 target, float voxel)
         t += max(d, 0.5 * voxel);
     }
     return 1.0;
+#endif
 }
 #endif
 

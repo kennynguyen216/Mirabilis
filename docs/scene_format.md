@@ -54,8 +54,11 @@ The optional root `rendering` block saves `celShading`, `celBands` [2,16],
 `celEdge` [0,1], `bloom`, `bloomStrength` [0,2], `bloomThreshold` >= 0,
 `bloomScatter` [0,1], and `tonemapOperator` (0 ACES, 1 Reinhard, 2 PBR Neutral).
 Cel shading and bloom default off; defaults for the remaining fields are
-4, 0.18, 0.08, 1, 0.7, and 0 respectively. GI quality, render scale and
-experimental GPU cluster culling are session settings.
+4, 0.18, 0.08, 1, 0.7, and 0 respectively. `lumenGI` and `sceneReflections`
+are booleans defaulting off; `reflectionRoughness` is finite in [0,1]
+and defaults to 0.4. These settings restore through Play snapshots. Scene
+reflections require a ray-query device and ready world GI. GI quality, render
+scale, experimental screen probes and GPU cluster culling are session settings.
 
 Vectors are JSON arrays. Transform rotation uses Euler radians in Y * X * Z
 order. Collider shapes are Box, GroundPlane and SurfRamp respectively. Basic

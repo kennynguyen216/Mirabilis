@@ -1,3 +1,4 @@
+#include "punctual_lights.glsl"
 layout(set=0,binding=22) uniform sampler2DShadow localShadowAtlas;
 
 float local_shadow(int index,vec3 position,vec3 normal)
@@ -26,14 +27,11 @@ void material_local_lights(MaterialSurface surface,vec3 position,vec3 geometricN
     diffuse=vec3(0);specular=vec3(0);
     if (sceneData.screenSpaceSettings.y>0.5) return;
     for (int i=0;i<int(sceneData.graphicsSettings.x);++i) {
-        vec3 delta=sceneData.localLightPosition[i].xyz-position;
-        float distance=length(delta),range=sceneData.localLightColor[i].w;
-        if (distance>=range) continue;
-        vec3 direction=delta/max(distance,1e-5);
-        float window=max(1.0-pow(distance/range,4.0),0.0);
-        vec3 radiance=sceneData.localLightColor[i].rgb*window*window/(distance*distance+1.0);
-        if (sceneData.localLightPosition[i].w>0.5)
-            radiance*=smoothstep(sceneData.localLightCone[i].x,max(sceneData.localLightDirection[i].w,sceneData.localLightCone[i].x+1e-5),dot(-direction,sceneData.localLightDirection[i].xyz));
+        vec3 direction; float distance;
+        PunctualLight light=PunctualLight(sceneData.localLightPosition[i],sceneData.localLightColor[i],
+            sceneData.localLightDirection[i],sceneData.localLightCone[i]);
+        vec3 radiance=punctual_irradiance(light,position,direction,distance);
+        if (!any(greaterThan(radiance,vec3(0)))) continue;
         vec3 d,s;
         material_direct_light(surface,direction,radiance*local_shadow(i,position,geometricNormal),d,s);
         diffuse+=d;specular+=s;

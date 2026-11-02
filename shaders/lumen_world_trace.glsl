@@ -1,3 +1,7 @@
+#ifdef MIRABILIS_RT_SHADOWS
+#include "ray_scene_hit.glsl"
+#include "ray_scene_lighting.glsl"
+#endif
 // Shared Lumen world gather for the main camera and portal cameras.
 // The caller supplies field/cache samplers and the two lighting policies.
 float lumen_field_distance(vec3 world)
@@ -21,14 +25,13 @@ vec3 lumen_field_normal(vec3 p)
 // visibility from the forward pass's own shadow map.  Its sky, emitters and
 // bounce light are unknown here and stay 0.  Half of the living room's first
 // sun bounce lands on stacked window bars one card layer cannot hold (R4.60).
-vec3 lumen_hit_sun(vec3 p)
+vec3 lumen_hit_sun(vec3 p,vec3 n)
 {
-    if (!LUMEN_HIT_LIGHTING_ENABLED) {
+    if (!LUMEN_HIT_LIGHTING_ENABLED || (uint(sceneData.materialDebug.z)&1u)==0u) {
         return vec3(0.0);
     }
     vec4 albedo = textureLod(albedoVolume,
         (p - fieldMin.xyz) / (fieldMax.xyz - fieldMin.xyz), 0.0);
-    vec3 n = lumen_field_normal(p);
     float noL = dot(n, normalize(sceneData.sunlightDirection.xyz));
     if (albedo.a < 1e-3 || noL <= 0.0) {
         return vec3(0.0);
@@ -37,17 +40,21 @@ vec3 lumen_hit_sun(vec3 p)
         sunlight_visibility(p, n);
 }
 
-vec3 lumen_hit_radiance(vec3 p, out uint rayClass)
+vec3 lumen_cached_radiance(SurfaceCacheSample surface)
 {
-    SurfaceCacheSample surface = LUMEN_SURFACE_LOOKUP(p, lumen_field_normal(p));
+    return surface.albedo*(surface.direct+surface.indirect)+
+        (sceneData.emitterSettings.x > 0.5 ? vec3(0.0) : surface.emissive);
+}
+
+vec3 lumen_hit_radiance(vec3 p,vec3 normal, out uint rayClass)
+{
+    SurfaceCacheSample surface = LUMEN_SURFACE_LOOKUP(p, normal);
     if (surface.weight > 0.0) {
         rayClass = RayFieldCache;
-        // Explicit emitter sampling owns emission at the receiver.
-        return surface.albedo * (surface.direct + surface.indirect) +
-            (sceneData.emitterSettings.x > 0.5 ? vec3(0.0) : surface.emissive);
+        return lumen_cached_radiance(surface);
     }
     rayClass = RayFieldUncovered;
-    return lumen_hit_sun(p);
+    return lumen_hit_sun(p,normal);
 }
 
 // Light arriving along one world ray: hardware geometry when available,
@@ -69,7 +76,20 @@ vec3 lumen_trace(vec3 worldPosition, vec3 worldNormal, vec3 worldDirection,
     }
     if (rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
         vec3 p = origin + worldDirection * rayQueryGetIntersectionTEXT(query, true);
-        return lumen_hit_radiance(p, rayClass);
+        vec3 normal=ray_hit_normal(query);
+        bool front=dot(normal,worldDirection)<0;
+        if(!front) normal=-normal;
+        RayInstance instance=rayInstances[rayQueryGetIntersectionInstanceCustomIndexEXT(query,true)];
+        SurfaceCacheSample surface;surface.weight=0;
+        if(instance.geometry.z!=0u) surface=LUMEN_SURFACE_LOOKUP(p,normal);
+        if(surface.weight>0) { rayClass=RayFieldCache; return lumen_cached_radiance(surface); }
+        rayClass=RayFieldUncovered;
+        if(!LUMEN_HIT_LIGHTING_ENABLED) return vec3(0);
+        vec3 albedo=ray_hit_albedo(query);
+        vec3 value=albedo*ray_uncached_direct(p,normal);
+        if(instance.geometry.w!=0u) value=lumen_hit_sun(p,normal);
+        if(front && (instance.geometry.z==0u || sceneData.emitterSettings.x<0.5)) value+=instance.emission.rgb;
+        return value;
     }
     rayClass = RayFieldExit;
     return environment_radiance(worldDirection);
@@ -85,7 +105,7 @@ vec3 lumen_trace(vec3 worldPosition, vec3 worldNormal, vec3 worldDirection,
         float d = lumen_field_distance(origin + worldDirection * t);
         if (d < 0.25 * voxel) {
             vec3 p = origin + worldDirection * t;
-            return lumen_hit_radiance(p, rayClass);
+            return lumen_hit_radiance(p,lumen_field_normal(p),rayClass);
         }
         t += max(d, 0.5 * voxel);
     }

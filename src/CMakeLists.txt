@@ -119,6 +119,7 @@ add_executable (engine
   vk_engine_debug_views.cpp
   vk_engine_post_process.cpp
   vk_engine_bloom.cpp
+  vk_engine_reflections.cpp
   vk_engine_prepass.cpp
   vk_engine_shadows.cpp
   vk_engine_local_lights.cpp

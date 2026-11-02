@@ -22,6 +22,7 @@ void VulkanEngine::build_local_lights(GPUSceneData &data) const {
                 if (imported.light.emits_light())
                     lights.emplace_back(imported.light, world * imported.node->worldTransform);
     }
+    if ((_r4Contributions.lightSources & 4u)==0) lights.clear();
     for (const auto &[value, world] : lights) {
         if (count == 16)
             break;
@@ -44,7 +45,7 @@ void VulkanEngine::build_local_lights(GPUSceneData &data) const {
             slot = 0;
             pointShadow = true;
         }
-        data.localLightCone[count] = glm::vec4(std::cos(light->outerCone), float(slot), 0, 0);
+        data.localLightCone[count] = glm::vec4(std::cos(light->outerCone), float(slot), light->castShadows ? 1.f : 0.f, 0);
         if (slot >= 0) {
             auto projection = glm::perspective(spot ? 2.f * light->outerCone : glm::radians(90.f),
                                                1.f, 0.025f, light->range);

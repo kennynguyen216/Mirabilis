@@ -457,6 +457,7 @@ void VulkanEngine::init()
     // After the presets, so a capture run can compare against the frame
     // without screen-space GI whatever else it asked for.
     apply_env_flag("MIRABILIS_LUMEN_LITE", _ssgi.lumenEnabled);
+    apply_env_flag("MIRABILIS_SCENE_REFLECTIONS",_reflections.enabled);
     apply_env_flag("MIRABILIS_SSGI_PROBES", _ssgi.probesEnabled);
     apply_env_flag("MIRABILIS_SSGI_HZB", _ssgi.hzbEnabled);
     // Exact world hits avoid the screen march's camera-dependent visibility
@@ -995,10 +996,20 @@ void VulkanEngine::draw(float deltaTime)
     if (surfaceCacheActive) {
         update_surface_cache();
     }
+    if (SDL_getenv("MIRABILIS_TEST_FRAMES") && SDL_getenv("MIRABILIS_TEST_BLOCKING_RELIGHT") && _surfaceCache.lightingPending) {
+        // Same-build benchmark control for the former blocking relight schedule.
+        immediate_submit([&](VkCommandBuffer command) {
+            record_sun_casters(command);
+            while (_surfaceCache.lightingPending && _surfaceCache.valid && _sceneSdf.fieldValid) record_surface_cache_lighting(command);
+        });
+    }
+    if (_reflections.enabled && _rayQueryShadows && lumen_lite_ready()) init_reflections();
     // After the field and the trace scene are current, before recording.
     write_emitter_descriptors(get_current_frame());
 
     VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
+
+    record_sun_casters(cmd);
 
     // Diagnostic VRAM pressure: a buffer referenced by every frame stays
     // resident, so the rest of the working set has that much less room.
@@ -1031,6 +1042,7 @@ void VulkanEngine::draw(float deltaTime)
     // First in the frame, where the blocking submission used to run, so every
     // later pass sees this update's page.
     if (surfaceCacheActive) {
+        record_surface_cache_lighting(cmd);
         update_surface_cache_radiosity(cmd);
     }
 
@@ -1112,6 +1124,7 @@ void VulkanEngine::draw(float deltaTime)
 	vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
+    vkutil::transition_image(cmd,_sceneTargets.gbufferSpecular.image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     vkutil::transition_image(cmd, _sceneTargets.gbufferAlbedo.image,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -1142,6 +1155,7 @@ void VulkanEngine::draw(float deltaTime)
     draw_ssgi_portal_mask(cmd);
     draw_ssgi(cmd);
     draw_ssgi_composite(cmd);
+    draw_reflections(cmd);
     // The portal view remains live all the way to the crossing plane.  Hiding
     // it for a frame-rate-sized safety band exposed the solid host wall before
     // physics teleported the player, causing the black flash.
@@ -1979,6 +1993,12 @@ void VulkanEngine::run(){
             _frameNumber >= 100 && _frameNumber < 130) {
             _shadow.sunlightDirection.x += 0.005f;
         }
+        if (frameLimit && SDL_getenv("MIRABILIS_TEST_LIGHT_DRAG") && _frameNumber>=100 && _frameNumber<130) {
+            for (auto ref:_scene.creation_order()) if (const auto* light=_scene.read<Light>(ref)) {
+                auto changed=*light; changed.intensity=20.f+10.f*std::sin(float(_frameNumber)*0.1f);
+                _scene.set(ref,changed,true); break;
+            }
+        }
         const bool testInvalidation=frameLimit&&SDL_getenv("MIRABILIS_TEST_INVALIDATION");
         const int testFrame=_frameNumber;
         if(testInvalidation) {
@@ -2098,11 +2118,11 @@ void VulkanEngine::run(){
                 else if (runtime->second.primitive.valid()) ++dynamicDraws;
             }
             const bool lumen = _ssgi.lumenEnabled && _ssgi.enabled;
-            fmt::print("PHYSICS phase={} frame={} bodies={} sdf={} surface={} trace={} ray-shadow={} eligible={} dynamic-draws={} history-reset={} sdf-enabled={} surface-enabled={} ray-shadow-enabled={} trace-enabled={} sdf-placed={} sdf-instances={} editor-mode={} body-sleep={} ecs-sleep={}\n",
+            fmt::print("PHYSICS phase={} frame={} bodies={} sdf={} surface={} trace={} ray-shadow={} eligible={} dynamic-draws={} history-reset={} sdf-enabled={} surface-enabled={} ray-shadow-enabled={} trace-enabled={} sdf-placed={} sdf-instances={} editor-mode={} body-sleep={} ecs-sleep={} hardware-world={} ray-blas={}\n",
                 physicsPhase,_frameNumber,_physicsWorld.body_count(),stats.sdf_rebuild_count,stats.surface_cache_rebuild_count,
                 stats.trace_rebuild_count,stats.sun_shadow_rebuild_count,eligible,dynamicDraws,_physicsHistoryResetCount,
                 int(lumen),int(lumen),int(_rayQueryShadows),int(_traceSupported),_sceneSdf.placedCount,_sceneSdf.instanceCount,int(_editorMode),int(_physicsWorld.sleeping(ref)),
-                int(_scene.read<PhysicsState>(ref) && _scene.read<PhysicsState>(ref)->sleeping));
+                int(_scene.read<PhysicsState>(ref) && _scene.read<PhysicsState>(ref)->sleeping),int(_sceneSdf.hardwareProxy),_sunCasters.blasBuilds);
             if (physicsPhase == "teleport") {
                 const auto pose = _scene.world_matrix(ref);
                 physicsRequire(glm::length(glm::vec3(pose[3])-glm::vec3(-.5f,2,0)) < 1e-4f, "teleport target pose drifted");
@@ -2303,6 +2323,11 @@ void VulkanEngine::run(){
             }
             if (const char* path=SDL_getenv("MIRABILIS_R4_SOURCE_IMPORTANCE_CSV"))
                 measure_cache_source_importance(path);
+            if (SDL_getenv("MIRABILIS_TEST_REQUIRE_LUMEN") && (!_ssgi.enabled || !_ssgi.lumenEnabled || !lumen_lite_ready())) {
+                fmt::print("GI TEST FAIL: requested Lumen did not become ready\n"); std::abort();
+            }
+            fmt::print("GI updates: BLAS-builds={} TLAS-builds={} completed-relights={} pending-texels={} reflections-active={} reflection-history={}\n",
+                _sunCasters.blasBuilds,_sunCasters.tlasBuilds,_surfaceCache.completedRelights,_surfaceCache.lightingSchedule.remaining,sceneData.reflectionSettings.x>0.5,_reflections.historyValid);
             fmt::print("GI bounded run complete: frames={} renderer={}\n",_frameNumber,
                 _rendererMode==RendererMode::SoftwarePathTrace&&_traceSupported?"software":"raster");
             bQuit = true;

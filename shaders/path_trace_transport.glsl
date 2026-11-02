@@ -24,6 +24,20 @@ void addContribution(inout TransportResult r,vec3 value,bool direct) {
 }
 void sampleLights(inout TransportResult result,Material material,vec3 albedo,vec3 point,vec3 geometric,vec3 normal,vec3 view,
     vec3 throughput,uint bounce,uint portalCount,inout uint state) {
+    // Finite segments prevent geometry behind a point/spot source from shadowing it.
+    for (uint i=0u;i<lighting.localCount.x;++i) {
+        PunctualLight light=lighting.localLights[i];
+        vec3 outgoing; float distance;
+        vec3 irradiance=punctual_irradiance(light,point,outgoing,distance);
+        if (dot(outgoing,geometric)<=0 || dot(outgoing,normal)<=0 || !any(greaterThan(irradiance,vec3(0)))) continue;
+        vec3 origin=offsetOrigin(point,geometric,outgoing);
+        vec3 delta=light.position.xyz-origin;
+        float endpoint=length(delta);
+        Hit blocker=intersectScene(origin,delta/max(endpoint,1e-8));
+        if (light.cone.y<0 || (!blocker.invalid && (blocker.triangle<0 || blocker.t>=endpoint-0.0002)))
+            addContribution(result,throughput*evaluateBRDF(material,albedo,normal,view,outgoing)*
+                (3.14159265359*max(dot(normal,outgoing),0))*irradiance,bounce==0);
+    }
     uint remaining=min(pc.sampling.w,4u)-min(portalCount,min(pc.sampling.w,4u));
     for(uint kind=0;kind<2u;++kind) {
         if(kind==1u&&(remaining==0u||lighting.counts.y==0u)) continue;

@@ -29,6 +29,17 @@ class PhysicsTelemetry(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     physics_gate.check_raster(records)
 
+    def test_hardware_motion_updates_instances_without_rebuilding_meshes(self):
+        records=self.records()
+        for i,item in enumerate(records):
+            item.update({'hardware-world':1,'ray-blas':2,'ray-shadow':i+1,'sdf':0,'sdf-placed':0})
+        physics_gate.check_raster(records)
+        records[3]['ray-blas']=3
+        with self.assertRaises(AssertionError):physics_gate.check_raster(records)
+        records[3]['ray-blas']=2
+        for item in records:item['ray-shadow']=1
+        with self.assertRaises(AssertionError):physics_gate.check_raster(records)
+
     def test_child_variant_retains_input_and_uses_fresh_id(self):
         source = {'version': 2, 'nextPersistentId': 8, 'objects': [{'id': 2, 'components': {'rigidBody': {'motion': 'Dynamic'}}}]}
         variant = physics_gate.child_variant(source)

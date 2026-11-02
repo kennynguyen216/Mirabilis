@@ -3,6 +3,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstddef>
+#include "punctual_lights.h"
 
 // Explicit vec4 lanes keep the std430 ABI independent of vec3 padding.
 struct TraceTriangle {
@@ -27,8 +28,9 @@ struct TraceLighting {
     glm::vec4 environment{1,0,0,0}; // intensity, 0=gradient / 1=black
     glm::uvec4 counts{}; // emitter count
     glm::vec4 environmentTint{1,1,1,0};
+    PunctualLights punctual;
 };
-static_assert(sizeof(TraceLighting)==80);
+static_assert(sizeof(TraceLighting)==1120 && offsetof(TraceLighting,punctual)==80);
 struct TracePortal {
     glm::vec4 center{}; // w=1 for linked, 0 for unlinked
     glm::vec4 rightWidth{};
