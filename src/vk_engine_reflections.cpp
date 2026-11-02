@@ -98,6 +98,6 @@ void VulkanEngine::draw_reflections(VkCommandBuffer cmd)
     vkutil::memory_barrier(cmd); dispatch(1);
     vkutil::memory_barrier(cmd); dispatch(2);
     vkutil::transition_image(cmd,_drawImage.image,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    state.historyValid=true; state.lastSceneHash=_sunCasters.hash; state.lastLightingHash=_surfaceCache.lightingHash;
+    state.historyValid=!_surfaceCache.lightingPending; state.lastSceneHash=_sunCasters.hash; state.lastLightingHash=_surfaceCache.lightingHash;
     state.lastViewProjection=sceneData.viewproj; state.liveExtent=_drawExtent; state.writeIndex=read;
 }
