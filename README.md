@@ -308,6 +308,8 @@ comparison. CSV percentiles measure render-loop work. Startup CPU BVH brute-forc
 validation is explicitly skipped during these timings, but stays enabled in
 correctness gates. `--atlas 2048` bounds cache size for memory-limited scenes;
 the default is 4096. Probes remain experimental and off by default.
+Use `--profiles lumen plain reflections` to measure selected modes in that order
+(reversed on the second repeat).
 
 Build both checkouts in Release with matching assets and generated shaders, then
 run GPU workloads sequentially with the comparison harness:

@@ -57,6 +57,8 @@ def main():
     parser.add_argument('--warmup', type=int, default=300)
     parser.add_argument('--atlas', type=int, choices=[512,1024,2048,4096], default=4096)
     parser.add_argument('--hitches', action='store_true')
+    parser.add_argument('--profiles', nargs='+', choices=('plain','lumen','probes','reflections'),
+                        default=('plain','lumen','probes','reflections'))
     args = parser.parse_args()
     assert args.warmup >= 60
     repo, out = Path(__file__).resolve().parents[1], args.output.resolve()
@@ -73,6 +75,7 @@ def main():
     profiles = {'plain': {'MIRABILIS_LUMEN_LITE':'0'}, 'lumen': {'MIRABILIS_LUMEN_LITE':'1'},
                 'probes': {'MIRABILIS_LUMEN_LITE':'1','MIRABILIS_SSGI_PROBES':'1'},
                 'reflections': {'MIRABILIS_LUMEN_LITE':'1','MIRABILIS_SCENE_REFLECTIONS':'1'}}
+    profiles={name:profiles[name] for name in args.profiles}
     measured, warmup, scene = 300, args.warmup, args.scene
     common = {'MIRABILIS_QT_EDITOR':'0','MIRABILIS_TEST_WINDOW':'1600x900','MIRABILIS_TEST_HIDE_PANELS':'1',
               'MIRABILIS_TEST_CAMERA':args.camera,'MIRABILIS_SSGI_PRESET':'2','MIRABILIS_SSGI_BENCHMARK':'1',
