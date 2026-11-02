@@ -305,8 +305,9 @@ camera. It rejects missing focus, fallback and unfinished cache warm-up. The
 relight comparison uses a forced blocking/full-relight control and the budgeted
 source-reuse path during a scripted light edit; it is not a historical binary
 comparison. CSV percentiles measure render-loop work. Startup CPU BVH brute-force
-validation is explicitly skipped during these timings, but stays enabled in
-correctness gates. `--atlas 2048` bounds cache size for memory-limited scenes;
+validation is explicitly skipped during these timings. General correctness gates
+retain it; the texture parity gate compares complete CPU albedo volumes instead.
+`--atlas 2048` bounds cache size for memory-limited scenes;
 the default is 4096. Probes remain experimental and off by default.
 Use `--profiles lumen plain reflections` to measure selected modes in that order
 (reversed on the second repeat).
