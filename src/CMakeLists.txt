@@ -70,7 +70,7 @@ target_link_libraries(mirabilis_core PUBLIC glm EnTT::EnTT fastgltf_simdjson Jol
 if(BUILD_TESTING)
   add_executable(mirabilis_core_tests ../tests/core_smoke.cpp ../tests/scene_ecs_tests.cpp ../tests/scene_serialization_tests.cpp ../tests/physics_tests.cpp ../tests/script_tests.cpp ../tests/profiler_tests.cpp)
   target_link_libraries(mirabilis_core_tests PRIVATE mirabilis_core doctest::doctest)
-  target_sources(mirabilis_core_tests PRIVATE ../tests/memory_task_tests.cpp)
+  target_sources(mirabilis_core_tests PRIVATE ../tests/memory_task_tests.cpp ../tests/graphics_foundation_tests.cpp)
   target_compile_definitions(mirabilis_core_tests PRIVATE MIRABILIS_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   target_compile_definitions(mirabilis_core_tests PRIVATE MIRABILIS_TEST_MANAGED_DIR="$<TARGET_FILE_DIR:mirabilis_core_tests>")
   target_compile_definitions(mirabilis_core_tests PRIVATE MIRABILIS_TEST_RELOAD_DIR="${CMAKE_BINARY_DIR}/reload-fixtures")
@@ -118,8 +118,11 @@ add_executable (engine
   vk_engine_renderer.cpp
   vk_engine_debug_views.cpp
   vk_engine_post_process.cpp
+  vk_engine_bloom.cpp
   vk_engine_prepass.cpp
   vk_engine_shadows.cpp
+  vk_engine_local_lights.cpp
+  vk_engine_mesh_visibility.cpp
   vk_engine_ssgi.cpp
   vk_engine_ssao.cpp
   vk_engine_sdf.cpp
@@ -150,7 +153,7 @@ mirabilis_deploy_scripts(engine)
 option(MIRABILIS_BUILD_QT_EDITOR "Build the Qt authoring host and content browser" ON)
 if(MIRABILIS_BUILD_QT_EDITOR)
   find_package(Qt6 6.8 REQUIRED COMPONENTS Widgets)
-  target_sources(engine PRIVATE qt_editor_window.cpp)
+  target_sources(engine PRIVATE qt_editor_window.cpp qt_editor_style.cpp qt_asset_delegate.cpp)
   target_link_libraries(engine PRIVATE Qt6::Widgets)
   target_compile_definitions(engine PRIVATE MIRABILIS_QT_EDITOR QT_NO_KEYWORDS)
   if(BUILD_TESTING)

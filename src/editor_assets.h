@@ -8,7 +8,8 @@
 
 enum class EditorCommand {
     OpenScene, ImportModel, AssignBaseColor, ReimportModel, Save, CreateCube,
-    Delete, Duplicate, TogglePlay, ToggleDebug, Select, SetName, SetTransform
+    Delete, Duplicate, TogglePlay, ToggleDebug, Select, SetName, SetTransform,
+    CreatePointLight, CreateSpotLight, SetLight, SetMaterial, SetRendering
 };
 struct EditorRequest {
     EditorCommand command;
@@ -32,4 +33,8 @@ struct EditorSnapshot {
     EntityRef selected{};
     std::array<float, 9> transform{};
     std::vector<EditorEntityRow> entities;
+    std::optional<Light> light;
+    std::optional<SceneMaterial> material;
+    bool importedModel{};
+    std::array<float,11> rendering{};
 };

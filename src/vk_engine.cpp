@@ -434,12 +434,8 @@ void VulkanEngine::init()
     // Balanced is the candidate default: preset 0 is a full-resolution
     // validation mode and costs about 7.7x plain SSGI on this GPU.
     apply_ssgi_quality_preset(2);
-    if (const char* preset = SDL_getenv("MIRABILIS_SSGI_PRESET")) {
-        apply_ssgi_quality_preset(std::atoi(preset));
-    }
-    if (SDL_getenv("MIRABILIS_MAX_FIDELITY")) {
-        apply_max_fidelity_settings();
-    }
+    if (SDL_getenv("MIRABILIS_MAX_FIDELITY"))apply_max_fidelity_settings();
+    if (const char* preset = SDL_getenv("MIRABILIS_SSGI_PRESET"))apply_ssgi_quality_preset(std::atoi(preset));
     // R6 original cache budget is a startup-only test control, not an SSGI preset.
     if (SDL_getenv("MIRABILIS_TEST_FRAMES") && SDL_getenv("MIRABILIS_R6_RADIOSITY_CONTROL"))
         _surfaceCache.radiosityTexelBudget = 300000u;
@@ -682,6 +678,10 @@ void VulkanEngine::init_vulkan()
         .select()
         .value();
 
+    VkPhysicalDeviceFeatures indirectFeatures{};indirectFeatures.multiDrawIndirect=VK_TRUE;
+    _meshVisibility.supported=physicalDevice.enable_features_if_present(indirectFeatures);
+    // GPU cluster culling is opt-in until measured on the target scene/device.
+    _meshVisibility.enabled=_meshVisibility.supported && SDL_getenv("MIRABILIS_MESH_CULLING") && std::string_view(SDL_getenv("MIRABILIS_MESH_CULLING"))=="1";
     // Anisotropic filtering is requested rather than required: it is a large
     // quality win on Sponza's oblique floors and arches, but it is an optional
     // Vulkan feature and a device that lacks it should still run with plain
@@ -925,6 +925,7 @@ void VulkanEngine::draw(float deltaTime)
     read_gpu_timestamps(_frameNumber % FRAME_OVERLAP);
     update_auto_exposure(deltaTime);
     get_current_frame()._deletionQueue.flush();
+    get_current_frame().instancePageCursor=0;
     get_current_frame()._frameDescriptors.clear_pools(_device);
     //request image from the swapchain 
     uint32_t swapchainImageIndex;
@@ -1049,6 +1050,7 @@ void VulkanEngine::draw(float deltaTime)
 	// Render the sunlight depth map first: every later pass, main camera and
 	// portal cameras alike, samples it while shading.
 	draw_shadow_map(cmd);
+    draw_local_shadows(cmd);
 
 	// Camera depth and view-space normals for the screen-space passes.  A
 	// debug view samples those images, so it also forces the pass to run, and
@@ -1056,9 +1058,11 @@ void VulkanEngine::draw(float deltaTime)
 	const bool showRenderDebugView = _debugViews.view != RenderDebugView::None;
 	const bool occlusionActive = ssao_active();
 	if (_prepass.enabled || showRenderDebugView || occlusionActive ||
-        _ssgi.enabled) {
+        _ssgi.enabled || _postProcess.tonemapEnabled || _meshVisibility.enabled) {
 		draw_depth_normal_prepass(cmd);
 	}
+
+    prepare_mesh_visibility(cmd);
 
 	// Ambient occlusion reads the prepass and is finished before any shading
 	// starts, because every lit surface in the frame samples its result.
@@ -1147,7 +1151,11 @@ void VulkanEngine::draw(float deltaTime)
     } else {
         draw_portal_views(cmd);
     }
-	stats.portal_drawcall_count = stats.drawcall_count - stats.world_drawcall_count;
+    stats.portal_drawcall_count = stats.drawcall_count - stats.world_drawcall_count;
+    if (!mainDrawContext.TransparentSurfaces.empty()) {
+        DrawContext transparent;transparent.TransparentSurfaces=mainDrawContext.TransparentSurfaces;
+        draw_geometry(cmd,transparent,sceneData.viewproj,get_current_frame().sceneDescriptor,false);
+    }
 
     // Replaces the shaded image with one of the buffers behind it.  Editor
     // overlays are still drawn on top, so shadow and collider bounds can be
@@ -1568,6 +1576,10 @@ void VulkanEngine::run(){
             outputDirectoryText ? outputDirectoryText : "cinematic";
         begin_cinematic_recording(
             cinematicFrames, outputDirectory, /*quitWhenDone=*/true);
+    }
+    if(frameLimit && SDL_getenv("MIRABILIS_TEST_PLAYER_PORTALS") && !_authoredPortals.pairs.empty()) {
+        _bluePortal=_authoredPortals.pairs.front().first;_orangePortal=_authoredPortals.pairs.front().second;
+        _authoredPortals.pairs.clear();_portalCameras.useOffscreen=SDL_getenv("MIRABILIS_TEST_PORTAL_OFFSCREEN")!=nullptr;
     }
     if (testTraversal) {
         if (_authoredPortals.pairs.empty() || _cinematic.recording) std::abort();
@@ -2528,6 +2540,7 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
         object.indexBuffer = mesh->meshBuffers.indexBuffer.buffer;
         object.material = surface.material ? &surface.material->data : nullptr;
         object.bounds = surface.bounds;
+        object.clusters = surface.clusters;
         object.transform = nodeMatrix;
         object.previousTransform = hasPreviousDrawTransform
             ? previousDrawTransform

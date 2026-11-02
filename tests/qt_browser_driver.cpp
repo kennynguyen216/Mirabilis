@@ -12,6 +12,7 @@
 #include <QSortFilterProxyModel>
 #include <QPushButton>
 #include <QDoubleSpinBox>
+#include <QCheckBox>
 #include <QDockWidget>
 #include <QLineEdit>
 #include <QImage>
@@ -21,7 +22,7 @@
 
 // Runs through the real Qt widgets and owner-thread request queue, using disposable assets.
 void install_qt_browser_test_driver(QtEditorWindow& window, VulkanEngine& engine) {
-    struct State { int stage{}; uint64_t epoch{}; EntityRef imported{}; QElapsedTimer elapsed; };
+    struct State { int graphicsStage{}; int stage{}; uint64_t epoch{}; EntityRef imported{}; QElapsedTimer elapsed; };
     auto state = std::make_shared<State>(); state->elapsed.start();
     auto* timer = new QTimer(&window); timer->setInterval(300);
     QObject::connect(timer, &QTimer::timeout, &window, [&, state, timer] {
@@ -55,6 +56,35 @@ void install_qt_browser_test_driver(QtEditorWindow& window, VulkanEngine& engine
         const auto click = [&](const char* name) {
             auto* button = window.findChild<QPushButton*>(name); require(button, "missing editor button"); button->click();
         };
+        if(state->stage==0 && state->graphicsStage<6) {
+            switch(state->graphicsStage) {
+            case 0: {
+                if(!snapshot.editing)return;
+                auto* cel=window.findChild<QCheckBox*>("CelShading");auto* bloom=window.findChild<QCheckBox*>("Bloom");
+                require(cel&&bloom,"missing Qt rendering controls");cel->click();bloom->click();click("CreatePointLight");break;
+            }
+            case 1: {
+                if(!snapshot.light)return;
+                require(snapshot.rendering[0]>0.5f&&snapshot.rendering[3]>0.5f,"Qt cel/bloom edit did not reach renderer");
+                auto* range=window.findChild<QDoubleSpinBox*>("Light3");require(range,"missing Qt light inspector");
+                range->setValue(8.5);QMetaObject::invokeMethod(range,"editingFinished");break;
+            }
+            case 2:
+                if(!snapshot.light||std::abs(snapshot.light->range-8.5f)>1e-6f)return;
+                click("TogglePlay");break;
+            case 3: {
+                if(snapshot.editing)return;
+                EditorRequest request{EditorCommand::SetLight};request.field=3;request.value=99;engine.queue_editor_request(std::move(request));break;
+            }
+            case 4:
+                require(snapshot.status=="Return to Edit mode to change authored content","Play allowed authored light mutation");click("TogglePlay");break;
+            case 5:
+                if(!snapshot.editing)return;
+                require(snapshot.light&&std::abs(snapshot.light->range-8.5f)<1e-6f,"Play did not restore authored light");
+                click("DeleteEntity");break;
+            }
+            ++state->graphicsStage;return;
+        }
         switch (state->stage) {
         case 0:
             if (!snapshot.editing) { click("TogglePlay"); return; }

@@ -93,6 +93,9 @@ layout(set = 1, binding = 0) uniform GLTFMaterialData {
     vec4 emission;
     // x = normal-map scale, y = debug checkerboard, zw reserved.
     vec4 materialFlags;
+    vec4 surfaceFactors;
+    vec4 subsurfaceColor;
+    vec4 transmissionFactors;
 } materialData;
 
 layout(set = 1, binding = 1) uniform sampler2D colorTex;
@@ -100,3 +103,6 @@ layout(set = 1, binding = 2) uniform sampler2D metalRoughTex;
 // Tangent-space normal map, stored linear.  Materials without one are bound a
 // 1x1 flat normal, (0.5, 0.5, 1).
 layout(set = 1, binding = 3) uniform sampler2D normalTex;
+layout(set = 1, binding = 4) uniform sampler2D occlusionTex;
+layout(set = 1, binding = 5) uniform sampler2D specularTex;
+layout(set=0,binding=23) uniform sampler2D opaqueSceneColor;

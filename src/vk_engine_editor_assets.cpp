@@ -2,6 +2,7 @@
 #include <SDL.h>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 
 std::filesystem::path VulkanEngine::editor_asset_root() const {
     if (const char* root = SDL_getenv("MIRABILIS_ASSET_ROOT"); root && *root)
@@ -18,9 +19,16 @@ EditorSnapshot VulkanEngine::editor_snapshot() const {
         const auto* name = _scene.read<Name>(ref); const auto* hierarchy = _scene.read<Hierarchy>(ref);
         result.entities.push_back({ref, hierarchy->parent, name->value});
     }
+    result.rendering={_postProcess.celShading?1.f:0.f,_postProcess.celBands,_postProcess.celEdge,
+        _postProcess.bloomEnabled?1.f:0.f,_postProcess.bloomStrength,_postProcess.bloomThreshold,_postProcess.bloomScatter,
+        float(_postProcess.tonemapOperator),float(_ssgi.qualityPreset),renderScale,_meshVisibility.enabled?1.f:0.f};
     result.selected = _scene.get(_selectedSceneObject);
     if (_scene.valid(result.selected)) {
         result.selectedName = _scene.read<Name>(result.selected)->value;
+        if(const auto* light=_scene.read<Light>(result.selected))result.light=*light;
+        const auto kind=_scene.read<SceneMeshAsset>(result.selected)->assetKind;
+        if(kind!=SceneAssetKind::None)result.material=*_scene.read<SceneMaterial>(result.selected);
+        result.importedModel=kind==SceneAssetKind::ImportedGLTF;
         const auto& transform = *_scene.read<Transform>(result.selected);
         for (int i = 0; i < 3; ++i) {
             result.transform[i] = transform.position[i];
@@ -61,6 +69,67 @@ void VulkanEngine::apply_editor_requests() {
                 continue;
             }
             if (!_editorMode) { _editorAssetStatus = "Return to Edit mode to change authored content"; continue; }
+            if (request.command == EditorCommand::CreatePointLight || request.command == EditorCommand::CreateSpotLight) {
+                const bool spot=request.command==EditorCommand::CreateSpotLight;
+                const auto ref=_scene.create_object(spot?"Spot Light":"Point Light",_scene.get(_sandboxRoot));
+                Light light;light.type=spot?LightType::Spot:LightType::Point;
+                Transform transform;transform.position=render_camera().position+glm::vec3(render_camera().getRotationMatrix()*glm::vec4(0,0,-4,0));
+                _scene.set_local_transform(ref,transform);_scene.set(ref,light);_selectedSceneObject=ref.persistentId;
+                _sceneDocument.dirty=true;_ssgi.historyValid=false;_editorAssetStatus="Light created";continue;
+            }
+            if(request.command==EditorCommand::SetRendering) {
+                if(!std::isfinite(request.value)){_editorAssetStatus="Invalid rendering value";continue;}
+                const float v=request.value;bool valid=true;
+                switch(request.field) {
+                case 0:_postProcess.celShading=v>0.5f;break;
+                case 1:valid=v>=2&&v<=16;if(valid)_postProcess.celBands=v;break;
+                case 2:valid=v>=0&&v<=1;if(valid)_postProcess.celEdge=v;break;
+                case 3:_postProcess.bloomEnabled=v>0.5f;break;
+                case 4:valid=v>=0&&v<=2;if(valid)_postProcess.bloomStrength=v;break;
+                case 5:valid=v>=0&&v<=100;if(valid)_postProcess.bloomThreshold=v;break;
+                case 6:valid=v>=0&&v<=1;if(valid)_postProcess.bloomScatter=v;break;
+                case 7:valid=v>=0&&v<=2&&v==std::floor(v);if(valid)_postProcess.tonemapOperator=int(v);break;
+                case 8:valid=v>=0&&v<=5&&v==std::floor(v);if(valid)apply_ssgi_quality_preset(int(v));break;
+                case 9:valid=v>=0.25f&&v<=1;if(valid){renderScale=v;_ssgi.historyValid=false;}break;
+                case 10:_meshVisibility.enabled=v>0.5f&&_meshVisibility.supported;break;
+                default:valid=false;break;
+                }
+                if(valid&&request.field<8)_sceneDocument.dirty=true;
+                _editorAssetStatus=valid?"Rendering updated":"Invalid rendering value";continue;
+            }
+            if(request.command==EditorCommand::SetLight || request.command==EditorCommand::SetMaterial) {
+                bool done=false;
+                if(_scene.valid(request.target)&&std::isfinite(request.value)) {
+                    const float v=request.value;
+                    if(request.command==EditorCommand::SetLight) {
+                        if(const auto* current=_scene.read<Light>(request.target)) {
+                            auto light=*current;
+                            switch(request.field) {
+                            case 0:light.type=v>0.5f?LightType::Spot:LightType::Point;break;
+                            case 1:light.enabled=v>0.5f;break;
+                            case 2:light.intensity=v;break;case 3:light.range=v;break;
+                            case 4:light.innerCone=glm::radians(v);break;case 5:light.outerCone=glm::radians(v);break;
+                            case 6:light.castShadows=v>0.5f;break;
+                            case 7:case 8:case 9:light.color[request.field-7]=v;break;
+                            default:continue;
+                            }
+                            done=_scene.set(request.target,light);
+                        }
+                    } else if(_scene.read<SceneMeshAsset>(request.target)->assetKind!=SceneAssetKind::ImportedGLTF) {
+                        auto material=*_scene.read<SceneMaterial>(request.target);
+                        switch(request.field){
+                        case 0:material.enabled=v>0.5f;break;case 1:material.doubleSided=v>0.5f;break;case 2:material.celShading=v>0.5f;break;
+                        case 3:material.metallic=v;break;case 4:material.roughness=v;break;case 5:material.specular=v;break;
+                        case 6:material.subsurface=v;break;case 7:material.transmission=v;break;case 8:material.ior=v;break;
+                        case 9:material.thickness=v;break;case 10:material.occlusionStrength=v;break;
+                        default:continue;
+                        }
+                        done=_scene.set(request.target,material);
+                    }
+                }
+                if(done){_sceneDocument.dirty=true;_ssgi.historyValid=false;}
+                _editorAssetStatus=done?"Property updated":"Property rejected";continue;
+            }
             if (request.command == EditorCommand::Save) { save_from_editor(); continue; }
             if (request.command == EditorCommand::CreateCube) { create_editor_actor("Cube", SceneAssetKind::UnitCube, false); continue; }
             if (request.command == EditorCommand::Delete || request.command == EditorCommand::Duplicate) {

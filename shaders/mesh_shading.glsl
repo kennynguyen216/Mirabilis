@@ -5,6 +5,9 @@
 #include "input_structures.glsl"
 #include "alpha_mask.glsl"
 #include "material_brdf.glsl"
+#include "local_lights.glsl"
+#include "material_transmission.glsl"
+#include "cel_shading.glsl"
 
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec4 inColor;
@@ -46,19 +49,24 @@ void main()
     }
     vec3 geometricNormal = normalize(inNormal);
     vec3 normal = material_shading_normal(geometricNormal, inTangent, inUV);
+    vec3 lightingGeometricNormal=geometricNormal;
+    if (materialData.materialFlags.z>0.5 && dot(geometricNormal,sceneData.cameraPosition.xyz-inWorldPosition)<0.0) {
+        lightingGeometricNormal=-geometricNormal; normal=-normal;
+    }
     MaterialSurface surface = material_surface(
-        baseColor.rgb, inUV, geometricNormal, normal, inWorldPosition);
+        baseColor.rgb, inUV, lightingGeometricNormal, normal, inWorldPosition);
     // Ambient light is deliberately left unshadowed; without it an occluded
     // surface would be pure black rather than merely out of the sun.  What it
     // does get is ambient occlusion, which asks the different question of how
     // much of the surrounding hemisphere nearby geometry blocks.
-    float visibility = sunlight_visibility(inWorldPosition, geometricNormal);
+    float visibility = sunlight_visibility(inWorldPosition, lightingGeometricNormal);
     float occlusion = ambient_occlusion(gl_FragCoord.xy);
     // Diffuse environment has one owner (docs/lumen_lite_design.md 4.2).
     // While SSGI runs it is the trace, which lights a ray from the sky only
     // when the ray demonstrably left the scene, so the diffuse ambient term
     // here is zero. Specular is not SSGI's and is never scaled. Lumen portal
     // cameras use the shared world gather instead of this screen-space pass.
+    occlusion*=mix(1.0,texture(occlusionTex,inUV).r,materialData.surfaceFactors.x);
     float ambientScale = sceneData.screenSpaceSettings.z > 0.5 ? 0.0 : 1.0;
     vec3 ambientLight = sceneData.ambientColor.rgb * occlusion * ambientScale;
 
@@ -67,6 +75,9 @@ void main()
     vec3 directDiffuse;
     vec3 directSpecular;
     material_sun(surface, visibility, directDiffuse, directSpecular);
+    vec3 localDiffuse,localSpecular;
+    material_local_lights(surface,inWorldPosition,lightingGeometricNormal,localDiffuse,localSpecular);
+    directDiffuse+=localDiffuse;directSpecular+=localSpecular;
     // SSGI supplies diffuse indirect light only, so the specular half of the
     // ambient term is never counted twice.
     vec3 ambientDiffuse;
@@ -80,7 +91,7 @@ void main()
     vec3 emission = material_emission(geometricNormal, inWorldPosition);
     vec3 emitterDiffuse;
     vec3 emitterSpecular;
-    material_emitters(surface, inWorldPosition, geometricNormal, gl_FragCoord.xy,
+    material_emitters(surface, inWorldPosition, lightingGeometricNormal, gl_FragCoord.xy,
         emitterDiffuse, emitterSpecular);
     // While emitters are sampled explicitly, their first bounce is owned here,
     // so emission must not also reach SSGI through the transport target: the
@@ -111,19 +122,30 @@ void main()
         outFragColor = vec4(0.0);
 #else
         outFragColor = vec4(vec3(
-            dot(geometricNormal, normalize(sceneData.sunlightDirection.xyz)) > 0.0
+            dot(lightingGeometricNormal, normalize(sceneData.sunlightDirection.xyz)) > 0.0
                 ? visibility : 0.0), 1.0);
 #endif
     }
+#ifdef MIRABILIS_COLOR_ONLY
+    if(sceneData.emitterSettings.w>0.5 && keep==1u)outFragColor=vec4(0);
+    else {
+        vec3 reflection=((keep&2u)!=0u?directSpecular:vec3(0))+
+            ((keep&8u)!=0u?ambientSpecular:vec3(0))+((keep&128u)!=0u?emitterSpecular:vec3(0))+
+            ((keep&16u)!=0u?emission:vec3(0));
+        outFragColor=material_transmission(surface,baseColor,outFragColor.rgb,reflection);
+        if(materialData.materialFlags.w>0.5 && sceneData.graphicsSettings.y<0.5)
+            outFragColor.rgb=cel_bands(outFragColor.rgb,4.0)*mix(0.15,1.0,step(0.18,surface.noV));
+    }
+#endif
     vec3 debugColor;
     if (material_debug_color(
-            surface, geometricNormal, inTangent,
+            surface, lightingGeometricNormal, inTangent,
             directDiffuse, directSpecular, emission, debugColor)) {
         outFragColor = vec4(debugColor, 1.0);
     }
 #ifndef MIRABILIS_COLOR_ONLY
     // The SSGI composite multiplies filtered incident light by this.
-    outAlbedo = vec4(material_diffuse_albedo(surface), 1.0);
+    outAlbedo = vec4(material_diffuse_albedo(surface)*mix(1.0,texture(occlusionTex,inUV).r,materialData.surfaceFactors.x), materialData.materialFlags.w);
     vec2 currentUV = inCurrentClip.xy / max(inCurrentClip.w, 0.00001) * 0.5 + 0.5;
     vec2 previousUV = inPreviousClip.xy / max(inPreviousClip.w, 0.00001) * 0.5 + 0.5;
     // Add this displacement to a current UV to find the same point in the

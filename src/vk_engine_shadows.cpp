@@ -44,6 +44,9 @@ void VulkanEngine::init_shadow_resources()
         shadowFormat,
         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 
+    _localShadowAtlas=create_image({2048,1024,1},shadowFormat,
+        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);
+    _mainDeletionQueue.push_function([this]{destroy_image(_localShadowAtlas);});
     // A comparison sampler runs the depth test in hardware and filters the
     // results, which is what makes each PCF tap cheap.  The white border
     // leaves everything outside the shadowed box lit, instead of stamping a

@@ -66,6 +66,8 @@ def main():
     assert "GLTF image decode failed" not in logs, "Referenced image did not decode"
     assert logs.count("GLTF decode batches: 2 sources, 3 color-space uploads (triangle.gltf)") == 3
     scene = json.loads((root / "scenes/sandbox.json").read_text())
+    assert scene["rendering"]["celShading"] and scene["rendering"]["bloom"], "Qt rendering edits did not save"
+    assert not any("light" in obj["components"] for obj in scene["objects"]), "Temporary test light was not deleted"
     assert len(scene["objects"]) == len(json.loads((repo / "assets/scenes/sandbox.json").read_text())["objects"]) + 1, "Discard autosaved the test cube"
     imported = [obj["components"] for obj in scene["objects"] if obj["components"]["name"]["value"].startswith("triangle")]
     assert len(imported) == 1 and abs(imported[0]["transform"]["position"][0] - 2.75) < 1e-6

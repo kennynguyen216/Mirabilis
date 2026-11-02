@@ -1647,6 +1647,16 @@ void VulkanEngine::draw_ambient_occlusion_settings()
 
 void VulkanEngine::draw_tonemap_settings()
 {
+    if (ImGui::CollapsingHeader("Stylization and bloom")) {
+        bool changed=ImGui::Checkbox("Cel shading",&_postProcess.celShading);
+        changed|=ImGui::SliderFloat("Cel bands",&_postProcess.celBands,2,16,"%.0f");
+        changed|=ImGui::SliderFloat("Cel silhouette",&_postProcess.celEdge,0,0.5f);
+        changed|=ImGui::Checkbox("Bloom",&_postProcess.bloomEnabled);
+        changed|=ImGui::SliderFloat("Bloom strength",&_postProcess.bloomStrength,0,1);
+        changed|=ImGui::SliderFloat("Bloom threshold",&_postProcess.bloomThreshold,0,10);
+        changed|=ImGui::SliderFloat("Bloom scatter",&_postProcess.bloomScatter,0,1);
+        if(changed)_sceneDocument.dirty=true;
+    }
     if (ImGui::CollapsingHeader("Tonemapping")) {
         // Exposure is a session preference; white balance is scene-authored.
         ImGui::Checkbox("Enabled##Tonemapping", &_postProcess.tonemapEnabled);
@@ -1656,7 +1666,7 @@ void VulkanEngine::draw_tonemap_settings()
                 "buffer: midtones read dark and highlights clip.");
         }
         if (_postProcess.tonemapEnabled) {
-            const char* operatorNames[] = {"ACES Filmic", "Reinhard"};
+            const char* operatorNames[] = {"ACES Filmic", "Reinhard", "PBR Neutral"};
             ImGui::Combo(
                 "Operator",
                 &_postProcess.tonemapOperator,
@@ -1781,7 +1791,8 @@ void VulkanEngine::draw_screen_buffer_settings()
             "High (half resolution)",
             "Balanced (half resolution)",
             "Performance (half resolution)",
-            "Peak (full resolution, 8 rays)"};
+            "Peak (full resolution, 8 rays)",
+            "Ultra (half resolution, 8 rays)"};
         int ssgiPreset = _ssgi.qualityPreset;
         if (ImGui::Combo("Quality Preset", &ssgiPreset,
                 ssgiPresets, IM_ARRAYSIZE(ssgiPresets))) {

@@ -27,6 +27,9 @@ Click the preview to watch the run.
 - Renders GPU mesh and material pipelines with glTF/GLB scene loading.
 - Manages Vulkan command buffers, synchronization, descriptor sets, dynamic rendering, and swapchain presentation.
 - Includes real-time shadows, ambient occlusion, and screen-space global illumination, with experimental probe/SDF lighting and a software path-tracing reference mode.
+- Includes shadowed point/spot lights, two-sided cloth lighting, material AO/specular controls, approximate thin-surface subsurface and screen-space glass refraction.
+- Offers optional cel shading, multi-scale HDR bloom, and ACES/Reinhard/PBR Neutral tone mapping.
+- Uses CPU-precomputed normal matrices in the prepass and instance batches, fast push-constant transforms for ordinary draws, with opt-in static-mesh GPU cluster culling for the main camera.
 - Includes a compute-rendered background and ongoing portal-rendering experiments.
 
 ### Linked portals
@@ -40,7 +43,8 @@ Click the preview to watch the run.
 ### Scene editor and tooling
 
 - Uses EnTT entities with versioned identities, hierarchical transforms, and deferred scene changes.
-- Provides a Qt host with an embedded Vulkan viewport, dockable content browser, scene tree, name/transform properties, and selection/duplicate/delete actions.
+- Provides a dark Qt host with an embedded Vulkan viewport, breadcrumb navigation, asset cards and asynchronous texture thumbnails, scene tree, and selection/duplicate/delete actions.
+- Exposes rendering styles, bloom, tone mapping, GI presets, primitive material properties, and point/spot light authoring in Qt. `graphics_showcase.json` demonstrates the new rendering features.
 - Keeps ImGui for profiler, render settings, and component diagnostics; advanced component controls remain there during the Qt properties migration.
 - Supports translate, rotate, and scale gizmos with optional snapping.
 - Exposes editable box colliders and gameplay roles for scene-authored objects.
@@ -143,8 +147,12 @@ replacement resources before swapping; failed parses/textures retain the old mod
 Save/Discard/Cancel protects unsaved scenes on open and close.
 
 Use **Debug > ImGui diagnostics** for profiling, rendering controls and the
-advanced component inspector. Qt currently edits names and transforms; physics,
-scripts and other advanced component controls remain in that debug inspector.
+advanced component inspector. Qt edits names, transforms, primitive PBR materials,
+and point/spot lights. Its **Rendering** tab controls cel shading, bloom, tone
+mapping, render scale and GI quality. **Ultra / half** uses Peak's 8 rays and
+96 steps at half resolution with depth/normal-aware reconstruction; it trades
+fine GI detail for speed. GPU cluster culling is experimental and off by default.
+Physics and scripts remain in the ImGui diagnostics inspector.
 `MIRABILIS_ASSET_ROOT` overrides the browser root. The existing scene directory
 is `assets/scenes`; browsing does not rename or move files and break references.
 
@@ -312,3 +320,13 @@ Enable **Override For This Scene** to edit and save level-specific values;
 **Reset to Project Defaults** removes that override on the next scene save.
 Existing scene `ssao` blocks remain explicit overrides.
 
+
+The graphics GPU gate uses disposable scenes to check cel/bloom output, light
+shadows, glass, stencil/offscreen portal transparency, and exact visible-image
+parity with conservative cluster culling. Run it sequentially with other GPU tests:
+
+```powershell
+python tests/graphics_gate.py --configuration Debug --output C:/temp/mirabilis-graphics-check
+```
+
+The gate requires NumPy and Pillow, as do the existing image-validation tools.

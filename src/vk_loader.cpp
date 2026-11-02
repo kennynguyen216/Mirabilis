@@ -64,7 +64,10 @@ std::optional<fastgltf::Asset> parse_gltf_asset(
     const std::filesystem::path& filePath,
     fastgltf::Options options)
 {
-    fastgltf::Parser parser{};
+    fastgltf::Parser parser{fastgltf::Extensions::KHR_materials_emissive_strength |
+        fastgltf::Extensions::KHR_materials_specular | fastgltf::Extensions::KHR_materials_transmission |
+        fastgltf::Extensions::KHR_materials_ior | fastgltf::Extensions::KHR_materials_volume |
+        fastgltf::Extensions::KHR_lights_punctual};
     const auto fileType = fastgltf::determineGltfFileType(&data);
 
     if (fileType == fastgltf::GltfType::glTF) {
@@ -211,6 +214,17 @@ void build_gltf_nodes(
                 }},
             source.transform);
 
+        if(source.lightIndex && *source.lightIndex<gltf.lights.size()) {
+            const auto& imported=gltf.lights[*source.lightIndex];
+            if(imported.type!=fastgltf::LightType::Directional) {
+                Light light;light.type=imported.type==fastgltf::LightType::Spot?LightType::Spot:LightType::Point;
+                light.color={imported.color[0],imported.color[1],imported.color[2]};light.intensity=imported.intensity;
+                // The bounded forward renderer needs a finite influence radius for infinite-range glTF lights.
+                light.range=imported.range.value_or(std::max(10.f,std::sqrt(float(imported.intensity)*100.f)));
+                light.innerCone=imported.innerConeAngle.value_or(0.f);light.outerCone=imported.outerConeAngle.value_or(glm::radians(45.f));
+                if(valid_component(light))scene.lights.push_back({newNode,light});
+            }
+        }
         nodes.push_back(newNode);
         scene.nodes[object_name(source.name, "node_", nodeIndex)] = newNode;
     }
@@ -379,6 +393,8 @@ std::vector<std::shared_ptr<MeshAsset>> build_gltf_meshes(
             } else {
                 surface.material = materials.front();
             }
+            if(surface.material->data.passType==MaterialPass::MainColor)
+                surface.clusters=std::make_shared<std::vector<MeshCluster>>();
             newMesh->surfaces.push_back(surface);
         }
 
@@ -529,7 +545,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
     // Three image samplers per material set: base colour, metallic/roughness,
     // and normal (bindings 1-3).
     std::vector<DescriptorAllocatorGrowable::PoolSizeRatio> descriptorRatios = {
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3.0f},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 5.0f},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3.0f},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1.0f}};
     scene->descriptorPool.init(engine->_device, materialCount, descriptorRatios);
@@ -549,6 +565,8 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         mark(material.pbrData.baseColorTexture, 2);
         mark(material.pbrData.metallicRoughnessTexture, 1);
         mark(material.normalTexture, 1);
+        mark(material.occlusionTexture, 1);
+        if(material.specular)mark(material.specular->specularTexture,1);
     }
     std::vector<size_t> referenced;
     for (size_t i = 0; i < roles.size(); ++i) if (roles[i]) referenced.push_back(i);
@@ -659,6 +677,14 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
                 source->emissiveFactor[2],
                 0.0f) * source->emissiveStrength.value_or(1.0f);
         }
+        if(source) {
+            if(source->specular)constants.surfaceFactors.y=0.5f*source->specular->specularFactor;
+            if(source->transmission)constants.surfaceFactors.w=source->transmission->transmissionFactor;
+            constants.transmissionFactors.x=source->ior.value_or(1.5f);
+            if(source->volume)constants.transmissionFactors.y=source->volume->thicknessFactor;
+        }
+        constants.materialFlags.z = source && source->doubleSided ? 1.f : 0.f;
+        constants.surfaceFactors.x = source && source->occlusionTexture ? source->occlusionTexture->strength : 1.f;
         materialConstants[index] = constants;
 
         GLTFMetallic_Roughness::MaterialResources resources{};
@@ -668,6 +694,8 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         resources.metalRoughSampler = engine->_defaultSamplerLinear;
         resources.normalImage = engine->_flatNormalImage;
         resources.normalSampler = engine->_defaultSamplerLinear;
+        resources.occlusionImage = resources.specularImage = engine->_whiteImage;
+        resources.occlusionSampler = resources.specularSampler = engine->_defaultSamplerLinear;
         resources.dataBuffer = scene->materialDataBuffer.buffer;
         resources.dataBufferOffset = static_cast<uint32_t>(
             index * sizeof(GLTFMetallic_Roughness::MaterialConstants));
@@ -691,6 +719,9 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
                     resources.metalRoughSampler);
                 ++boundMetalRoughCount;
             }
+            if(source->specular && source->specular->specularTexture)resolveTexture(*source->specular->specularTexture,false,resources.specularImage,resources.specularSampler);
+            if (source->occlusionTexture) resolveTexture(*source->occlusionTexture, false,
+                resources.occlusionImage, resources.occlusionSampler);
             if (source->normalTexture.has_value()) {
                 resolveTexture(
                     source->normalTexture.value(),
@@ -706,6 +737,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
             pass,
             resources,
             scene->descriptorPool);
+        material->data.doubleSided = constants.materialFlags.z > 0.5f;
         material->data.traceBaseColor = constants.colorFactors;
         if(source) material->data.traceEmission=glm::vec4(
             source->emissiveFactor[0],source->emissiveFactor[1],source->emissiveFactor[2],0)*source->emissiveStrength.value_or(1.f);
@@ -736,6 +768,8 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
             MaterialPass pass = MaterialPass::MainColor;
             if (source.alphaMode == fastgltf::AlphaMode::Blend) {
                 pass = MaterialPass::Transparent;
+            } else if (source.transmission && source.transmission->transmissionFactor>0) {
+                pass=MaterialPass::Transparent;
             } else if (source.alphaMode == fastgltf::AlphaMode::Mask) {
                 pass = MaterialPass::Mask;
             }

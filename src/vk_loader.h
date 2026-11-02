@@ -8,12 +8,14 @@
 #include <vector>
 
 #include <vk_types.h>
+#include "scene_components.h"
 #include <vk_descriptors.h>
 
 struct GeoSurface {
     uint32_t startIndex{};
     uint32_t count{};
     Bounds bounds{};
+    std::shared_ptr<std::vector<MeshCluster>> clusters;
     std::shared_ptr<struct GLTFMaterial> material;
 };
 
@@ -41,6 +43,8 @@ struct LoadedGLTF : public IRenderable {
     AllocatedBuffer materialDataBuffer{};
     VulkanEngine* creator{};
     bool hasMissingTextures{};
+    struct ImportedLight {std::shared_ptr<Node> node;Light light;};
+    std::vector<ImportedLight> lights;
 
     ~LoadedGLTF() override;
 

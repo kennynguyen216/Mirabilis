@@ -191,6 +191,9 @@ void VulkanEngine::init_depth_normal_mask_pipeline()
 void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
 {
     const auto startTime = std::chrono::steady_clock::now();
+    auto& instances=_instanceScratch;instances.clear();instances.reserve(mainDrawContext.OpaqueSurfaces.size());
+    for(const auto& object:mainDrawContext.OpaqueSurfaces)instances.push_back(make_draw_instance(object.transform,object.previousTransform,object.material&&object.material->doubleSided));
+    const auto instanceAddress=upload_draw_instances(instances);
 
     vkutil::transition_image(
         cmd,
@@ -305,6 +308,8 @@ void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
             GPUDrawPushConstants pushConstants{};
             pushConstants.worldMatrix = renderObject.transform;
             pushConstants.vertexBuffer = renderObject.vertexBufferAddress;
+            pushConstants.alignmentPadding=instanceAddress+size_t(&renderObject-mainDrawContext.OpaqueSurfaces.data())*sizeof(GPUDrawInstance);
+            pushConstants.previousWorldRow0.x=renderObject.material && renderObject.material->doubleSided ? 1.f:0.f;
             vkCmdPushConstants(
                 cmd,
                 active.layout,

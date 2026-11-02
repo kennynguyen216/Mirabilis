@@ -68,4 +68,10 @@ layout(set = 0, binding = 0) uniform SceneData {
     // samples per pixel, w = 1 while measuring cache-lookup coverage.
     vec4 emitterSettings;
     vec4 environmentTint;
+    vec4 localLightPosition[16];
+    vec4 localLightColor[16];
+    vec4 localLightDirection[16];
+    vec4 localLightCone[16];
+    mat4 localShadowMatrix[7];
+    vec4 graphicsSettings;
 } sceneData;

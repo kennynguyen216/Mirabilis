@@ -93,7 +93,8 @@ void VulkanEngine::emit_scene_render_objects(
         _previousSceneObjectTransforms[object.persistentId] = world;
         renderObject.vertexBufferAddress = primitive.vertexBufferAddress;
         renderObject.contributesToStaticCaches = cacheEligible;
-        drawContext.OpaqueSurfaces.push_back(renderObject);
+        if(renderObject.material->passType==MaterialPass::Transparent)drawContext.TransparentSurfaces.push_back(renderObject);
+        else drawContext.OpaqueSurfaces.push_back(renderObject);
     }
 }
 

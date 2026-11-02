@@ -13,6 +13,11 @@ class QFileSystemModel;
 class QListView;
 class QLabel;
 class QSortFilterProxyModel;
+class QHBoxLayout;
+class QToolButton;
+class QComboBox;
+class QCheckBox;
+class QGroupBox;
 
 class QtEditorWindow final : public QMainWindow {
 public:
@@ -25,7 +30,9 @@ private:
     void refresh_scene();
     void request(EditorCommand command);
     void open_scene();
-    void choose_directory(const QString& path);
+    void choose_directory(const QString& path, bool remember=true);
+    void refresh_browser_path();
+    void edit_property(EditorCommand command,int field,float value,QObject* widget);
     void update_asset_selection();
     VulkanEngine& engine_;
     QWindow* viewportWindow_{};
@@ -38,7 +45,21 @@ private:
     QListView* assets_{};
     QLabel* assetInfo_{};
     QLabel* preview_{};
-    QString root_, selectedAsset_, treeFingerprint_;
+    QString root_, selectedAsset_, treeFingerprint_, directory_;
+    QStringList back_, forward_;
+    QHBoxLayout* crumbs_{};
+    QToolButton *backButton_{}, *forwardButton_{};
+    QLabel* assetCount_{};
+    std::array<QDoubleSpinBox*,9> renderNumbers_{};
+    QCheckBox *cel_{}, *bloom_{}, *meshCulling_{};
+    QComboBox *tonemap_{}, *giQuality_{};
+    std::array<QDoubleSpinBox*,10> lightFields_{};
+    QGroupBox* lightGroup_{};
+    QComboBox* lightType_{};
+    QCheckBox *lightEnabled_{}, *lightShadows_{};
+    std::array<QDoubleSpinBox*,8> materialFields_{};
+    QCheckBox *materialEnabled_{}, *twoSided_{}, *materialCel_{};
+    std::unordered_map<QObject*,std::pair<EntityRef,uint64_t>> propertyBindings_;
     uint64_t shownEpoch_{};
     EntityRef nameTarget_{};
     uint64_t nameEpoch_{};

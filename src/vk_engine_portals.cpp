@@ -332,7 +332,7 @@ void VulkanEngine::draw_portal_views(VkCommandBuffer cmd)
 void VulkanEngine::draw_geometry_to_portal_camera(
     VkCommandBuffer cmd,
     const DrawContext& drawContext,
-    const glm::mat4& viewProjection,
+    const GPUSceneData& camera,
     VkDescriptorSet sceneDescriptor,
     const AllocatedImage& colorTarget)
 {
@@ -423,6 +423,27 @@ void VulkanEngine::draw_geometry_to_portal_camera(
         stats.triangle_count += static_cast<int>(renderObject.indexCount / 3);
     }
     vkCmdEndRendering(cmd);
+    draw_portal_sky(cmd,camera,0,0xff,&colorTarget);
+    if(!drawContext.TransparentSurfaces.empty()) {
+        copy_refraction_source(cmd,colorTarget,_portalCameras.extent);
+        colorAttachment.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;depthAttachment.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;stencilAttachment.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;
+        vkCmdBeginRendering(cmd,&renderInfo);
+        const auto& pipeline=metalRoughMaterial.portalOffscreenTransparentPipeline;
+        vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline.pipeline);
+        vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline.layout,0,1,&sceneDescriptor,0,nullptr);
+        std::vector<const RenderObject*> draws;for(const auto& object:drawContext.TransparentSurfaces)draws.push_back(&object);
+        std::stable_sort(draws.begin(),draws.end(),[&](const auto* a,const auto* b){return (camera.viewproj*a->transform*glm::vec4(a->bounds.origin,1)).w>(camera.viewproj*b->transform*glm::vec4(b->bounds.origin,1)).w;});
+        for(const auto* object:draws) {
+            if(!object->material)continue;
+            vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline.layout,1,1,&object->material->materialSet,0,nullptr);
+            vkCmdBindIndexBuffer(cmd,object->indexBuffer,0,VK_INDEX_TYPE_UINT32);
+            GPUDrawPushConstants push{};push.worldMatrix=object->transform;push.vertexBuffer=object->vertexBufferAddress;
+            vkCmdPushConstants(cmd,pipeline.layout,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(push),&push);
+            vkCmdDrawIndexed(cmd,object->indexCount,1,object->firstIndex,0,0);
+            ++stats.drawcall_count;stats.triangle_count+=object->indexCount/3;
+        }
+        vkCmdEndRendering(cmd);
+    }
     stats.mesh_draw_time += std::chrono::duration<float, std::milli>(
         std::chrono::steady_clock::now() - startTime).count();
 }
@@ -452,10 +473,9 @@ void VulkanEngine::draw_offscreen_portal_views(VkCommandBuffer cmd)
         draw_geometry_to_portal_camera(
             cmd,
             portalViewDrawContext,
-            _portalRender.sceneData[viewIndex].viewproj,
+            _portalRender.sceneData[viewIndex],
             frame.portalSceneDescriptors[viewIndex],
             target);
-        draw_portal_sky(cmd, _portalRender.sceneData[viewIndex], 0, 0xff, &target);
         vkutil::transition_image(
             cmd,
             target.image,
@@ -584,6 +604,10 @@ GPUSceneData VulkanEngine::build_portal_scene_data(
     const Portal& destination) const
 {
     GPUSceneData data = build_scene_data(view);
+    if(_portalCameras.useOffscreen) {
+        data.graphicsSettings.z=float(_portalCameras.extent.width);
+        data.graphicsSettings.w=float(_portalCameras.extent.height);
+    }
 
     // Keep only the world beyond the destination aperture. This is required
     // for freestanding links too: all authored rooms coexist in world space,
@@ -628,7 +652,7 @@ void VulkanEngine::init_portal_camera_targets()
         image = create_image(
             targetExtent,
             _drawImage.imageFormat,
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     }
     _portalCameras.depthImage = create_image(
         targetExtent,

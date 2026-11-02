@@ -49,6 +49,11 @@ struct FrameData {
         DeletionQueue _deletionQueue;
         DescriptorAllocatorGrowable _frameDescriptors;
         AllocatedBuffer sceneBuffer;
+        std::vector<AllocatedBuffer> instancePages;
+        size_t instancePageCursor{};
+        AllocatedBuffer clusterInput, clusterInstances, clusterCommands;
+        size_t clusterCapacity{}, clusterInstanceCapacity{};
+        std::vector<std::pair<uint32_t,uint32_t>> clusterRanges;
         VkDescriptorSet sceneDescriptor{};
         std::array<AllocatedBuffer, PortalViewCount> portalSceneBuffers;
         std::array<VkDescriptorSet, PortalViewCount> portalSceneDescriptors{};
@@ -109,6 +114,9 @@ struct TonemapPushConstants {
     // sRGB encode runs.
     glm::vec4 settings{1.0f, 0.0f, 0.0f, 0.0f};
     glm::vec4 whiteBalanceGain{1,1,1,0};
+    glm::vec4 bloom{0}; // strength; remaining unused
+    glm::vec4 cel{0}; // enabled, bands, edge threshold, raster flag
+    glm::vec4 extent{0}; // active extent, allocation extent
 };
 
 struct FXAAPushConstants {
@@ -414,6 +422,7 @@ struct SceneMaterialRuntime {
     // Emission colour times strength, as written to the material constants.
     glm::vec4 emission{0.0f};
     bool debugChecker{false};
+    SceneMaterial source;
     bool initialized{false};
 };
 
@@ -427,6 +436,7 @@ enum class EditorGizmoOperation : uint8_t {
 struct GLTFMetallic_Roughness {
     MaterialPipeline opaquePipeline;
     MaterialPipeline transparentPipeline;
+    MaterialPipeline portalTransparentPipeline,portalOffscreenTransparentPipeline;
     // The alpha-tested counterparts of the three passes that shade geometry.
     // They exist as separate pipelines rather than as a branch inside the
     // opaque ones so that discard - which costs every opaque surface its
@@ -460,7 +470,12 @@ struct GLTFMetallic_Roughness {
         glm::vec4 emission;
         // x = normal-map scale, y = debug checkerboard, zw reserved.
         glm::vec4 materialFlags;
-        glm::vec4 extra[10];
+        // AO strength, dielectric specular (0.5 = F0 0.04), subsurface, transmission.
+        glm::vec4 surfaceFactors{1,0.5f,0,0};
+        glm::vec4 subsurfaceColor{1,1,1,0};
+        // IOR, thickness; zw reserved.
+        glm::vec4 transmissionFactors{1.5f,0.1f,0,0};
+        glm::vec4 extra[7];
     };
     static_assert(sizeof(MaterialConstants) == 256);
 
@@ -472,6 +487,8 @@ struct GLTFMetallic_Roughness {
         // Tangent-space normal map; the engine's flat normal when there is none.
         AllocatedImage normalImage;
         VkSampler normalSampler{};
+        AllocatedImage occlusionImage{}, specularImage{};
+        VkSampler occlusionSampler{}, specularSampler{};
         VkBuffer dataBuffer{};
         uint32_t dataBufferOffset{};
     };
@@ -887,6 +904,9 @@ class VulkanEngine{
         void init_shadow_pipeline();
         void init_shadow_mask_pipeline();
         void draw_shadow_map(VkCommandBuffer cmd);
+        void build_local_lights(GPUSceneData& data) const;
+        void draw_local_shadows(VkCommandBuffer cmd);
+        void copy_refraction_source(VkCommandBuffer cmd,const AllocatedImage& source,VkExtent2D extent);
         void init_depth_normal_resources();
         void init_ssgi_resources();
         void init_depth_normal_pipeline();
@@ -987,6 +1007,21 @@ class VulkanEngine{
         void save_ao_preferences() const;
         void draw_render_debug(VkCommandBuffer cmd);
         void draw_tonemap(VkCommandBuffer cmd);
+        VkDeviceAddress upload_draw_instances(std::span<const GPUDrawInstance> instances);
+        void init_mesh_visibility();
+        void prepare_mesh_visibility(VkCommandBuffer cmd);
+        struct MeshVisibility {
+            bool supported{false}, enabled{false};
+            uint32_t maxIndirectCount{1};
+            std::array<AllocatedBuffer,FRAME_OVERLAP> readback;
+            std::array<uint32_t,FRAME_OVERLAP> readbackCounts{};
+            AllocatedImage tiles;
+            VkDescriptorSetLayout layout{};
+            MaterialPipeline tilePipeline,cullPipeline;
+        } _meshVisibility;
+        std::vector<GPUDrawInstance> _instanceScratch;
+        void init_bloom();
+        void draw_bloom(VkCommandBuffer cmd);
         void draw_fxaa(VkCommandBuffer cmd);
         glm::mat4 compute_sun_view_projection(const glm::vec3& focusPoint) const;
         void draw_geometry(
@@ -1026,7 +1061,7 @@ class VulkanEngine{
         void draw_geometry_to_portal_camera(
             VkCommandBuffer cmd,
             const DrawContext& drawContext,
-            const glm::mat4& viewProjection,
+            const GPUSceneData& camera,
             VkDescriptorSet sceneDescriptor,
             const AllocatedImage& colorTarget);
         RenderObject make_portal_render_object(
@@ -1293,6 +1328,7 @@ class VulkanEngine{
             const char* formatName{"none"};
         };
         ShadowState _shadow;
+        AllocatedImage _localShadowAtlas;
         // IQ2: the ray-query half of sun visibility.  One BLAS holds the
         // trace scene's opaque casters in world space and one TLAS instance
         // points at it; both are rebuilt when that draw list changes.  The
@@ -1715,6 +1751,14 @@ class VulkanEngine{
             // Off leaves the frame linear and clipped, which is how it looked
             // before this pass existed.  Kept as a comparison, not a default.
             bool tonemapEnabled{true};
+            bool celShading{false}, bloomEnabled{false};
+            float celBands{4}, celEdge{0.18f}, bloomStrength{0.08f}, bloomThreshold{1}, bloomScatter{0.7f};
+            AllocatedImage sceneCopy;
+            static constexpr int BloomLevels=6;
+            std::array<AllocatedImage,BloomLevels> bloomDown, bloomUp;
+            std::array<VkDescriptorSet,BloomLevels> bloomDownSets{}, bloomUpSets{};
+            VkDescriptorSetLayout bloomLayout{}, tonemapLayout{};
+            MaterialPipeline bloomPipeline;
             // Stops in photographic terms would be friendlier, but every other
             // exposure-like control in this engine is a plain multiplier.
             float tonemapExposure{1.0f};

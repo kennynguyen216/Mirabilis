@@ -5,6 +5,7 @@
 #include <exception>
 #ifdef MIRABILIS_QT_EDITOR
 #include "qt_editor_window.h"
+#include "qt_editor_style.h"
 #include <QApplication>
 #include <QEventLoop>
 #include <QPalette>
@@ -34,19 +35,7 @@ int main(int argc, char* argv[])
     std::unique_ptr<QApplication> app;
     if (useQt) {
         app = std::make_unique<QApplication>(argc, argv);
-        app->setStyle(QStyleFactory::create("Fusion"));
-        QPalette palette;
-        palette.setColor(QPalette::Window, QColor(32, 36, 44));
-        palette.setColor(QPalette::WindowText, QColor(230, 233, 239));
-        palette.setColor(QPalette::Base, QColor(23, 27, 34));
-        palette.setColor(QPalette::AlternateBase, QColor(37, 42, 52));
-        palette.setColor(QPalette::Text, QColor(230, 233, 239));
-        palette.setColor(QPalette::Button, QColor(43, 51, 64));
-        palette.setColor(QPalette::ButtonText, QColor(230, 233, 239));
-        palette.setColor(QPalette::Highlight, QColor(73, 122, 191));
-        palette.setColor(QPalette::HighlightedText, Qt::white);
-        palette.setColor(QPalette::Disabled, QPalette::Text, QColor(140, 146, 158));
-        app->setPalette(palette);
+        apply_editor_style(*app);
     }
 #endif
     VulkanEngine engine;

@@ -12,16 +12,22 @@ layout(location = 3) out vec3 outWorldPosition;
 layout(location = 4) out vec4 outTangent;
 
 #include "vertex.glsl"
+#include "draw_instance.glsl"
 
 layout(push_constant) uniform constants {
     mat4 render_matrix;
     VertexBuffer vertexBuffer;
+    DrawInstances instances;
 } PushConstants;
 
 void main()
 {
     Vertex vertex = PushConstants.vertexBuffer.vertices[gl_VertexIndex];
-    vec4 worldPosition = PushConstants.render_matrix * vec4(vertex.position, 1.0);
+    bool instanced=false;
+    DrawInstance instance;
+    mat4 world=PushConstants.render_matrix;
+    if(instanced){instance=PushConstants.instances.values[gl_InstanceIndex];world=instance.world;}
+    vec4 worldPosition = world * vec4(vertex.position, 1.0);
     gl_Position = sceneData.viewproj * worldPosition;
     outWorldPosition = worldPosition.xyz;
     // Clip before rasterization. Doing this in the fragment shader with
@@ -31,14 +37,16 @@ void main()
         ? dot(worldPosition, sceneData.portalClipPlane)
         : 1.0;
     // Keep lighting and shadow bias correct under non-uniform object scale.
-    mat3 model = mat3(PushConstants.render_matrix);
-    mat3 normalMatrix = transpose(inverse(model));
-    outNormal = normalize(normalMatrix * vertex.normal);
+    mat3 model = mat3(world);
+    float modelDeterminant=determinant(model);
+    mat3 fallbackNormal=(!isnan(modelDeterminant) && !isinf(modelDeterminant) && abs(modelDeterminant)>1e-12)
+        ? transpose(inverse(model)) : mat3(1);
+    outNormal=instanced?instance_normal(instance,vertex.normal):normalize(fallbackNormal*vertex.normal);
     // Same tangent frame as mesh.vert: model matrix, handedness flipped by a
     // mirroring transform.
     outTangent = vec4(
         model * vertex.tangent.xyz,
-        vertex.tangent.w * (determinant(model) < 0.0 ? -1.0 : 1.0));
+        vertex.tangent.w * (instanced?instance.flags.y:(modelDeterminant < 0.0 ? -1.0 : 1.0)));
     outColor = vertex.color * materialData.colorFactors;
     vec2 uvScale = materialData.uvTransform.xy;
     if (all(lessThan(abs(uvScale), vec2(0.0001)))) {

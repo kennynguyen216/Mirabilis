@@ -28,12 +28,15 @@ struct SSGIPreset {
 
 // 0 full-resolution validation baseline, 1 high (half resolution, spending the
 // saved pixels on longer rays), 2 balanced, 3 performance, 4 peak.
-constexpr std::array<SSGIPreset, 5> SSGIPresets{{
+constexpr std::array<SSGIPreset, 6> SSGIPresets{{
     {false, 4, 32, 12.0f, 0.35f, 0.08f, 3, 800.0f, 32.0f, 0.92f},
     {true,  4, 48, 16.0f, 0.30f, 0.06f, 4, 700.0f, 28.0f, 0.94f},
     {true,  2, 32, 12.0f, 0.35f, 0.08f, 5, 800.0f, 32.0f, 0.92f},
     {true,  1, 16,  8.0f, 0.45f, 0.10f, 2, 900.0f, 36.0f, 0.90f},
-    {false, 8, 96, 20.0f, 0.25f, 0.05f, 5, 800.0f, 32.0f, 0.96f}}};
+    {false, 8, 96, 20.0f, 0.25f, 0.05f, 5, 800.0f, 32.0f, 0.96f},
+    // Same ray budget and reach as Peak at one quarter of the trace pixels;
+    // existing depth/normal-aware reconstruction trades fine GI detail for speed.
+    {true,  8, 96, 20.0f, 0.25f, 0.05f, 5, 800.0f, 32.0f, 0.96f}}};
 }
 
 void VulkanEngine::apply_ssgi_quality_preset(int preset)

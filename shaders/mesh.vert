@@ -15,24 +15,33 @@ layout(location = 5) out vec4 outPreviousClip;
 layout(location = 6) out vec4 outTangent;
 
 #include "vertex.glsl"
+#include "draw_instance.glsl"
 
 layout(push_constant) uniform constants {
     mat4 render_matrix;
     VertexBuffer vertexBuffer;
+    DrawInstances instances;
     vec4 previousWorldRow0;
     vec4 previousWorldRow1;
     vec4 previousWorldRow2;
 } PushConstants;
 
+// Ordinary draws keep uniform push-constant transforms. Only real batches read per-instance transforms.
+layout(constant_id=0) const bool InstancedDraw=false;
+
 void main()
 {
     Vertex vertex = PushConstants.vertexBuffer.vertices[gl_VertexIndex];
-    vec4 worldPosition = PushConstants.render_matrix * vec4(vertex.position, 1.0);
+    bool instanced=InstancedDraw;
+    DrawInstance instance;
+    mat4 world=PushConstants.render_matrix;
+    if(instanced){instance=PushConstants.instances.values[gl_InstanceIndex];world=instance.world;}
+    vec4 worldPosition = world * vec4(vertex.position, 1.0);
 
     gl_Position = sceneData.viewproj * worldPosition;
     outCurrentClip = gl_Position;
     vec4 localPosition = vec4(vertex.position, 1.0);
-    vec4 previousWorldPosition = vec4(
+    vec4 previousWorldPosition = instanced?vec4(dot(instance.previousRows[0],localPosition),dot(instance.previousRows[1],localPosition),dot(instance.previousRows[2],localPosition),1):vec4(
         dot(PushConstants.previousWorldRow0, localPosition),
         dot(PushConstants.previousWorldRow1, localPosition),
         dot(PushConstants.previousWorldRow2, localPosition),
@@ -43,16 +52,18 @@ void main()
     outWorldPosition = worldPosition.xyz;
     // Normals use the inverse transpose so editor-authored non-uniform scale
     // does not skew either diffuse lighting or the shadow normal offset.
-    mat3 model = mat3(PushConstants.render_matrix);
-    mat3 normalMatrix = transpose(inverse(model));
-    outNormal = normalize(normalMatrix * vertex.normal);
+    mat3 model = mat3(world);
+    float modelDeterminant=determinant(model);
+    mat3 fallbackNormal=(!isnan(modelDeterminant) && !isinf(modelDeterminant) && abs(modelDeterminant)>1e-12)
+        ? transpose(inverse(model)) : mat3(1);
+    outNormal=instanced?instance_normal(instance,vertex.normal):normalize(fallbackNormal*vertex.normal);
     // A tangent is a direction along the surface, so it transforms with the
     // model matrix, not the inverse transpose.  The fragment shader
     // re-orthogonalizes it against the interpolated normal.  A mirroring
     // transform flips the frame's handedness.
     outTangent = vec4(
         model * vertex.tangent.xyz,
-        vertex.tangent.w * (determinant(model) < 0.0 ? -1.0 : 1.0));
+        vertex.tangent.w * (instanced?instance.flags.y:(modelDeterminant < 0.0 ? -1.0 : 1.0)));
     outColor = vertex.color * materialData.colorFactors;
     vec2 uvScale = materialData.uvTransform.xy;
     if (all(lessThan(abs(uvScale), vec2(0.0001)))) {

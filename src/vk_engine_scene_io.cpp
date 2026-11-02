@@ -49,6 +49,10 @@ SceneSettings VulkanEngine::capture_scene_settings() const
     settings.warmth = _postProcess.whiteBalance.x;
     settings.tint = _postProcess.whiteBalance.y;
     settings.giSaturation = _ssgi.colorSaturation;
+    settings.celShading=_postProcess.celShading;settings.celBands=_postProcess.celBands;settings.celEdge=_postProcess.celEdge;
+    settings.bloom=_postProcess.bloomEnabled;settings.bloomStrength=_postProcess.bloomStrength;
+    settings.bloomThreshold=_postProcess.bloomThreshold;settings.bloomScatter=_postProcess.bloomScatter;
+    settings.tonemapOperator=_postProcess.tonemapOperator;
     if (_ssao.sceneOverride) settings.ssao = SceneSettings::SSAO{
         _ssao.settings.enabled, _ssao.settings.radius, _ssao.settings.bias,
         _ssao.settings.intensity, _ssao.settings.power};
@@ -71,6 +75,10 @@ void VulkanEngine::apply_scene_settings(const SceneSettings& settings)
     _traceSettings.lighting.environmentTint = glm::vec4(settings.environmentTint, 0);
     _postProcess.whiteBalance = glm::vec2(settings.warmth, settings.tint);
     _ssgi.colorSaturation = settings.giSaturation;
+    _postProcess.celShading=settings.celShading;_postProcess.celBands=settings.celBands;_postProcess.celEdge=settings.celEdge;
+    _postProcess.bloomEnabled=settings.bloom;_postProcess.bloomStrength=settings.bloomStrength;
+    _postProcess.bloomThreshold=settings.bloomThreshold;_postProcess.bloomScatter=settings.bloomScatter;
+    _postProcess.tonemapOperator=settings.tonemapOperator;
     _ssao.settings = SSAOSettings{};
     _ssao.sceneOverride = settings.ssao.has_value();
     if (settings.ssao) {

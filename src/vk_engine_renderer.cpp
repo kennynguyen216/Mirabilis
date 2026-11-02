@@ -36,6 +36,22 @@ void set_previous_world_rows(
 
 } // namespace
 
+VkDeviceAddress VulkanEngine::upload_draw_instances(std::span<const GPUDrawInstance> instances)
+{
+    if(instances.empty())return 0;
+    auto& frame=get_current_frame();const size_t page=frame.instancePageCursor++;
+    if(page==frame.instancePages.size())frame.instancePages.emplace_back();
+    auto& buffer=frame.instancePages[page];const size_t bytes=instances.size_bytes();
+    if(buffer.buffer==VK_NULL_HANDLE || buffer.info.size<bytes) {
+        if(buffer.buffer!=VK_NULL_HANDLE)destroy_buffer(buffer);
+        buffer=create_buffer(std::max<size_t>(bytes,64*1024),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
+    }
+    std::memcpy(buffer.info.pMappedData,instances.data(),bytes);
+    vmaFlushAllocation(_allocator,buffer.allocation,0,bytes);
+    VkBufferDeviceAddressInfo info{.sType=VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};info.buffer=buffer.buffer;
+    return vkGetBufferDeviceAddress(_device,&info);
+}
+
 bool is_visible(const RenderObject& object, const glm::mat4& viewProjection)
 {
     const std::array<glm::vec3, 8> corners = {
@@ -175,6 +191,8 @@ void VulkanEngine::init_scene_descriptors()
         builder.add_binding(13, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         builder.add_binding(14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         builder.add_binding(15, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        builder.add_binding(22, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(23, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         for (uint32_t binding = 17; binding <= 21; ++binding)
             builder.add_binding(binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         // IQ2: the sun casters' TLAS, only on the ray-query device, where
@@ -269,6 +287,8 @@ void VulkanEngine::init_descriptor_cleanup()
         for (FrameData& frame : _frames) {
             frame._frameDescriptors.destroy_pools(_device);
             destroy_buffer(frame.sceneBuffer);
+            for(auto page:frame.instancePages)destroy_buffer(page);
+            for(auto buffer:{frame.clusterInput,frame.clusterInstances,frame.clusterCommands})if(buffer.buffer)destroy_buffer(buffer);
             for (AllocatedBuffer& portalSceneBuffer : frame.portalSceneBuffers) {
                 destroy_buffer(portalSceneBuffer);
             }
@@ -317,6 +337,18 @@ void VulkanEngine::init_pipelines()
     init_shadow_mask_pipeline();
     init_depth_normal_mask_pipeline();
     init_ssgi_pipelines();
+    init_mesh_visibility();
+}
+
+void VulkanEngine::copy_refraction_source(VkCommandBuffer cmd,const AllocatedImage& source,VkExtent2D extent)
+{
+    vkutil::transition_image(cmd,source.image,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    vkutil::transition_image(cmd,_postProcess.sceneCopy.image,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkImageCopy copy{};copy.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.dstSubresource=copy.srcSubresource;
+    copy.extent={std::min(extent.width,_postProcess.sceneCopy.imageExtent.width),std::min(extent.height,_postProcess.sceneCopy.imageExtent.height),1};
+    vkCmdCopyImage(cmd,source.image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,_postProcess.sceneCopy.image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
+    vkutil::transition_image(cmd,_postProcess.sceneCopy.image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vkutil::transition_image(cmd,source.image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
 void VulkanEngine::draw_geometry(
@@ -409,11 +441,15 @@ void VulkanEngine::draw_geometry(
             return std::less<MaterialInstance*>{}(left.material, right.material);
         });
 
-    MaterialPipeline* lastPipeline = nullptr;
+    VkPipeline lastPipeline=VK_NULL_HANDLE;
     MaterialInstance* lastMaterial = nullptr;
     VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
 
-    auto draw = [&](const RenderObject& renderObject) {
+    auto& instances=_instanceScratch;instances.clear();instances.reserve(opaqueDraws.size()+drawContext.TransparentSurfaces.size());
+    for(auto index:opaqueDraws){const auto& object=drawContext.OpaqueSurfaces[index];instances.push_back(make_draw_instance(object.transform,object.previousTransform,object.material&&object.material->doubleSided));}
+    for(const auto& object:drawContext.TransparentSurfaces)instances.push_back(make_draw_instance(object.transform,object.previousTransform,object.material&&object.material->doubleSided));
+    const auto instanceAddress=upload_draw_instances(instances);
+    auto draw = [&](const RenderObject& renderObject,uint32_t firstInstance,uint32_t instanceCount) {
         if (renderObject.material == nullptr) {
             return;
         }
@@ -431,10 +467,13 @@ void VulkanEngine::draw_geometry(
                 ? overrideMaskPipeline
                 : overridePipeline;
         }
-        if (pipeline != lastPipeline) {
-            lastPipeline = pipeline;
+        if(renderObject.material->passType==MaterialPass::Transparent && overridePipeline==&metalRoughMaterial.portalViewPipeline)
+            pipeline=&metalRoughMaterial.portalTransparentPipeline;
+        const VkPipeline selected=instanceCount>1 && pipeline->instancedPipeline ? pipeline->instancedPipeline : pipeline->pipeline;
+        if (selected != lastPipeline) {
+            lastPipeline = selected;
             vkCmdBindPipeline(
-                cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
+                cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selected);
             vkCmdBindDescriptorSets(
                 cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -468,6 +507,7 @@ void VulkanEngine::draw_geometry(
         pushConstants.worldMatrix = renderObject.transform;
         pushConstants.vertexBuffer = renderObject.vertexBufferAddress;
         set_previous_world_rows(pushConstants, renderObject.previousTransform);
+        pushConstants.alignmentPadding=instanceAddress+firstInstance*sizeof(GPUDrawInstance);
         vkCmdPushConstants(
             cmd,
             pipeline->layout,
@@ -475,32 +515,44 @@ void VulkanEngine::draw_geometry(
             0,
             sizeof(GPUDrawPushConstants),
             &pushConstants);
-        vkCmdDrawIndexed(
-            cmd, renderObject.indexCount, 1, renderObject.firstIndex, 0, 0);
+        const auto& ranges=get_current_frame().clusterRanges;
+        const auto objectIndex=writeGBuffer&&&drawContext==&mainDrawContext?size_t(&renderObject-drawContext.OpaqueSurfaces.data()):SIZE_MAX;
+        if(instanceCount==1 && objectIndex<ranges.size() && ranges[objectIndex].second) {
+            const auto [first,count]=ranges[objectIndex];
+            for(uint32_t offset=0;offset<count;) {
+                const auto draws=std::min(count-offset,_meshVisibility.maxIndirectCount);
+                vkCmdDrawIndexedIndirect(cmd,get_current_frame().clusterCommands.buffer,VkDeviceSize(first+offset)*sizeof(VkDrawIndexedIndirectCommand),draws,sizeof(VkDrawIndexedIndirectCommand));
+                offset+=draws;
+            }
+        } else vkCmdDrawIndexed(cmd,renderObject.indexCount,instanceCount,renderObject.firstIndex,0,0);
 
         ++stats.drawcall_count;
-        stats.triangle_count += static_cast<int>(renderObject.indexCount / 3);
+        stats.triangle_count += static_cast<int>(renderObject.indexCount / 3)*instanceCount;
     };
 
-    for (uint32_t drawIndex : opaqueDraws) {
-        draw(drawContext.OpaqueSurfaces[drawIndex]);
+    const bool allowInstancing=SDL_getenv("MIRABILIS_TEST_DISABLE_INSTANCING")==nullptr;
+    for(uint32_t i=0;i<opaqueDraws.size();) {
+        const auto& object=drawContext.OpaqueSurfaces[opaqueDraws[i]];
+        uint32_t end=i+1;
+        while(overridePipeline==nullptr && allowInstancing && end<opaqueDraws.size()) {
+            const auto& next=drawContext.OpaqueSurfaces[opaqueDraws[end]];
+            if(next.material!=object.material || next.indexBuffer!=object.indexBuffer || next.vertexBufferAddress!=object.vertexBufferAddress || next.firstIndex!=object.firstIndex || next.indexCount!=object.indexCount)break;
+            ++end;
+        }
+        draw(object,i,end-i);i=end;
     }
-    // The transparent pipeline is built for the draw image alone, so it must
-    // not blend into the G-buffer targets this pass carries.  Restart with
-    // just the draw image, loading the colour and depth the opaque draws
-    // stored.  An override pipeline already matches this pass as it is.
-    if (writeGBuffer && overridePipeline == nullptr &&
-        !drawContext.TransparentSurfaces.empty()) {
-        vkCmdEndRendering(cmd);
-        renderInfo.colorAttachmentCount = 1;
-        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        stencilAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        vkCmdBeginRendering(cmd, &renderInfo);
-        lastPipeline = nullptr;
-        lastMaterial = nullptr;
+    if(!writeGBuffer && !drawContext.TransparentSurfaces.empty()) {
+        vkCmdEndRendering(cmd);copy_refraction_source(cmd,_drawImage,_drawExtent);
+        depthAttachment.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;stencilAttachment.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;
+        vkCmdBeginRendering(cmd,&renderInfo);lastPipeline=VK_NULL_HANDLE;lastMaterial=nullptr;
     }
-    for (const RenderObject& renderObject : drawContext.TransparentSurfaces) {
-        draw(renderObject);
+    std::vector<uint32_t> transparentOrder;
+    if(!writeGBuffer){transparentOrder.resize(drawContext.TransparentSurfaces.size());for(uint32_t i=0;i<transparentOrder.size();++i)transparentOrder[i]=i;
+        std::stable_sort(transparentOrder.begin(),transparentOrder.end(),[&](uint32_t a,uint32_t b){const auto& left=drawContext.TransparentSurfaces[a];const auto& right=drawContext.TransparentSurfaces[b];
+            return (viewProjection*left.transform*glm::vec4(left.bounds.origin,1)).w>(viewProjection*right.transform*glm::vec4(right.bounds.origin,1)).w;});}
+    for (uint32_t i:transparentOrder) {
+        const auto& object=drawContext.TransparentSurfaces[i];
+        draw(object,uint32_t(opaqueDraws.size())+i,1);
     }
 
     vkCmdEndRendering(cmd);
@@ -513,6 +565,7 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
 {
     GPUSceneData data{};
     data.view = view;
+    build_local_lights(data);
     // Passing far, then near, intentionally builds the reversed-depth
     // projection used by the existing GREATER_OR_EQUAL depth pipeline.
     data.proj = glm::perspective(
@@ -667,6 +720,8 @@ void VulkanEngine::write_emitter_descriptors(FrameData& frame)
     };
     const auto write = [&](VkDescriptorSet set) {
         DescriptorWriter writer;
+        writer.write_image(22,_localShadowAtlas.imageView,_shadow.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.write_image(23,_postProcess.sceneCopy.imageView,_postProcess.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         const std::array<std::pair<uint32_t, VkImageView>, 4> pages{{
             {6, page(_surfaceCache.albedo)}, {10, page(_surfaceCache.emissive)},
             {11, page(_surfaceCache.depth)}, {12, page(_surfaceCache.emitter)}}};

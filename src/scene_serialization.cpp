@@ -21,7 +21,7 @@
 namespace {
 using Json = simdjson::dom::element;
 using Object = simdjson::dom::object;
-constexpr std::string_view KnownComponents[]{"name", "transform", "visibility", "mesh", "material", "collider", "portalPlaceable", "timeTrialRole", "transformDrivenExternally", "rigidBody", "script"};
+constexpr std::string_view KnownComponents[]{"name", "transform", "visibility", "mesh", "material", "collider", "portalPlaceable", "timeTrialRole", "transformDrivenExternally", "rigidBody", "script", "light"};
 [[noreturn]] void invalid(std::string message) { throw std::runtime_error(std::move(message)); }
 Object object(Json value) { Object result; if (value.get_object().get(result)) invalid("Expected JSON object"); return result; }
 simdjson::dom::array array(Json value) { simdjson::dom::array result; if (value.get_array().get(result)) invalid("Expected JSON array"); return result; }
@@ -138,6 +138,11 @@ void read_material(Object json, SceneMaterial& material, bool legacy) {
     read_float(json,"emissionStrength",material.emissionStrength);
     read_float(json,"transmission",material.transmission);
     read_float(json,"ior",material.ior);
+    read_bool(json,"doubleSided",material.doubleSided); read_bool(json,"celShading",material.celShading);
+    read_string(json,"occlusionTexture",material.occlusionTexturePath); read_string(json,"specularTexture",material.specularTexturePath);
+    read_float(json,"occlusionStrength",material.occlusionStrength); read_float(json,"specular",material.specular);
+    read_float(json,"subsurface",material.subsurface); read_float(json,"thickness",material.thickness);
+    read_optional(json,"subsurfaceColor",material.subsurfaceColor,vector<glm::vec3>);
     if(legacy) {
         material.emissionColor=glm::clamp(material.emissionColor,glm::vec3(0),glm::vec3(10000));
         material.emissionStrength=std::clamp(material.emissionStrength,0.f,10000.f);
@@ -164,6 +169,14 @@ void read_settings(Object document, uint64_t version, const SceneSettings& defau
     if(const auto item=optional(document,"colorGrading")) {
         const auto json=object(*item); read_float(json,"warmth",settings.warmth); read_float(json,"tint",settings.tint); read_float(json,"giSaturation",settings.giSaturation);
         if(version==1) { settings.warmth=std::clamp(settings.warmth,-1.f,1.f); settings.tint=std::clamp(settings.tint,-1.f,1.f); settings.giSaturation=std::clamp(settings.giSaturation,0.f,1.f); }
+    }
+    if(const auto item=optional(document,"rendering")) {
+        const auto json=object(*item);
+        read_bool(json,"celShading",settings.celShading); read_float(json,"celBands",settings.celBands);
+        read_float(json,"celEdge",settings.celEdge); read_bool(json,"bloom",settings.bloom);
+        read_float(json,"bloomStrength",settings.bloomStrength); read_float(json,"bloomThreshold",settings.bloomThreshold);
+        read_float(json,"bloomScatter",settings.bloomScatter);
+        if(const auto value=optional(json,"tonemapOperator")) {const auto op=integer(*value);if(op>2)invalid("Unknown tonemap operator");settings.tonemapOperator=int(op);}
     }
     if(const auto item=optional(document,"ssao")) {
         settings.ssao.emplace(); auto& ao=*settings.ssao; const auto json=object(*item);
@@ -203,6 +216,19 @@ std::optional<RigidBody> read_components(Object json, uint64_t version, mirabili
             read_float(value,"restitution",rigidBody->restitution); read_float(value,"gravityFactor",rigidBody->gravityFactor);
             if(!valid_component(*rigidBody))invalid("Invalid rigid-body value");
         }
+        if(const auto item=optional(components,"light")) {
+            Light light; const auto value=object(*item);
+            if(const auto field=optional(value,"type")) {
+                const auto type=string(*field);
+                if(type!="Point" && type!="Spot")invalid("Unknown light type");
+                light.type=type=="Spot"?LightType::Spot:LightType::Point;
+            }
+            read_optional(value,"color",light.color,vector<glm::vec3>);
+            read_float(value,"intensity",light.intensity); read_float(value,"range",light.range);
+            read_float(value,"innerCone",light.innerCone); read_float(value,"outerCone",light.outerCone);
+            read_bool(value,"enabled",light.enabled); read_bool(value,"castShadows",light.castShadows);
+            if(!scene.set(ref,light))invalid("Invalid light component");
+        }
         if(const auto item=optional(components,"script")) {
             const auto value=object(*item);
             std::set<std::string> keys;
@@ -237,6 +263,9 @@ bool finite(float value) { return std::isfinite(value); }
 bool finite(glm::vec3 value) { return finite(value.x)&&finite(value.y)&&finite(value.z); }
 void validate_settings(const SceneSettings& s) {
     if(s.nextActor==0 || s.skybox.empty() || !finite(s.sunDirection) || glm::dot(s.sunDirection,s.sunDirection)<0.000001f || !finite(s.shadowRadius) || s.shadowRadius<=0 || !finite(s.shadowDepthBias) || s.shadowDepthBias<0 || !finite(s.shadowNormalBias) || s.shadowNormalBias<0 || !finite(s.sunRadiance) || glm::any(glm::lessThan(s.sunRadiance,glm::vec3(0))) || !finite(s.environmentIntensity) || s.environmentIntensity<0 || !finite(s.environmentTint) || glm::any(glm::lessThan(s.environmentTint,glm::vec3(0))) || !finite(s.warmth) || std::abs(s.warmth)>1 || !finite(s.tint) || std::abs(s.tint)>1 || !finite(s.giSaturation) || s.giSaturation<0 || s.giSaturation>1)invalid("Invalid scene settings");
+    if(!finite(s.celBands)||s.celBands<2||s.celBands>16||!finite(s.celEdge)||s.celEdge<0||s.celEdge>1||
+        !finite(s.bloomStrength)||s.bloomStrength<0||s.bloomStrength>2||!finite(s.bloomThreshold)||s.bloomThreshold<0||
+        !finite(s.bloomScatter)||s.bloomScatter<0||s.bloomScatter>1||s.tonemapOperator<0||s.tonemapOperator>2)invalid("Invalid rendering settings");
     if(s.ssao) { const auto& ao=*s.ssao; if(!finite(ao.radius)||ao.radius<=0||!finite(ao.bias)||ao.bias<0||!finite(ao.intensity)||ao.intensity<0||!finite(ao.power)||ao.power<=0)invalid("Invalid SSAO settings"); }
 }
 void validate_portal(const mirabilis::Scene& scene,const Portal& portal) {
@@ -374,6 +403,7 @@ bool validate_authored_scene(const mirabilis::Scene& scene,const SceneSettings& 
             if(scene.pending(ref))invalid("Cannot save pending authored entity");
             const auto transform=scene.read<Transform>(ref);const auto visibility=scene.read<Visibility>(ref);const auto mesh=scene.read<SceneMeshAsset>(ref);const auto material=scene.read<SceneMaterial>(ref);const auto collider=scene.read<Collider>(ref);const auto role=scene.read<TimeTrial>(ref);
             if(!scene.read<Name>(ref)||!transform||!visibility||!mesh||!material||!collider||!role||!valid_component(*transform)||!valid_component(*visibility)||!valid_component(*mesh)||!valid_component(*material)||!valid_component(*collider)||!valid_component(*role))invalid("Invalid saved component value");
+            if(const auto light=scene.read<Light>(ref);light && !valid_component(*light))invalid("Invalid light component");
             const auto body=scene.read<RigidBody>(ref);
             if((body&&!valid_component(*body)) || !scene.validate_physics_edit(ref,body,collider,transform))invalid("Invalid saved physics settings: "+scene.last_error());
             if(const auto script=scene.read<Script>(ref)) {
@@ -406,6 +436,9 @@ bool serialize_scene_json(const mirabilis::Scene& scene,const SceneSettings& set
     out<<"{\n  \"version\": 2,\n  \"nextActor\": "<<settings.nextActor<<",\n  \"nextPersistentId\": "<<scene.next_persistent_id()<<",\n  \"lighting\": {\"skybox\": "<<quote(settings.skybox)<<", \"sunDirection\": ";write_vector(out,settings.sunDirection);
     out<<", \"shadowsEnabled\": "<<settings.shadowsEnabled<<", \"shadowRadius\": "<<settings.shadowRadius<<", \"shadowDepthBias\": "<<settings.shadowDepthBias<<", \"shadowNormalBias\": "<<settings.shadowNormalBias<<"},\n  \"referenceLighting\": {\"sunRadiance\": ";write_vector(out,settings.sunRadiance);
     out<<", \"environmentIntensity\": "<<settings.environmentIntensity<<", \"blackEnvironment\": "<<settings.blackEnvironment<<", \"environmentTint\": ";write_vector(out,settings.environmentTint);out<<"},\n  \"colorGrading\": {\"warmth\": "<<settings.warmth<<", \"tint\": "<<settings.tint<<", \"giSaturation\": "<<settings.giSaturation<<'}';
+    out<<",\n  \"rendering\": {\"celShading\": "<<settings.celShading<<", \"celBands\": "<<settings.celBands
+       <<", \"celEdge\": "<<settings.celEdge<<", \"bloom\": "<<settings.bloom<<", \"bloomStrength\": "<<settings.bloomStrength
+       <<", \"bloomThreshold\": "<<settings.bloomThreshold<<", \"bloomScatter\": "<<settings.bloomScatter<<", \"tonemapOperator\": "<<settings.tonemapOperator<<'}';
     if(settings.ssao){const auto& ao=*settings.ssao;out<<",\n  \"ssao\": {\"enabled\": "<<ao.enabled<<", \"radius\": "<<ao.radius<<", \"bias\": "<<ao.bias<<", \"intensity\": "<<ao.intensity<<", \"power\": "<<ao.power<<'}';}
     out<<",\n  \"authoredPortals\": [";bool first=true;
     const auto writePortal=[&](const Portal& p){if(!first)out<<", ";first=false;out<<"{\"hostWallObject\": ";write_reference(out,p.hostWallObject);out<<", \"position\": ";write_vector(out,p.position);out<<", \"normal\": ";write_vector(out,p.normal);out<<", \"up\": ";write_vector(out,p.up);out<<", \"halfWidth\": "<<p.halfWidth<<", \"halfHeight\": "<<p.halfHeight<<'}';};
@@ -416,9 +449,20 @@ bool serialize_scene_json(const mirabilis::Scene& scene,const SceneSettings& set
         const auto& hierarchy=*scene.read<Hierarchy>(ref);const auto& transform=*scene.read<Transform>(ref);const auto& visibility=*scene.read<Visibility>(ref);const auto& mesh=*scene.read<SceneMeshAsset>(ref);const auto& material=*scene.read<SceneMaterial>(ref);const auto& collider=*scene.read<Collider>(ref);const auto& role=*scene.read<TimeTrial>(ref);
         if(!first)out<<',';first=false;out<<"\n    {\"id\": "<<ref.persistentId<<", \"parent\": ";write_reference(out,hierarchy.parent);out<<", \"siblingIndex\": "<<siblingCounts[hierarchy.parent]++<<", \"components\": {";
         out<<"\"name\": {\"value\": "<<quote(scene.read<Name>(ref)->value)<<"}, \"transform\": {\"position\": ";write_vector(out,transform.position);out<<", \"rotation\": ";write_vector(out,transform.rotation);out<<", \"scale\": ";write_vector(out,transform.scale);out<<"}, \"visibility\": {\"visible\": "<<visibility.visible<<", \"layer\": "<<static_cast<int>(visibility.layer)<<"}, \"mesh\": {\"asset\": "<<quote(asset_name(mesh.assetKind))<<", \"modelPath\": "<<quote(mesh.modelPath)<<"}, \"material\": {\"enabled\": "<<material.enabled<<", \"baseColorTexture\": "<<quote(material.baseColorTexturePath)<<", \"normalTexture\": "<<quote(material.normalTexturePath)<<", \"metallicRoughnessTexture\": "<<quote(material.metalRoughTexturePath)<<", \"tint\": ";write_vector(out,material.colorTint);
-        out<<", \"uvScale\": ";write_vector(out,material.uvScale);out<<", \"metallic\": "<<material.metallic<<", \"roughness\": "<<material.roughness<<", \"debugChecker\": "<<material.debugChecker<<", \"emissionColor\": ";write_vector(out,material.emissionColor);out<<", \"emissionStrength\": "<<material.emissionStrength<<", \"transmission\": "<<material.transmission<<", \"ior\": "<<material.ior<<"}, \"collider\": {\"enabled\": "<<collider.hasCollision<<", \"shape\": "<<static_cast<int>(collider.collisionShape)<<", \"center\": ";write_vector(out,collider.colliderCenter);out<<", \"halfExtents\": ";write_vector(out,collider.colliderHalfExtents);out<<"}, \"timeTrialRole\": {\"role\": "<<quote(role_name(role.role))<<'}';
+        out<<", \"uvScale\": ";write_vector(out,material.uvScale);out<<", \"metallic\": "<<material.metallic<<", \"roughness\": "<<material.roughness<<", \"debugChecker\": "<<material.debugChecker<<", \"emissionColor\": ";write_vector(out,material.emissionColor);out<<", \"emissionStrength\": "<<material.emissionStrength<<", \"transmission\": "<<material.transmission<<", \"ior\": "<<material.ior<<", \"doubleSided\": "<<material.doubleSided<<", \"celShading\": "<<material.celShading
+            <<", \"occlusionTexture\": "<<quote(material.occlusionTexturePath)<<", \"specularTexture\": "<<quote(material.specularTexturePath)
+            <<", \"occlusionStrength\": "<<material.occlusionStrength<<", \"specular\": "<<material.specular
+            <<", \"subsurface\": "<<material.subsurface<<", \"thickness\": "<<material.thickness<<", \"subsurfaceColor\": ";
+        write_vector(out,material.subsurfaceColor);out<<"}, \"collider\": {\"enabled\": "<<collider.hasCollision<<", \"shape\": "<<static_cast<int>(collider.collisionShape)<<", \"center\": ";write_vector(out,collider.colliderCenter);out<<", \"halfExtents\": ";write_vector(out,collider.colliderHalfExtents);out<<"}, \"timeTrialRole\": {\"role\": "<<quote(role_name(role.role))<<'}';
         if(scene.has<PortalPlaceable>(ref))out<<", \"portalPlaceable\": {}";
         if(const auto body=scene.read<RigidBody>(ref))out<<", \"rigidBody\": {\"motion\": "<<quote(body->motion==BodyMotion::Dynamic?"Dynamic":"Static")<<", \"mass\": "<<body->mass<<", \"friction\": "<<body->friction<<", \"restitution\": "<<body->restitution<<", \"gravityFactor\": "<<body->gravityFactor<<'}';
+        if(const auto light=scene.read<Light>(ref)) {
+            out<<", \"light\": {\"type\": "<<quote(light->type==LightType::Spot?"Spot":"Point")<<", \"color\": ";
+            write_vector(out,light->color);
+            out<<", \"intensity\": "<<light->intensity<<", \"range\": "<<light->range
+                <<", \"innerCone\": "<<light->innerCone<<", \"outerCone\": "<<light->outerCone
+                <<", \"enabled\": "<<light->enabled<<", \"castShadows\": "<<light->castShadows<<'}';
+        }
         if(const auto script=scene.read<Script>(ref))out<<", \"script\": {\"assembly\": "<<quote(script->assembly)<<", \"type\": "<<quote(script->typeName)<<", \"enabled\": "<<script->enabled<<", \"fields\": "<<serialize_script_fields(script->fields)<<'}';
         if(scene.has<TransformDrivenExternally>(ref))out<<", \"transformDrivenExternally\": {}";
         if(const auto unknown=scene.read<UnknownComponents>(ref))for(const auto& [key,value]:unknown->blocks)out<<", "<<quote(key)<<": "<<value;

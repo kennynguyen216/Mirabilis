@@ -1,0 +1,32 @@
+#version 450
+layout(local_size_x=64) in;
+struct Cluster {vec4 minimum;vec4 maximum;uvec4 range;};
+struct Instance {mat4 world;vec4 previousRows[3];vec4 normalRows[3];vec4 flags;};
+struct Command {uint indexCount;uint instanceCount;uint firstIndex;int vertexOffset;uint firstInstance;};
+layout(std430,set=0,binding=0) readonly buffer Clusters {Cluster clusters[];};
+layout(std430,set=0,binding=1) readonly buffer Instances {Instance instances[];};
+layout(std430,set=0,binding=2) writeonly buffer Commands {Command commands[];};
+layout(r32f,set=0,binding=4) uniform readonly image2D depthTiles;
+layout(push_constant) uniform Settings {mat4 viewProjection;uvec4 extent;} push;
+bool visible(Cluster cluster)
+{
+    mat4 clipMatrix=push.viewProjection*instances[cluster.range.z].world;
+    vec3 low=vec3(1e30),high=vec3(-1e30);
+    for(int corner=0;corner<8;++corner){
+        vec3 p=mix(cluster.minimum.xyz,cluster.maximum.xyz,vec3((corner&1)!=0?1:0,(corner&2)!=0?1:0,(corner&4)!=0?1:0));
+        vec4 clip=clipMatrix*vec4(p,1);
+        if(clip.w<=1e-4)return true;
+        vec3 ndc=clip.xyz/clip.w;low=min(low,ndc);high=max(high,ndc);
+    }
+    if(low.x>1||low.y>1||low.z>1||high.x< -1||high.y< -1||high.z<0)return false;
+    // Near-plane intersections and partially clipped bounds remain visible.
+    if(low.z<0||high.z>1)return true;
+    ivec2 begin=clamp(ivec2(floor((low.xy*0.5+0.5)*vec2(push.extent.xy)-1.0))/8,ivec2(0),ivec2((push.extent.xy+7u)/8u)-1);
+    ivec2 end=clamp(ivec2(ceil((high.xy*0.5+0.5)*vec2(push.extent.xy)+1.0))/8,ivec2(0),ivec2((push.extent.xy+7u)/8u)-1);
+    if((end.x-begin.x+1)*(end.y-begin.y+1)>256)return true;
+    float nearest=high.z+max(1e-5,high.z*0.005);
+    for(int y=begin.y;y<=end.y;++y)for(int x=begin.x;x<=end.x;++x)
+        if(nearest>=imageLoad(depthTiles,ivec2(x,y)).r)return true;
+    return false;
+}
+void main(){uint i=gl_GlobalInvocationID.x;if(i>=push.extent.z)return;Cluster c=clusters[i];commands[i]=Command(visible(c)?c.range.y:0,1,c.range.x,0,0);}
