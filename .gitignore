@@ -38,6 +38,7 @@
 /bin/
 /assets/brickadia/
 /assets/sponza/
+/assets/sponza_hq/
 /shaders/*.spv
 /.vs/
 __pycache__/

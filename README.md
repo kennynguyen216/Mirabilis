@@ -152,6 +152,36 @@ is `assets/scenes`; browsing does not rename or move files and break references.
 `-DMIRABILIS_BUILD_QT_EDITOR=OFF` to omit the Qt dependency entirely. Bounded
 GPU tests use SDL unless Qt is explicitly enabled. Press `Esc` or close to exit.
 
+### Original 4K Sponza and curtains
+
+Download Intel's original Sponza and Colorful Curtains glTF assets with:
+
+```powershell
+python scripts/fetch_sponza_hq.py
+```
+
+The installer fetches only the glTF files, geometry, referenced PNG textures and
+credits from [Intel's official packages](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-research/samples.html).
+It verifies archive CRCs, resumes by checking completed files, and retains all
+80 original 4096x4096 textures without resizing. The selected files occupy about
+2.27 GiB; the large downloads stay in the ignored `assets/sponza_hq/` directory.
+The source licenses and attribution are retained beside both models.
+
+Two new scenes are available through the Qt content browser:
+
+- `sponza_hq_preview.json`: 4K base-color maps and all original 4K curtain maps,
+  with existing 2K normal/roughness maps for the building. This optional profile
+  references the original assets; it does not modify or resize the downloads.
+  It is validated on the 6 GB RTX 3060 Laptop GPU.
+- `sponza_hq_full_4k.json`: original 4K maps for both building and curtains. The current
+  RGBA8 GPU uploads need about 6.67 GiB for these textures alone, before meshes,
+  render targets and other resources. It fails with device-memory exhaustion on
+  the 6 GB GPU; GPU texture compression or streaming is needed for that card.
+
+The original `sponza_showcase.json` and its 2K assets remain unchanged so prior
+benchmark results still refer to the same workload. When opening the preview,
+the hanging red/blue curtains and green banners come from Intel's add-on package.
+
 ### Profiling and shared services
 
 The **Profiler** debug window is available with the editor's debug panels. CPU
