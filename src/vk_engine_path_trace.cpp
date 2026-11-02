@@ -443,12 +443,14 @@ void VulkanEngine::update_trace_scene() {
     };
     // Raster GI shares the static-cache policy; the reference renderer keeps moving geometry.
     const bool includeAwakeDynamics = _rendererMode == RendererMode::SoftwarePathTrace;
+    const bool fullGpuTrace=includeAwakeDynamics || !_rayQueryShadows || SDL_getenv("MIRABILIS_TEST_FULL_TRACE_UPLOAD");
     const auto included = [includeAwakeDynamics](const RenderObject& draw) {
         return includeAwakeDynamics || draw.contributesToStaticCaches;
     };
     uint64_t drawHash=1469598103934665603ull;
     auto append=[&](const void* data,size_t bytes) {auto p=static_cast<const uint8_t*>(data);for(size_t i=0;i<bytes;++i) {drawHash^=p[i];drawHash*=1099511628211ull;}};
     append(&includeAwakeDynamics, sizeof(includeAwakeDynamics));
+    append(&fullGpuTrace, sizeof(fullGpuTrace));
     for(const auto& draw:worldDrawContext.OpaqueSurfaces) {
         if (!included(draw)) continue;
         append(&draw.transform,sizeof(draw.transform)); append(&draw.vertexBufferAddress,sizeof(draw.vertexBufferAddress));
@@ -465,6 +467,7 @@ void VulkanEngine::update_trace_scene() {
     std::vector<TraceTriangle> triangles;
     std::vector<TraceMaterial> materials;
     std::vector<uint32_t> texels;
+    std::vector<std::shared_ptr<TraceTextureSource>> cpuTextures;
     std::unordered_map<const TraceTextureSource*,glm::uvec4> textures;
     std::unordered_map<const MaterialInstance*,uint32_t> materialIds;
     // Reserve once: growing the ~630 MiB Sponza triangle vector otherwise
@@ -480,7 +483,7 @@ void VulkanEngine::update_trace_scene() {
         triangleCapacity += (end - first) / 3;
         if (auto texture = draw.material->traceTexture;
             texture && textures.emplace(texture.get(), glm::uvec4(0)).second) {
-            texelCapacity += texture->rgba.size();
+            if (fullGpuTrace) texelCapacity += texture->rgba.size();
         }
     }
     textures.clear();
@@ -497,10 +500,11 @@ void VulkanEngine::update_trace_scene() {
         auto [entry,inserted]=materialIds.emplace(draw.material,uint32_t(materials.size()));
         if (inserted) {
             materials.push_back({draw.material->traceBaseColor,draw.material->traceEmission,draw.material->traceParameters});
+            cpuTextures.push_back(fullGpuTrace ? nullptr : draw.material->traceTexture);
             materials.back().uvScale=glm::vec4(draw.material->traceUVScale,0,0);
             if(auto texture=draw.material->traceTexture) {
                 auto [record,isNew]=textures.emplace(texture.get(),glm::uvec4(uint32_t(texels.size()),texture->width,texture->height,0));
-                if(isNew) texels.insert(texels.end(),texture->rgba.begin(),texture->rgba.end());
+                if(isNew && fullGpuTrace) texels.insert(texels.end(),texture->rgba.begin(),texture->rgba.end());
                 materials.back().texture=record->second;
             }
         }
@@ -526,13 +530,18 @@ void VulkanEngine::update_trace_scene() {
     uint64_t hash=1469598103934665603ull;
     const auto hashBytes=[&](const void* data,size_t size) { auto p=static_cast<const unsigned char*>(data); for(size_t i=0;i<size;++i) { hash^=p[i]; hash*=1099511628211ull; } };
     hashBytes(&includeAwakeDynamics, sizeof(includeAwakeDynamics));
+    hashBytes(&fullGpuTrace, sizeof(fullGpuTrace));
     hashBytes(triangles.data(),triangles.size()*sizeof(TraceTriangle)); hashBytes(materials.data(),materials.size()*sizeof(TraceMaterial));
     hashBytes(texels.data(),texels.size()*sizeof(uint32_t));
+    if (!fullGpuTrace) for (const auto& source:cpuTextures) {
+        const auto* identity=source.get(); hashBytes(&identity,sizeof(identity));
+    }
     if (_traceTriangleBuffer.buffer && hash==_traceSceneHash) {uploadPortals(); uploadLighting(); return;}
     VK_CHECK(vkDeviceWaitIdle(_device)); // Rare scene edits retire all readers before replacing descriptors/buffers.
     _traceSceneHash=hash; ++_traceSceneRevision;
     _traceTriangles=std::move(triangles); _traceMaterials=std::move(materials);
     _traceTexels=std::move(texels);
+    _traceCpuTextures=std::move(cpuTextures);
     _traceSettings.lighting.counts.y=uint32_t(_tracePortals.size());
     _traceNodes=build_trace_bvh(_traceTriangles);
     _traceEmitters.clear();
@@ -549,9 +558,7 @@ void VulkanEngine::update_trace_scene() {
         vmaFlushAllocation(_allocator,buffer.allocation,0,VK_WHOLE_SIZE);
     };
     // Hardware raster GI only needs emitter triangles on the GPU. Texture
-    // texels and the complete software BVH remain CPU/reference data.
-    const bool fullGpuTrace=_rendererMode==RendererMode::SoftwarePathTrace || !_rayQueryShadows ||
-        SDL_getenv("MIRABILIS_TEST_FULL_TRACE_UPLOAD");
+    // CPU albedo reads retain immutable source images instead of repacking them.
     std::vector<TraceTriangle> emitterTriangles;
     std::vector<uint32_t> emitterIndices;
     if (!fullGpuTrace) for (uint32_t index:_traceEmitters) {

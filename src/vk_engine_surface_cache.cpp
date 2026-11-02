@@ -1746,7 +1746,9 @@ glm::vec3 VulkanEngine::trace_albedo(const TraceTriangle& t, glm::vec2 bary) con
     const auto texel = [&](glm::ivec2 xy) {
         const glm::ivec2 size(m.texture.y, m.texture.z);
         xy = (xy % size + size) % size;
-        const uint32_t packed = _traceTexels[m.texture.x + xy.y * size.x + xy.x];
+        const auto& source = _traceCpuTextures[t.meta.x];
+        const size_t index = size_t(xy.y) * size.x + xy.x;
+        const uint32_t packed = source ? source->rgba[index] : _traceTexels[m.texture.x + index];
         return glm::vec3(srgb(float(packed & 255u) / 255.0f),
             srgb(float((packed >> 8u) & 255u) / 255.0f),
             srgb(float((packed >> 16u) & 255u) / 255.0f));
@@ -1847,6 +1849,11 @@ void VulkanEngine::update_albedo_volume()
         if (!(cells[i].w > 0.0f)) continue;
         const glm::vec3 albedo = glm::clamp(glm::vec3(cells[i]) / cells[i].w, 0.0f, 1.0f);
         texels[i] = glm::packUnorm4x8(glm::vec4(albedo, 1.0f));
+    }
+    if (SDL_getenv("MIRABILIS_TEST_FRAMES") && SDL_getenv("MIRABILIS_TEST_ALBEDO_CHECKSUM")) {
+        uint64_t checksum=1469598103934665603ull, colored=0;
+        for (uint32_t value:texels) { checksum=(checksum^value)*1099511628211ull; colored+=(value&0x00ffffffu)!=0; }
+        fmt::print("GI albedo checksum={} texels={} colored={}\n",checksum,texels.size(),colored);
     }
     if (_surfaceCache.albedoVolume.image != VK_NULL_HANDLE) {
         VK_CHECK(vkDeviceWaitIdle(_device));

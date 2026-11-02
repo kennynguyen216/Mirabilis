@@ -29,6 +29,7 @@ Click the preview to watch the run.
 - Includes real-time shadows, ambient occlusion, screen-space GI, optional Lumen-inspired world GI, and a software path-tracing reference mode.
 - On ray-query devices, world GI uses reusable mesh BLASes and frame-local TLASes, including moving opaque bodies, without requiring distance-field bakes. Software world tracing retains its bake requirement.
 - Relights the surface cache in bounded strips in the frame command buffer, retaining sky/emission pages during sun or punctual-light edits. Raster, cache and reference lighting share punctual-light attenuation.
+- Hardware GI borrows immutable CPU texture sources and uploads only emitter geometry, avoiding duplicate packed texture arrays; the software reference keeps its full payload.
 - Offers optional smooth/rough opaque scene reflections with GGX visible-normal sampling and separate static-view temporal history. Moving cameras, moving geometry and lighting changes reject that history. Cache-lit hits and scalar-material direct fallback are approximations; textured uncached hits remain conservative.
 - Includes shadowed point/spot lights, two-sided cloth lighting, material AO/specular controls, approximate thin-surface subsurface and screen-space glass refraction.
 - Offers optional cel shading, multi-scale HDR bloom, and ACES/Reinhard/PBR Neutral tone mapping.
@@ -290,6 +291,7 @@ The world-GI correctness gate and focused benchmark use fresh output directories
 ```powershell
 python tests/lumen_gate.py --output C:/temp/mirabilis-lumen-check --configuration Debug
 python tests/reflection_history_gate.py --output C:/temp/mirabilis-reflection-history
+python tests/trace_texture_gate.py --output C:/temp/mirabilis-trace-textures
 python tests/lumen_benchmark.py --output C:/temp/mirabilis-lumen-timing
 python tests/lumen_benchmark.py --output C:/temp/mirabilis-relight-timing --hitches
 ```

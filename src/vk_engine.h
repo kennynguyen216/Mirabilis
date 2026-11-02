@@ -656,6 +656,7 @@ class VulkanEngine{
     std::vector<uint32_t> _traceEmitters;
     std::vector<glm::vec4> read_trace_image(const AllocatedImage& image);
     std::vector<uint32_t> _traceTexels;
+    std::vector<std::shared_ptr<TraceTextureSource>> _traceCpuTextures;
     AllocatedBuffer _traceTexelBuffer{};
     uint64_t _traceDrawHash{0};
     std::vector<TracePortal> _tracePortals;
