@@ -289,6 +289,7 @@ The world-GI correctness gate and focused benchmark use fresh output directories
 
 ```powershell
 python tests/lumen_gate.py --output C:/temp/mirabilis-lumen-check --configuration Debug
+python tests/reflection_history_gate.py --output C:/temp/mirabilis-reflection-history
 python tests/lumen_benchmark.py --output C:/temp/mirabilis-lumen-timing
 python tests/lumen_benchmark.py --output C:/temp/mirabilis-relight-timing --hitches
 ```
