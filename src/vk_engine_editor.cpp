@@ -2172,12 +2172,12 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
         draw_editor_gizmo();
     }
     
-    stats.frametime = deltaTime * 1000.0f;
     const float horizontalSpeed = glm::length(glm::vec2(
         _playerMovement.velocity.x,
         _playerMovement.velocity.z));
     if (_editorMode && _editorUi.showDebugPanels) {
         draw_statistics_panel(horizontalSpeed);
+        draw_profiling_panel();
     }
     
     if (!_editorMode) {

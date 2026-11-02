@@ -95,8 +95,8 @@ class GIStability(unittest.TestCase):
     def test_pending_gpu_work_is_not_a_fatal_timeout(self):
         body = (ROOT / "src" / "vk_engine.cpp").read_text(encoding="utf-8")
         self.assertIn("while (result == VK_TIMEOUT)", body)
-        self.assertIn("wait_for_gpu_fence(_device, get_current_frame()._renderFence)", body)
-        self.assertIn("wait_for_gpu_fence(_device, _immFence)", body)
+        self.assertIn("wait_for_gpu_fence(_device, get_current_frame()._renderFence, _profiler)", body)
+        self.assertIn("wait_for_gpu_fence(_device, _immFence, _profiler)", body)
         self.assertIn("if (acquireResult == VK_TIMEOUT || acquireResult == VK_NOT_READY) return", body)
         self.assertIn("draw_frame_ui(wallDeltaTime)", body,
                       "FPS must report real time, not the physics clamp's 10 FPS floor")

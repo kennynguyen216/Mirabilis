@@ -49,7 +49,7 @@ function(mirabilis_deploy_scripts TARGET)
     VERBATIM)
 endfunction()
 
-add_library(mirabilis_core STATIC scene.cpp scene_math.cpp scene_queries.cpp scene_serialization.cpp player_movement.cpp physics_world.cpp script_host.cpp)
+add_library(mirabilis_core STATIC scene.cpp scene_math.cpp scene_queries.cpp scene_serialization.cpp player_movement.cpp physics_world.cpp script_host.cpp profiler.cpp)
 target_compile_features(mirabilis_core PUBLIC cxx_std_20)
 target_compile_definitions(mirabilis_core PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_include_directories(mirabilis_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -61,7 +61,7 @@ target_compile_definitions(mirabilis_core PUBLIC
   MIRABILIS_SCRIPT_CONFIGURATION="$<CONFIG>")
 target_link_libraries(mirabilis_core PUBLIC glm EnTT::EnTT fastgltf_simdjson Jolt)
 if(BUILD_TESTING)
-  add_executable(mirabilis_core_tests ../tests/core_smoke.cpp ../tests/scene_ecs_tests.cpp ../tests/scene_serialization_tests.cpp ../tests/physics_tests.cpp ../tests/script_tests.cpp)
+  add_executable(mirabilis_core_tests ../tests/core_smoke.cpp ../tests/scene_ecs_tests.cpp ../tests/scene_serialization_tests.cpp ../tests/physics_tests.cpp ../tests/script_tests.cpp ../tests/profiler_tests.cpp)
   target_link_libraries(mirabilis_core_tests PRIVATE mirabilis_core doctest::doctest)
   target_compile_definitions(mirabilis_core_tests PRIVATE MIRABILIS_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   target_compile_definitions(mirabilis_core_tests PRIVATE MIRABILIS_TEST_MANAGED_DIR="$<TARGET_FILE_DIR:mirabilis_core_tests>")
@@ -101,6 +101,7 @@ add_executable (engine
   vk_engine_editor.cpp
   vk_engine_ibl.cpp
   vk_engine_gameplay.cpp
+  vk_engine_simulation.cpp
   vk_engine_input.cpp
   vk_engine_materials.cpp
   vk_engine_portals.cpp

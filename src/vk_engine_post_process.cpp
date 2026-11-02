@@ -371,6 +371,7 @@ void VulkanEngine::update_auto_exposure(float deltaTime)
             VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
         _autoExposure.gpuMilliseconds =
             float(ticks[1] - ticks[0]) * _gpuTiming.timestampPeriod * 1e-6f;
+        _profiler.counter(mirabilis::ProfileCounter::GpuExposure, _autoExposure.gpuMilliseconds);
     }
     if (!_autoExposure.enabled) {
         return;

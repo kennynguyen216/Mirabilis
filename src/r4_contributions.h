@@ -6,7 +6,7 @@
 
 #include "env_flags.h"
 
-// R4 lighting-ownership instrumentation (docs/lumen_lite_design.md, R4.1).
+// Lighting-ownership instrumentation.
 // MIRABILIS_R4_CONTRIBUTIONS names the owners the final image keeps; every
 // other owner's addition to the image is zeroed, while the transport buffers
 // it feeds are left exactly as the full frame computes them.  Absent keeps

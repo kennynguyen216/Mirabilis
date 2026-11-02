@@ -1,0 +1,33 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "windows",
+      "displayName": "Windows engine and diagnostics",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build/windows",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "cacheVariables": { "BUILD_TESTING": "ON", "MIRABILIS_BUILD_ENGINE": "ON" }
+    },
+    {
+      "name": "windows-core",
+      "displayName": "Windows core without Vulkan or UI",
+      "inherits": "windows",
+      "binaryDir": "${sourceDir}/build/core",
+      "cacheVariables": { "MIRABILIS_BUILD_ENGINE": "OFF" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "debug", "configurePreset": "windows", "configuration": "Debug" },
+    { "name": "release", "configurePreset": "windows", "configuration": "Release" },
+    { "name": "core-debug", "configurePreset": "windows-core", "configuration": "Debug" },
+    { "name": "core-release", "configurePreset": "windows-core", "configuration": "Release" }
+  ],
+  "testPresets": [
+    { "name": "debug", "configurePreset": "windows", "configuration": "Debug", "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } },
+    { "name": "release", "configurePreset": "windows", "configuration": "Release", "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } },
+    { "name": "core-debug", "configurePreset": "windows-core", "configuration": "Debug", "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } },
+    { "name": "core-release", "configurePreset": "windows-core", "configuration": "Release", "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } }
+  ]
+}

@@ -447,6 +447,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
     VulkanEngine* engine,
     std::filesystem::path filePath)
 {
+    auto profileScope = engine->profiler().scope(mirabilis::CpuZone::AssetLoad);
     fmt::print("Loading GLTF scene: {}\n", filePath.string());
 
     auto scene = std::make_shared<LoadedGLTF>();
@@ -479,12 +480,14 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
     auto loadImage = [&](fastgltf::Image& source, VkFormat format)
         -> std::optional<AllocatedImage> {
         SDL_PumpEvents();
+        auto decodeScope = engine->profiler().scope(mirabilis::CpuZone::ImageDecode);
         int width = 0;
         int height = 0;
         int channels = 0;
         AllocatedImage loadedImage{};
 
         auto uploadPixels = [&](const unsigned char* pixels) {
+            decodeScope.finish();
             if (pixels == nullptr || width <= 0 || height <= 0) {
                 return;
             }

@@ -140,6 +140,7 @@ void VulkanEngine::draw_path_trace(VkCommandBuffer cmd) {
             if(vkGetQueryPoolResults(_device,_traceRuntime.timestampPool,slot*2,2,sizeof(ticks),ticks,sizeof(uint64_t),VK_QUERY_RESULT_64_BIT)==VK_SUCCESS) {
                 VkPhysicalDeviceProperties properties{}; vkGetPhysicalDeviceProperties(_chosenGPU,&properties);
                 _traceRuntime.gpuMs=float(ticks[1]-ticks[0])*properties.limits.timestampPeriod/1e6f;
+                _profiler.counter(mirabilis::ProfileCounter::GpuTrace, _traceRuntime.gpuMs);
                 _traceRuntime.maxGpuMs=std::max(_traceRuntime.maxGpuMs,_traceRuntime.gpuMs);
             }
         }

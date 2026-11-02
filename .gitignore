@@ -33,6 +33,8 @@
 
 # Local Vulkan/CMake build products
 /build/
+/CMakeUserPresets.json
+/.claude/
 /bin/
 /assets/brickadia/
 /assets/sponza/

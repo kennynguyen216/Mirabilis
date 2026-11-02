@@ -1,5 +1,7 @@
 #include "physics_world.h"
 #include "script_host.h"
+#include "frame_clock.h"
+#include "profiler.h"
 #pragma once
 #include "path_trace_scene.h"
 
@@ -223,6 +225,10 @@ struct ColliderDebugPushConstants {
 };
 
 struct EngineStats {
+    uint64_t draw_index_buffer_grows{0};
+    uint64_t gpu_allocation_bytes{0}, gpu_block_bytes{0};
+    uint32_t gpu_allocation_count{0};
+    bool gpu_memory_sampled{false};
     uint32_t script_instance_count{0};
     uint32_t physics_body_count{0};
     uint64_t sdf_rebuild_count{0}, surface_cache_rebuild_count{0}, trace_rebuild_count{0}, sun_shadow_rebuild_count{0};
@@ -495,6 +501,12 @@ class VulkanEngine{
     int _frameNumber {0};
     bool stop_rendering {false};
     bool resize_requested {false};
+    mirabilis::FrameClock _frameClock;
+    mirabilis::Profiler _profiler;
+    std::filesystem::path _profileTraceOutput;
+    std::string _profileExportStatus;
+    // Command recording is serial; no GPU work retains these CPU indices.
+    std::vector<uint32_t> _opaqueDrawScratch;
     // Render internally below the window size by default.  The swapchain
     // remains 1280x720, while the expensive prepass/SSGI work starts at 75%
     // resolution and is upscaled for presentation.
@@ -525,9 +537,7 @@ class VulkanEngine{
     // round trip is correct, independent of any sphere-tracing or debug-view
     // work still to come. Reads a scripts/bake_sdf.py ".sdf" file, uploads it
     // as a 3D image, reads it back, and reports the max error against the
-    // original bytes. See docs/hybrid_ray_traced_gi_design.md and the
-    // Lumen-lite memory note for why this is SDF-based rather than the
-    // BVH/ray-query fallback that document otherwise describes.
+    // original bytes. This validates the SDF upload independently of tracing.
     void validate_sdf_bake(const char* path);
     std::unordered_map<VkDeviceAddress,std::weak_ptr<TraceMeshSource>> _traceMeshSources;
     std::vector<TraceTriangle> _traceTriangles;
@@ -676,7 +686,7 @@ class VulkanEngine{
     // relative to its sun is a property of the capture.
     float _skyboxIndirectClamp{1.0e4f};
     // Image-based lighting built from the selected panorama whenever it
-    // changes (docs/image_based_lighting_design.md).
+    // changes.
     static constexpr uint32_t IblPrefilterLevels = 6;
     struct ImageBasedLightingState {
         // Level k is prefiltered for roughness k / (IblPrefilterLevels - 1).
@@ -703,7 +713,7 @@ class VulkanEngine{
     // Surface cards rasterize conservatively where the device can, so
     // geometry thinner than a card texel is still captured (R4.60).
     bool _conservativeRasterSupported{false};
-    // IQ2 (docs/lumen_lite_design.md): sun visibility by ray query against the
+    // Sun visibility by ray query against the
     // trace scene's opaque casters, on devices with VK_KHR_ray_query unless
     // MIRABILIS_IQ_RT_SHADOWS=0.  While it is off nothing IQ2 adds is created
     // or loaded, and the shadow map works exactly as before.
@@ -784,6 +794,11 @@ class VulkanEngine{
 
     //run main loop
     void run();
+
+    // Host supplies a bounded delta and input focus; no event loop or UI calls here.
+    void tick_simulation(float deltaTime, bool gameplayInputAllowed);
+    mirabilis::Profiler& profiler() { return _profiler; }
+    void draw_profiling_panel();
 
     void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
 
@@ -1707,7 +1722,7 @@ class VulkanEngine{
             bool fxaaShowEdges{false};
         };
         PostProcessState _postProcess;
-        // IQ3 auto-exposure (docs/lumen_lite_design.md): a log2 luminance
+        // Auto-exposure: a log2 luminance
         // histogram of the linear frame, read back once the frame slot's fence
         // has passed, sets _postProcess.tonemapExposure.  Off in bounded runs
         // unless MIRABILIS_AUTO_EXPOSURE=1, and then nothing here runs.

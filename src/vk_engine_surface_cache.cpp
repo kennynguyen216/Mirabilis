@@ -26,8 +26,7 @@
 // opaque instance gets six cards, one per local axis direction, each an
 // orthographic view of the instance's local bounds.  They are packed into one
 // atlas and rasterised with the scene's own materials.  Lighting the atlas and
-// reading it back at distance-field hits come later; see
-// docs/lumen_lite_design.md.
+// reading it back at distance-field hits uses the same captured material data.
 
 namespace {
 

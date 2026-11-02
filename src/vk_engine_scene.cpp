@@ -99,6 +99,7 @@ void VulkanEngine::emit_scene_render_objects(
 
 void VulkanEngine::update_scene(float deltaTime)
 {
+    auto profileScope = _profiler.scope(mirabilis::CpuZone::SceneUpdate);
     const auto startTime = std::chrono::steady_clock::now();
     mainCamera.position = _playerMovement.position + glm::vec3(0.0f, 1.7f, 0.0f);
     const Camera& camera = render_camera();

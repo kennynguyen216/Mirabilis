@@ -50,7 +50,7 @@ void VulkanEngine::apply_ssgi_quality_preset(int preset)
     _ssgi.filterDepthFalloff = chosen.filterDepthFalloff;
     _ssgi.filterNormalPower = chosen.filterNormalPower;
     _ssgi.historyWeight = chosen.historyWeight;
-    // IQ4 step 0 diagnostic (docs/screen_probe_proposal.md): a longer temporal
+    // Probe diagnostic: a longer temporal
     // accumulation, which tells blotch variance from cache bias.  Unset changes
     // nothing; the temporal shader caps the weight at 0.99.
     if (const char* weight = SDL_getenv("MIRABILIS_IQ4_HISTORY_WEIGHT")) {

@@ -332,6 +332,7 @@ void VulkanEngine::draw_geometry(
     uint32_t stencilCompareMask,
     bool writeGBuffer)
 {
+    auto profileScope = _profiler.scope(mirabilis::CpuZone::Geometry);
     const auto startTime = std::chrono::steady_clock::now();
 
     std::array<VkRenderingAttachmentInfo, 4> colorAttachments{};
@@ -379,8 +380,12 @@ void VulkanEngine::draw_geometry(
     vkCmdSetStencilWriteMask(
         cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
 
-    std::vector<uint32_t> opaqueDraws;
-    opaqueDraws.reserve(drawContext.OpaqueSurfaces.size());
+    auto& opaqueDraws = _opaqueDrawScratch;
+    opaqueDraws.clear();
+    if (opaqueDraws.capacity() < drawContext.OpaqueSurfaces.size()) {
+        opaqueDraws.reserve(drawContext.OpaqueSurfaces.size());
+        ++stats.draw_index_buffer_grows;
+    }
     for (uint32_t i = 0; i < drawContext.OpaqueSurfaces.size(); ++i) {
         // Oblique portal projections replace their near plane.  The simple
         // CPU frustum test above assumes an ordinary projection, so using it
@@ -528,7 +533,7 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
         normalized_sun_direction(_shadow.sunlightDirection), 1.0f);
     // One sun for both renderers.  Raster diffuse is baseColor * cos * S and
     // the path tracer's is albedo / pi * cos * E, so S = E / pi, with E the
-    // scene's referenceLighting.sunRadiance (docs/lumen_lite_design.md R4.3).
+    // scene's referenceLighting.sunRadiance.
     constexpr float Pi = 3.14159265358979323846f;
     data.sunlightColor = glm::vec4(
         glm::vec3(_traceSettings.lighting.sunRadiance) / Pi, 1.0f);
@@ -854,6 +859,7 @@ void VulkanEngine::read_gpu_timestamps(uint32_t frameIndex)
     stats.ssao_blur_vertical_time = toMilliseconds(ticks[2], ticks[3]);
     stats.ssao_total_time = toMilliseconds(ticks[0], ticks[3]);
     stats.ssao_time_is_gpu = true;
+    _profiler.counter(mirabilis::ProfileCounter::GpuAO, stats.ssao_total_time);
     }
 
     if (_ssgi.timingWritten[frameIndex]) {
@@ -875,6 +881,7 @@ void VulkanEngine::read_gpu_timestamps(uint32_t frameIndex)
             stats.ssgi_composite_time = milliseconds(ssgiTicks[3], ssgiTicks[4]);
             stats.ssgi_total_time = milliseconds(ssgiTicks[0], ssgiTicks[4]);
             stats.ssgi_time_is_gpu = true;
+            _profiler.counter(mirabilis::ProfileCounter::GpuGI, stats.ssgi_total_time);
         }
     }
 }

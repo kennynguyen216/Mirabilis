@@ -53,8 +53,9 @@ namespace {
 
 // A pending fence is not a Vulkan failure. Keep servicing the native window
 // while waiting; reset/reuse GPU resources only after the fence is signaled.
-void wait_for_gpu_fence(VkDevice device, VkFence fence)
+void wait_for_gpu_fence(VkDevice device, VkFence fence, mirabilis::Profiler& profiler)
 {
+    auto scope = profiler.scope(mirabilis::CpuZone::WaitGPU);
     VkResult result;
     do {
         SDL_PumpEvents();
@@ -79,22 +80,6 @@ void apply_env_flag(const char* name, bool& flag)
     flag = value == EnvBool::On;
 }
 
-// Interpolates between two yaw angles along the shorter arc.  Yaw is
-// accumulated from mouse motion and is never wrapped, so the raw difference
-// between two samples can be several turns' worth even when the player barely
-// moved; folding it into (-pi, pi] first keeps the step small and in the
-// direction they actually turned.
-float lerp_yaw(float from, float to, float t)
-{
-    constexpr float Pi = 3.14159265358979323846f;
-    constexpr float TwoPi = 2.0f * Pi;
-    float delta = std::fmod(to - from + Pi, TwoPi);
-    if (delta < 0.0f) {
-        delta += TwoPi;
-    }
-    return from + (delta - Pi) * t;
-}
-
 } // namespace
 
 VulkanEngine* loadedEngine = nullptr;
@@ -112,6 +97,7 @@ void VulkanEngine::reset_physics_render_history()
 
 void VulkanEngine::sync_physics_world()
 {
+    auto scope = _profiler.scope(mirabilis::CpuZone::PhysicsSync);
     std::vector<PersistentID> hosts;
     for (const auto& pair : _authoredPortals.pairs) {
         if (pair.first.hostWallObject) hosts.push_back(*pair.first.hostWallObject);
@@ -156,6 +142,7 @@ void VulkanEngine::take_play_snapshot()
 
 void VulkanEngine::drain_scene_destruction()
 {
+    auto scope = _profiler.scope(mirabilis::CpuZone::Destruction);
     bool pending = false;
     for (const auto entity : _scene.registry().view<PendingDestroy>()) { (void)entity; pending = true; break; }
     if (!pending) return;
@@ -357,6 +344,14 @@ void VulkanEngine::apply_performance_settings()
 
 void VulkanEngine::init()
 {
+    bool profileEnabled = false;
+    apply_env_flag("MIRABILIS_PROFILE", profileEnabled);
+    _profiler.set_enabled(profileEnabled);
+    if (const char* output = std::getenv("MIRABILIS_PROFILE_TRACE"); output && *output) {
+        _profileTraceOutput = output;
+        _profiler.start_capture();
+    }
+    auto profileScope = _profiler.scope(mirabilis::CpuZone::Startup);
     //only one engine init is allowed with the application
     assert(loadedEngine == nullptr);
     loadedEngine = this;
@@ -908,12 +903,21 @@ void VulkanEngine::cleanup()
 
     // clear engine pointer 
     loadedEngine = nullptr;
+    _profiler.stop_capture();
+    if (!_profileTraceOutput.empty()) {
+        if (!_profiler.save_trace(_profileTraceOutput))
+            throw std::runtime_error("Could not write profiling trace: " + _profileTraceOutput.string());
+        const auto trace = _profiler.trace_status();
+        fmt::print("Profile trace saved: {} ({} events, {} dropped)\n",
+            _profileTraceOutput.string(), trace.events, trace.dropped);
+    }
 }
 
 void VulkanEngine::draw(float deltaTime)
 {
+    auto profileScope = _profiler.scope(mirabilis::CpuZone::Render);
 
-    wait_for_gpu_fence(_device, get_current_frame()._renderFence);
+    wait_for_gpu_fence(_device, get_current_frame()._renderFence, _profiler);
     // The fence has passed, so any timestamps this slot recorded belong to a
     // submission that has finished and can be read without stalling.
     read_gpu_timestamps(_frameNumber % FRAME_OVERLAP);
@@ -922,13 +926,13 @@ void VulkanEngine::draw(float deltaTime)
     get_current_frame()._frameDescriptors.clear_pools(_device);
     //request image from the swapchain 
     uint32_t swapchainImageIndex;
-    VkResult acquireResult = vkAcquireNextImageKHR(
-        _device,
-        _swapchain,
-        1000000000,
-        get_current_frame()._swapchainSemaphore,
-        nullptr,
-        &swapchainImageIndex);
+    VkResult acquireResult;
+    {
+        auto scope = _profiler.scope(mirabilis::CpuZone::AcquireImage);
+        acquireResult = vkAcquireNextImageKHR(
+            _device, _swapchain, 1000000000,
+            get_current_frame()._swapchainSemaphore, nullptr, &swapchainImageIndex);
+    }
     if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
         resize_requested = true;
         return;
@@ -1724,7 +1728,7 @@ void VulkanEngine::run(){
         input.clear(); ImGui::GetIO().WantCaptureKeyboard = capturedKeyboard;
         scriptState("reopened-play");
     }
-    auto previousTime = std::chrono::steady_clock::now();
+    _frameClock.reset();
     const bool testReload=frameLimit && SDL_getenv("MIRABILIS_TEST_SCRIPT_RELOAD");
     if (testReload) {
         set_editor_mode(false);set_mouse_capture(false);
@@ -1738,24 +1742,28 @@ void VulkanEngine::run(){
     //main loop
     while(!bQuit) {
         const auto currentTime = std::chrono::steady_clock::now();
-        float deltaTime = std::chrono::duration<float>(currentTime - previousTime).count();
-        previousTime = currentTime;
-        // Avoid a large movement jump after dragging/resuming the window.
-        const float wallDeltaTime = deltaTime;
-        deltaTime = std::min(deltaTime, 0.1f);
+        const auto frameTime = _frameClock.tick(currentTime);
+        float deltaTime = frameTime.simulationSeconds;
+        const float wallDeltaTime = static_cast<float>(frameTime.wallSeconds);
+        stats.frametime = wallDeltaTime * 1000.0f;
+        auto profileFrame = _profiler.frame(_frameNumber, frameTime.wallSeconds);
         if (frameLimit && SDL_getenv("MIRABILIS_SSGI_BENCHMARK") && _frameNumber == 5) {
             SDL_SetHint(SDL_HINT_FORCE_RAISEWINDOW, "1");
             SDL_RaiseWindow(_window);
         }
 
         //handle events on queue
+        {
+        auto scope = _profiler.scope(mirabilis::CpuZone::Events);
         while (SDL_PollEvent(&e) != 0) {
             if (testPhysics && e.type == SDL_KEYDOWN) {
                 fmt::print("PHYSICS interactive key event: key={} repeat={}\n",int(e.key.keysym.sym),int(e.key.repeat));
             }
             bQuit = process_event(e) || bQuit;
         }
+        }
         if (_scriptHost) {
+            auto scope = _profiler.scope(mirabilis::CpuZone::Reload);
             const auto ref=testReload ? _scene.get(3) : EntityRef{};
             const auto epoch=_scene.epoch();
             const auto pose=testReload ? _scene.world_matrix(ref) : glm::mat4(1);
@@ -1767,7 +1775,7 @@ void VulkanEngine::run(){
             const auto accumulator=_playerStep.accumulator;
             const auto history=_physicsHistoryResetCount;
             if (_scriptHost->poll_reload()) {
-                previousTime=std::chrono::steady_clock::now();
+                _frameClock.reset();
                 if (testReload) {
                     scriptRequire(!_editorMode && _scene.epoch()==epoch && _scene.valid(ref),"reload reset Play or entity identity");
                     scriptRequire(_scene.world_matrix(ref)==pose && _physicsWorld.velocity(ref)==velocity,"reload reset live physics pose/velocity");
@@ -1914,56 +1922,15 @@ void VulkanEngine::run(){
                 }
             }
         }
-        if (_editorMode) {
-            if (_cinematic.recording) {
-                // Live mouse-look input is ignored while recording: the pose
-                // this frame is entirely a function of frameIndex, which is
-                // what makes the output reproducible frame-for-frame.
-                apply_cinematic_camera_pose();
-                deltaTime = _cinematic.frameDt;
-            } else {
-                _editorCamera.update(deltaTime);
-            }
-            _playerStep.accumulator = 0.0f;
-            // Leaving the editor should not make the first tick back in play
-            // sweep through however far the editor camera was turned.
-            _playerStep.previousPlayerYaw = mainCamera.yaw;
-        } else {
-            if (_scriptHost && (!_mouseCaptured || ImGui::GetIO().WantCaptureKeyboard ||
-                !(SDL_GetWindowFlags(_window) & SDL_WINDOW_INPUT_FOCUS))) _scriptHost->input().focus_lost();
-            _playerStep.accumulator = std::min(
-                _playerStep.accumulator + deltaTime,
-                PlayerMovementDt * static_cast<float>(MaxPlayerMovementSteps));
-            // Where this frame's turn ends.  update_player_movement() may overwrite
-            // both ends of it partway through if the player crosses a portal,
-            // which is why the loop reads the members rather than a local.
-            _playerStep.targetPlayerYaw = mainCamera.yaw;
-            // Clamped to at least one: the accumulator can sit a hair above
-            // PlayerMovementDt while the division truncates to zero, and dividing by
-            // that below would hand the first tick an infinite fraction.
-            const int stepCount = std::max(
-                1, static_cast<int>(_playerStep.accumulator / PlayerMovementDt));
-            int stepIndex = 0;
-            while (_playerStep.accumulator >= PlayerMovementDt) {
-                ++stepIndex;
-                _playerInput.yaw = lerp_yaw(
-                    _playerStep.previousPlayerYaw,
-                    _playerStep.targetPlayerYaw,
-                    static_cast<float>(stepIndex) /
-                        static_cast<float>(stepCount));
-                if (_scriptHost) _scriptHost->fixed_update(PlayerMovementDt);
-                _scene.apply_commands();
-                update_player_movement(PlayerMovementDt);
-                sync_physics_world();
-                _physicsWorld.step(_scene, PlayerMovementDt);
-                drain_scene_destruction();
-                _playerStep.accumulator -= PlayerMovementDt;
-            }
-            _playerStep.previousPlayerYaw = _playerStep.targetPlayerYaw;
-            if (_scriptHost) _scriptHost->update(deltaTime);
-            drain_scene_destruction();
+        if (_editorMode && _cinematic.recording) {
+            apply_cinematic_camera_pose();
+            deltaTime = _cinematic.frameDt;
         }
+        tick_simulation(deltaTime, _mouseCaptured && !ImGui::GetIO().WantCaptureKeyboard &&
+            (SDL_GetWindowFlags(_window) & SDL_WINDOW_INPUT_FOCUS));
 
+        {
+        auto scope = _profiler.scope(mirabilis::CpuZone::UI);
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
@@ -1971,6 +1938,7 @@ void VulkanEngine::run(){
         if (!SDL_getenv("MIRABILIS_TEST_HIDE_PANELS")) draw_frame_ui(wallDeltaTime);
 
         ImGui::Render();
+        }
         // Exercise the editor's scene replacement path, not only cold startup.
         if (frameLimit && _frameNumber == 20) {
             if (const char* scene = SDL_getenv("MIRABILIS_TEST_SCENE_SWITCH")) {
@@ -2091,6 +2059,12 @@ void VulkanEngine::run(){
             _sceneResourcesRetired = false;
         }
         draw(deltaTime);
+        _profiler.counter(mirabilis::ProfileCounter::DrawCalls, stats.drawcall_count);
+        _profiler.counter(mirabilis::ProfileCounter::Triangles, stats.triangle_count);
+        _profiler.counter(mirabilis::ProfileCounter::DrawScratchBytes,
+            static_cast<double>(_opaqueDrawScratch.capacity() * sizeof(uint32_t)));
+        _profiler.counter(mirabilis::ProfileCounter::DrawScratchGrowths,
+            static_cast<double>(stats.draw_index_buffer_grows));
         if (testPhysics) {
             const auto ref = _scene.get(physicsBox);
             if (_frameNumber < 900) physicsPhase = _physicsWorld.sleeping(ref) ? "sleep" : "awake";
@@ -2242,6 +2216,7 @@ void VulkanEngine::run(){
             }
         }
         if (_frameRateCapEnabled && _targetFrameRate > 0.0f) {
+            auto scope = _profiler.scope(mirabilis::CpuZone::FrameLimit);
             const auto frameEnd = std::chrono::steady_clock::now();
             const auto targetDuration = std::chrono::duration<double>(
                 1.0 / static_cast<double>(_targetFrameRate));
@@ -2596,5 +2571,5 @@ void VulkanEngine::immediate_submit(std::function<void(VkCommandBuffer cmd)>&& f
 	//  _renderFence will now block until the graphic commands finish execution
 	VK_CHECK(vkQueueSubmit2(_graphicsQueue, 1, &submit, _immFence));
 
-    wait_for_gpu_fence(_device, _immFence);
+    wait_for_gpu_fence(_device, _immFence, _profiler);
 }

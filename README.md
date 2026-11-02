@@ -110,6 +110,21 @@ cmake --build build --config Debug --parallel
 
 CMake builds and deploys ScriptCore, the sample scripts, and the hosting DLL beside the executable automatically.
 
+Alternatively, with Ninja installed, use the shared presets from a Visual Studio
+Developer PowerShell:
+
+```powershell
+cmake --preset windows
+cmake --build --preset debug --parallel 2
+ctest --preset debug
+```
+
+Use `release` for Release builds/tests. The `windows-core` configure preset and
+`core-debug` / `core-release` build/test presets run the CPU and managed checks
+without Vulkan or UI dependencies. Keep machine-specific settings in the ignored
+`CMakeUserPresets.json`. Build configurations sequentially: they share runtime
+deployment and generated shader outputs.
+
 ### Run
 
 ```powershell
@@ -119,6 +134,57 @@ Pop-Location
 ```
 
 Press `Esc` or close the window to exit.
+
+### Profiling and shared services
+
+The **Profiler** debug window is available with the editor's debug panels. CPU
+profiling is off by default. Enable it to inspect the last completed host frame,
+inclusive operation times and call counts, and a bounded frame history. Timings
+include waits; they are not CPU utilization measurements. GPU timings reuse the
+existing completed queries. GPU allocation statistics are sampled only when
+requested, and draw-index scratch capacity/growths show retained CPU memory.
+
+Use **Start trace**, **Stop trace** and **Save trace** to export
+`mirabilis-profile.json` in the working directory. Captures retain at most 65,536
+events and report dropped events when full. Starting a new capture discards the
+previous capture. Export copies a consistent snapshot before writing it; tracing
+adds synchronization overhead and should be disabled for ordinary performance
+comparisons.
+
+For an unattended trace including startup, set an output path whose parent exists:
+
+```powershell
+New-Item -ItemType Directory -Force .\tmp | Out-Null
+$env:MIRABILIS_PROFILE_TRACE = Join-Path $PWD "tmp/profile.json"
+Push-Location .\bin\Debug
+.\engine.exe
+Pop-Location
+Remove-Item Env:\MIRABILIS_PROFILE_TRACE
+```
+
+`MIRABILIS_PROFILE=1` enables CPU summaries without tracing. Trace JSON contains
+CPU duration events and counters, with timestamps/durations in microseconds.
+GPU counters are reported when completed results are received; they do not claim
+to locate GPU work on the CPU timeline. A failed requested trace export reports
+an error rather than claiming a successful capture.
+
+`FrameClock` and `Profiler` live in the GPU-free core. The frame clock preserves
+unclamped wall time and caps simulation deltas at 100 ms; reload resets its time
+origin. `VulkanEngine::tick_simulation` shares the existing fixed-step update and
+accepts input-focus permission from the host without pumping events or calling
+ImGui. This is the foundation for a Qt authoring host with ImGui diagnostics;
+the current executable still uses its SDL host and existing editor controls.
+
+After building, run the profiling GPU gate sequentially with other GPU checks:
+
+```powershell
+python tests/profiling_gate.py --output C:/temp/mirabilis-profile-check
+```
+
+Use a fresh output directory. The gate checks engine trace events, steady scratch
+capacity, unchanged scene files, and identical profiling-on/off raster captures
+in a static scene and during player portal traversal. Add `--configuration Release`
+to exercise the Release binary.
 
 ## Status
 
