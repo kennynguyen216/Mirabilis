@@ -25,7 +25,7 @@ def fixture(repo, mirror=False):
                'components': {'name': {'value': name},
                    'transform': {'position': position, 'rotation': [0, 0, 0], 'scale': scale},
                    'mesh': {'asset': 'cube', 'modelPath': ''},
-                   'material': {'enabled': True, 'colorTint': color, 'metallic': metallic,
+                   'material': {'enabled': True, 'tint': color, 'metallic': metallic,
                                 'roughness': roughness}}}
         if emission:
             obj['components']['material'].update(emissionColor=emission, emissionStrength=8)
