@@ -40,6 +40,7 @@ struct LoadedGLTF : public IRenderable {
     DescriptorAllocatorGrowable descriptorPool;
     AllocatedBuffer materialDataBuffer{};
     VulkanEngine* creator{};
+    bool hasMissingTextures{};
 
     ~LoadedGLTF() override;
 

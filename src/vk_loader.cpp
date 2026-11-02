@@ -249,6 +249,7 @@ std::vector<std::shared_ptr<MeshAsset>> build_gltf_meshes(
     const fastgltf::Asset& gltf,
     const std::vector<std::shared_ptr<GLTFMaterial>>& materials,
     GltfMeshStats& stats,
+    mirabilis::TaskSystem& tasks,
     UploadMesh&& uploadMesh)
 {
     std::vector<std::shared_ptr<MeshAsset>> meshes;
@@ -344,11 +345,17 @@ std::vector<std::shared_ptr<MeshAsset>> build_gltf_meshes(
                 ++stats.suppliedTangentPrimitives;
             } else if (primitive.findAttribute("TEXCOORD_0") !=
                        primitive.attributes.end()) {
-                generate_tangents(
-                    vertices,
-                    std::span<const uint32_t>(indices).subspan(
-                        surface.startIndex,
-                        indices.size() - surface.startIndex));
+                const auto primitiveIndices = std::span<const uint32_t>(indices).subspan(surface.startIndex);
+                if (vertices.size() < 4096) {
+                    // Avoid a worker handoff for tiny primitives.
+                    generate_tangents(vertices, primitiveIndices);
+                } else {
+                    mirabilis::TaskGroup group;
+                    tasks.submit(group, [&vertices, primitiveIndices] {
+                        generate_tangents(vertices, primitiveIndices, mirabilis::TaskSystem::scratch());
+                    });
+                    tasks.wait(group, [] { SDL_PumpEvents(); });
+                }
                 ++stats.generatedTangentPrimitives;
             } else {
                 ++stats.untangentedPrimitives;
@@ -477,145 +484,44 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
     // as a normal or metallic/roughness map.  stb hands back the stored bytes
     // either way, and only the Vulkan format decides whether the hardware
     // decodes them on sample.
-    auto loadImage = [&](fastgltf::Image& source, VkFormat format)
-        -> std::optional<AllocatedImage> {
-        SDL_PumpEvents();
-        auto decodeScope = engine->profiler().scope(mirabilis::CpuZone::ImageDecode);
-        int width = 0;
-        int height = 0;
-        int channels = 0;
-        AllocatedImage loadedImage{};
-
-        auto uploadPixels = [&](const unsigned char* pixels) {
-            decodeScope.finish();
-            if (pixels == nullptr || width <= 0 || height <= 0) {
-                return;
-            }
-            loadedImage = engine->create_image(
-                const_cast<unsigned char*>(pixels),
-                VkExtent3D{
-                    static_cast<uint32_t>(width),
-                    static_cast<uint32_t>(height),
-                    1},
-                format,
-                VK_IMAGE_USAGE_SAMPLED_BIT,
-                true);
-            // Base colour is the only sRGB role, and the only map the path
-            // tracer samples, so it is the only one worth a CPU copy.
-            if (format == VK_FORMAT_R8G8B8A8_SRGB) {
-                loadedImage.traceSource = VulkanEngine::make_trace_texture(
-                    pixels, loadedImage.imageExtent);
-            }
+    struct DecodedPixels {
+        std::unique_ptr<stbi_uc, decltype(&stbi_image_free)> pixels{nullptr, &stbi_image_free};
+        int width{}, height{};
+    };
+    auto decodeImage = [&](fastgltf::Image& source, DecodedPixels& output) {
+        auto scope = engine->profiler().scope(mirabilis::CpuZone::ImageDecode);
+        int channels{};
+        // Bound each RGBA result to 256 MiB; at most two results are live per batch.
+        const auto validSize = [&] {
+            return output.width > 0 && output.height > 0 &&
+                uint64_t(output.width) * uint64_t(output.height) <= 64 * 1024 * 1024;
         };
-
-        auto reportDecodeFailure = [&]() {
-            fmt::print(
-                "stb_image failed for {}: {}\n",
-                source.name,
-                stbi_failure_reason() != nullptr ? stbi_failure_reason() : "unknown");
+        const auto memory = [&](const auto& bytes, size_t offset, size_t length) {
+            if (offset > bytes.size() || length > bytes.size() - offset || length > INT_MAX) return;
+            const auto* data = reinterpret_cast<const stbi_uc*>(bytes.data() + offset);
+            if (stbi_info_from_memory(data, int(length), &output.width, &output.height, &channels) && validSize())
+                output.pixels.reset(stbi_load_from_memory(data, int(length), &output.width, &output.height, &channels, 4));
         };
-
-        std::visit(
-            fastgltf::visitor{
-                [](auto&) {},
-                [&](fastgltf::sources::URI& uri) {
-                    if (uri.fileByteOffset != 0 || !uri.uri.isLocalPath()) {
-                        return;
-                    }
-                    const std::string relativePath(
-                        uri.uri.path().begin(), uri.uri.path().end());
-                    const std::filesystem::path imagePath =
-                        filePath.parent_path() / relativePath;
-                    stbi_uc* pixels = stbi_load(
-                        imagePath.string().c_str(),
-                        &width,
-                        &height,
-                        &channels,
-                        4);
-                    if (pixels != nullptr) {
-                        uploadPixels(pixels);
-                        stbi_image_free(pixels);
-                    } else {
-                        reportDecodeFailure();
-                    }
-                },
-                [&](fastgltf::sources::Vector& vector) {
-                    const stbi_uc* encoded = reinterpret_cast<const stbi_uc*>(
-                        vector.bytes.data());
-                    stbi_uc* pixels = stbi_load_from_memory(
-                        encoded,
-                        static_cast<int>(vector.bytes.size()),
-                        &width,
-                        &height,
-                        &channels,
-                        4);
-                    if (pixels != nullptr) {
-                        uploadPixels(pixels);
-                        stbi_image_free(pixels);
-                    } else {
-                        reportDecodeFailure();
-                    }
-                },
-                [&](fastgltf::sources::ByteView& view) {
-                    const stbi_uc* encoded = reinterpret_cast<const stbi_uc*>(
-                        view.bytes.data());
-                    stbi_uc* pixels = stbi_load_from_memory(
-                        encoded,
-                        static_cast<int>(view.bytes.size()),
-                        &width,
-                        &height,
-                        &channels,
-                        4);
-                    if (pixels != nullptr) {
-                        uploadPixels(pixels);
-                        stbi_image_free(pixels);
-                    } else {
-                        reportDecodeFailure();
-                    }
-                },
-                [&](fastgltf::sources::BufferView& view) {
-                    const auto& bufferView = gltf.bufferViews[view.bufferViewIndex];
-                    const auto& buffer = gltf.buffers[bufferView.bufferIndex];
-                    if (auto* vector = std::get_if<fastgltf::sources::Vector>(&buffer.data)) {
-                        const stbi_uc* encoded = reinterpret_cast<const stbi_uc*>(
-                            vector->bytes.data() + bufferView.byteOffset);
-                        stbi_uc* pixels = stbi_load_from_memory(
-                            encoded,
-                            static_cast<int>(bufferView.byteLength),
-                            &width,
-                            &height,
-                            &channels,
-                            4);
-                        if (pixels != nullptr) {
-                            uploadPixels(pixels);
-                            stbi_image_free(pixels);
-                        } else {
-                            reportDecodeFailure();
-                        }
-                    } else if (auto* bytes = std::get_if<fastgltf::sources::ByteView>(&buffer.data)) {
-                        const stbi_uc* encoded = reinterpret_cast<const stbi_uc*>(
-                            bytes->bytes.data());
-                        stbi_uc* pixels = stbi_load_from_memory(
-                            encoded,
-                            static_cast<int>(bytes->bytes.size()),
-                            &width,
-                            &height,
-                            &channels,
-                            4);
-                        if (pixels != nullptr) {
-                            uploadPixels(pixels);
-                            stbi_image_free(pixels);
-                        } else {
-                            reportDecodeFailure();
-                        }
-                    }
-                }},
-            source.data);
-
-        if (loadedImage.image == VK_NULL_HANDLE) {
-            return {};
-        }
-        return loadedImage;
+        std::visit(fastgltf::visitor{
+            [](auto&) {},
+            [&](fastgltf::sources::URI& uri) {
+                if (uri.fileByteOffset != 0 || !uri.uri.isLocalPath()) return;
+                const auto name = (filePath.parent_path() / std::string(uri.uri.path().begin(), uri.uri.path().end())).string();
+                if (stbi_info(name.c_str(), &output.width, &output.height, &channels) && validSize())
+                    output.pixels.reset(stbi_load(name.c_str(), &output.width, &output.height, &channels, 4));
+            },
+            [&](fastgltf::sources::Vector& data) { memory(data.bytes, 0, data.bytes.size()); },
+            [&](fastgltf::sources::ByteView& data) { memory(data.bytes, 0, data.bytes.size()); },
+            [&](fastgltf::sources::BufferView& sourceView) {
+                if (sourceView.bufferViewIndex >= gltf.bufferViews.size()) return;
+                const auto& view = gltf.bufferViews[sourceView.bufferViewIndex];
+                if (view.bufferIndex >= gltf.buffers.size()) return;
+                auto& buffer = gltf.buffers[view.bufferIndex];
+                if (auto* data = std::get_if<fastgltf::sources::Vector>(&buffer.data)) memory(data->bytes, view.byteOffset, view.byteLength);
+                else if (auto* data = std::get_if<fastgltf::sources::ByteView>(&buffer.data)) memory(data->bytes, view.byteOffset, view.byteLength);
+            }
+        }, source.data);
+        if (!output.pixels) fmt::print("GLTF image decode failed or exceeded 256 MiB: {}\n", source.name);
     };
 
     const uint32_t materialCount = static_cast<uint32_t>(
@@ -630,44 +536,56 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
 
     create_gltf_samplers(engine, *scene, gltf);
 
-    // Images are uploaded on demand rather than up front, because the correct
-    // format is a property of the role the material assigns the image, not of
-    // the image itself.  A glTF may also carry images no material references;
-    // those now cost nothing.  The key is (image index, colour space): one
-    // source image referenced as both base colour and a normal map legitimately
-    // needs two GPU images, and silently sharing one would decode the normals.
+    // Decode each referenced source once, sharing its bytes across color-space uploads.
+    // GPU ownership stays on the engine thread; only independent CPU decodes run on fibers.
     std::unordered_map<uint64_t, AllocatedImage> imageCache;
-    auto acquireImage = [&](size_t imageIndex, bool srgb) -> AllocatedImage {
-        if (imageIndex >= gltf.images.size()) {
-            return engine->_errorCheckerboardImage;
+    std::vector<uint8_t> roles(gltf.images.size());
+    const auto mark = [&](const auto& info, uint8_t role) {
+        if (!info || info->textureIndex >= gltf.textures.size()) return;
+        const auto& texture = gltf.textures[info->textureIndex];
+        if (texture.imageIndex && *texture.imageIndex < roles.size()) roles[*texture.imageIndex] |= role;
+    };
+    for (const auto& material : gltf.materials) {
+        mark(material.pbrData.baseColorTexture, 2);
+        mark(material.pbrData.metallicRoughnessTexture, 1);
+        mark(material.normalTexture, 1);
+    }
+    std::vector<size_t> referenced;
+    for (size_t i = 0; i < roles.size(); ++i) if (roles[i]) referenced.push_back(i);
+    for (size_t begin = 0; begin < referenced.size(); begin += 2) {
+        std::array<DecodedPixels, 2> decoded;
+        mirabilis::TaskGroup group;
+        const size_t count = std::min(size_t(2), referenced.size() - begin);
+        try {
+            for (size_t i = 0; i < count; ++i) {
+                const auto image = referenced[begin + i];
+                engine->tasks().submit(group, [&, image, i] { decodeImage(gltf.images[image], decoded[i]); });
+            }
+        } catch (...) {
+            const auto error = std::current_exception();
+            try { engine->tasks().wait(group); } catch (...) {}
+            std::rethrow_exception(error);
         }
-        const uint64_t key = uint64_t(imageIndex) * 2 + (srgb ? 1 : 0);
-        if (auto found = imageCache.find(key); found != imageCache.end()) {
-            return found->second;
+        engine->tasks().wait(group, [] { SDL_PumpEvents(); });
+        for (size_t i = 0; i < count; ++i) {
+            const size_t image = referenced[begin + i];
+            for (int srgb = 0; srgb < 2; ++srgb) if (roles[image] & (1 << srgb)) {
+                auto resolved = engine->_errorCheckerboardImage;
+                if (decoded[i].pixels) {
+                    const auto extent = VkExtent3D{uint32_t(decoded[i].width), uint32_t(decoded[i].height), 1};
+                    resolved = engine->create_image(decoded[i].pixels.get(), extent,
+                        srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, true);
+                    if (srgb) resolved.traceSource = VulkanEngine::make_trace_texture(decoded[i].pixels.get(), extent);
+                } else scene->hasMissingTextures = true;
+                imageCache[uint64_t(image) * 2 + srgb] = resolved;
+                scene->images[object_name(gltf.images[image].name, "image_", image) + (srgb ? ":srgb" : ":linear")] = resolved;
+            }
         }
-
-        const VkFormat format = srgb
-            ? VK_FORMAT_R8G8B8A8_SRGB
-            : VK_FORMAT_R8G8B8A8_UNORM;
-        const std::string name =
-            object_name(gltf.images[imageIndex].name, "image_", imageIndex) +
-            (srgb ? ":srgb" : ":linear");
-
-        AllocatedImage resolved{};
-        auto loadedImage = loadImage(gltf.images[imageIndex], format);
-        if (loadedImage.has_value()) {
-            resolved = *loadedImage;
-        } else {
-            // A missing texture must not take the scene down with it: the
-            // checkerboard is obvious on screen and is owned by the engine, so
-            // clearAll already knows not to destroy it.
-            resolved = engine->_errorCheckerboardImage;
-            fmt::print("Failed to load GLTF image {}\n", name);
-        }
-
-        imageCache[key] = resolved;
-        scene->images[name] = resolved;
-        return resolved;
+    }
+    fmt::print("GLTF decode batches: {} sources, {} color-space uploads ({})\n", referenced.size(), imageCache.size(), filePath.filename().string());
+    const auto acquireImage = [&](size_t image, bool srgb) {
+        const auto found = imageCache.find(uint64_t(image) * 2 + (srgb ? 1 : 0));
+        return found != imageCache.end() ? found->second : engine->_errorCheckerboardImage;
     };
 
     // Resolves one glTF texture reference into the image and sampler a
@@ -851,7 +769,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
     };
     GltfMeshStats meshStats;
     std::vector<std::shared_ptr<MeshAsset>> meshes =
-        build_gltf_meshes(*scene, gltf, materials, meshStats, uploadMesh);
+        build_gltf_meshes(*scene, gltf, materials, meshStats, engine->tasks(), uploadMesh);
     // The GPU vertex buffers and the path tracer's CPU copy each hold every
     // vertex once, so each figure below is paid twice.
     const double megabyte = 1024.0 * 1024.0;

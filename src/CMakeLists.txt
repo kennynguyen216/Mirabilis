@@ -50,6 +50,13 @@ function(mirabilis_deploy_scripts TARGET)
 endfunction()
 
 add_library(mirabilis_core STATIC scene.cpp scene_math.cpp scene_queries.cpp scene_serialization.cpp player_movement.cpp physics_world.cpp script_host.cpp profiler.cpp)
+target_sources(mirabilis_core PRIVATE memory_resources.cpp fiber.cpp task_system.cpp)
+if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND NOT CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64")
+  enable_language(ASM_MASM)
+  add_library(mirabilis_fiber_asm OBJECT fiber_switch_win64.asm)
+  target_sources(mirabilis_core PRIVATE $<TARGET_OBJECTS:mirabilis_fiber_asm>)
+  target_compile_definitions(mirabilis_core PRIVATE MIRABILIS_FIBER_ASM_WIN64)
+endif()
 target_compile_features(mirabilis_core PUBLIC cxx_std_20)
 target_compile_definitions(mirabilis_core PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_include_directories(mirabilis_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -63,12 +70,14 @@ target_link_libraries(mirabilis_core PUBLIC glm EnTT::EnTT fastgltf_simdjson Jol
 if(BUILD_TESTING)
   add_executable(mirabilis_core_tests ../tests/core_smoke.cpp ../tests/scene_ecs_tests.cpp ../tests/scene_serialization_tests.cpp ../tests/physics_tests.cpp ../tests/script_tests.cpp ../tests/profiler_tests.cpp)
   target_link_libraries(mirabilis_core_tests PRIVATE mirabilis_core doctest::doctest)
+  target_sources(mirabilis_core_tests PRIVATE ../tests/memory_task_tests.cpp)
   target_compile_definitions(mirabilis_core_tests PRIVATE MIRABILIS_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
   target_compile_definitions(mirabilis_core_tests PRIVATE MIRABILIS_TEST_MANAGED_DIR="$<TARGET_FILE_DIR:mirabilis_core_tests>")
   target_compile_definitions(mirabilis_core_tests PRIVATE MIRABILIS_TEST_RELOAD_DIR="${CMAKE_BINARY_DIR}/reload-fixtures")
   target_compile_definitions(mirabilis_core_tests PRIVATE MIRABILIS_TEST_CONFIGURATION="$<CONFIG>")
   mirabilis_deploy_scripts(mirabilis_core_tests)
   add_test(NAME mirabilis_core_tests COMMAND mirabilis_core_tests)
+  set_tests_properties(mirabilis_core_tests PROPERTIES TIMEOUT 180)
   add_executable(mirabilis_script_abi_probe ../tests/script_abi_probe.cpp)
   target_link_libraries(mirabilis_script_abi_probe PRIVATE mirabilis_core)
   add_dependencies(mirabilis_script_abi_probe mirabilis_bad_bridge)
@@ -99,6 +108,7 @@ add_executable (engine
   vk_engine_path_trace.cpp
   path_trace_scene.cpp
   vk_engine_editor.cpp
+  vk_engine_editor_assets.cpp
   vk_engine_ibl.cpp
   vk_engine_gameplay.cpp
   vk_engine_simulation.cpp
@@ -137,6 +147,24 @@ target_include_directories(engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
 target_link_libraries(engine PUBLIC mirabilis_core vma glm Vulkan::Vulkan fmt::fmt stb_image SDL2::SDL2 vkbootstrap imgui imguizmo fastgltf::fastgltf fastgltf_simdjson)
 mirabilis_deploy_scripts(engine)
+option(MIRABILIS_BUILD_QT_EDITOR "Build the Qt authoring host and content browser" ON)
+if(MIRABILIS_BUILD_QT_EDITOR)
+  find_package(Qt6 6.8 REQUIRED COMPONENTS Widgets)
+  target_sources(engine PRIVATE qt_editor_window.cpp)
+  target_link_libraries(engine PRIVATE Qt6::Widgets)
+  target_compile_definitions(engine PRIVATE MIRABILIS_QT_EDITOR QT_NO_KEYWORDS)
+  if(BUILD_TESTING)
+    target_sources(engine PRIVATE ../tests/qt_browser_driver.cpp)
+    target_compile_definitions(engine PRIVATE MIRABILIS_EDITOR_TESTS)
+  endif()
+  get_target_property(QT_QMAKE Qt6::qmake IMPORTED_LOCATION)
+  get_filename_component(QT_BIN "${QT_QMAKE}" DIRECTORY)
+  find_program(QT_DEPLOY NAMES windeployqt6 windeployqt HINTS "${QT_BIN}" REQUIRED)
+  add_custom_command(TARGET engine POST_BUILD
+    COMMAND "${QT_DEPLOY}" "$<IF:$<CONFIG:Debug>,--debug,--release>" --no-translations --no-compiler-runtime "$<TARGET_FILE:engine>"
+    VERBATIM)
+endif()
+
 
 target_precompile_headers(engine PUBLIC <optional> <vector> <memory> <string> <vector> <unordered_map> <glm/mat4x4.hpp>  <glm/vec4.hpp> <vulkan/vulkan.h>)
 

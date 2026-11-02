@@ -155,6 +155,15 @@ void VulkanEngine::draw_profiling_panel()
     if (_rendererMode == RendererMode::SoftwarePathTrace) ImGui::Text("Completed GPU trace: %.3f ms", _traceRuntime.gpuMs);
     ImGui::Text("Draw-index scratch: %zu bytes, %llu growths",
         _opaqueDrawScratch.capacity() * sizeof(uint32_t), static_cast<unsigned long long>(stats.draw_index_buffer_grows));
+    if (_tasks) {
+        const auto tasks = _tasks->statistics();
+        ImGui::Text("Tasks: %zu workers, %zu fibers (%s)", tasks.workers, tasks.fibers,
+            tasks.backend == mirabilis::FiberBackend::Assembly ? "x64 assembly" : "Windows fibers");
+        ImGui::Text("Queued %zu, running %zu, parked %zu, completed %zu", tasks.queued, tasks.running, tasks.parked, tasks.completed);
+        ImGui::Text("Pool-exhaustion fallbacks %zu, cancelled %zu", tasks.inlineFallbacks, tasks.cancelled);
+        ImGui::Text("Task scratch: %.2f MiB committed, %.2f MiB peak; small pools %.2f MiB",
+            double(tasks.scratchCommitted) / 1048576, double(tasks.scratchPeak) / 1048576, double(tasks.poolCommitted) / 1048576);
+    }
     if (ImGui::Button("Sample GPU allocations")) {
         VmaTotalStatistics memory{};
         vmaCalculateStatistics(_allocator, &memory);

@@ -1396,7 +1396,7 @@ SceneObjectID VulkanEngine::import_gltf_actor(std::string_view modelPath)
     }
 
     auto model = loadGltf(this, std::filesystem::path(modelPath));
-    if (!model) {
+    if (!model || _editorQuitRequested) {
         fmt::print("Failed to import glTF actor: {}\n", modelPath);
         return InvalidSceneObject;
     }
@@ -2057,21 +2057,24 @@ void VulkanEngine::draw_play_overlay(float horizontalSpeed)
 void VulkanEngine::draw_frame_ui(float deltaTime)
 {
     if (_editorMode) {
-        // This full-window dockspace has a transparent centre, so the
-        // Vulkan scene remains the editor viewport between side panels.
-        const ImGuiID dockspaceID = ImGui::DockSpaceOverViewport(
-            0,
-            ImGui::GetMainViewport(),
-            ImGuiDockNodeFlags_PassthruCentralNode);
-        setup_default_dock_layout(dockspaceID);
-        draw_editor_menu();
+        if (!_qtEditorActive) {
+            // This full-window dockspace has a transparent centre, so the
+            // Vulkan scene remains the editor viewport between side panels.
+            const ImGuiID dockspaceID = ImGui::DockSpaceOverViewport(
+                0,
+                ImGui::GetMainViewport(),
+                ImGuiDockNodeFlags_PassthruCentralNode);
+            setup_default_dock_layout(dockspaceID);
+            draw_editor_menu();
     
-        // The player model's offset, facing correction, and scale now
-        // live on this object instead of in a separate tuning panel.
-        draw_hierarchy_panel();
-        draw_inspector_panel();
-    
+            // The player model's offset, facing correction, and scale now
+            // live on this object instead of in a separate tuning panel.
+            draw_hierarchy_panel();
+            draw_inspector_panel();
+        }
         if (_editorUi.showDebugPanels) {
+            // Keep component diagnostics accessible while Qt's properties cover name and TRS.
+            if (_qtEditorActive) draw_inspector_panel();
             if (ImGui::Begin("Render Settings")) {
                 draw_path_trace_ui();
                 ImGui::SliderFloat("Resolution Scale", &renderScale, 0.3f, 1.0f);
@@ -2175,7 +2178,7 @@ void VulkanEngine::draw_frame_ui(float deltaTime)
     const float horizontalSpeed = glm::length(glm::vec2(
         _playerMovement.velocity.x,
         _playerMovement.velocity.z));
-    if (_editorMode && _editorUi.showDebugPanels) {
+    if (_editorUi.showDebugPanels) {
         draw_statistics_panel(horizontalSpeed);
         draw_profiling_panel();
     }

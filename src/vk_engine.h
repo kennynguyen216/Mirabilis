@@ -2,6 +2,8 @@
 #include "script_host.h"
 #include "frame_clock.h"
 #include "profiler.h"
+#include "task_system.h"
+#include "editor_assets.h"
 #pragma once
 #include "path_trace_scene.h"
 
@@ -503,6 +505,11 @@ class VulkanEngine{
     bool resize_requested {false};
     mirabilis::FrameClock _frameClock;
     mirabilis::Profiler _profiler;
+    std::unique_ptr<mirabilis::TaskSystem> _tasks;
+    std::function<void()> _editorHostPump;
+    bool _qtEditorActive{}, _editorQuitRequested{}, _editorDiscardOnExit{};
+    std::deque<EditorRequest> _editorRequests;
+    std::string _editorAssetStatus;
     std::filesystem::path _profileTraceOutput;
     std::string _profileExportStatus;
     // Command recording is serial; no GPU work retains these CPU indices.
@@ -799,6 +806,15 @@ class VulkanEngine{
     void tick_simulation(float deltaTime, bool gameplayInputAllowed);
     mirabilis::Profiler& profiler() { return _profiler; }
     void draw_profiling_panel();
+    mirabilis::TaskSystem& tasks() { return *_tasks; }
+    // Qt and SDL run on this owner thread; requests apply between event polling and simulation.
+    std::filesystem::path editor_asset_root() const;
+    EditorSnapshot editor_snapshot() const;
+    void queue_editor_request(EditorRequest request);
+    bool save_from_editor();
+    void release_editor_input();
+    void request_editor_quit();
+    void apply_editor_requests();
 
     void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
 

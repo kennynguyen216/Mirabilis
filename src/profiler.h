@@ -16,7 +16,7 @@ enum class CpuZone : uint8_t {
     Startup, Frame, Events, Reload, Simulation, ScriptFixed, SceneCommands,
     Movement, PhysicsSync, PhysicsStep, ScriptUpdate, Destruction, UI,
     Render, WaitGPU, AcquireImage, SceneUpdate, Geometry, AssetLoad,
-    ImageDecode, Upload, FrameLimit, Count
+    ImageDecode, Upload, FrameLimit, TaskExecute, TaskWait, Count
 };
 
 enum class ProfileCounter : uint8_t {

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <span>
+#include <memory_resource>
 
 #include <vk_types.h>
 
@@ -16,4 +17,5 @@
 //
 // This differs from MikkTSpace only across smoothed UV seams.
 void generate_tangents(
-    std::span<Vertex> vertices, std::span<const uint32_t> indices);
+    std::span<Vertex> vertices, std::span<const uint32_t> indices,
+    std::pmr::memory_resource* scratch = std::pmr::get_default_resource());

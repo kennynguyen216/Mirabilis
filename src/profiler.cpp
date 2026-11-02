@@ -13,7 +13,7 @@ constexpr std::array ZoneNames{
     "Startup", "Frame", "Events", "Reload", "Simulation", "Script fixed update", "Scene commands",
     "Movement", "Physics sync", "Physics step", "Script update", "Destruction", "UI",
     "Render", "GPU fence wait", "Acquire image", "Scene update", "Geometry", "Asset load",
-    "Image decode", "Upload", "Frame limiter"
+    "Image decode", "Upload", "Frame limiter", "Task execution", "Task wait"
 };
 constexpr std::array CounterNames{
     "GPU AO ms (completed)", "GPU GI ms (completed)", "GPU exposure ms (completed)",

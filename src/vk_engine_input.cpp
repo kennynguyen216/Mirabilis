@@ -31,15 +31,15 @@ bool VulkanEngine::process_event(const SDL_Event& e)
 {
     // Close the window when the user presses Alt+F4 or clicks the X.
     if (e.type == SDL_QUIT) {
-        return true;
+        return !_qtEditorActive || _editorQuitRequested;
     }
 
     if(e.type == SDL_WINDOWEVENT) {
         if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST && _scriptHost) _scriptHost->input().focus_lost();
-        if(e.window.event == SDL_WINDOWEVENT_MINIMIZED){
+        if(!_qtEditorActive && e.window.event == SDL_WINDOWEVENT_MINIMIZED){
             stop_rendering = true;
         }
-        if(e.window.event == SDL_WINDOWEVENT_RESTORED) {
+        if(!_qtEditorActive && e.window.event == SDL_WINDOWEVENT_RESTORED) {
             stop_rendering = false;
         }
         if(e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
@@ -54,7 +54,7 @@ bool VulkanEngine::process_event(const SDL_Event& e)
     if(e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) {
         if (!_editorMode && _scriptHost && _mouseCaptured && !ImGui::GetIO().WantCaptureKeyboard)
             _scriptHost->input().event(mirabilis::scripting::Key::Escape,true,e.key.repeat != 0);
-        return true;
+        return !_qtEditorActive || _editorQuitRequested;
     }
 
     if (e.type == SDL_KEYDOWN &&

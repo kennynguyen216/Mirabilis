@@ -40,7 +40,8 @@ Click the preview to watch the run.
 ### Scene editor and tooling
 
 - Uses EnTT entities with versioned identities, hierarchical transforms, and deferred scene changes.
-- Provides an ImGui editor with a scene hierarchy, object inspector, selection, duplication, and deletion.
+- Provides a Qt host with an embedded Vulkan viewport, dockable content browser, scene tree, name/transform properties, and selection/duplicate/delete actions.
+- Keeps ImGui for profiler, render settings, and component diagnostics; advanced component controls remain there during the Qt properties migration.
 - Supports translate, rotate, and scale gizmos with optional snapping.
 - Exposes editable box colliders and gameplay roles for scene-authored objects.
 - Saves and loads scene hierarchies, transforms, colliders, rigid bodies, scripts, imported assets, and gameplay roles in version 2 JSON scenes.
@@ -70,7 +71,7 @@ Click the preview to watch the run.
 - **Scene entities:** EnTT
 - **Rigid-body physics:** Jolt Physics
 - **Platform and input:** SDL2
-- **Editor UI:** ImGui and ImGuizmo
+- **Editor UI:** Qt 6 Widgets; ImGui diagnostics and ImGuizmo viewport tools
 - **Assets and math:** fastgltf, simdjson, GLM, stb_image
 - **Build:** CMake
 
@@ -87,6 +88,7 @@ The current build targets Windows x64. Install:
 - Visual Studio with the **Desktop development with C++** workload and a C++20-capable compiler
 - The [Vulkan SDK](https://vulkan.lunarg.com/sdk/home/)
 - The x64 .NET 10 SDK, including the Windows x64 hosting pack
+- Qt 6.8 or newer, MSVC x64 Widgets SDK (tested with 6.12); CMake deploys its runtime plugins
 
 A Vulkan 1.3-capable GPU is required for the editor. The .NET SDK includes the runtime needed by scripts; the SDK is also required to compile scripts and build the native host.
 
@@ -104,7 +106,7 @@ cd C:/dev/Mirabilis
 ### Configure and build
 
 ```powershell
-cmake -S . -B build
+cmake -S . -B build -DCMAKE_PREFIX_PATH=C:/Qt/6.12.0/msvc2022_64
 cmake --build build --config Debug --parallel
 ```
 
@@ -114,7 +116,7 @@ Alternatively, with Ninja installed, use the shared presets from a Visual Studio
 Developer PowerShell:
 
 ```powershell
-cmake --preset windows
+cmake --preset windows -DCMAKE_PREFIX_PATH=C:/Qt/6.12.0/msvc2022_64
 cmake --build --preset debug --parallel 2
 ctest --preset debug
 ```
@@ -133,7 +135,22 @@ Push-Location .\bin\Debug
 Pop-Location
 ```
 
-Press `Esc` or close the window to exit.
+The Qt editor opens by default. Its content browser navigates the asset root,
+filters the current folder, previews selected images, opens scene JSON files,
+imports glTF/GLB models, assigns a selected image as base color, and reimports
+models. Asset changes apply on the engine thread in Edit mode. Reimport builds
+replacement resources before swapping; failed parses/textures retain the old model.
+Save/Discard/Cancel protects unsaved scenes on open and close.
+
+Use **Debug > ImGui diagnostics** for profiling, rendering controls and the
+advanced component inspector. Qt currently edits names and transforms; physics,
+scripts and other advanced component controls remain in that debug inspector.
+`MIRABILIS_ASSET_ROOT` overrides the browser root. The existing scene directory
+is `assets/scenes`; browsing does not rename or move files and break references.
+
+`MIRABILIS_QT_EDITOR=0` runs the SDL host. Configure with
+`-DMIRABILIS_BUILD_QT_EDITOR=OFF` to omit the Qt dependency entirely. Bounded
+GPU tests use SDL unless Qt is explicitly enabled. Press `Esc` or close to exit.
 
 ### Profiling and shared services
 
@@ -172,8 +189,35 @@ an error rather than claiming a successful capture.
 unclamped wall time and caps simulation deltas at 100 ms; reload resets its time
 origin. `VulkanEngine::tick_simulation` shares the existing fixed-step update and
 accepts input-focus permission from the host without pumping events or calling
-ImGui. This is the foundation for a Qt authoring host with ImGui diagnostics;
-the current executable still uses its SDL host and existing editor controls.
+ImGui. The Qt host pumps on the owner thread before simulation and shares these
+services with the SDL fallback.
+
+The core task scheduler uses pinned worker fibers, priority queues, nested
+`TaskGroup` waits and `parallel_for`. Windows x64 uses a separate MASM switch
+preserving nonvolatile registers, floating-point controls and stack metadata.
+Processes with hardware shadow stacks use Win32 fibers automatically. Waiting
+jobs retain their scratch storage; exhausted fiber pools execute descendants on
+the worker root stack with a checked nesting limit. Exceptions propagate after
+joining the group, cancellation skips queued work, and shutdown drains accepted
+jobs and their children. Callers must join groups before captured references die;
+cyclic dependencies are invalid. A task must not shut down its own scheduler.
+
+`VirtualArena` reserves address space and commits pages on demand, supports
+checked alignment/reallocation and scoped rewinds, and can decommit on reset.
+`FixedBlockPool` reuses aligned slots and rejects invalid/double releases.
+`SizeClassResource` serves 16–2048-byte allocations from pools, with heap fallback
+for larger/over-aligned requests. Task queues use these pools; larger tangent jobs
+use per-task PMR scratch with heap fallback when its arena fills. Arena reset
+never runs destructors: PMR containers must be destroyed first. Profiling reports
+committed task scratch and small-pool memory; heap fallback allocations are not
+included in those figures.
+
+The glTF loader decodes only referenced images in batches of two on workers,
+reuses one decode for sRGB/linear GPU variants, and performs Vulkan uploads on the
+owner thread. Each decoded RGBA source is limited to 256 MiB; unsupported or failed
+images use the checkerboard on initial load. Embedded image views honor their byte
+offsets and lengths. This reduces duplicate decoding and temporary allocation;
+no frame-rate or load-time speedup is claimed without a dedicated benchmark.
 
 After building, run the profiling GPU gate sequentially with other GPU checks:
 
@@ -185,6 +229,18 @@ Use a fresh output directory. The gate checks engine trace events, steady scratc
 capacity, unchanged scene files, and identical profiling-on/off raster captures
 in a static scene and during player portal traversal. Add `--configuration Release`
 to exercise the Release binary.
+
+The Qt integration gate uses disposable assets and saved scenes:
+
+```powershell
+python tests/qt_editor_gate.py --output C:/temp/mirabilis-qt-check
+```
+
+It checks import, shared color-space decodes, embedded image offsets, texture
+assignment/failure, transforms, save/reopen, stale identities, reimport, dock/
+window lifecycle behavior, ImGui diagnostics in Edit/Play and close Cancel/Discard. Native CTest coverage also exercises both fiber
+backends, pool exhaustion, nested tasks, cancellation, shutdown and allocator
+alignment/overflow/OOM paths.
 
 ## Status
 

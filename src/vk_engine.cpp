@@ -352,6 +352,7 @@ void VulkanEngine::init()
         _profiler.start_capture();
     }
     auto profileScope = _profiler.scope(mirabilis::CpuZone::Startup);
+    _tasks = std::make_unique<mirabilis::TaskSystem>(mirabilis::TaskSystemDesc{}, &_profiler);
     //only one engine init is allowed with the application
     assert(loadedEngine == nullptr);
     loadedEngine = this;
@@ -850,6 +851,7 @@ void VulkanEngine::init_sync_structures()
 
 void VulkanEngine::cleanup()
 {
+    if (_tasks) _tasks->shutdown();
     if (_scriptHost) _scriptHost->shutdown();
     if(_isInitialized) {
         vkDeviceWaitIdle(_device);
@@ -859,7 +861,7 @@ void VulkanEngine::cleanup()
         // The explicit File > Save Scene command is still useful for named
         // checkpoints, but closing the editor should not discard unsaved
         // level construction work.
-        if (_sceneDocument.dirty && !SDL_getenv("MIRABILIS_TEST_FRAMES")) {
+        if (_sceneDocument.dirty && !_editorDiscardOnExit && !SDL_getenv("MIRABILIS_TEST_FRAMES")) {
             save_editor_scene();
         }
 
@@ -1755,6 +1757,7 @@ void VulkanEngine::run(){
         //handle events on queue
         {
         auto scope = _profiler.scope(mirabilis::CpuZone::Events);
+        if (_editorHostPump) _editorHostPump();
         while (SDL_PollEvent(&e) != 0) {
             if (testPhysics && e.type == SDL_KEYDOWN) {
                 fmt::print("PHYSICS interactive key event: key={} repeat={}\n",int(e.key.keysym.sym),int(e.key.repeat));
@@ -1762,6 +1765,8 @@ void VulkanEngine::run(){
             bQuit = process_event(e) || bQuit;
         }
         }
+        apply_editor_requests();
+        if (bQuit || _editorQuitRequested) break;
         if (_scriptHost) {
             auto scope = _profiler.scope(mirabilis::CpuZone::Reload);
             const auto ref=testReload ? _scene.get(3) : EntityRef{};
