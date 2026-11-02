@@ -1,21 +1,7 @@
-# Frozen Milestone 1 contracts
+# Scene API contracts
 
-The canonical typed API is `mirabilis::Scene` in `scene_ecs.h`; the caller migration
-replaces the legacy global `Scene` with an alias to it. The legacy vector exists
-only through the building extraction/contract checkpoints, and is removed in the
-single validated registry/caller integration group. No worker adds a SceneObject
-adapter or a second authoritative entity aggregate.
-
-## Ownership and integration
-
-Lead owns all CMake files, scene types/components/wrapper, snapshots, queues,
-`vk_engine.h`, `vk_engine.cpp`, debug views, scene material runtime code and
-unassigned files. Editor specialist owns editor, scene IO, `scene_serialization.cpp`
-and `scene_format.md`. Gameplay specialist owns gameplay, scene emission, portals,
-`scene_queries.cpp` and listed renderer eligibility callers. Validation owns tests
-and fixtures after the contract checkpoint (including the existing core smoke test).
-Worker branches start at the frozen commit and integrate one at a time on
-`integration/ecs`; only the building, tested combined group merges to `feature/ecs`.
+The canonical typed API is `mirabilis::Scene` in `scene_ecs.h`. Scene owns the
+authoritative registry; engine callers use validated references and mutations.
 
 ## Identity and access
 

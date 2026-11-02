@@ -1,6 +1,6 @@
-# Milestone 2 frozen contracts
+# Physics contracts
 
-Base: reviewed ECS tip 6497ec16d60989401a8c20b4a4839aec9d3eca70. Player naming-only commit precedes these contracts. Identity, epoch, queued command batch, pending read/mutation and destruction rules remain those of Milestone 1.
+Physics preserves the Scene identity, epoch, queued command batch, pending read/mutation and destruction rules described in `ecs_milestone_1_contracts.md`.
 
 RigidBody is optional saved data: BodyMotion Static/Dynamic, mass=1, friction=.5, restitution=0, gravityFactor=1. V2 block `rigidBody` uses `motion` strings `Static`/`Dynamic` and those four numeric names. All finite; mass positive for Dynamic, friction nonnegative, restitution [0,1], gravity signed. Dynamic requires root, enabled Box collider, positive extents and nonzero scale. Static disabled settings persist. PhysicsState sleeping is transient only. EntityState adds optional RigidBody for duplication/snapshots.
 
@@ -14,7 +14,6 @@ PhysicsWorld::render_world(scene,ref,alpha) returns interpolated Dynamic ancesto
 
 Shared contributes_to_static_caches(scene,ref,editorMode) retains existing validity/runtime eligibility and uses dynamic ancestor PhysicsState sleeping: authored Dynamic subtrees eligible in editor, excluded awake in Play, included asleep at exact authoritative pose. Emission attaches predicate on every primitive/glTF draw; SDF, surface cache and ray-query shadows consume it; path tracer includes all draws. Existing deterministic hierarchy/node/surface order remains. EngineStats adds live bodies and cumulative actual rebuild counters for each cache. No unrelated renderer preferences change.
 
-Ownership: lead owns components, Scene/math/physics implementation, engine header/main, CMake, dependency vendoring, contracts/report/demo. Gameplay worker owns scene queries, gameplay, scene emission, portals, four cache files. Editor worker owns inspector, engine scene IO, core serialization and scene format. Validation owns tests/fixtures/gate runners and evidence and writes from contracts/spec without reading physics implementation. Workers branch from this commit, request shared declaration changes from lead, and integrate sequentially on temporary integration branch if compilation requires combined callers.
 
 Gate refinements: step has an optional during-step validation callback; native body_world/body_bounds inspect origin/bounds without a GPU. In-step remove is refused with a diagnostic; queued entity destruction is drained afterward. Per-entity glTF previous-draw vectors accompany primitive history and reset together. The shared trace implementation also serves Raster cache lighting: its Raster auxiliary input uses the static-eligible subset, while SoftwarePathTrace always includes all draws; both hashes include that policy so mode changes rebuild. Capture telemetry describes completed rendered frames and reports real SDF placed/instance counts.
 
