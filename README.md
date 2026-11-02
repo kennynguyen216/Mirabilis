@@ -205,7 +205,7 @@ cyclic dependencies are invalid. A task must not shut down its own scheduler.
 `VirtualArena` reserves address space and commits pages on demand, supports
 checked alignment/reallocation and scoped rewinds, and can decommit on reset.
 `FixedBlockPool` reuses aligned slots and rejects invalid/double releases.
-`SizeClassResource` serves 16�2048-byte allocations from pools, with heap fallback
+`SizeClassResource` serves 16–2048-byte allocations from pools, with heap fallback
 for larger/over-aligned requests. Task queues use these pools; larger tangent jobs
 use per-task PMR scratch with heap fallback when its arena fills. Arena reset
 never runs destructors: PMR containers must be destroyed first. Profiling reports
@@ -241,6 +241,31 @@ assignment/failure, transforms, save/reopen, stale identities, reimport, dock/
 window lifecycle behavior, ImGui diagnostics in Edit/Play and close Cancel/Discard. Native CTest coverage also exercises both fiber
 backends, pool exhaustion, nested tasks, cancellation, shutdown and allocator
 alignment/overflow/OOM paths.
+
+### Comparing engine performance
+
+Build both checkouts in Release with matching assets and generated shaders, then
+run GPU workloads sequentially with the comparison harness:
+
+```powershell
+python tests/benchmark_comparison.py --baseline C:/dev/Mirabilis-baseline --candidate . --output C:/temp/mirabilis-comparison
+```
+
+Use a fresh output directory. The harness verifies matching shader/asset bytes
+and rendered captures, primes caches, then alternates five old/new runs in the
+sandbox, Sponza and a portal scene. Each run uses a fixed 1600×900 window, the
+scene's saved quality settings, 120 warm-up frames and 600 measured frames with
+the cap/panels/profiling off. It requires input focus for every measured sample.
+Window focus changes invalidate a run. No other engine instance or build should
+run during measurement.
+
+Results include wall-frame FPS, run variance, descriptive paired bootstrap
+intervals, render-loop duration percentiles, startup/glTF log intervals, GPU
+clock/temperature samples and input hashes. Loading numbers include uploads and
+use warmed filesystem/driver caches. Percentiles from the engine CSV measure
+render-loop work rather than independent presentation timestamps. The comparison
+uses the same SDL host on both revisions; Qt editor overhead is excluded. Small
+changes or intervals crossing zero are reported without claiming a speedup.
 
 ## Status
 
