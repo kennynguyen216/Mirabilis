@@ -102,7 +102,11 @@ vec3 emitter_sample(vec3 world, vec3 normal, uint count, vec3 xi, float voxel,
     if (dot(normal, direction) <= 0.0 || cosineLight <= 1e-8) {
         return vec3(0.0);
     }
+#ifdef EMITTER_FIELD_ORIGIN
+    visibilityTarget = EMITTER_FIELD_ORIGIN(lightPoint,emitterNormal,voxel);
+#else
     visibilityTarget = lightPoint + emitterNormal * (EmitterClearanceVoxels * voxel);
+#endif
     return materials[emitter.meta.x].emission.rgb * cosineLight * (0.5 * twiceArea) *
         float(count) / (3.14159265359 * distanceSquared);
 }

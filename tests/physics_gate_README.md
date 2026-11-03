@@ -36,8 +36,8 @@ ray-shadow, eligible, dynamic-draws, history-reset, and the four corresponding
 `*-enabled` fields. It uses the existing fixed step at 1/120. Raster phases are
 awake/sleep, wake at900, teleport at930, restore at960, edit-restore at980,
 unchanged-restore at990, scratch-save/reopened at1020, sandbox at1050, end1080.
-The runner rejects per-frame static-cache rebuilds while awake, more than one
-rebuild per sleep/wake transition, unchanged Edit restoration rebuilds, missing
+The runner rejects per-frame static-cache rebuilds while awake, any
+rebuild per sleep/wake transition, unchanged Edit restoration rebuilds, unexpected
 subtree cache eligibility changes and missing teleport/restore history resets.
 
 Captures use the same fixed camera. Awake/sleep raster PFM files and path-trace
@@ -61,4 +61,4 @@ two-frame Edit preflight queues every eligible primitive/glTF mesh, followed by
 `scripts/bake_sdf.py --queue assets/sdf/queue assets/sdf/cache`. Generated volumes
 remain ignored runtime artifacts. The runner retains bake logs, source hash,
 dependency versions and hashes of every queue/cache file; it requires real
-positive rebuild counters and exactly one enabled-cache sleep/wake rebuild.
+positive rebuild counters and zero enabled-cache sleep/wake rebuilds.

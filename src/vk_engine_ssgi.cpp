@@ -309,7 +309,7 @@ void VulkanEngine::init_ssgi_resources()
     }
     _ssgi.temporalDiagnosticImage = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     _ssgi.filterScratchImage = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
@@ -845,6 +845,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
                 // strength, as before the motion-scaled clamp.
                 (_ssgi.fullClampControl ? 16u : 0u) |
                 (_r4Contributions.ray << 8));
+        if(SDL_getenv("MIRABILIS_GI_RANDOM_SAMPLING")) pushConstants.quality.w|=0x80000000u;
         vkCmdPushConstants(
             cmd, traceLayout, VK_SHADER_STAGE_COMPUTE_BIT,
             0, sizeof(pushConstants), &pushConstants);
@@ -880,6 +881,10 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
         // Temporal accumulation is a separate dispatch so every invocation
         // sees the complete current-frame raw image. This makes the 3x3
         // neighborhood clamp deterministic across workgroups.
+        if(lumen && (_surfaceCache.lightingPending || uint64_t(_frameNumber)<_surfaceCache.responsiveUntil)) {
+            pushConstants.temporal.x=std::min(pushConstants.temporal.x,.65f);
+            pushConstants.quality.w=(pushConstants.quality.w & ~32u) | 16u;
+        }
         vkCmdBindPipeline(
             cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.temporalPipeline);
         vkCmdBindDescriptorSets(

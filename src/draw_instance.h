@@ -9,12 +9,12 @@ struct GPUDrawInstance {
     glm::mat4 world{1};
     glm::vec4 previousRows[3]{};
     glm::vec4 normalRows[3]{};
-    glm::vec4 flags{}; // x double-sided, y determinant sign
+    glm::vec4 flags{}; // x double-sided, y determinant sign, z excludes static-cache lighting
 };
 static_assert(sizeof(GPUDrawInstance) == 176);
 
 inline GPUDrawInstance make_draw_instance(const glm::mat4 &world, const glm::mat4 &previous,
-                                          bool doubleSided) {
+                                          bool doubleSided, bool staticCacheMember = true) {
     GPUDrawInstance instance;
     instance.world = world;
     const glm::mat3 linear(world);
@@ -28,6 +28,6 @@ inline GPUDrawInstance make_draw_instance(const glm::mat4 &world, const glm::mat
             glm::vec4(previous[0][row], previous[1][row], previous[2][row], previous[3][row]);
         instance.normalRows[row] = glm::vec4(normal[0][row], normal[1][row], normal[2][row], 0);
     }
-    instance.flags = glm::vec4(doubleSided ? 1.f : 0.f, determinant < 0 ? -1.f : 1.f, 0, 0);
+    instance.flags = glm::vec4(doubleSided ? 1.f : 0.f, determinant < 0 ? -1.f : 1.f, staticCacheMember ? 0.f : 1.f, 0);
     return instance;
 }

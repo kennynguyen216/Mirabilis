@@ -10,6 +10,7 @@
 layout(location = 0) out vec3 outViewNormal;
 layout(location = 2) flat out float outDoubleSided;
 layout(location=3) out vec3 outViewPosition;
+layout(location=4) flat out float outStaticCacheMember;
 
 #include "vertex.glsl"
 #include "draw_instance.glsl"
@@ -43,4 +44,5 @@ void main()
     outViewNormal = mat3(sceneData.view) * worldNormal;
     outViewPosition=(sceneData.view*worldPosition).xyz;
     outDoubleSided=PushConstants.flags.x;
+    outStaticCacheMember=instanced ? 1.0-instance.flags.z : 1.0;
 }

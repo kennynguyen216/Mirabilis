@@ -10,6 +10,7 @@
 #include "cel_shading.glsl"
 #include "reflection_settings.glsl"
 
+layout(location=7) flat in float inStaticCacheMember;
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec4 inColor;
 layout(location = 2) in vec2 inUV;
@@ -98,7 +99,7 @@ void main()
     vec3 emission = material_emission(geometricNormal, inWorldPosition);
     vec3 emitterDiffuse;
     vec3 emitterSpecular;
-    material_emitters(surface, inWorldPosition, lightingGeometricNormal, gl_FragCoord.xy,
+    material_emitters(surface, inWorldPosition, lightingGeometricNormal, gl_FragCoord.xy,inStaticCacheMember>0.5,
         emitterDiffuse, emitterSpecular);
     #ifndef MIRABILIS_COLOR_ONLY
     if (reflection_roughness_owned(surface.roughness)) {

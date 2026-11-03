@@ -93,7 +93,7 @@ void main()
                 }
                 // Bound stale directional radiance when a reflected sky ray changes with the view.
                 old.rgb=clamp(old.rgb,lo,hi);
-                float count=min(old.a+1,16);
+                float count=min(old.a+1,push.settings.y);
                 value=vec4(mix(old.rgb,raw.rgb,1/count),count);
             }
         }

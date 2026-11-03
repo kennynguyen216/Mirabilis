@@ -1,0 +1,23 @@
+#version 450
+layout(local_size_x=8,local_size_y=8,local_size_z=8) in;
+layout(rgba16f,set=0,binding=0) uniform image3D field;
+layout(set=0,binding=1) uniform sampler3D meshVolume;
+layout(std140,set=0,binding=2) uniform Surface { vec4 albedo; } surface;
+layout(push_constant) uniform Constants {
+    vec4 worldToLocal0,worldToLocal1,worldToLocal2,volumeMin,volumeMax,fieldOrigin;
+    ivec3 regionOffset; float shellPad; ivec4 regionSize;
+} push;
+void main()
+{
+    ivec3 local=ivec3(gl_GlobalInvocationID);
+    if(any(greaterThanEqual(local,push.regionSize.xyz))) return;
+    ivec3 voxel=push.regionOffset+local;
+    vec4 world=vec4(push.fieldOrigin.xyz+(vec3(voxel)+0.5)*push.fieldOrigin.w,1);
+    vec3 p=vec3(dot(push.worldToLocal0,world),dot(push.worldToLocal1,world),dot(push.worldToLocal2,world));
+    vec3 q=clamp(p,push.volumeMin.xyz,push.volumeMax.xyz);
+    float outside=length(p-q);
+    float stored=textureLod(meshVolume,(q-push.volumeMin.xyz)/(push.volumeMax.xyz-push.volumeMin.xyz),0).r;
+    float distance=(outside>0 ? length(vec2(outside,max(stored,0))) : stored)*push.volumeMin.w-push.shellPad;
+    vec4 previous=imageLoad(field,voxel);
+    if(distance<previous.a) imageStore(field,voxel,vec4(surface.albedo.rgb,distance));
+}

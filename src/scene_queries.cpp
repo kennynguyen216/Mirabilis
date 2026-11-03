@@ -154,9 +154,8 @@ bool contributes_to_static_caches(const mirabilis::Scene& scene, EntityRef ref, 
 {
     if (!scene.valid(ref)) return false;
     const EntityRef dynamic = scene.dynamic_ancestor(ref);
-    if (editorMode || !dynamic) return true;
-    const PhysicsState* state = scene.read<PhysicsState>(dynamic);
-    return state != nullptr && state->sleeping;
+    // Keep a body's cache membership stable across sleep/wake transitions.
+    return editorMode || !dynamic;
 }
 
 std::vector<EntityRef> scene_emission_order(const mirabilis::Scene& scene)

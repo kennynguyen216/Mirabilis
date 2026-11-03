@@ -74,9 +74,10 @@ void VulkanEngine::draw_reflections(VkCommandBuffer cmd)
     // Large per-frame jumps are cuts; smooth motion uses the per-hit reprojection checks.
     const bool continuousCamera=glm::distance(cameraPosition,state.lastCameraPosition)<2.f &&
         glm::dot(cameraForward,state.lastCameraForward)>.5f;
-    // Scene edits invalidate globally; camera motion is checked per reprojected hit.
-    state.historyValid=allowHistory && continuousCamera && state.historyValid && state.lastSceneHash==_sunCasters.hash &&
-        state.lastLightingHash==_surfaceCache.lightingHash && !_surfaceCache.lightingPending &&
+    // Hit identity/position rejects changed geometry; changed lighting gets short, clamped history.
+    const bool reactive=state.lastSceneHash!=_sunCasters.hash || state.lastLightingHash!=_surfaceCache.lightingHash ||
+        _surfaceCache.lightingPending || uint64_t(_frameNumber)<_surfaceCache.responsiveUntil;
+    state.historyValid=allowHistory && continuousCamera && state.historyValid &&
         state.liveExtent.width==_drawExtent.width && state.liveExtent.height==_drawExtent.height;
     const uint32_t write=state.writeIndex,read=1-write;
     VkDescriptorSet set=get_current_frame()._frameDescriptors.allocate(_device,state.layout);
@@ -93,7 +94,7 @@ void VulkanEngine::draw_reflections(VkCommandBuffer cmd)
     const VkDescriptorSet sets[]{get_current_frame().sceneDescriptor,set};
     struct Push { glm::mat4 inverseViewProjection; glm::vec4 camera; glm::uvec4 control; glm::vec4 settings; };
     static_assert(sizeof(Push)==112);
-    Push push{glm::inverse(sceneData.viewproj),cameraWorld[3],glm::uvec4(_drawExtent.width,_drawExtent.height,uint32_t(_frameNumber),0),glm::vec4(state.historyValid?1.f:0.f,0,0,0)};
+    Push push{glm::inverse(sceneData.viewproj),cameraWorld[3],glm::uvec4(_drawExtent.width,_drawExtent.height,uint32_t(_frameNumber),0),glm::vec4(state.historyValid?1.f:0.f,reactive?4.f:16.f,0,0)};
     vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,state.pipeline.pipeline);
     vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,state.pipeline.layout,0,2,sets,0,nullptr);
     const auto dispatch=[&](uint32_t pass) {
@@ -106,7 +107,7 @@ void VulkanEngine::draw_reflections(VkCommandBuffer cmd)
     vkutil::memory_barrier(cmd); dispatch(1);
     vkutil::memory_barrier(cmd); dispatch(2);
     vkutil::transition_image(cmd,_drawImage.image,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    state.historyValid=allowHistory && !_surfaceCache.lightingPending; state.lastSceneHash=_sunCasters.hash; state.lastLightingHash=_surfaceCache.lightingHash;
+    state.historyValid=allowHistory; state.lastSceneHash=_sunCasters.hash; state.lastLightingHash=_surfaceCache.lightingHash;
     state.lastCameraPosition=cameraPosition;state.lastCameraForward=cameraForward;
     state.liveExtent=_drawExtent; state.writeIndex=read;
 }

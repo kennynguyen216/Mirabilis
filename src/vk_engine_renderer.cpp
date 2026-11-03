@@ -196,6 +196,8 @@ void VulkanEngine::init_scene_descriptors()
         builder.add_binding(23, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(24, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         builder.add_binding(25, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(26, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(27, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         for (uint32_t binding = 17; binding <= 21; ++binding)
             builder.add_binding(binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         // IQ2: the sun casters' TLAS, only on the ray-query device, where
@@ -218,6 +220,7 @@ void VulkanEngine::init_scene_descriptors()
     const VkSampler occlusionSampler = ssao_occlusion_sampler();
 
     for (FrameData& frame : _frames) {
+        frame.dynamicFieldBuffer=create_buffer(sizeof(glm::vec4)*2,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
         frame.sceneBuffer = create_buffer(
             sizeof(GPUSceneData),
             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
@@ -290,6 +293,7 @@ void VulkanEngine::init_descriptor_cleanup()
         for (FrameData& frame : _frames) {
             frame._frameDescriptors.destroy_pools(_device);
             destroy_buffer(frame.sceneBuffer);
+            destroy_buffer(frame.dynamicFieldBuffer);
             for(auto page:frame.instancePages)destroy_buffer(page);
             for(auto buffer:{frame.clusterInput,frame.clusterInstances,frame.clusterCommands})if(buffer.buffer)destroy_buffer(buffer);
             for (AllocatedBuffer& portalSceneBuffer : frame.portalSceneBuffers) {
@@ -450,8 +454,8 @@ void VulkanEngine::draw_geometry(
     VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
 
     auto& instances=_instanceScratch;instances.clear();instances.reserve(opaqueDraws.size()+drawContext.TransparentSurfaces.size());
-    for(auto index:opaqueDraws){const auto& object=drawContext.OpaqueSurfaces[index];instances.push_back(make_draw_instance(object.transform,object.previousTransform,object.material&&object.material->doubleSided));}
-    for(const auto& object:drawContext.TransparentSurfaces)instances.push_back(make_draw_instance(object.transform,object.previousTransform,object.material&&object.material->doubleSided));
+    for(auto index:opaqueDraws){const auto& object=drawContext.OpaqueSurfaces[index];instances.push_back(make_draw_instance(object.transform,object.previousTransform,object.material&&object.material->doubleSided,object.contributesToStaticCaches));}
+    for(const auto& object:drawContext.TransparentSurfaces)instances.push_back(make_draw_instance(object.transform,object.previousTransform,object.material&&object.material->doubleSided,object.contributesToStaticCaches));
     const auto instanceAddress=upload_draw_instances(instances);
     auto draw = [&](const RenderObject& renderObject,uint32_t firstInstance,uint32_t instanceCount) {
         if (renderObject.material == nullptr) {
@@ -701,6 +705,9 @@ uint32_t VulkanEngine::sampled_emitter_count() const
 
 void VulkanEngine::write_emitter_descriptors(FrameData& frame)
 {
+    const glm::vec4 bounds[]{_dynamicSdf.minimum,_dynamicSdf.maximum};
+    std::memcpy(frame.dynamicFieldBuffer.info.pMappedData,bounds,sizeof(bounds));
+    vmaFlushAllocation(_allocator,frame.dynamicFieldBuffer.allocation,0,VK_WHOLE_SIZE);
     if (_portalGiPlaceholder.image == VK_NULL_HANDLE) {
         uint32_t empty[2]{};
         _portalGiPlaceholder = create_image(empty, {1, 1, 2},
@@ -731,6 +738,8 @@ void VulkanEngine::write_emitter_descriptors(FrameData& frame)
     };
     const auto write = [&](VkDescriptorSet set) {
         DescriptorWriter writer;
+        writer.write_image(26,_dynamicSdf.field.imageView,_sdf.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.write_buffer(27,frame.dynamicFieldBuffer.buffer,sizeof(glm::vec4)*2,0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         writer.write_image(22,_localShadowAtlas.imageView,_shadow.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         writer.write_buffer(24,buffer(frame.rayHitInstances,_rayQueryShadows),VK_WHOLE_SIZE,0,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         writer.write_image(23,_postProcess.sceneCopy.imageView,_postProcess.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);

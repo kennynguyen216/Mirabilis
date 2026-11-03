@@ -53,6 +53,7 @@ struct FrameData {
         DeletionQueue _deletionQueue;
         DescriptorAllocatorGrowable _frameDescriptors;
         AllocatedBuffer sceneBuffer;
+        AllocatedBuffer dynamicFieldBuffer;
         std::vector<AllocatedBuffer> instancePages;
         size_t instancePageCursor{};
         AllocatedBuffer clusterInput, clusterInstances, clusterCommands;
@@ -246,14 +247,14 @@ struct ColliderDebugPushConstants {
 };
 
 enum class GpuPass : uint32_t {
-    Frame, RayScene, SunShadow, CacheDirect, Radiosity, Reference,
+    Frame, RayScene, DynamicField, SunShadow, CacheDirect, Radiosity, Reference,
     LocalShadows, Prepass, Visibility, AO, Background, Forward, GI,
     Reflections, Portals, Transparents, Debug, Exposure, Bloom, Tonemap,
     FXAA, PresentCopy, UI, Count
 };
 constexpr size_t GpuPassCount = static_cast<size_t>(GpuPass::Count);
 inline constexpr std::array<const char*, GpuPassCount> GpuPassNames{
-    "frame", "ray_scene", "sun_shadow", "cache_direct", "radiosity", "reference",
+    "frame", "ray_scene", "dynamic_field", "sun_shadow", "cache_direct", "radiosity", "reference",
     "local_shadows", "prepass", "visibility", "ao", "background", "forward", "gi",
     "reflections", "portals", "transparents", "debug", "exposure", "bloom", "tonemap",
     "fxaa", "present_copy", "ui"};
@@ -973,6 +974,9 @@ class VulkanEngine{
         // their transforms changed since the last build.  Meshes without a
         // baked volume are written to the bake queue and left out.
         void update_scene_sdf();
+        void update_dynamic_sdf();
+        void record_dynamic_sdf(VkCommandBuffer cmd);
+        void capture_dynamic_sdf(const char* filename);
         // Every opaque world draw grouped into instances.  Returns a hash of
         // the grouping and transforms, so callers can skip unchanged scenes.
         uint64_t collect_opaque_instances(
@@ -1655,6 +1659,21 @@ class VulkanEngine{
             VkPipeline compositePipeline{};
         };
         SceneSdfState _sceneSdf;
+        struct DynamicSdfState {
+            struct Job { uint64_t mesh; SdfCompositePushConstants push; glm::vec4 albedo; };
+            std::unordered_map<uint64_t, SceneSdfState::MeshVolume> volumes;
+            std::vector<Job> jobs;
+            AllocatedImage field{};
+            glm::vec4 minimum{}, maximum{};
+            glm::uvec3 dimensions{1,1,2};
+            uint64_t hash{}, updates{};
+            uint32_t missing{};
+            bool pending{}, active{};
+            VkPipelineLayout layout{};
+            VkPipeline pipeline{};
+            VkDescriptorSetLayout descriptorLayout{};
+        };
+        DynamicSdfState _dynamicSdf;
         struct SurfaceCacheState {
             AllocatedImage albedo{};
             AllocatedImage normal{};
@@ -1749,8 +1768,9 @@ class VulkanEngine{
             std::array<glm::vec4,12> pendingSky{};
             PunctualLights pendingPunctual;
             glm::vec4 pendingSunDirection{}, pendingSunColor{};
-            bool lightingPending{}, pendingSunOnly{};
+            bool lightingPending{}, pendingSunOnly{}, pendingDark{};
             uint64_t lightingBatchTexels{}, relightFrames{}, completedRelights{}, initialLightingRemaining{};
+            uint64_t responsiveUntil{};
             std::chrono::steady_clock::time_point relightStarted;
             // The same without the sun (IQ13): unchanged, a sun-only relight
             // suffices.  MIRABILIS_IQ13_SUN_ONLY_RELIGHT=0 always relights fully.

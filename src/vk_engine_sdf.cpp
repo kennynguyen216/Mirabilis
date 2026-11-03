@@ -273,7 +273,24 @@ void VulkanEngine::init_sdf_resources()
         _sceneSdf.status = "sdf_composite.comp.spv failed to load";
     }
 
+    DescriptorLayoutBuilder dynamicBuilder;
+    dynamicBuilder.add_binding(0,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+    dynamicBuilder.add_binding(1,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    dynamicBuilder.add_binding(2,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+    const auto dynamicLayout=dynamicBuilder.build(_device,VK_SHADER_STAGE_COMPUTE_BIT);
+    _dynamicSdf.descriptorLayout=dynamicLayout;
+    makePipeline("../../shaders/dynamic_sdf.comp.spv",dynamicLayout,sizeof(SdfCompositePushConstants),
+        _dynamicSdf.layout,_dynamicSdf.pipeline);
+    const uint16_t empty[8]{0,0,0,glm::packHalf1x16(60000.f),0,0,0,glm::packHalf1x16(60000.f)};
+    _dynamicSdf.field=create_image(const_cast<uint16_t*>(empty),sizeof(empty),{1,1,2},
+        VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_SAMPLED_BIT,false);
+
     _mainDeletionQueue.push_function([this]() {
+        for(auto& [hash,volume]:_dynamicSdf.volumes) destroy_image(volume.image);
+        destroy_image(_dynamicSdf.field);
+        vkDestroyPipeline(_device,_dynamicSdf.pipeline,nullptr);
+        vkDestroyPipelineLayout(_device,_dynamicSdf.layout,nullptr);
+        vkDestroyDescriptorSetLayout(_device,_dynamicSdf.descriptorLayout,nullptr);
         if (_sdf.loaded) {
             destroy_image(_sdf.volume);
         }
@@ -383,6 +400,223 @@ uint64_t VulkanEngine::collect_opaque_instances(
         fnv_append(drawHash, &draw.material, sizeof(draw.material));
     }
     return drawHash;
+}
+
+void VulkanEngine::update_dynamic_sdf()
+{
+    auto& state=_dynamicSdf;
+    state.jobs.clear(); state.pending=false; state.missing=0;
+    std::vector<SceneOpaqueInstance> instances;
+    uint64_t hash=FnvOffset;
+    static const bool enabled=[] { const char* value=SDL_getenv("MIRABILIS_DYNAMIC_GI"); return !value || std::atoi(value)!=0; }();
+    if(enabled && !lumen_hardware_tracing()) for(const auto& draw:worldDrawContext.OpaqueSurfaces) {
+        if(draw.contributesToStaticCaches || !draw.material || draw.material->passType!=MaterialPass::MainColor) continue;
+        fnv_append(hash,&draw.vertexBufferAddress,sizeof(draw.vertexBufferAddress));
+        fnv_append(hash,&draw.transform,sizeof(draw.transform));
+        fnv_append(hash,&draw.firstIndex,sizeof(draw.firstIndex));
+        fnv_append(hash,&draw.indexCount,sizeof(draw.indexCount));
+        fnv_append(hash,&draw.material->traceBaseColor,sizeof(glm::vec4));
+        fnv_append(hash,&draw.material->traceParameters,sizeof(glm::vec4));
+        auto found=std::find_if(instances.begin(),instances.end(),[&](const auto& i) {
+            return i.address==draw.vertexBufferAddress && i.transform==draw.transform;
+        });
+        if(found==instances.end()) { instances.push_back({draw.vertexBufferAddress,draw.transform,{}});found=instances.end()-1; }
+        found->draws.push_back(draw);
+    }
+    if(hash==state.hash) return;
+    state.hash=hash;
+    state.active=false; state.maximum.w=0;
+    const auto retireUnused=[&](const std::unordered_set<uint64_t>& used) {
+        for(auto it=state.volumes.begin();it!=state.volumes.end();) {
+            if(used.contains(it->first)) {++it;continue;}
+            auto image=it->second.image;
+            get_current_frame()._deletionQueue.push_function([this,image] {destroy_image(image);});
+            it=state.volumes.erase(it);
+        }
+    };
+    if(instances.empty() || !state.pipeline) {retireUnused({});return;}
+    struct Placed {uint64_t mesh; glm::mat4 transform; glm::vec4 albedo;};
+    std::vector<Placed> placed;
+    glm::vec3 lo(std::numeric_limits<float>::max()),hi(std::numeric_limits<float>::lowest());
+    for(const auto& instance:instances) {
+        const auto sourceIt=_traceMeshSources.find(instance.address);
+        const auto source=sourceIt==_traceMeshSources.end()?nullptr:sourceIt->second.lock();
+        if(!source) continue;
+        std::vector<IndexRange> ranges;
+        uint64_t key=FnvOffset;fnv_append(key,&instance.address,sizeof(instance.address));
+        for(const auto& draw:instance.draws) ranges.emplace_back(draw.firstIndex,draw.indexCount);
+        fnv_append(key,ranges.data(),ranges.size()*sizeof(IndexRange));
+        auto meshHash=_sceneSdf.meshHashes.find(key);
+        if(meshHash==_sceneSdf.meshHashes.end()) meshHash=_sceneSdf.meshHashes.emplace(key,
+            geometry_hash(extract_opaque_geometry(*source,ranges))).first;
+        const uint64_t mesh=meshHash->second;
+        if(!state.volumes.contains(mesh)) {
+            SdfFile file;std::string error;
+            if(!read_sdf_file(_sceneSdf.cacheDirectory+"/"+hash_name(mesh)+".sdf",file,error)) {
+                std::filesystem::create_directories(_sceneSdf.queueDirectory);
+                const auto path=_sceneSdf.queueDirectory+"/"+hash_name(mesh)+".obj";
+                if(!std::filesystem::exists(path)) write_mesh_obj(path,extract_opaque_geometry(*source,ranges));
+                ++state.missing;
+                if(SDL_getenv("MIRABILIS_TEST_FRAMES")) fmt::print("Scene SDF missing mesh: {}\n",hash_name(mesh));
+                // Retry after an offline bake without requiring another transform edit.
+                state.hash=0;
+                continue;
+            }
+            SceneSdfState::MeshVolume volume;
+            VkFormat format;
+            if(!upload_sdf_voxels(file.voxels,file.dimensions,volume.image,format)) {++state.missing;state.hash=0;continue;}
+            volume.boundsMin=file.boundsMin;volume.boundsMax=file.boundsMax;
+            volume.bakeVoxel=(file.boundsMax.x-file.boundsMin.x)/file.dimensions.x;
+            state.volumes.emplace(mesh,volume);
+        }
+        const auto& volume=state.volumes.at(mesh);
+        for(int corner=0;corner<8;++corner) {
+            glm::vec3 point=glm::vec3(instance.transform*glm::vec4(
+                corner&1?volume.boundsMax.x:volume.boundsMin.x,
+                corner&2?volume.boundsMax.y:volume.boundsMin.y,
+                corner&4?volume.boundsMax.z:volume.boundsMin.z,1));
+            lo=glm::min(lo,point);hi=glm::max(hi,point);
+        }
+        // shortcut: moving textured meshes use the material factor for bounced color; add texture-aware captures when needed.
+        glm::vec4 albedo=instance.draws.front().material->traceBaseColor;
+        albedo*=1.f-std::clamp(instance.draws.front().material->traceParameters.x,0.f,1.f);
+        placed.push_back({mesh,instance.transform,albedo});
+    }
+    std::unordered_set<uint64_t> used;
+    for(const auto& p:placed) used.insert(p.mesh);
+    retireUnused(used);
+    if(placed.empty()) return;
+    const auto extent=hi-lo;
+    const float voxel=std::max({std::max({extent.x,extent.y,extent.z})/92.f,_sceneSdf.voxelSize*.25f,1e-3f});
+    const auto centre=(lo+hi)*.5f;
+    state.minimum=glm::vec4(centre-glm::vec3(96)*voxel*.5f,voxel);
+    state.maximum=glm::vec4(glm::vec3(state.minimum)+glm::vec3(96)*voxel,1);
+    // A fixed-size allocation survives motion; only first activation waits for allocation replacement.
+    if(state.dimensions!=glm::uvec3(96)) {
+        VK_CHECK(vkDeviceWaitIdle(_device)); destroy_image(state.field);
+        state.field=create_image({96,96,96},VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        state.dimensions=glm::uvec3(96);
+        immediate_submit([&](VkCommandBuffer cmd) {vkutil::transition_image(cmd,state.field.image,
+            VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);});
+    }
+    for(const auto& p:placed) {
+        const auto& volume=state.volumes.at(p.mesh);
+        auto inverse=glm::inverse(p.transform);
+        const glm::vec3 scales(glm::length(glm::vec3(p.transform[0])),glm::length(glm::vec3(p.transform[1])),glm::length(glm::vec3(p.transform[2])));
+        const float scale=std::min({scales.x,scales.y,scales.z});
+        SdfCompositePushConstants push{};
+        push.shellPad=std::max(0.f,.75f*voxel-.5f*volume.bakeVoxel*scale);
+        push.worldToLocal0=glm::row(inverse,0);push.worldToLocal1=glm::row(inverse,1);push.worldToLocal2=glm::row(inverse,2);
+        push.volumeMin=glm::vec4(volume.boundsMin,scale);push.volumeMax=glm::vec4(volume.boundsMax,60000.f);
+        push.fieldOrigin=state.minimum;
+        glm::vec3 boxLo(std::numeric_limits<float>::max()),boxHi(std::numeric_limits<float>::lowest());
+        for(int corner=0;corner<8;++corner) {
+            const auto point=glm::vec3(p.transform*glm::vec4(corner&1?volume.boundsMax.x:volume.boundsMin.x,
+                corner&2?volume.boundsMax.y:volume.boundsMin.y,corner&4?volume.boundsMax.z:volume.boundsMin.z,1));
+            boxLo=glm::min(boxLo,point);boxHi=glm::max(boxHi,point);
+        }
+        const float maxDistance=8.f*voxel;
+        // Smallest-scale distances can influence farther voxels along a stretched axis.
+        const float margin=(maxDistance+push.shellPad)*std::max({scales.x,scales.y,scales.z})/scale;
+        const auto first=glm::clamp(glm::ivec3(glm::floor((boxLo-glm::vec3(margin)-glm::vec3(state.minimum))/voxel)),glm::ivec3(0),glm::ivec3(96));
+        const auto last=glm::clamp(glm::ivec3(glm::ceil((boxHi+glm::vec3(margin)-glm::vec3(state.minimum))/voxel)),glm::ivec3(0),glm::ivec3(96));
+        push.regionOffset=first;push.regionSize=glm::ivec4(last-first,0);
+        state.jobs.push_back({p.mesh,push,p.albedo});
+    }
+    state.active=true;state.pending=true;
+}
+
+void VulkanEngine::record_dynamic_sdf(VkCommandBuffer cmd)
+{
+    auto& state=_dynamicSdf;
+    if(!state.pending) return;
+    state.pending=false;
+    vkutil::transition_image(cmd,state.field.image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL);
+    VkClearColorValue empty{};empty.float32[3]=8.f*state.minimum.w;
+    auto range=vkinit::image_subresource_range(VK_IMAGE_ASPECT_COLOR_BIT);
+    vkCmdClearColorImage(cmd,state.field.image,VK_IMAGE_LAYOUT_GENERAL,&empty,1,&range);
+    vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,state.pipeline);
+    for(const auto& job:state.jobs) {
+        auto set=get_current_frame()._frameDescriptors.allocate(_device,state.descriptorLayout);
+        auto color=create_buffer(sizeof(glm::vec4),VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
+        std::memcpy(color.info.pMappedData,&job.albedo,sizeof(glm::vec4));
+        vmaFlushAllocation(_allocator,color.allocation,0,VK_WHOLE_SIZE);
+        DescriptorWriter writer;
+        writer.write_image(0,state.field.imageView,VK_NULL_HANDLE,VK_IMAGE_LAYOUT_GENERAL,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+        writer.write_image(1,state.volumes.at(job.mesh).image.imageView,_sdf.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.write_buffer(2,color.buffer,sizeof(glm::vec4),0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);writer.update_set(_device,set);
+        get_current_frame()._deletionQueue.push_function([this,color] {destroy_buffer(color);});
+        vkutil::memory_barrier(cmd);
+        vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,state.layout,0,1,&set,0,nullptr);
+        vkCmdPushConstants(cmd,state.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(job.push),&job.push);
+        vkCmdDispatch(cmd,(job.push.regionSize.x+7)/8,(job.push.regionSize.y+7)/8,(job.push.regionSize.z+7)/8);
+    }
+    vkutil::transition_image(cmd,state.field.image,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    ++state.updates;
+    if(SDL_getenv("MIRABILIS_TEST_FRAMES")) fmt::print("Dynamic GI field: updates={} instances={} missing={} voxel={} static-rebuilds={}\n",
+        state.updates,state.jobs.size(),state.missing,state.minimum.w,stats.sdf_rebuild_count);
+}
+
+void VulkanEngine::capture_dynamic_sdf(const char* filename)
+{
+    const auto& state=_dynamicSdf;
+    std::ofstream file(std::string(filename)+".json");
+    file<<fmt::format(R"({{"active":{},"updates":{},"missing":{},"staticRebuilds":{},"surfaceRebuilds":{},"relights":{},"pendingTexels":{},"giHistoryValid":{},"frame":{},"minimum":[{},{},{},{}],"maximum":[{},{},{},{}],"dimensions":[{},{},{}],"bodies":[)",
+        state.active,state.updates,state.missing,stats.sdf_rebuild_count,stats.surface_cache_rebuild_count,
+        _surfaceCache.completedRelights,_surfaceCache.lightingSchedule.remaining,_ssgi.historyValid,_frameNumber,
+        state.minimum.x,state.minimum.y,state.minimum.z,state.minimum.w,
+        state.maximum.x,state.maximum.y,state.maximum.z,state.maximum.w,
+        state.dimensions.x,state.dimensions.y,state.dimensions.z);
+    bool first=true;
+    for(auto ref:_scene.creation_order()) if(auto body=_scene.read<RigidBody>(ref);body && body->motion==BodyMotion::Dynamic) {
+        glm::vec3 position(_scene.world_matrix(ref)[3]);
+        file<<fmt::format("{}[{},{},{}]",first?"":",",position.x,position.y,position.z);first=false;
+    }
+    const auto history=read_ssgi_image(_ssgi.temporalDiagnosticImage,active_ssgi_extent());
+    const auto accepted=std::count_if(history.begin(),history.end(),[](const auto& value) {return value.z>.5f;});
+    const auto normals=read_ssgi_image(_prepass.normalImage,_drawExtent,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    const auto movingPixels=std::count_if(normals.begin(),normals.end(),[](const auto& value) {
+        return glm::dot(glm::vec3(value),glm::vec3(value))>.25f && value.w<.5f;
+    });
+    file<<fmt::format("],\"historyAcceptedPixels\":{},\"historyPixels\":{},\"dynamicPixels\":{}}}",accepted,history.size(),movingPixels);
+    const auto capture=[&](const AllocatedImage& image,glm::uvec3 dimensions,size_t stride,const std::string& path) {
+        VK_CHECK(vkDeviceWaitIdle(_device));
+        const size_t bytes=size_t(dimensions.x)*dimensions.y*dimensions.z*stride;
+        auto buffer=create_buffer(bytes,VK_BUFFER_USAGE_TRANSFER_DST_BIT,VMA_MEMORY_USAGE_GPU_TO_CPU);
+        immediate_submit([&](VkCommandBuffer cmd) {
+            vkutil::transition_image(cmd,image.image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            VkBufferImageCopy region{};region.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+            region.imageExtent={dimensions.x,dimensions.y,dimensions.z};
+            vkCmdCopyImageToBuffer(cmd,image.image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,buffer.buffer,1,&region);
+            vkutil::transition_image(cmd,image.image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        });
+        void* mapped=nullptr;
+        VK_CHECK(vmaMapMemory(_allocator,buffer.allocation,&mapped));
+        vmaInvalidateAllocation(_allocator,buffer.allocation,0,VK_WHOLE_SIZE);
+        std::ofstream binary(path,std::ios::binary);
+        binary.write(static_cast<const char*>(mapped),bytes);
+        vmaUnmapMemory(_allocator,buffer.allocation);
+        destroy_buffer(buffer);
+        if(!binary) throw std::runtime_error("Cannot write dynamic-field evidence");
+    };
+    if(state.active) capture(state.field,state.dimensions,8,std::string(filename)+".field");
+    if(SDL_getenv("MIRABILIS_TEST_STATIC_SDF_CAPTURE") && !_sceneSdf.hardwareProxy && _sceneSdf.fieldValid) {
+        capture(_sceneSdf.field,_sceneSdf.fieldDimensions,4,std::string(filename)+".static-field");
+        std::ofstream metadata(std::string(filename)+".static.json");
+        metadata<<fmt::format(R"({{"minimum":[{},{},{}],"maximum":[{},{},{}],"voxel":{},"dimensions":[{},{},{}],"meshes":[)",
+            _sceneSdf.fieldMin.x,_sceneSdf.fieldMin.y,_sceneSdf.fieldMin.z,
+            _sceneSdf.fieldMax.x,_sceneSdf.fieldMax.y,_sceneSdf.fieldMax.z,_sceneSdf.voxelSize,
+            _sceneSdf.fieldDimensions.x,_sceneSdf.fieldDimensions.y,_sceneSdf.fieldDimensions.z);
+        bool firstMesh=true;
+        for(const auto& [hash,volume]:_sceneSdf.volumes) {
+            metadata<<fmt::format("{}\"{:016x}\"",firstMesh?"":",",hash);firstMesh=false;
+        }
+        metadata<<"]}";
+        if(!metadata) throw std::runtime_error("Cannot write static-field metadata");
+    }
+
+    if(!file) throw std::runtime_error("Cannot write dynamic-field metadata");
 }
 
 void VulkanEngine::update_scene_sdf()
@@ -588,7 +822,7 @@ void VulkanEngine::update_scene_sdf()
             VkExtent3D{dimensions.x, dimensions.y, dimensions.z},
             VK_FORMAT_R32_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
         _sceneSdf.fieldDimensions = dimensions;
     }
 

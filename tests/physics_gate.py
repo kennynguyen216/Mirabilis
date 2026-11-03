@@ -60,11 +60,11 @@ def check_raster(records):
         for cache in raster_caches:
             assert phase[-1][cache]==phase[0][cache], f'{cache} rebuilt every frame'
     for cache in raster_caches:
-        assert asleep[0][cache]-awake[-1][cache]==1, f'{cache} sleep rebuild batch'
-        assert phases['wake'][0][cache]-asleep[-1][cache]==1, f'{cache} wake rebuild batch'
+        assert asleep[0][cache]==awake[-1][cache], f'{cache} rebuilt on sleep'
+        assert phases['wake'][0][cache]==asleep[-1][cache], f'{cache} rebuilt on wake'
         assert phases['unchanged-restore'][-1][cache]==phases['edit-restore'][-1][cache], f'{cache} unchanged restore rebuilt'
-    assert asleep[-1]['eligible'] > awake[-1]['eligible'], 'Sleeping subtree never entered static caches'
-    assert phases['wake'][0]['eligible'] < asleep[-1]['eligible'], 'Awake subtree stayed in static caches'
+    assert asleep[-1]['eligible']==awake[-1]['eligible'], 'Sleep changed static-cache membership'
+    assert phases['wake'][0]['eligible']==asleep[-1]['eligible'], 'Wake changed static-cache membership'
     assert phases['teleport'][0]['history-reset'] > 0, 'Teleport left previous-render history'
     assert phases['restore'][0]['history-reset'] > 0, 'Restore left previous-render history'
     assert phases['reopened'][-1]['bodies'] > 0 and phases['sandbox'][-1]['bodies'] > 0

@@ -4,6 +4,7 @@
 
 #include "input_structures.glsl"
 
+layout(location=7) flat out float outStaticCacheMember;
 layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec4 outColor;
 layout(location = 2) out vec2 outUV;
@@ -36,6 +37,9 @@ void main()
     DrawInstance instance;
     mat4 world=PushConstants.render_matrix;
     if(instanced){instance=PushConstants.instances.values[gl_InstanceIndex];world=instance.world;}
+    bool hasInstance=any(notEqual(uvec2(PushConstants.instances),uvec2(0)));
+    outStaticCacheMember=instanced ? 1.0-instance.flags.z :
+        (hasInstance ? 1.0-PushConstants.instances.values[0].flags.z : 1.0);
     vec4 worldPosition = world * vec4(vertex.position, 1.0);
 
     gl_Position = sceneData.viewproj * worldPosition;

@@ -50,17 +50,15 @@ void main()
                   dot(PushConstants.worldToLocal1, world),
                   dot(PushConstants.worldToLocal2, world));
 
-    // Inside the baked box the volume answers directly.  Outside it, two
-    // lower bounds on the true distance both hold: the distance to the box
-    // (the mesh is inside it), and the distance stored at the nearest box
-    // point minus how far away that point is.  The larger is kept, so the
-    // field never claims more empty space than there is.
+    // Outside the containing box, the projection residual has nonnegative
+    // dot with every vector from a surface to the projection. Pythagoras
+    // gives a lower bound without the stored-minus-outside dip in empty space.
     vec3 lo = PushConstants.volumeMin.xyz;
     vec3 hi = PushConstants.volumeMax.xyz;
     vec3 clamped = clamp(p, lo, hi);
     float outside = length(p - clamped);
     float stored = textureLod(meshVolume, (clamped - lo) / (hi - lo), 0.0).r;
-    float distanceLocal = outside > 0.0 ? max(outside, stored - outside) : stored;
+    float distanceLocal = outside > 0.0 ? length(vec2(outside,max(stored,0.0))) : stored;
 
     // Converting with the transform's smallest scale keeps a non-uniformly
     // scaled mesh's distance a lower bound; for uniform scale it is exact.

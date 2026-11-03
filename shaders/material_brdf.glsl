@@ -355,13 +355,14 @@ void material_emitters(
     vec3 worldPosition,
     vec3 geometricNormal,
     vec2 pixel,
+    bool staticCacheMember,
     out vec3 diffuse,
     out vec3 specular)
 {
     diffuse = vec3(0.0);
     specular = vec3(0.0);
     uint count = uint(sceneData.emitterSettings.x + 0.5);
-    if (count == 0u || sceneData.screenSpaceSettings.y > 0.5) {
+    if (!staticCacheMember || count == 0u || sceneData.screenSpaceSettings.y > 0.5) {
         return;
     }
     SurfaceCacheSample cached = surface_cache_lookup(worldPosition, geometricNormal);

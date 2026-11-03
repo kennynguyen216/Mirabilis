@@ -4,6 +4,7 @@
 
 #include "input_structures.glsl"
 
+layout(location=7) flat out float outStaticCacheMember;
 layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec4 outColor;
 layout(location = 2) out vec2 outUV;
@@ -41,6 +42,9 @@ void main()
     float modelDeterminant=determinant(model);
     mat3 fallbackNormal=(!isnan(modelDeterminant) && !isinf(modelDeterminant) && abs(modelDeterminant)>1e-12)
         ? transpose(inverse(model)) : mat3(1);
+    bool hasInstance=any(notEqual(uvec2(PushConstants.instances),uvec2(0)));
+    outStaticCacheMember=instanced ? 1.0-instance.flags.z :
+        (hasInstance ? 1.0-PushConstants.instances.values[0].flags.z : 1.0);
     outNormal=instanced?instance_normal(instance,vertex.normal):normalize(fallbackNormal*vertex.normal);
     // Same tangent frame as mesh.vert: model matrix, handedness flipped by a
     // mirroring transform.

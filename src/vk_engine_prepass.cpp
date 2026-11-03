@@ -192,7 +192,7 @@ void VulkanEngine::draw_depth_normal_prepass(VkCommandBuffer cmd)
 {
     const auto startTime = std::chrono::steady_clock::now();
     auto& instances=_instanceScratch;instances.clear();instances.reserve(mainDrawContext.OpaqueSurfaces.size());
-    for(const auto& object:mainDrawContext.OpaqueSurfaces)instances.push_back(make_draw_instance(object.transform,object.previousTransform,object.material&&object.material->doubleSided));
+    for(const auto& object:mainDrawContext.OpaqueSurfaces)instances.push_back(make_draw_instance(object.transform,object.previousTransform,object.material&&object.material->doubleSided,object.contributesToStaticCaches));
     const auto instanceAddress=upload_draw_instances(instances);
 
     vkutil::transition_image(

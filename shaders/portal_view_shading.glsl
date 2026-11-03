@@ -18,6 +18,7 @@
 layout(early_fragment_tests) in;
 #endif
 
+layout(location=7) flat in float inStaticCacheMember;
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec4 inColor;
 layout(location = 2) in vec2 inUV;
@@ -95,10 +96,10 @@ void main()
     vec3 emitterDiffuse = vec3(0.0);
     vec3 emitterSpecular = vec3(0.0);
     if (lumen)
-        material_emitters(surface, inWorldPosition, lightingGeometricNormal, gl_FragCoord.xy,
+        material_emitters(surface, inWorldPosition, lightingGeometricNormal, gl_FragCoord.xy,inStaticCacheMember>0.5,
             emitterDiffuse, emitterSpecular);
     vec3 indirect = lumen ? material_diffuse_albedo(surface) *
-        indirect_color(portal_indirect(inWorldPosition, lightingGeometricNormal), sceneData.environmentTint.w) * sceneData.portalIndirectSettings.z
+        indirect_color(portal_indirect(inWorldPosition, lightingGeometricNormal,inStaticCacheMember>0.5), sceneData.environmentTint.w) * sceneData.portalIndirectSettings.z
         : vec3(0.0);
 
     vec3 reflected=vec3(0);

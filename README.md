@@ -402,6 +402,44 @@ reduces retained GPU memory at the cost of extra loading during rebuilds.
 default 8) for tracing experiments; larger ranges increase composition work and
 do not guarantee faster tracing.
 
+Awake opaque physics bodies use a separate 96-cubed software distance field.
+Motion updates this field in the frame command buffer without recapturing the
+static atlas or rebuilding its distance field. Empty regions are cleared on
+each update, and inactive mesh volumes retire after the frame fence. Moving
+meshes still require their geometry bake; their hit lighting currently uses
+sun/punctual visibility and the first material's diffuse factor. A widely spread set of bodies shares this
+bounded field and therefore loses detail. Sleeping bodies retain dynamic-field
+membership and stop updating when their pose is unchanged; sleep/wake does not
+rebuild static caches. Editor geometry/material edits can still rebuild them.
+Per-instance cache membership reaches prepass, screen gathers and portal shading
+so moving surfaces do not borrow cached sky/emitter lighting from nearby walls.
+`MIRABILIS_DYNAMIC_GI=0` disables the moving software field for diagnostics.
+
+Software rays escape their origin shell with a bounded offset that stops when
+it enters a neighboring surface after allowing for the first voxel's filtered
+shell uncertainty. Sub-voxel geometry remains approximate. Outside baked volume
+bounds, a projected-distance lower bound avoids artificial distance dips.
+Diffuse gathers and radiosity use per-pixel/texel low-discrepancy sequences;
+`MIRABILIS_GI_RANDOM_SAMPLING=1` selects the previous random-sampling control.
+Relighting uses short, validated GI history instead of resetting the entire
+image each edit. Disabling every cached light source clears irradiance and bounce
+history in one GPU clear batch. Reflections validate each hit and cap history at four samples
+during geometry/lighting changes, retaining sixteen in a stable scene.
+
+Run the moving-field, close-gap, lights-off and noise checks sequentially:
+
+```powershell
+python tests/dynamic_gi_gate.py --configuration Release --output C:/temp/mirabilis-dynamic-gi
+python tests/reflection_motion_gate.py --configuration Release --output C:/temp/mirabilis-reflection-motion
+python tests/reflection_history_gate.py --configuration Release --output C:/temp/mirabilis-reactive-reflections
+```
+
+`tests/dynamic_lighting_benchmark.py --runs 3 --output C:/temp/mirabilis-dynamic-sponza`
+measures all-4K Sponza with banners, one oscillating rigid body and one continuously
+edited point light. It uses 900 warmup frames and 300 measured frames per run,
+with reflections enabled. This stress workload is separate from the static
+before/after comparison below.
+
 For a matched comparison across renderer and shader changes, preserve the old
 Release executable and all of its generated `.spv` files before rebuilding:
 

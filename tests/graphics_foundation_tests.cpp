@@ -134,6 +134,8 @@ TEST_CASE("draw instances preserve normal orthogonality and mirrored tangent han
           doctest::Approx(0).epsilon(1e-5));
     CHECK(instance.flags.x == 1);
     CHECK(instance.flags.y == -1);
+    CHECK(instance.flags.z == 0);
+    CHECK(make_draw_instance(world,previous,false,false).flags.z == 1);
     CHECK(instance.previousRows[0].w == 3);
     CHECK(instance.previousRows[1].w == 4);
     CHECK(instance.previousRows[2].w == 5);

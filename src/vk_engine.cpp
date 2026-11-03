@@ -1015,28 +1015,32 @@ void VulkanEngine::draw(float deltaTime)
         _debugViews.view == RenderDebugView::SurfaceCache ||
         (_ssgi.lumenEnabled && _ssgi.enabled)) {
         update_scene_sdf();
+        update_dynamic_sdf();
     }
     const bool surfaceCacheActive = _debugViews.view == RenderDebugView::SurfaceCache ||
         (_ssgi.lumenEnabled && _ssgi.enabled);
     if (surfaceCacheActive) {
         update_surface_cache();
     }
+    if (_reflections.enabled && _rayQueryShadows && lumen_lite_ready()) init_reflections();
+    // After the field and the trace scene are current, before recording.
+    write_emitter_descriptors(get_current_frame());
+
     if (SDL_getenv("MIRABILIS_TEST_FRAMES") && SDL_getenv("MIRABILIS_TEST_BLOCKING_RELIGHT") && _surfaceCache.lightingPending) {
         // Same-build benchmark control for the former blocking relight schedule.
         immediate_submit([&](VkCommandBuffer command) {
             record_sun_casters(command);
+            record_dynamic_sdf(command);
             while (_surfaceCache.lightingPending && _surfaceCache.valid && _sceneSdf.fieldValid) record_surface_cache_lighting(command);
         });
     }
-    if (_reflections.enabled && _rayQueryShadows && lumen_lite_ready()) init_reflections();
-    // After the field and the trace scene are current, before recording.
-    write_emitter_descriptors(get_current_frame());
 
     const auto recordStart=std::chrono::steady_clock::now();
     VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
     begin_gpu_frame(cmd);
 
     { GpuPassScope gpu(*this,cmd,GpuPass::RayScene); record_sun_casters(cmd); }
+    { GpuPassScope gpu(*this,cmd,GpuPass::DynamicField); record_dynamic_sdf(cmd); }
 
     // Diagnostic VRAM pressure: a buffer referenced by every frame stays
     // resident, so the rest of the working set has that much less room.
@@ -1704,6 +1708,15 @@ void VulkanEngine::run(){
         r4FrameTimes << "frame,ms,radiosity_gpu_ms,ssgi_gpu_ms,radiosity_texels\n";
     }
     const bool testPhysics = frameLimit && SDL_getenv("MIRABILIS_TEST_PHYSICS_LIFECYCLE");
+    const bool testDynamicGi=frameLimit && SDL_getenv("MIRABILIS_TEST_DYNAMIC_GI");
+    PersistentID dynamicGiBody=InvalidSceneObject;
+    const Camera dynamicGiCamera=_editorCamera;
+    if(testDynamicGi) {
+        for(auto ref:_scene.creation_order()) if(auto body=_scene.read<RigidBody>(ref);body && body->motion==BodyMotion::Dynamic)
+            dynamicGiBody=ref.persistentId;
+        if(dynamicGiBody==InvalidSceneObject) throw std::runtime_error("Dynamic GI test requires a dynamic body");
+        set_editor_mode(false);set_mouse_capture(false);
+    }
     const bool testPhysicsTrace = testPhysics && _rendererMode == RendererMode::SoftwarePathTrace;
     const bool testPhysicsShortTrace = testPhysicsTrace && frameLimit <= 200;
     SceneDocumentSnapshot physicsAuthored;
@@ -2013,6 +2026,14 @@ void VulkanEngine::run(){
             apply_cinematic_camera_pose();
             deltaTime = _cinematic.frameDt;
         }
+        if(testDynamicGi) {
+            deltaTime=PlayerMovementDt;_noClip.enabled=true;_playerInput={};
+            mainCamera=_editorCamera=dynamicGiCamera;
+            _playerMovement.position=dynamicGiCamera.position-glm::vec3(0,1.7f,0);
+            _playerMovement.previousPosition=_playerMovement.position;_playerMovement.velocity={};
+            const float velocity=SDL_getenv("MIRABILIS_TEST_DYNAMIC_GI_OSCILLATE") ? 3.f*std::cos(float(_frameNumber)*.05f) : 3.f;
+            _physicsWorld.queue_velocity(_scene,_scene.get(dynamicGiBody),{velocity,0,0});
+        }
         tick_simulation(deltaTime, _mouseCaptured && !ImGui::GetIO().WantCaptureKeyboard &&
             (SDL_GetWindowFlags(_window) & SDL_WINDOW_INPUT_FOCUS));
 
@@ -2049,10 +2070,16 @@ void VulkanEngine::run(){
             _frameNumber >= 100 && _frameNumber < 130) {
             _shadow.sunlightDirection.x += 0.005f;
         }
-        if (frameLimit && SDL_getenv("MIRABILIS_TEST_LIGHT_DRAG") && _frameNumber>=100 && _frameNumber<130) {
+        if (frameLimit && SDL_getenv("MIRABILIS_TEST_LIGHT_DRAG") && _frameNumber>=100 &&
+            (_frameNumber<130 || SDL_getenv("MIRABILIS_TEST_LIGHT_DRAG_CONTINUOUS"))) {
             for (auto ref:_scene.creation_order()) if (const auto* light=_scene.read<Light>(ref)) {
                 auto changed=*light; changed.intensity=20.f+10.f*std::sin(float(_frameNumber)*0.1f);
                 _scene.set(ref,changed,true); break;
+            }
+        }
+        if(frameLimit && SDL_getenv("MIRABILIS_TEST_LIGHT_OFF") && _frameNumber==160) {
+            for(auto ref:_scene.creation_order()) if(auto light=_scene.read<Light>(ref)) {
+                auto changed=*light;changed.intensity=0;_scene.set(ref,changed,true);
             }
         }
         if (frameLimit && SDL_getenv("MIRABILIS_TEST_REFLECTION_MOTION") && _frameNumber>=100) {
@@ -2158,6 +2185,18 @@ void VulkanEngine::run(){
             _sceneResourcesRetired = false;
         }
         draw(deltaTime);
+        if(frameLimit) if(const char* directory=SDL_getenv("MIRABILIS_TEST_GI_SEQUENCE")) {
+            const std::filesystem::path outputDirectory(directory);
+            int start=160,count=16;
+            if(const char* range=SDL_getenv("MIRABILIS_TEST_GI_CAPTURE_RANGE")) std::sscanf(range,"%d %d",&start,&count);
+            if(count<1 || count>64 || start<0) throw std::runtime_error("Invalid GI capture range");
+            if(_frameNumber>=start && _frameNumber-start<count) {
+                std::filesystem::create_directories(outputDirectory);
+                const auto path=(outputDirectory/fmt::format("frame-{:04}",_frameNumber)).string();
+                capture_raster(path.c_str());
+                if(_frameNumber==start || _frameNumber-start==count-1) capture_dynamic_sdf(path.c_str());
+            }
+        }
         _profiler.counter(mirabilis::ProfileCounter::DrawCalls, stats.drawcall_count);
         _profiler.counter(mirabilis::ProfileCounter::Triangles, stats.triangle_count);
         _profiler.counter(mirabilis::ProfileCounter::DrawScratchBytes,

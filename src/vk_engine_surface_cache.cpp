@@ -339,6 +339,8 @@ void VulkanEngine::init_surface_cache_resources()
             builder.add_binding(12, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
         }
         builder.add_binding(13, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        builder.add_binding(26,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(27,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         _surfaceCache.directLayout = builder.build(_device, VK_SHADER_STAGE_COMPUTE_BIT);
         VkPushConstantRange directRange{
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -927,6 +929,7 @@ void VulkanEngine::light_surface_cache()
     mix(&_traceSceneHash, sizeof(_traceSceneHash));
     mix(&_shadow.enabled, sizeof(_shadow.enabled));
     mix(&_sceneSdf.drawHash, sizeof(_sceneSdf.drawHash));
+    mix(&_dynamicSdf.hash,sizeof(_dynamicSdf.hash));
     mix(&_sceneSdf.fieldMin, sizeof(_sceneSdf.fieldMin));
     mix(&_sceneSdf.voxelSize, sizeof(_sceneSdf.voxelSize));
     mix(&_surfaceCache.drawHash, sizeof(_surfaceCache.drawHash));
@@ -950,6 +953,7 @@ void VulkanEngine::light_surface_cache()
         restHash == _surfaceCache.lightingRestHash;
     auto& pending = _surfaceCache;
     pending.pendingLightingHash=hash; pending.pendingRestHash=restHash;
+    pending.responsiveUntil=uint64_t(_frameNumber)+16;
     pending.pendingSunOnly=sunOnly; pending.lightingPending=true;
     std::copy(_ibl.environmentSH.begin(),_ibl.environmentSH.end(),pending.pendingSky.begin());
     const glm::uvec4 settings(panoramaSky,emitterCount,_r4Contributions.cacheSources,
@@ -958,6 +962,14 @@ void VulkanEngine::light_surface_cache()
     pending.pendingSky[10]=skyEnvironment;
     pending.pendingSky[11]=_traceSettings.lighting.environmentTint;
     pending.pendingPunctual=punctual;
+    const auto positive=[](glm::vec3 value) {return value.x>0 || value.y>0 || value.z>0;};
+    const uint32_t sources=_r4Contributions.cacheSources;
+    bool illuminated=((sources&r4::CacheSun) && positive(sunColor)) ||
+        ((sources&r4::CacheSky) && skyIntensity>0 && positive(glm::vec3(_traceSettings.lighting.environmentTint))) ||
+        ((sources&r4::CacheEmitters) && emitterCount>0);
+    if(sources&r4::CachePunctual) for(uint32_t i=0;i<punctual.count.x;++i)
+        illuminated=illuminated || positive(glm::vec3(punctual.lights[i].color));
+    pending.pendingDark=!illuminated;
     pending.pendingSunDirection=glm::vec4(sunDirection,_shadow.enabled?1.f:0.f);
     pending.pendingSunColor=glm::vec4(sunColor,skyIntensity);
     std::vector<glm::uvec4> rects;
@@ -965,7 +977,7 @@ void VulkanEngine::light_surface_cache()
     pending.lightingSchedule.restart(rects,retainCursor);
     if (!retainCursor && !pending.lightingValid) pending.initialLightingRemaining=pending.lightingSchedule.remaining;
     if (!retainCursor) { pending.relightFrames=0; pending.relightStarted=std::chrono::steady_clock::now(); }
-    _ssgi.historyValid=false;
+    if (!pending.lightingValid) _ssgi.historyValid=false;
 }
 
 void VulkanEngine::record_surface_cache_lighting(VkCommandBuffer cmd)
@@ -973,6 +985,19 @@ void VulkanEngine::record_surface_cache_lighting(VkCommandBuffer cmd)
     auto& pending=_surfaceCache;
     pending.lightingBatchTexels=0;
     if (!pending.lightingPending || !pending.valid || !_sceneSdf.fieldValid) return;
+    if(pending.pendingDark) {
+        VkClearColorValue zero{};zero.float32[3]=1;
+        auto range=vkinit::image_subresource_range(VK_IMAGE_ASPECT_COLOR_BIT);
+        for(VkImage image:{pending.direct.image,pending.emitter.image,pending.sky.image,
+                pending.indirect.image,pending.indirectPrevious.image}) {
+            vkutil::transition_image(cmd,image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            vkCmdClearColorImage(cmd,image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&zero,1,&range);
+            vkutil::transition_image(cmd,image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+        pending.lightingBatchTexels=pending.lightingSchedule.remaining;
+        pending.lightingSchedule.remaining=0;pending.initialLightingRemaining=0;++pending.relightFrames;
+        _ssgi.historyValid=_reflections.historyValid=false;
+    } else {
     std::vector<glm::uvec4> rects;
     uint64_t widest=1;
     for (const auto& card:pending.cards) { rects.push_back(card.rect); widest=std::max(widest,uint64_t(card.rect.z)); }
@@ -1029,6 +1054,8 @@ void VulkanEngine::record_surface_cache_lighting(VkCommandBuffer cmd)
         writer.write_acceleration_structure(12, _sunCasters.tlas);
     }
     writer.write_buffer(13,punctualBuffer.buffer,sizeof(PunctualLights),0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+    writer.write_image(26,_dynamicSdf.field.imageView,_sdf.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    writer.write_buffer(27,get_current_frame().dynamicFieldBuffer.buffer,sizeof(glm::vec4)*2,0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
     writer.update_set(_device, set);
     get_current_frame()._deletionQueue.push_function([this,skyBuffer,punctualBuffer,placeholder]() {
         destroy_buffer(skyBuffer); destroy_buffer(punctualBuffer); destroy_buffer(placeholder);
@@ -1056,6 +1083,7 @@ void VulkanEngine::record_surface_cache_lighting(VkCommandBuffer cmd)
     }
     for (VkImage image:{pending.direct.image,pending.emitter.image,pending.sky.image})
         vkutil::transition_image(cmd,image,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
     if (!pending.lightingValid) {
         pending.initialLightingRemaining-=std::min(pending.initialLightingRemaining,pending.lightingBatchTexels);
         if (!pending.initialLightingRemaining) { pending.lightingValid=true; _ssgi.historyValid=false; }
@@ -1067,7 +1095,7 @@ void VulkanEngine::record_surface_cache_lighting(VkCommandBuffer cmd)
         pending.radiosityCursor=pending.radiosityRow=0; pending.radiosityPendingBlend=1;
         pending.lightingMilliseconds=std::chrono::duration<float,std::milli>(std::chrono::steady_clock::now()-pending.relightStarted).count();
         ++pending.completedRelights;
-        _ssgi.historyValid=false;
+        pending.responsiveUntil=uint64_t(_frameNumber)+16;
         fmt::print("Surface cache lit: {} cards over {} frames, {} local lights; converged in {:.1f} ms (no blocking relight submissions)\n",
             pending.cards.size(),pending.relightFrames,pending.pendingPunctual.count.x,pending.lightingMilliseconds);
     }
@@ -1486,7 +1514,7 @@ void VulkanEngine::update_surface_cache_radiosity(VkCommandBuffer cmd)
         push.rect = card.rect;
         push.tile = glm::uvec4(0, regionUpdate.row, card.rect.z, regionUpdate.rows);
         push.control = glm::uvec4(update, _surfaceCache.raysPerTexel,
-            _surfaceCache.singleBounce ? 1u : 0u, 0);
+            _surfaceCache.singleBounce ? 1u : 0u, SDL_getenv("MIRABILIS_GI_RANDOM_SAMPLING") ? 1u : 0u);
         uint32_t& updates = _surfaceCache.cardUpdates[index];
         if (regionUpdate.row == 0) {
             // Waiting frames add no rays: do not inflate the blend by the
@@ -1495,6 +1523,9 @@ void VulkanEngine::update_surface_cache_radiosity(VkCommandBuffer cmd)
                 1.0f / float(updates + 1), _surfaceCache.radiosityBlend);
             ++updates;
         }
+        if (push.control.w==0) push.control.x=updates-1;
+        if (_surfaceCache.lightingPending || uint64_t(_frameNumber)<_surfaceCache.responsiveUntil)
+            _surfaceCache.radiosityPendingBlend=std::max(_surfaceCache.radiosityPendingBlend,.35f);
         push.settings = glm::vec4(
             _surfaceCache.radiosityPendingBlend, _surfaceCache.radiosityMaxDistance, 0.0f, 0.0f);
         vkCmdPushConstants(cmd, _surfaceCache.radiosityPipelineLayout,
