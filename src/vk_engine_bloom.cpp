@@ -81,6 +81,7 @@ void VulkanEngine::init_bloom() {
 }
 
 void VulkanEngine::draw_bloom(VkCommandBuffer cmd) {
+    GpuPassScope gpu(*this,cmd,GpuPass::Bloom);
     const auto extent = [&](int level) {
         return glm::ivec2(std::max(1u, _drawExtent.width >> (level + 1)),
                           std::max(1u, _drawExtent.height >> (level + 1)));

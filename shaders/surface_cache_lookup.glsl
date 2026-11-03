@@ -185,8 +185,8 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky, b
         return result;
     }
     uvec4 range = cells[(cell.z * dims.y + cell.y) * dims.x + cell.x];
-    const uint MaxCardsPerLookup = 64u;
-    uint count = min(range.y, MaxCardsPerLookup);
+    // Every candidate matters: truncating changes coverage with instance order.
+    uint count = range.y;
     float depthTolerance = lookupParameters.x;
     float minimumFacing = lookupParameters.y;
     // How far in front of the query point a captured surface may sit (depth

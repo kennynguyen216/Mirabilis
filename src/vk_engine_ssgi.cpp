@@ -494,7 +494,7 @@ void VulkanEngine::init_ssgi_pipelines()
         VK_CHECK(vkCreatePipelineLayout(
             _device, &lumenInfo, nullptr, &_ssgi.lumenPipelineLayout));
         ScopedShaderModule lumenShader(_device);
-        if (lumenShader.load(lumen_shader("ssgi_lumen.comp").c_str())) {
+        if (lumenShader.load(ray_query_shader("ssgi_lumen.comp").c_str())) {
             VkComputePipelineCreateInfo lumenCreate{
                 .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             lumenCreate.layout = _ssgi.lumenPipelineLayout;
@@ -506,7 +506,7 @@ void VulkanEngine::init_ssgi_pipelines()
             fmt::print("Error loading ssgi_lumen.comp.spv; Lumen-lite fallback unavailable\n");
         }
         ScopedShaderModule probeShader(_device);
-        if (probeShader.load(lumen_shader("ssgi_probe.comp").c_str())) {
+        if (probeShader.load(ray_query_shader("ssgi_probe.comp").c_str())) {
             VkComputePipelineCreateInfo probeCreate{
                 .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             probeCreate.layout = _ssgi.lumenPipelineLayout;
@@ -524,7 +524,7 @@ void VulkanEngine::init_ssgi_pipelines()
             {"ssgi_probe_adaptive.comp", &_ssgi.probeAdaptivePipeline}}};
         for (const auto& [name, pipeline] : adaptiveStages) {
             ScopedShaderModule shader(_device);
-            if (!shader.load(lumen_shader(name).c_str())) {
+            if (!shader.load(ray_query_shader(name).c_str())) {
                 fmt::print("Error loading {}; screen probes unavailable\n", name);
                 continue;
             }
@@ -729,7 +729,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
         const uint32_t timingBase =
             (_frameNumber % FRAME_OVERLAP) * SSGITimestampsPerFrame;
         if (_gpuTiming.supported) {
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                 _ssgi.timestampPool, timingBase + 0);
         }
         // Orders the preceding frame's fragment reads against this
@@ -872,7 +872,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             (ssgiExtent.height + 7u) / 8u,
             1);
         if (_gpuTiming.supported) {
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                 _ssgi.timestampPool, timingBase + 1);
         }
         vkutil::memory_barrier(cmd);
@@ -894,7 +894,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             (ssgiExtent.height + 7u) / 8u,
             1);
         if (_gpuTiming.supported) {
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                 _ssgi.timestampPool, timingBase + 2);
         }
         vkutil::memory_barrier(cmd);
@@ -937,7 +937,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkutil::memory_barrier(cmd);
         }
         if (_gpuTiming.supported) {
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                 _ssgi.timestampPool, timingBase + 3);
         }
 
@@ -994,7 +994,7 @@ void VulkanEngine::draw_ssgi_composite(VkCommandBuffer cmd)
         const uint32_t timingBase =
             (_frameNumber % FRAME_OVERLAP) * SSGITimestampsPerFrame;
         vkCmdWriteTimestamp2(cmd,
-            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
             _ssgi.timestampPool, timingBase + 4);
         _ssgi.timingWritten[_frameNumber % FRAME_OVERLAP] = true;
     }

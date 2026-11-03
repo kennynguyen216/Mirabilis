@@ -149,6 +149,13 @@ void VulkanEngine::draw_profiling_panel()
         }
     }
     ImGui::Separator();
+    if (stats.gpu_frame_valid && ImGui::CollapsingHeader("GPU passes (completed submission)")) {
+        ImGui::Text("Submitted frame %llu",static_cast<unsigned long long>(stats.gpu_timing_frame));
+        for (size_t i=0;i<GpuPassCount;++i) ImGui::Text("%s: %.3f ms",GpuPassNames[i],stats.gpu_pass_ms[i]);
+        ImGui::TextUnformatted("Frame includes the child passes; do not add it to their sum.");
+        ImGui::Text("Device-local heap: %.1f / %.1f MiB (%s)",double(stats.gpu_heap_usage)/1048576,
+            double(stats.gpu_heap_budget)/1048576,_gpuTiming.memoryBudgetSupported?"driver budget":"VMA estimate");
+    }
     if (stats.ssao_time_is_gpu) ImGui::Text("Completed GPU AO: %.3f ms", stats.ssao_total_time);
     if (stats.ssgi_time_is_gpu) ImGui::Text("Completed GPU GI: %.3f ms", stats.ssgi_total_time);
     if (_autoExposure.enabled) ImGui::Text("Completed GPU exposure: %.3f ms", _autoExposure.gpuMilliseconds);

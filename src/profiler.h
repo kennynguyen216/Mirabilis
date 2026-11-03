@@ -20,7 +20,7 @@ enum class CpuZone : uint8_t {
 };
 
 enum class ProfileCounter : uint8_t {
-    GpuAO, GpuGI, GpuExposure, GpuTrace, DrawCalls, Triangles, DrawScratchBytes, DrawScratchGrowths, Count
+    GpuAO, GpuGI, GpuExposure, GpuTrace, DrawCalls, Triangles, DrawScratchBytes, DrawScratchGrowths, GpuFrame, GpuForward, GpuRadiosity, Count
 };
 
 const char* zone_name(CpuZone zone);

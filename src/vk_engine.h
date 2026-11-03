@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <fstream>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -244,7 +245,25 @@ struct ColliderDebugPushConstants {
     glm::mat4 model;
 };
 
+enum class GpuPass : uint32_t {
+    Frame, RayScene, SunShadow, CacheDirect, Radiosity, Reference,
+    LocalShadows, Prepass, Visibility, AO, Background, Forward, GI,
+    Reflections, Portals, Transparents, Debug, Exposure, Bloom, Tonemap,
+    FXAA, PresentCopy, UI, Count
+};
+constexpr size_t GpuPassCount = static_cast<size_t>(GpuPass::Count);
+inline constexpr std::array<const char*, GpuPassCount> GpuPassNames{
+    "frame", "ray_scene", "sun_shadow", "cache_direct", "radiosity", "reference",
+    "local_shadows", "prepass", "visibility", "ao", "background", "forward", "gi",
+    "reflections", "portals", "transparents", "debug", "exposure", "bloom", "tonemap",
+    "fxaa", "present_copy", "ui"};
+
 struct EngineStats {
+    std::array<float, GpuPassCount> gpu_pass_ms{};
+    uint64_t gpu_timing_frame{};
+    bool gpu_frame_valid{false};
+    uint64_t gpu_heap_usage{}, gpu_heap_budget{}, gpu_heap_peak{};
+    uint64_t albedo_rebuild_count{};
     uint64_t draw_index_buffer_grows{0};
     uint64_t gpu_allocation_bytes{0}, gpu_block_bytes{0};
     uint32_t gpu_allocation_count{0};
@@ -1018,6 +1037,23 @@ class VulkanEngine{
         void init_ssgi_pipelines();
         void init_gpu_timestamps();
         void read_gpu_timestamps(uint32_t frameIndex);
+        void begin_gpu_frame(VkCommandBuffer cmd);
+        void sample_gpu_memory_budget(bool print = false);
+        bool begin_gpu_pass(VkCommandBuffer cmd, GpuPass pass);
+        void end_gpu_pass(VkCommandBuffer cmd, GpuPass pass);
+        class GpuPassScope {
+        public:
+            GpuPassScope(VulkanEngine& engine, VkCommandBuffer cmd, GpuPass pass)
+                : engine_(engine), cmd_(cmd), pass_(pass), active_(engine.begin_gpu_pass(cmd, pass)) {}
+            ~GpuPassScope() { if (active_) engine_.end_gpu_pass(cmd_, pass_); }
+            GpuPassScope(const GpuPassScope&) = delete;
+            GpuPassScope& operator=(const GpuPassScope&) = delete;
+        private:
+            VulkanEngine& engine_;
+            VkCommandBuffer cmd_;
+            GpuPass pass_;
+            bool active_;
+        };
         void draw_depth_normal_prepass(VkCommandBuffer cmd);
         void draw_ssao(VkCommandBuffer cmd);
         void draw_ssgi_portal_mask(VkCommandBuffer cmd);
@@ -1782,8 +1818,22 @@ class VulkanEngine{
         // the three dispatches - read back once the frame's fence has passed.
         static constexpr uint32_t TimestampsPerFrame = 4;
         struct GpuTimingState {
+            VkQueryPool scopePool{VK_NULL_HANDLE};
+            VkCommandBuffer activeCommand{VK_NULL_HANDLE};
+            struct Slot {
+                bool pending{};
+                uint64_t frame{};
+                std::array<bool, GpuPassCount> written{};
+                std::array<uint64_t, 6> rebuilds{};
+                double cpuFence{}, cpuAcquire{}, cpuPrepare{}, cpuRecord{}, cpuSubmit{}, cpuPresent{};
+                uint64_t heapUsage{}, heapBudget{};
+            };
+            std::array<Slot, FRAME_OVERLAP> slots{};
+            std::ofstream log;
+            bool memoryBudgetSupported{};
             VkQueryPool timestampPool{VK_NULL_HANDLE};
             // Nanoseconds per timestamp tick, from the device.
+            uint64_t timestampMask{~uint64_t(0)};
             float timestampPeriod{0.0f};
             bool supported{false};
             std::array<bool, FRAME_OVERLAP> timestampsPending{};

@@ -325,6 +325,7 @@ void VulkanEngine::init_auto_exposure()
 
 void VulkanEngine::record_auto_exposure(VkCommandBuffer cmd)
 {
+    GpuPassScope gpu(*this,cmd,GpuPass::Exposure);
     // Called with the draw image already readable.  This slot's histogram is
     // cleared, filled and copied out for update_auto_exposure() to read once
     // the slot's fence has passed.
@@ -430,6 +431,7 @@ void VulkanEngine::draw_tonemap(VkCommandBuffer cmd)
     }
 
     if(_postProcess.bloomEnabled)draw_bloom(cmd);
+    GpuPassScope gpu(*this,cmd,GpuPass::Tonemap);
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
         _postProcess.tonemapImage.imageView,
         nullptr,

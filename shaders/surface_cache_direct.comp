@@ -227,7 +227,12 @@ vec3 punctual_irradiance_at_surface(vec3 world,vec3 normal)
 {
     vec3 result=vec3(0);
     float epsilon=max(0.0002,max(max(abs(world.x),abs(world.y)),abs(world.z))*0.000002);
+#ifdef MIRABILIS_RT_SHADOWS
     vec3 origin=world+normal*epsilon;
+#else
+    float voxel=PushConstants.fieldMin.w;
+    vec3 origin=world+normal*(EmitterClearanceVoxels*voxel);
+#endif
     for (uint i=0u;i<punctual.count.x;++i) {
         PunctualLight light=punctual.lights[i];
         vec3 direction; float distance;
@@ -235,7 +240,37 @@ vec3 punctual_irradiance_at_surface(vec3 world,vec3 normal)
         if (!any(greaterThan(value,vec3(0)))) continue;
         vec3 delta=light.position.xyz-origin;
         float endpoint=length(delta);
-        if (light.cone.y<0 || (endpoint>0.0003 && segment_visible_exact(origin,delta/endpoint,endpoint-0.0002))) result+=value;
+        if (light.cone.y<0) { result+=value; continue; }
+#ifdef MIRABILIS_RT_SHADOWS
+        bool visible=endpoint>0.0003 && segment_visible_exact(origin,delta/endpoint,endpoint-0.0002);
+#else
+        // The raster payload has no scene BVH. Stop short of a point source's
+        // shell; unlike an area emitter it has no authored endpoint normal.
+        float span=max(endpoint-voxel,0.0);
+        vec3 directionToLight=delta/max(endpoint,1e-8);
+        float t=0.0;
+        // Outside the represented field is empty. Clip the segment so a far
+        // source cannot exhaust the step budget in clamped edge texels.
+        bool intersects=true;
+        for (int axis=0;axis<3;++axis) {
+            if (abs(directionToLight[axis])<1e-8) {
+                if (origin[axis]<PushConstants.fieldMin[axis] || origin[axis]>PushConstants.fieldMax[axis]) intersects=false;
+            } else {
+                float a=(PushConstants.fieldMin[axis]-origin[axis])/directionToLight[axis];
+                float b=(PushConstants.fieldMax[axis]-origin[axis])/directionToLight[axis];
+                t=max(t,min(a,b));span=min(span,max(a,b));
+            }
+        }
+        bool visible=true;
+        if (!intersects) span=t;
+        for (int step=0;step<192 && t<span;++step) {
+            float d=field_distance(origin+directionToLight*t);
+            if (d<0.25*voxel) { visible=false; break; }
+            t+=max(d,0.5*voxel);
+        }
+        visible=visible && t>=span;
+#endif
+        if (visible) result+=value;
     }
     return result;
 }

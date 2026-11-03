@@ -568,6 +568,9 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
 {
     GPUSceneData data{};
     data.giTracingSettings.x = lumen_hardware_tracing() ? 1.f : 0.f;
+    // Force genuine uncovered-hit lighting in the occlusion regression fixture.
+    static const bool uncoveredTest=SDL_getenv("MIRABILIS_TEST_FRAMES") && SDL_getenv("MIRABILIS_TEST_GI_UNCOVERED");
+    data.giTracingSettings.y=uncoveredTest?1.f:0.f;
     data.view = view;
     build_local_lights(data);
     data.reflectionSettings=glm::vec4(_reflections.enabled && _materialShading.specular && (_r4Contributions.forward & r4::EnvSpecular)!=0 && _ssgi.enabled && _ssgi.lumenEnabled && _rayQueryShadows && lumen_lite_ready() && !is_forward_material_debug_view(_debugViews.view)?1.f:0.f,_reflections.roughnessLimit,2,1000);
@@ -871,6 +874,13 @@ void VulkanEngine::init_gpu_timestamps()
         return;
     }
     _gpuTiming.timestampPeriod = properties.limits.timestampPeriod;
+    uint32_t queueCount=0;
+    vkGetPhysicalDeviceQueueFamilyProperties(_chosenGPU,&queueCount,nullptr);
+    std::vector<VkQueueFamilyProperties> queues(queueCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(_chosenGPU,&queueCount,queues.data());
+    const uint32_t bits=queues[_graphicsQueueFamily].timestampValidBits;
+    if (!bits) return;
+    _gpuTiming.timestampMask=bits==64 ? ~uint64_t(0) : (uint64_t(1)<<bits)-1;
 
     VkQueryPoolCreateInfo poolInfo{
         .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
@@ -880,9 +890,24 @@ void VulkanEngine::init_gpu_timestamps()
     poolInfo.queryCount = FRAME_OVERLAP * SSGITimestampsPerFrame;
     VK_CHECK(vkCreateQueryPool(
         _device, &poolInfo, nullptr, &_ssgi.timestampPool));
+    const char* scopes=SDL_getenv("MIRABILIS_GPU_SCOPES");
+    if (!scopes || std::string_view(scopes)!="0") {
+        poolInfo.queryCount=FRAME_OVERLAP*uint32_t(GpuPassCount)*2;
+        VK_CHECK(vkCreateQueryPool(_device,&poolInfo,nullptr,&_gpuTiming.scopePool));
+    }
+    if (const char* path=SDL_getenv("MIRABILIS_GPU_FRAME_LOG")) {
+        _gpuTiming.log.open(path);
+        if (!_gpuTiming.log || !_gpuTiming.scopePool) {
+            fmt::print("GI TEST FAIL: GPU frame log requires writable output and GPU scopes\n"); std::abort();
+        }
+        _gpuTiming.log << "frame,gpu_written_mask";
+        for (const char* name:GpuPassNames) _gpuTiming.log << ",gpu_" << name << "_ms";
+        _gpuTiming.log << ",cpu_fence_ms,cpu_acquire_ms,cpu_prepare_ms,cpu_record_ms,cpu_submit_ms,cpu_present_ms,heap_usage,heap_budget,sdf_rebuilds,card_rebuilds,trace_rebuilds,blas_builds,tlas_builds,albedo_rebuilds\n";
+    }
     _gpuTiming.supported = true;
 
     _mainDeletionQueue.push_function([this]() {
+        if (_gpuTiming.scopePool) vkDestroyQueryPool(_device,_gpuTiming.scopePool,nullptr);
         vkDestroyQueryPool(_device, _gpuTiming.timestampPool, nullptr);
         vkDestroyQueryPool(_device, _ssgi.timestampPool, nullptr);
     });
@@ -894,6 +919,40 @@ void VulkanEngine::read_gpu_timestamps(uint32_t frameIndex)
     // results being read belong to a submission that has certainly finished.
     if (!_gpuTiming.supported) {
         return;
+    }
+    auto& slot=_gpuTiming.slots[frameIndex];
+    if (slot.pending) {
+        struct Tick { uint64_t value, available; };
+        std::array<Tick,GpuPassCount*2> ticks{};
+        const VkResult result=vkGetQueryPoolResults(_device,_gpuTiming.scopePool,
+            frameIndex*uint32_t(ticks.size()),uint32_t(ticks.size()),sizeof(ticks),ticks.data(),sizeof(Tick),
+            VK_QUERY_RESULT_64_BIT|VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        if (result!=VK_SUCCESS && result!=VK_NOT_READY) VK_CHECK(result);
+        uint64_t mask=0;
+        for (size_t pass=0;pass<GpuPassCount;++pass) {
+            stats.gpu_pass_ms[pass]=0;
+            if (!slot.written[pass]) continue;
+            if (!ticks[pass*2].available || !ticks[pass*2+1].available) {
+                fmt::print("GI TEST FAIL: completed frame {} has unavailable GPU scope {}\n",slot.frame,GpuPassNames[pass]);
+                std::abort();
+            }
+            const uint64_t delta=(ticks[pass*2+1].value-ticks[pass*2].value)&_gpuTiming.timestampMask;
+            stats.gpu_pass_ms[pass]=float(double(delta)*_gpuTiming.timestampPeriod*1e-6);
+            mask|=uint64_t(1)<<pass;
+        }
+        stats.gpu_timing_frame=slot.frame; stats.gpu_frame_valid=true;
+        _profiler.counter(mirabilis::ProfileCounter::GpuFrame,stats.gpu_pass_ms[size_t(GpuPass::Frame)]);
+        _profiler.counter(mirabilis::ProfileCounter::GpuForward,stats.gpu_pass_ms[size_t(GpuPass::Forward)]);
+        _profiler.counter(mirabilis::ProfileCounter::GpuRadiosity,stats.gpu_pass_ms[size_t(GpuPass::Radiosity)]);
+        if (_gpuTiming.log.is_open()) {
+            _gpuTiming.log << slot.frame << ',' << mask;
+            for (float ms:stats.gpu_pass_ms) _gpuTiming.log << ',' << ms;
+            _gpuTiming.log << ',' << slot.cpuFence << ',' << slot.cpuAcquire << ',' << slot.cpuPrepare << ',' << slot.cpuRecord
+                << ',' << slot.cpuSubmit << ',' << slot.cpuPresent << ',' << slot.heapUsage << ',' << slot.heapBudget;
+            for (uint64_t count:slot.rebuilds) _gpuTiming.log << ',' << count;
+            _gpuTiming.log << '\n';
+        }
+        slot.pending=false;
     }
     if (_gpuTiming.timestampsPending[frameIndex]) {
         _gpuTiming.timestampsPending[frameIndex] = false;
@@ -947,4 +1006,57 @@ void VulkanEngine::read_gpu_timestamps(uint32_t frameIndex)
             _profiler.counter(mirabilis::ProfileCounter::GpuGI, stats.ssgi_total_time);
         }
     }
+}
+
+
+void VulkanEngine::begin_gpu_frame(VkCommandBuffer cmd)
+{
+    if (!_gpuTiming.scopePool) return;
+    auto& slot=_gpuTiming.slots[_frameNumber%FRAME_OVERLAP];
+    slot.frame=uint64_t(_frameNumber)+1;
+    slot.written.fill(false); slot.pending=true;
+    _gpuTiming.activeCommand=cmd;
+    vkCmdResetQueryPool(cmd,_gpuTiming.scopePool,(_frameNumber%FRAME_OVERLAP)*uint32_t(GpuPassCount)*2,uint32_t(GpuPassCount)*2);
+    begin_gpu_pass(cmd,GpuPass::Frame);
+}
+
+bool VulkanEngine::begin_gpu_pass(VkCommandBuffer cmd,GpuPass pass)
+{
+    if (!_gpuTiming.scopePool || cmd!=_gpuTiming.activeCommand) return false;
+    const auto index=uint32_t(pass);
+    if (_gpuTiming.slots[_frameNumber%FRAME_OVERLAP].written[index]) {
+        fmt::print("GI TEST FAIL: repeated GPU scope {} in frame\n",GpuPassNames[index]); std::abort();
+    }
+    vkCmdWriteTimestamp2(cmd,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,_gpuTiming.scopePool,
+        (_frameNumber%FRAME_OVERLAP)*uint32_t(GpuPassCount)*2+index*2);
+    return true;
+}
+
+void VulkanEngine::end_gpu_pass(VkCommandBuffer cmd,GpuPass pass)
+{
+    if (!_gpuTiming.scopePool || cmd!=_gpuTiming.activeCommand) return;
+    const auto index=uint32_t(pass);
+    vkCmdWriteTimestamp2(cmd,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,_gpuTiming.scopePool,
+        (_frameNumber%FRAME_OVERLAP)*uint32_t(GpuPassCount)*2+index*2+1);
+    _gpuTiming.slots[_frameNumber%FRAME_OVERLAP].written[index]=true;
+}
+
+void VulkanEngine::sample_gpu_memory_budget(bool print)
+{
+    vmaSetCurrentFrameIndex(_allocator,uint32_t(_frameNumber));
+    std::array<VmaBudget,VK_MAX_MEMORY_HEAPS> heaps{};
+    vmaGetHeapBudgets(_allocator,heaps.data());
+    VkPhysicalDeviceMemoryProperties properties{};
+    vkGetPhysicalDeviceMemoryProperties(_chosenGPU,&properties);
+    stats.gpu_heap_usage=0;stats.gpu_heap_budget=0;
+    for (uint32_t i=0;i<properties.memoryHeapCount;++i) {
+        if (properties.memoryHeaps[i].flags&VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            stats.gpu_heap_usage+=heaps[i].usage;stats.gpu_heap_budget+=heaps[i].budget;
+        }
+        if (print) fmt::print("GPU heap: index={} device-local={} budget-extension={} usage={} budget={} allocation-bytes={} block-bytes={}\n",
+            i,bool(properties.memoryHeaps[i].flags&VK_MEMORY_HEAP_DEVICE_LOCAL_BIT),_gpuTiming.memoryBudgetSupported,
+            heaps[i].usage,heaps[i].budget,heaps[i].statistics.allocationBytes,heaps[i].statistics.blockBytes);
+    }
+    stats.gpu_heap_peak=std::max(stats.gpu_heap_peak,stats.gpu_heap_usage);
+    if (print) fmt::print("GPU heap peak: device-local-usage={} (sampled, not peak allocation or residency)\n",stats.gpu_heap_peak);
 }

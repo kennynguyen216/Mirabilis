@@ -1869,6 +1869,7 @@ void VulkanEngine::update_albedo_volume()
     _surfaceCache.albedoVolumeSize = dims;
     _surfaceCache.albedoVolumeVoxel = extent.x / float(dims.x);
     _surfaceCache.albedoVolumeHash = hash;
+    ++stats.albedo_rebuild_count;
     fmt::print("Surface cache albedo volume: {}x{}x{} at {:.1f} cm, {} KiB, built in {:.0f} ms\n",
         dims.x, dims.y, dims.z, _surfaceCache.albedoVolumeVoxel * 100.0f,
         texels.size() * 4 / 1024, std::chrono::duration<double, std::milli>(

@@ -48,7 +48,8 @@ vec3 lumen_cached_radiance(SurfaceCacheSample surface)
 
 vec3 lumen_hit_radiance(vec3 p,vec3 normal, out uint rayClass)
 {
-    SurfaceCacheSample surface = LUMEN_SURFACE_LOOKUP(p, normal);
+    SurfaceCacheSample surface; surface.weight=0.0;
+    if (sceneData.giTracingSettings.y<0.5) surface=LUMEN_SURFACE_LOOKUP(p, normal);
     if (surface.weight > 0.0) {
         rayClass = RayFieldCache;
         return lumen_cached_radiance(surface);
@@ -82,7 +83,7 @@ vec3 lumen_trace(vec3 worldPosition, vec3 worldNormal, vec3 worldDirection,
         if(!front) normal=-normal;
         RayInstance instance=rayInstances[ray_hit_index(query)];
         SurfaceCacheSample surface;surface.weight=0;
-        if(instance.geometry.z!=0u) surface=LUMEN_SURFACE_LOOKUP(p,normal);
+        if(instance.geometry.z!=0u && sceneData.giTracingSettings.y<0.5) surface=LUMEN_SURFACE_LOOKUP(p,normal);
         if(surface.weight>0) { rayClass=RayFieldCache; return lumen_cached_radiance(surface); }
         rayClass=RayFieldUncovered;
         if(!LUMEN_HIT_LIGHTING_ENABLED) return vec3(0);

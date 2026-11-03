@@ -17,7 +17,7 @@ constexpr std::array ZoneNames{
 };
 constexpr std::array CounterNames{
     "GPU AO ms (completed)", "GPU GI ms (completed)", "GPU exposure ms (completed)",
-    "GPU trace ms (completed)", "Draw calls", "Triangles", "Draw scratch bytes", "Draw scratch growths"
+    "GPU trace ms (completed)", "Draw calls", "Triangles", "Draw scratch bytes", "Draw scratch growths", "GPU frame ms (completed)", "GPU forward ms (completed)", "GPU radiosity ms (completed)"
 };
 static_assert(ZoneNames.size() == static_cast<size_t>(CpuZone::Count));
 static_assert(CounterNames.size() == static_cast<size_t>(ProfileCounter::Count));

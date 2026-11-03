@@ -1,5 +1,7 @@
 """Exercise the Qt content browser against the live Vulkan engine using disposable files."""
 import argparse
+import csv
+import re
 import json
 from pathlib import Path
 import shutil
@@ -60,7 +62,12 @@ def main():
         "MIRABILIS_ASSET_ROOT": str(root), "MIRABILIS_TEST_QT_RASTER": str(output / "viewport"), "MIRABILIS_TEST_QT_CAPTURE": str(output / "editor.png"),
         "MIRABILIS_SSGI_DISABLE": "1", "MIRABILIS_R4_UNCAP_FRAMES": "1",
         "MIRABILIS_PROFILE_TRACE": str(output / "trace.json"),
+        "MIRABILIS_GPU_FRAME_LOG": str(output / "gpu.csv"),
         "VK_LAYER_VALIDATE_SYNC": "1", "VK_KHRONOS_VALIDATION_VALIDATE_SYNC": "true"}, seconds=150)
+    submitted=re.search(r'GPU frame log: submitted-frames=(\d+) stream-ok=true',logs)
+    assert submitted,'Editor close did not finish GPU export'
+    with (output / 'gpu.csv').open() as stream:gpu_rows=list(csv.DictReader(stream))
+    assert sorted(int(row['frame']) for row in gpu_rows)==list(range(1,int(submitted[1])+1)), 'Editor exit lost GPU submissions'
     assert "QT BROWSER PASS:" in logs
     assert (output / "viewport.pfm").is_file()
     assert "GLTF image decode failed" not in logs, "Referenced image did not decode"

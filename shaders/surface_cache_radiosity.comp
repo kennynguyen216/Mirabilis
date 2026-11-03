@@ -193,15 +193,14 @@ void main()
             sum += surface.albedo * arriving;
             ++counted;
         }
-#ifdef MIRABILIS_RT_SHADOWS
         else {
+#ifdef MIRABILIS_RT_SHADOWS
             sum+=ray_hit_albedo(query)*ray_uncached_direct(p,hitNormal);
-            ++counted; // Unknown material/indirect data contributes a conservative zero.
-        }
 #endif
-        // A hit no card saw adds no sample rather than a black one: the
-        // surface is there, its light is just unknown, and counting it as
-        // zero would darken everything near the cache's coverage gaps.
+            // Missing lighting contributes zero instead of renormalizing the
+            // covered directions into extra energy on the software backend.
+            ++counted;
+        }
     }
     if (counted == 0u) {
         return;

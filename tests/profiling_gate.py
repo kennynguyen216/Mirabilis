@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 
 import ecs_gate
+from lumen_benchmark import read_gpu_metrics
 
 
 def check_trace(path, minimum_frames):
@@ -58,7 +59,9 @@ def main():
                      "MIRABILIS_R4_UNCAP_FRAMES": "1", "MIRABILIS_SSGI_DISABLE": "1",
                      "MIRABILIS_AUTO_EXPOSURE": "0", "MIRABILIS_RASTER_CAPTURE": str(prefix),
                      "VK_LAYER_VALIDATE_SYNC": "1", "VK_KHRONOS_VALIDATION_VALIDATE_SYNC": "true", **extra}
+            flags["MIRABILIS_GPU_SCOPES"] = "1" if trace else "0"
             if trace:
+                flags["MIRABILIS_GPU_FRAME_LOG"] = str(directory / "gpu.csv")
                 flags["MIRABILIS_PROFILE_TRACE"] = str(directory / "trace.json")
             logs, result = ecs_gate.run(label, args.configuration, flags)
             assert f"GI bounded run complete: frames={frames} renderer=raster" in logs
@@ -66,7 +69,9 @@ def main():
             capture = prefix.with_suffix(".pfm")
             assert capture.is_file(), "Missing raster capture"
             captures.append(hashlib.sha256(capture.read_bytes()).hexdigest())
-            if trace: result.update(check_trace(Path(flags["MIRABILIS_PROFILE_TRACE"]), frames))
+            if trace:
+                result.update(check_trace(Path(flags["MIRABILIS_PROFILE_TRACE"]), frames))
+                result["gpu"] = read_gpu_metrics(directory / "gpu.csv", 8, frames - 8)
             summary[label] = result
         assert captures[0] == captures[1], f"Profiling changed the {name} raster output"
     after = {str(path.relative_to(repo)): ecs_gate.digest(path) for path in authored}

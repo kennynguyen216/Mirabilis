@@ -199,9 +199,24 @@ the hanging red/blue curtains and green banners come from Intel's add-on package
 The **Profiler** debug window is available with the editor's debug panels. CPU
 profiling is off by default. Enable it to inspect the last completed host frame,
 inclusive operation times and call counts, and a bounded frame history. Timings
-include waits; they are not CPU utilization measurements. GPU timings reuse the
-existing completed queries. GPU allocation statistics are sampled only when
-requested, and draw-index scratch capacity/growths show retained CPU memory.
+include waits; they are not CPU utilization measurements. The completed GPU
+submission view breaks down shadows, cache lighting/radiosity, forward shading,
+GI, reflections, portals and post-processing. Its frame span includes the child
+passes; do not add the frame row to their sum. Queries are read after the owning
+frame fence without waiting for unfinished query results.
+
+Set `MIRABILIS_GPU_FRAME_LOG` to a writable CSV path to export submitted frame IDs,
+GPU pass times, CPU fence/acquire/preparation/record/submit/present times and
+representation rebuild counts. Bounded runs drain the final delayed submissions
+outside the measured loop; editor shutdown also drains its pending submissions. `MIRABILIS_GPU_SCOPES=0` disables the additional pass
+queries for overhead controls. Existing AO/GI timers remain available.
+
+Heap usage/budget is sampled every 60 submitted frames. `VK_EXT_memory_budget`
+is enabled when available; unsupported devices report VMA estimates. Driver
+budget usage, allocated bytes and residency are different measurements. The
+reported peak is sampled and may miss transient allocations. Detailed allocation
+statistics remain available on request; scratch capacity/growths show retained
+CPU memory.
 
 Use **Start trace**, **Stop trace** and **Save trace** to export
 `mirabilis-profile.json` in the working directory. Captures retain at most 65,536
@@ -226,6 +241,23 @@ CPU duration events and counters, with timestamps/durations in microseconds.
 GPU counters are reported when completed results are received; they do not claim
 to locate GPU work on the CPU timeline. A failed requested trace export reports
 an error rather than claiming a successful capture.
+
+The focused lighting checks and matched HQ Sponza/curtains benchmark are:
+
+```powershell
+python tests/lighting_visibility_gate.py --configuration Debug --output C:/temp/lighting-visibility
+python tests/lighting_benchmark.py --baseline C:/path/to/frozen-baseline --output C:/temp/sponza-lighting
+```
+
+The baseline must contain `bin/Release/engine.exe`, its runtime dependencies,
+compiled `shaders`, and the same `assets`. Benchmark profiles preserve the
+hardware direct-world and software screen-first policies, with 32 cache sky
+samples in both revisions. Each profile gets three alternating before/after
+pairs, 900 warmup and 300 focused samples. The candidate exports complete GPU
+submissions; static windows reject representation rebuilds. Visibility and
+coverage fixes may change images, so their timing changes are not automatically
+equal-image optimization gains. A separate direct-hit hardware GI baseline is
+still needed to compare cached GI against directly shaded RT GI.
 
 `FrameClock` and `Profiler` live in the GPU-free core. The frame clock preserves
 unclamped wall time and caps simulation deltas at 100 ms; reload resets its time

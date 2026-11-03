@@ -49,6 +49,32 @@ def parse_metrics(logs, samples, lumen, warmup):
     return {'frameMs': frame_ms, 'fps': 1000/frame_ms, 'giGpuMs': float(match[2])}
 
 
+
+def read_gpu_metrics(path, warmup, samples, allow_rebuilds=False):
+    """Read completed submissions, not the host frame that happens to read them back."""
+    with Path(path).open() as stream:
+        rows = list(csv.DictReader(stream))
+    assert rows, 'Missing GPU samples'
+    selected = [row for row in rows if warmup < int(row['frame']) <= warmup+samples]
+    assert sorted(int(row['frame']) for row in selected) == list(range(warmup+1,warmup+samples+1)), 'Missing or duplicate GPU submissions'
+    gpu = [key for key in rows[0] if key.startswith('gpu_') and key.endswith('_ms')]
+    cpu = [key for key in rows[0] if key.startswith('cpu_') and key.endswith('_ms')]
+    rebuilds = ('sdf_rebuilds','card_rebuilds','trace_rebuilds','blas_builds','tlas_builds','albedo_rebuilds')
+    for row in selected:
+        assert int(row['gpu_written_mask']) & 1, 'Missing whole-frame GPU timestamps'
+        assert all(np.isfinite(float(row[k])) and float(row[k]) >= 0 for k in [*gpu,*cpu,'heap_usage','heap_budget']), 'Invalid GPU/CPU sample'
+        assert float(row['gpu_frame_ms']) > 0, 'Invalid GPU frame span'
+        if not allow_rebuilds: assert all(int(row[k]) == 0 for k in rebuilds), 'Representation rebuilt inside static measurement window'
+    means = {key:statistics.mean(float(row[key]) for row in selected) for key in [*gpu,*cpu]}
+    exclusive = sum(value for key,value in means.items() if key.startswith('gpu_') and key != 'gpu_frame_ms')
+    return {'samples':len(selected), 'meanMs':means,
+            'passCoverageFraction':exclusive/means['gpu_frame_ms'],
+            'unscopedGpuMs':means['gpu_frame_ms']-exclusive,
+            'heapUsagePeak':max(int(row['heap_usage']) for row in selected),
+            'heapBudgetMin':min(int(row['heap_budget']) for row in selected),
+            'rebuilds':{key:sum(int(row[key]) for row in selected) for key in rebuilds}}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
@@ -113,12 +139,14 @@ def main():
             label=f'{mode}-{repeat+1}'
             flags={**common,'MIRABILIS_TEST_SCENE':scene,'MIRABILIS_TEST_FRAMES':str(warmup+measured),
                    'MIRABILIS_BENCHMARK_WARMUP_FRAMES':str(warmup),
-                   'MIRABILIS_R4_FRAME_TIME_LOG':str(out/(label+'.csv')),**profiles[mode]}
+                   'MIRABILIS_R4_FRAME_TIME_LOG':str(out/(label+'.csv')),
+                   'MIRABILIS_GPU_FRAME_LOG':str(out/(label+'-gpu.csv')),**profiles[mode]}
             lumen=flags.get('MIRABILIS_LUMEN_LITE')=='1'
             if lumen:flags['MIRABILIS_TEST_REQUIRE_LUMEN']='1'
             if args.compare_backends and repeat==0:flags['MIRABILIS_RASTER_CAPTURE']=str(out/(mode+'-hdr'))
             logs,result=ecs_gate.run(label,'Release',flags,seconds=900)
             result.update(parse_metrics(logs,measured,lumen,warmup))
+            result['gpu']=read_gpu_metrics(out/(label+'-gpu.csv'),warmup,measured,allow_rebuilds=args.hitches)
             assert result['engineSha256']==initial_engine, 'Executable changed during measurement'
             if args.compare_backends:
                 backend='software-distance-field' if mode=='software' else 'hardware'

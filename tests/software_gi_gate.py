@@ -60,7 +60,8 @@ def main():
     images, results = {}, {}
     for name, sun, scene, extra in [('point-sun-hardware','1','point',{}),
             ('point-sun-raster','0','point',{}),
-            ('point-world','0','point',{'MIRABILIS_SSGI_SCREEN_TRACE':'0'}), ('dark','0','dark',{}),
+            ('point-world','0','point',{'MIRABILIS_SSGI_SCREEN_TRACE':'0'}),
+            ('point-probes','1','point',{'MIRABILIS_SSGI_PROBES':'1'}), ('dark','0','dark',{}),
             ('mirror','1','mirror',{'MIRABILIS_R4_CONTRIBUTIONS':'env_specular','MIRABILIS_TEST_CAMERA':'0 2.5 8 -0.6 0'}),
             ('portal','1','portal',{}), ('portal-offscreen','0','portal',
              {'MIRABILIS_TEST_PLAYER_PORTALS':'1','MIRABILIS_TEST_PORTAL_OFFSCREEN':'1'})]:
@@ -82,6 +83,7 @@ def main():
     difference = float(np.abs(images['point-sun-hardware']-images['point-sun-raster']).max())
     assert images['point-sun-raster'].mean()>1e-5, 'Software indirect lighting is absent'
     assert images['point-world'].mean()>1e-5, 'Distance-field fallback lighting is absent'
+    assert images['point-probes'].mean()>1e-5, 'Software probe gather lighting is absent'
     if 'mirror' in images:
         assert images['mirror'].max()>.05, 'Hardware reflections cannot read software-GI lighting'
     assert np.abs(images['dark']).max()<1e-5, 'Software GI invents light'
