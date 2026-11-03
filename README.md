@@ -414,12 +414,17 @@ rebuild static caches. Editor geometry/material edits can still rebuild them.
 Per-instance cache membership reaches prepass, screen gathers and portal shading
 so moving surfaces do not borrow cached sky/emitter lighting from nearby walls.
 `MIRABILIS_DYNAMIC_GI=0` disables the moving software field for diagnostics.
+Static software and hardware gathers use specialized pipelines that remove
+unused backend and moving-field code. Active software moving geometry retains
+the generic gather. `MIRABILIS_GI_GENERIC_WORLD=1` selects the generic shader
+for same-binary image and performance comparisons.
 
 Software rays escape their origin shell with a bounded offset that stops when
 it enters a neighboring surface after allowing for the first voxel's filtered
 shell uncertainty. Sub-voxel geometry remains approximate. Outside baked volume
 bounds, a projected-distance lower bound avoids artificial distance dips.
 Diffuse gathers and radiosity use per-pixel/texel low-discrepancy sequences;
+integer-wrapped angular phases preserve precision in long sessions.
 `MIRABILIS_GI_RANDOM_SAMPLING=1` selects the previous random-sampling control.
 Relighting uses short, validated GI history instead of resetting the entire
 image each edit. Disabling every cached light source clears irradiance and bounce
@@ -432,6 +437,7 @@ Run the moving-field, close-gap, lights-off and noise checks sequentially:
 python tests/dynamic_gi_gate.py --configuration Release --output C:/temp/mirabilis-dynamic-gi
 python tests/reflection_motion_gate.py --configuration Release --output C:/temp/mirabilis-reflection-motion
 python tests/reflection_history_gate.py --configuration Release --output C:/temp/mirabilis-reactive-reflections
+python tests/gather_backend_gate.py --configuration Release --output C:/temp/mirabilis-gather-backends
 ```
 
 `tests/dynamic_lighting_benchmark.py --runs 3 --output C:/temp/mirabilis-dynamic-sponza`

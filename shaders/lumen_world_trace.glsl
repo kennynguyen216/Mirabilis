@@ -4,6 +4,9 @@
 #endif
 #include "dynamic_sdf.glsl"
 #include "punctual_lights.glsl"
+#ifndef LUMEN_HARDWARE_WORLD
+#define LUMEN_HARDWARE_WORLD (sceneData.giTracingSettings.x>0.5)
+#endif
 // Shared Lumen world gather for the main camera and portal cameras.
 // The caller supplies field/cache samplers and the two lighting policies.
 float lumen_field_distance(vec3 world)
@@ -78,7 +81,7 @@ vec3 lumen_trace(vec3 worldPosition, vec3 worldNormal, vec3 worldDirection,
     out uint rayClass)
 {
 #ifdef MIRABILIS_RT_SHADOWS
-    if (sceneData.giTracingSettings.x > 0.5) {
+    if (LUMEN_HARDWARE_WORLD) {
     // Reuse the opaque scene TLAS already bound for sunlight. The field's
     // multi-voxel origin offset moves rays almost a metre off the wall in a
     // large scene, and its voxel shells imprint false floor-contact bands.

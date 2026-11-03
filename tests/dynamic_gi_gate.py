@@ -87,6 +87,7 @@ def main():
         'moving-disabled':{'MIRABILIS_TEST_SCENE':'moving.json','MIRABILIS_TEST_DYNAMIC_GI':'1','MIRABILIS_DYNAMIC_GI':'0'},
         'noise':{'MIRABILIS_TEST_SCENE':'point.json','MIRABILIS_LUMEN_HARDWARE':'1'},
         'noise-random':{'MIRABILIS_TEST_SCENE':'point.json','MIRABILIS_LUMEN_HARDWARE':'1','MIRABILIS_GI_RANDOM_SAMPLING':'1'},
+        'noise-long-run':{'MIRABILIS_TEST_SCENE':'point.json','MIRABILIS_LUMEN_HARDWARE':'1','MIRABILIS_IQ9_SSGI_SEED':'2000000'},
         'relighting':{'MIRABILIS_TEST_SCENE':'point.json','MIRABILIS_TEST_LIGHT_DRAG':'1'},
         'lights-off':{'MIRABILIS_TEST_SCENE':'point.json','MIRABILIS_TEST_LIGHT_OFF':'1'},
     }.items():
@@ -133,7 +134,10 @@ def main():
     assert ratio<1,('Low-discrepancy sampling did not reduce temporal noise',ratio)
     energy=abs(results['noise']['mean']-results['noise-random']['mean'])/max(results['noise-random']['mean'],1e-6)
     assert energy<.05,('Noise reduction changed mean energy',energy)
-    results['comparison']={'temporalVarianceRatio':ratio,'noiseMeanRelativeDifference':energy,'dynamicLightingMeanDifference':float(changed.mean())}
+    long_energy=abs(results['noise-long-run']['mean']-results['noise']['mean'])/max(results['noise']['mean'],1e-6)
+    assert long_energy<.05 and results['noise-long-run']['temporalVariance']>1e-10,('Long-running sampling lost energy or variation',long_energy)
+    results['comparison']={'temporalVarianceRatio':ratio,'noiseMeanRelativeDifference':energy,
+        'longRunMeanRelativeDifference':long_energy,'dynamicLightingMeanDifference':float(changed.mean())}
     (out/'summary.json').write_text(json.dumps(results,indent=2))
     print('DYNAMIC GI GPU GATE PASS',results['comparison'],flush=True)
 

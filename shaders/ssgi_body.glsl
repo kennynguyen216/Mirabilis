@@ -66,6 +66,12 @@ vec3 r4_ray_value(uint rayClass, vec3 radiance)
 #include "environment.glsl"
 
 #ifdef LUMEN_LITE
+// Generic diagnostics keep runtime selection; production can remove unused
+// tracing backends and moving-field hit lighting at pipeline creation.
+layout(constant_id=0) const uint GiWorldBackend=0u;
+layout(constant_id=1) const bool GiDynamicField=true;
+#define MIRABILIS_DYNAMIC_FIELD_ENABLED GiDynamicField
+#define LUMEN_HARDWARE_WORLD (GiWorldBackend==2u || (GiWorldBackend==0u && sceneData.giTracingSettings.x>0.5))
 // Lumen-lite world fallback: set 2 holds the scene distance field and the
 // surface cache.  See docs/lumen_lite_design.md.
 layout(set = 2, binding = 0) uniform sampler3D sceneField;
@@ -811,8 +817,10 @@ void main()
             uint pixelSeed=uint(pixel.x)*1973u^uint(pixel.y)*9277u^0x68bc21ebu;
             vec2 shift=vec2(randomFloat(pixelSeed),randomFloat(pixelSeed));
             uint sampleIndex=PushConstants.control.w*uint(rayCount)+uint(rayIndex)+1u;
+            // Wrap the phase as an integer before conversion, preserving its
+            // fractional precision even after hours of frame accumulation.
             xi=fract(shift+vec2(float(bitfieldReverse(sampleIndex))*(1.0/4294967296.0),
-                float(sampleIndex)*0.61803398875));
+                float(sampleIndex*0x9e3779b9u)*(1.0/4294967296.0)));
         }
 #endif
         vec3 direction = cosine_direction(o.normal, xi);

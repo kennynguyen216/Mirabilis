@@ -1532,6 +1532,7 @@ class VulkanEngine{
             VkDescriptorSetLayout lumenLayout{};
             VkPipelineLayout lumenPipelineLayout{};
             VkPipeline lumenPipeline{};
+            VkPipeline lumenStaticPipeline{}, lumenHardwarePipeline{};
             // Screen probes (shaders/ssgi_body.glsl): per-tile hemispheres
             // stored as SH, gathered per pixel.  Lumen-lite only.
             bool probesEnabled{false};

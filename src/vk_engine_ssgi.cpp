@@ -502,6 +502,18 @@ void VulkanEngine::init_ssgi_pipelines()
                 VK_SHADER_STAGE_COMPUTE_BIT, lumenShader.get());
             VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1,
                 &lumenCreate, nullptr, &_ssgi.lumenPipeline));
+            const VkSpecializationMapEntry entries[]{{0,0,sizeof(uint32_t)},
+                {1,sizeof(uint32_t),sizeof(VkBool32)}};
+            struct Mode { uint32_t backend; VkBool32 dynamicField; } mode{1,VK_FALSE};
+            VkSpecializationInfo specialization{2,entries,sizeof(mode),&mode};
+            lumenCreate.stage.pSpecializationInfo=&specialization;
+            VK_CHECK(vkCreateComputePipelines(_device,VK_NULL_HANDLE,1,
+                &lumenCreate,nullptr,&_ssgi.lumenStaticPipeline));
+            if(_rayQueryShadows) {
+                mode.backend=2;
+                VK_CHECK(vkCreateComputePipelines(_device,VK_NULL_HANDLE,1,
+                    &lumenCreate,nullptr,&_ssgi.lumenHardwarePipeline));
+            }
         } else {
             fmt::print("Error loading ssgi_lumen.comp.spv; Lumen-lite fallback unavailable\n");
         }
@@ -538,6 +550,8 @@ void VulkanEngine::init_ssgi_pipelines()
         }
         _mainDeletionQueue.push_function([this]() {
             vkDestroyPipeline(_device, _ssgi.lumenPipeline, nullptr);
+            vkDestroyPipeline(_device, _ssgi.lumenStaticPipeline, nullptr);
+            vkDestroyPipeline(_device, _ssgi.lumenHardwarePipeline, nullptr);
             vkDestroyPipeline(_device, _ssgi.probePipeline, nullptr);
             vkDestroyPipeline(_device, _ssgi.probePlacePipeline, nullptr);
             vkDestroyPipeline(_device, _ssgi.probeAdaptivePipeline, nullptr);
@@ -794,7 +808,6 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             writer.update_set(_device, lumenSet);
             traceLayout = _ssgi.lumenPipelineLayout;
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.lumenPipeline);
             const std::array<VkDescriptorSet, 3> lumenSets{sets[0], sets[1], lumenSet};
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, traceLayout,
                 0, static_cast<uint32_t>(lumenSets.size()), lumenSets.data(), 0, nullptr);
@@ -846,6 +859,21 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
                 (_ssgi.fullClampControl ? 16u : 0u) |
                 (_r4Contributions.ray << 8));
         if(SDL_getenv("MIRABILIS_GI_RANDOM_SAMPLING")) pushConstants.quality.w|=0x80000000u;
+        VkPipeline lumenTracePipeline=_ssgi.lumenPipeline;
+        static const bool genericWorld=SDL_getenv("MIRABILIS_GI_GENERIC_WORLD");
+        if(lumen && !genericWorld) {
+            if(lumen_hardware_tracing()) lumenTracePipeline=_ssgi.lumenHardwarePipeline;
+            else if(!_dynamicSdf.active) lumenTracePipeline=_ssgi.lumenStaticPipeline;
+        }
+        if(lumen && SDL_getenv("MIRABILIS_TEST_FRAMES")) {
+            static VkPipeline reported{};
+            if(reported!=lumenTracePipeline) {
+                fmt::print("GI gather pipeline={}\n",lumenTracePipeline==_ssgi.lumenHardwarePipeline ?
+                    "hardware" : lumenTracePipeline==_ssgi.lumenStaticPipeline ? "software-static" : "generic");
+                reported=lumenTracePipeline;
+            }
+        }
+        if(lumen) vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,lumenTracePipeline);
         vkCmdPushConstants(
             cmd, traceLayout, VK_SHADER_STAGE_COMPUTE_BIT,
             0, sizeof(pushConstants), &pushConstants);
@@ -865,7 +893,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.probeAdaptivePipeline);
             vkCmdDispatch(cmd, 1024u, 1, 1);
             vkutil::memory_barrier(cmd);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.lumenPipeline);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, lumenTracePipeline);
         }
         vkCmdDispatch(
             cmd,
