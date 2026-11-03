@@ -334,7 +334,7 @@ void VulkanEngine::init_surface_cache_resources()
         builder.add_binding(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         builder.add_binding(11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         // IQ8: the sun casters' TLAS, which replaces that BVH on the ray-query device.
-        if (_rayQueryShadows) {
+        if (lumen_hardware_tracing()) {
             builder.add_binding(12, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
         }
         builder.add_binding(13, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
@@ -351,7 +351,7 @@ void VulkanEngine::init_surface_cache_resources()
         VK_CHECK(vkCreatePipelineLayout(
             _device, &directLayoutInfo, nullptr, &_surfaceCache.directPipelineLayout));
         ScopedShaderModule directShader(_device);
-        if (directShader.load(ray_query_shader("surface_cache_direct.comp").c_str())) {
+        if (directShader.load(lumen_shader("surface_cache_direct.comp").c_str())) {
             VkPipelineShaderStageCreateInfo stage{
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
             stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -432,7 +432,7 @@ void VulkanEngine::init_surface_cache_resources()
         VK_CHECK(vkCreatePipelineLayout(
             _device, &info, nullptr, &_surfaceCache.radiosityPipelineLayout));
         ScopedShaderModule shader(_device);
-        if (shader.load(ray_query_shader("surface_cache_radiosity.comp").c_str())) {
+        if (shader.load(lumen_shader("surface_cache_radiosity.comp").c_str())) {
             VkPipelineShaderStageCreateInfo stage{
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
             stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -913,12 +913,12 @@ void VulkanEngine::light_surface_cache()
     // overrides either.  z = 0 keeps the shader's own 32 and the lighting hash.
     const char* skySamplesText = SDL_getenv("MIRABILIS_IQ5_CACHE_SKY_SAMPLES");
     const uint32_t skySamples = skySamplesText
-        ? std::clamp(std::atoi(skySamplesText), 1, 1024) : (_rayQueryShadows ? 256 : 32);
+        ? std::clamp(std::atoi(skySamplesText), 1, 1024) : (lumen_hardware_tracing() ? 256 : 32);
     // IQ7 diagnostic: a second rotation seed for the sky directions, so two
     // relights differ only in their per-texel noise (0 = unchanged).
     const char* skySeedText = SDL_getenv("MIRABILIS_IQ7_SKY_SEED");
     const glm::vec4 skyEnvironment(_skyboxEnvironmentLod, _skyboxIndirectClamp,
-        skySamplesText || _rayQueryShadows ? float(skySamples) : 0.0f,
+        skySamplesText || lumen_hardware_tracing() ? float(skySamples) : 0.0f,
         skySeedText ? float(std::clamp(std::atoi(skySeedText), 0, 65535)) : 0.0f);
     mix(&skyEnvironment, sizeof(skyEnvironment));
     mix(&_r4Contributions.cacheSources, sizeof(_r4Contributions.cacheSources));
@@ -952,7 +952,7 @@ void VulkanEngine::light_surface_cache()
     pending.pendingSunOnly=sunOnly; pending.lightingPending=true;
     std::copy(_ibl.environmentSH.begin(),_ibl.environmentSH.end(),pending.pendingSky.begin());
     const glm::uvec4 settings(panoramaSky,emitterCount,_r4Contributions.cacheSources,
-        _traceSupported && (_rayQueryShadows || !_traceNodes.empty())?1u:0u);
+        _traceSupported && lumen_hardware_tracing()?1u:0u);
     std::memcpy(&pending.pendingSky[9],&settings,sizeof(settings));
     pending.pendingSky[10]=skyEnvironment;
     pending.pendingSky[11]=_traceSettings.lighting.environmentTint;
@@ -1024,7 +1024,7 @@ void VulkanEngine::record_surface_cache_lighting(VkCommandBuffer cmd)
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
     writer.write_image(11, _surfaceCache.sky.imageView, VK_NULL_HANDLE,
         VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-    if (_rayQueryShadows) {
+    if (lumen_hardware_tracing()) {
         writer.write_acceleration_structure(12, _sunCasters.tlas);
     }
     writer.write_buffer(13,punctualBuffer.buffer,sizeof(PunctualLights),0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);

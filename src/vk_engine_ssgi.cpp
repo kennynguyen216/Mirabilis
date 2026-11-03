@@ -494,7 +494,7 @@ void VulkanEngine::init_ssgi_pipelines()
         VK_CHECK(vkCreatePipelineLayout(
             _device, &lumenInfo, nullptr, &_ssgi.lumenPipelineLayout));
         ScopedShaderModule lumenShader(_device);
-        if (lumenShader.load(ray_query_shader("ssgi_lumen.comp").c_str())) {
+        if (lumenShader.load(lumen_shader("ssgi_lumen.comp").c_str())) {
             VkComputePipelineCreateInfo lumenCreate{
                 .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             lumenCreate.layout = _ssgi.lumenPipelineLayout;
@@ -506,7 +506,7 @@ void VulkanEngine::init_ssgi_pipelines()
             fmt::print("Error loading ssgi_lumen.comp.spv; Lumen-lite fallback unavailable\n");
         }
         ScopedShaderModule probeShader(_device);
-        if (probeShader.load(ray_query_shader("ssgi_probe.comp").c_str())) {
+        if (probeShader.load(lumen_shader("ssgi_probe.comp").c_str())) {
             VkComputePipelineCreateInfo probeCreate{
                 .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             probeCreate.layout = _ssgi.lumenPipelineLayout;
@@ -524,7 +524,7 @@ void VulkanEngine::init_ssgi_pipelines()
             {"ssgi_probe_adaptive.comp", &_ssgi.probeAdaptivePipeline}}};
         for (const auto& [name, pipeline] : adaptiveStages) {
             ScopedShaderModule shader(_device);
-            if (!shader.load(ray_query_shader(name).c_str())) {
+            if (!shader.load(lumen_shader(name).c_str())) {
                 fmt::print("Error loading {}; screen probes unavailable\n", name);
                 continue;
             }

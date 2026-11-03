@@ -38,20 +38,22 @@ def check_raster(records):
     assert all(phases.values()), 'Missing lifecycle phase'
     awake, asleep = phases['awake'], phases['sleep']
     hardware=awake[-1].get('hardware-world',0)==1
-    static_caches=('surface',) if hardware else STATIC_CACHES
+    hardware_shadows=awake[-1]['ray-shadow-enabled']==1 and awake[-1].get('ray-blas',0)>0
+    static_caches=('surface',) if hardware else ('sdf','surface')
+    if not hardware_shadows and awake[-1]['ray-shadow-enabled']==1:
+        static_caches=(*static_caches,'ray-shadow')
     raster_caches=(*static_caches,'trace')
     assert all(awake[-1][f'{cache}-enabled']==1 for cache in static_caches)
     assert all(awake[-1][cache]>0 for cache in static_caches)
-    if hardware:
+    if hardware_shadows:
         assert awake[-1]['ray-shadow-enabled']==1 and awake[-1]['ray-blas']>0
         assert len(awake)>=4 and len(asleep)>=2
         for phase in (awake[2:],asleep):
             assert phase[-1]['ray-blas']==phase[0]['ray-blas'], 'Immutable mesh BLAS rebuilt during rigid motion'
         assert awake[-1]['ray-shadow']>awake[0]['ray-shadow'], 'Moving instances never updated TLAS'
-    else:
+    if not hardware:
         for sample in (awake[-1],asleep[-1]):
             assert sample['sdf-placed']==sample['sdf-instances'] and sample['sdf-placed']>0
-        raster_caches=RASTER_CACHES
         assert len(awake)>=4 and len(asleep)>=2
     assert all(item['dynamic-draws']>0 for item in awake)
     for phase in (awake[2:],asleep):
@@ -100,6 +102,7 @@ def main():
     parser.add_argument('--repo', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--configuration', choices=('Debug','Release'), default='Debug')
+    parser.add_argument('--software-gi', action='store_true')
     args = parser.parse_args()
     repo, output = args.repo.resolve(), args.output.resolve()
     assert not output.exists() or not any(output.iterdir()), 'Use fresh evidence directory'
@@ -117,7 +120,8 @@ def main():
     (scratch/'physics_child_demo.json').write_text(json.dumps(child_variant(original), indent=2))
     preflight_logs, _ = ecs_gate.run('sdf-preflight', args.configuration, {'MIRABILIS_TEST_SCENE': 'physics_child_demo.json',
         'MIRABILIS_TEST_SCENE_DIRECTORY': str(scratch), 'MIRABILIS_TEST_FRAMES': '2',
-        'MIRABILIS_TEST_RESET_PLAY': '1', 'MIRABILIS_TEST_WINDOW': '1600x900', 'MIRABILIS_LUMEN_LITE': '1'})
+        'MIRABILIS_TEST_RESET_PLAY': '1', 'MIRABILIS_TEST_WINDOW': '1600x900', 'MIRABILIS_LUMEN_LITE': '1',
+        'MIRABILIS_LUMEN_HARDWARE': '0' if args.software_gi else '1'})
     if 'distance-field-bakes-required=false' in preflight_logs:
         (output/'sdf-bake-inventory.json').write_text(json.dumps({'backend':'triangle-ray-query','distanceFieldBakesRequired':False},indent=2))
     else:
@@ -145,6 +149,7 @@ def main():
                  'MIRABILIS_TEST_CAMERA': '0 2.5 12 -0.08 0',
                  'MIRABILIS_TEST_PHYSICS_CAPTURE_DIRECTORY': str(captures),
                  'MIRABILIS_LUMEN_LITE': '1', 'MIRABILIS_IQ_RT_SHADOWS': '1',
+                 'MIRABILIS_LUMEN_HARDWARE': '0' if args.software_gi else '1',
                  'VK_INSTANCE_LAYERS': 'VK_LAYER_KHRONOS_validation',
                  'VK_LAYER_VALIDATE_SYNC': '1', 'VK_KHRONOS_VALIDATION_VALIDATE_SYNC': 'true'}
         if trace:

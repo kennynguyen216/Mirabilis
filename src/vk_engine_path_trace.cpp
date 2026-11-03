@@ -462,7 +462,7 @@ void VulkanEngine::update_trace_scene() {
     };
     // Raster GI shares the static-cache policy; the reference renderer keeps moving geometry.
     const bool includeAwakeDynamics = _rendererMode == RendererMode::SoftwarePathTrace;
-    const bool fullGpuTrace=includeAwakeDynamics || !_rayQueryShadows || SDL_getenv("MIRABILIS_TEST_FULL_TRACE_UPLOAD");
+    const bool fullGpuTrace=includeAwakeDynamics || SDL_getenv("MIRABILIS_TEST_FULL_TRACE_UPLOAD");
     const bool validateCpu=SDL_getenv("MIRABILIS_TEST_FRAMES") && !SDL_getenv("MIRABILIS_BENCHMARK_SKIP_CPU_BVH_VALIDATION");
     const bool fullCpuTrace=fullGpuTrace || validateCpu || _surfaceCache.measureShadows || _surfaceCache.measureEmitterVisibility ||
         SDL_getenv("MIRABILIS_R4_CACHE_SUN_CHECK") || SDL_getenv("MIRABILIS_R4_SKY_VISIBILITY_CHECK") ||
@@ -594,7 +594,7 @@ void VulkanEngine::update_trace_scene() {
     };
     fmt::print("GI CPU geometry: mode={} triangle-record-bytes={} visibility=\"{}\"\n",
         fullCpuTrace?"full":"references",_traceTriangles.size()*sizeof(TraceTriangle)+_traceTriangleRefs.size()*sizeof(TraceTriangleRef),
-        _rayQueryShadows?"hardware":"software BVH");
+        includeAwakeDynamics?"software BVH":lumen_hardware_tracing()?"hardware":"distance field");
     // Hardware raster GI only needs emitter triangles on the GPU. Texture
     // CPU albedo reads retain immutable source images instead of repacking them.
     std::vector<TraceTriangle> emitterTriangles;
@@ -611,7 +611,7 @@ void VulkanEngine::update_trace_scene() {
     upload(_traceEmitterBuffer,gpuEmitters.data(),gpuEmitters.size()*sizeof(uint32_t),sizeof(uint32_t));
     upload(_traceTexelBuffer,_traceTexels.data(),fullGpuTrace?_traceTexels.size()*sizeof(uint32_t):0,sizeof(uint32_t));
     fmt::print("GI GPU trace payload: mode={} triangles={} texels={} CPU-triangles={} CPU-texels={}\n",
-        fullGpuTrace?"full":"hardware-raster",gpuTriangles.size(),fullGpuTrace?_traceTexels.size():0,_traceTriangles.size(),_traceTexels.size());
+        fullGpuTrace?"full":"raster-emitters",gpuTriangles.size(),fullGpuTrace?_traceTexels.size():0,_traceTriangles.size(),_traceTexels.size());
     if (_tracePortals.size() > MaxPortalSurfaces) std::abort();
     upload(_tracePortalBuffer,_tracePortals.data(),_tracePortals.size()*sizeof(TracePortal),MaxPortalSurfaces*sizeof(TracePortal));
     _tracePortalBufferDirty = false;

@@ -63,6 +63,7 @@ vec3 lumen_trace(vec3 worldPosition, vec3 worldNormal, vec3 worldDirection,
     out uint rayClass)
 {
 #ifdef MIRABILIS_RT_SHADOWS
+    if (sceneData.giTracingSettings.x > 0.5) {
     // Reuse the opaque scene TLAS already bound for sunlight. The field's
     // multi-voxel origin offset moves rays almost a metre off the wall in a
     // large scene, and its voxel shells imprint false floor-contact bands.
@@ -93,7 +94,8 @@ vec3 lumen_trace(vec3 worldPosition, vec3 worldNormal, vec3 worldDirection,
     }
     rayClass = RayFieldExit;
     return environment_radiance(worldDirection);
-#else
+    }
+#endif
     float voxel = fieldMin.w;
     vec3 origin = worldPosition + worldNormal * (2.5 * voxel);
     vec3 inverse = 1.0 / worldDirection;
@@ -114,5 +116,4 @@ vec3 lumen_trace(vec3 worldPosition, vec3 worldNormal, vec3 worldDirection,
     // room (the same rule the cache's radiosity follows).
     rayClass = t >= tExit ? RayFieldExit : RayFieldExhausted;
     return t >= tExit ? environment_radiance(worldDirection) : vec3(0.0);
-#endif
 }

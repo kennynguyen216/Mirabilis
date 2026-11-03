@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -293,6 +294,13 @@ void VulkanEngine::init_sdf_resources()
 
     // Each value is copied out before the next SDL_getenv call, which may
     // reuse the storage the previous one returned.
+    if (const char* range = SDL_getenv("MIRABILIS_SDF_MAX_DISTANCE_VOXELS")) {
+        char* end = nullptr;
+        const float value = std::strtof(range, &end);
+        if (end==range || *end || !std::isfinite(value) || value<2.f || value>64.f)
+            throw std::runtime_error("MIRABILIS_SDF_MAX_DISTANCE_VOXELS must be between 2 and 64");
+        _sceneSdf.maxDistanceVoxels = value;
+    }
     if (const char* offset = SDL_getenv("MIRABILIS_SDF_OFFSET")) {
         std::sscanf(offset, "%f %f %f",
             &_sdf.offset.x, &_sdf.offset.y, &_sdf.offset.z);
@@ -385,7 +393,7 @@ void VulkanEngine::update_scene_sdf()
 
     std::vector<SceneOpaqueInstance> sceneInstances;
     const uint64_t drawHash = collect_opaque_instances(sceneInstances);
-    const bool hardware=_rayQueryShadows && !(_debugViews.view==RenderDebugView::SDFTrace && _sdf.source==1);
+    const bool hardware=lumen_hardware_tracing() && !(_debugViews.view==RenderDebugView::SDFTrace && _sdf.source==1);
     if (hardware!=_sceneSdf.hardwareProxy) { _sceneSdf.drawHash=0; _sceneSdf.fieldValid=false; }
     _sceneSdf.hardwareProxy=hardware;
     if (hardware) {
@@ -470,6 +478,10 @@ void VulkanEngine::update_scene_sdf()
         const uint64_t hash = hashIt->second;
 
         auto volumeIt = _sceneSdf.volumes.find(hash);
+        if (volumeIt != _sceneSdf.volumes.end() && volumeIt->second.image.image==VK_NULL_HANDLE) {
+            _sceneSdf.volumes.erase(volumeIt);
+            volumeIt = _sceneSdf.volumes.end();
+        }
         if (volumeIt == _sceneSdf.volumes.end() &&
             !_sceneSdf.missing.contains(hash)) {
             const std::string name = hash_name(hash);
@@ -487,7 +499,8 @@ void VulkanEngine::update_scene_sdf()
                     volumeIt = _sceneSdf.volumes.emplace(hash, volume).first;
                 }
             } else {
-                _sceneSdf.missing.insert(hash);
+                if (_sceneSdf.missing.insert(hash).second && SDL_getenv("MIRABILIS_TEST_FRAMES"))
+                    fmt::print("Scene SDF missing mesh: {}\n", name);
                 const std::string objPath =
                     _sceneSdf.queueDirectory + "/" + name + ".obj";
                 if (!std::filesystem::exists(objPath) &&
@@ -513,6 +526,8 @@ void VulkanEngine::update_scene_sdf()
             _sceneSdf.placedCount, _sceneSdf.instanceCount,
             _sceneSdf.missing.size(), queuedNow, detail);
         fmt::print("Scene SDF: {}\n", _sceneSdf.status);
+        fmt::print("GI world backend=distance-field instances={} ready={} missing-meshes={}\n",
+            _sceneSdf.instanceCount,_sceneSdf.placedCount,_sceneSdf.missing.size());
     };
 
     if (placed.empty()) {
@@ -701,6 +716,14 @@ void VulkanEngine::update_scene_sdf()
             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     });
     pool.destroy_pools(_device);
+    // Runtime tracing reads the merged field; mesh images are only build inputs.
+    VkDeviceSize released = 0;
+    for (auto& [hash, volume] : _sceneSdf.volumes) if (volume.image.image!=VK_NULL_HANDLE) {
+        released += VkDeviceSize(volume.image.imageExtent.width)*volume.image.imageExtent.height*
+            volume.image.imageExtent.depth*(volume.image.imageFormat==VK_FORMAT_R16_SFLOAT?2:4);
+        destroy_image(volume.image); volume.image = {};
+    }
+    fmt::print("GI mesh SDF residency: released-texel-bytes={}; merged field retained\n", released);
     _sceneSdf.fieldValid = true;
     ++stats.sdf_rebuild_count;
 

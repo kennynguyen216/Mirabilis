@@ -763,6 +763,12 @@ class VulkanEngine{
     // MIRABILIS_IQ_RT_SHADOWS=0.  While it is off nothing IQ2 adds is created
     // or loaded, and the shadow map works exactly as before.
     bool _rayQueryShadows{false};
+    bool _lumenHardwareTracing{false};
+    bool lumen_hardware_tracing() const { return _rayQueryShadows && _lumenHardwareTracing; }
+    std::string lumen_shader(const char* name) const
+    {
+        return std::string("../../shaders/") + name + (lumen_hardware_tracing() ? ".rt.spv" : ".spv");
+    }
     // The build of a shader to load: its ray-query build (*.rt.spv, IQ2/IQ8)
     // while _rayQueryShadows is on.
     std::string ray_query_shader(const char* name) const

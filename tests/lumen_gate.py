@@ -93,6 +93,7 @@ def main():
             'MIRABILIS_TEST_CAMERA':'0 2.5 8 -0.6 0' if scene in ('mirror','rough','threshold','portal') else '0 3.5 9 -0.3 0',
             'MIRABILIS_TEST_HIDE_PANELS':'1', 'MIRABILIS_TEST_FRAMES':'180',
             'MIRABILIS_LUMEN_LITE':'1', 'MIRABILIS_TEST_REQUIRE_LUMEN':'1',
+            'MIRABILIS_LUMEN_HARDWARE':'1', 'MIRABILIS_SSGI_SCREEN_TRACE':'0',
             'MIRABILIS_BENCHMARK_SKIP_CPU_BVH_VALIDATION':'1',
             'MIRABILIS_R4_UNCAP_FRAMES':'1', 'MIRABILIS_RASTER_CAPTURE':str(capture),
             'MIRABILIS_R4_CONTRIBUTIONS':'env_diffuse,ray_field_cache,ray_field_uncovered,ray_field_exit,ray_field_exhausted,ray_primary_cache_sky' if scene in ('point','dark','spot') else 'env_specular',

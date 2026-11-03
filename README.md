@@ -27,9 +27,9 @@ Click the preview to watch the run.
 - Renders GPU mesh and material pipelines with glTF/GLB scene loading.
 - Manages Vulkan command buffers, synchronization, descriptor sets, dynamic rendering, and swapchain presentation.
 - Includes real-time shadows, ambient occlusion, screen-space GI, optional Lumen-inspired world GI, and a software path-tracing reference mode.
-- On ray-query devices, world GI groups a mesh's material ranges into one reusable BLAS and one TLAS instance per transform. Hit queries retain each geometry's material index. Frame-local TLASes include moving opaque bodies without requiring distance-field bakes. Software world tracing retains its bake requirement.
+- Select GPU software distance-field GI with `MIRABILIS_LUMEN_HARDWARE=0`, independently of hardware sun shadows (`MIRABILIS_IQ_RT_SHADOWS`). Software GI defaults to screen-first tracing and requires complete mesh distance-field bakes. Hardware GI retains its direct-world-tracing default on ray-query devices; it groups material ranges into reusable mesh BLASes and one TLAS instance per transform, preserving per-geometry hit materials and moving opaque bodies without distance-field bakes. Devices without ray queries use software GI.
 - Relights the surface cache in bounded strips in the frame command buffer, retaining sky/emission pages during sun or punctual-light edits. Raster, cache and reference lighting share punctual-light attenuation.
-- Hardware GI borrows immutable CPU mesh/texture sources, stores 20-byte triangle references for albedo voxelization, and uploads only emitter geometry. This avoids full CPU triangle/BVH and packed texture copies; the software reference and CPU visibility diagnostics keep their full payload. Voxelization reuses subdivision scratch across triangles.
+- Raster GI borrows immutable CPU mesh/texture sources, stores 20-byte triangle references for albedo voxelization, and uploads only emitter geometry. Both distance-field and hardware GI avoid full CPU triangle/BVH and packed texture copies; the software reference and CPU visibility diagnostics keep their full payload. Voxelization reuses subdivision scratch across triangles.
 - Offers optional smooth/rough opaque scene reflections with GGX visible-normal sampling and separate static-view temporal history. Moving cameras, moving geometry and lighting changes reject that history. Cache-lit hits and scalar-material direct fallback are approximations; textured uncached hits remain conservative.
 - Includes shadowed point/spot lights, two-sided cloth lighting, material AO/specular controls, approximate thin-surface subsurface and screen-space glass refraction.
 - Offers optional cel shading, multi-scale HDR bloom, and ACES/Reinhard/PBR Neutral tone mapping.
@@ -290,6 +290,8 @@ The world-GI correctness gate and focused benchmark use fresh output directories
 
 ```powershell
 python tests/lumen_gate.py --output C:/temp/mirabilis-lumen-check --configuration Debug
+python tests/software_gi_gate.py --output C:/temp/mirabilis-software-gi-check --configuration Debug
+python tests/physics_gate.py --repo . --software-gi --output C:/temp/mirabilis-software-physics --configuration Release
 python tests/reflection_history_gate.py --output C:/temp/mirabilis-reflection-history
 python tests/trace_texture_gate.py --output C:/temp/mirabilis-trace-textures
 python tests/ray_geometry_gate.py --output C:/temp/mirabilis-ray-geometry
@@ -314,6 +316,32 @@ bounded checks retain CPU BVH validation, as does the software reference.
 the default is 4096. Probes remain experimental and off by default.
 Use `--profiles lumen plain reflections` to measure selected modes in that order
 (reversed on the second repeat).
+
+Software GI traces distance fields in GPU compute shaders; it is separate from
+the triangle-BVH software reference renderer. Start the desired scene once to
+queue missing mesh geometry, run the existing baker with its Python dependencies,
+then restart the scene:
+
+```powershell
+python scripts/bake_sdf.py --queue assets/sdf/queue assets/sdf/cache
+python tests/lumen_benchmark.py --compare-backends --scene sponza_hq_preview.json --camera "0 2.5 0 -0.05 1.5708" --warmup 900 --atlas 2048 --output C:/temp/mirabilis-gi-backends
+```
+
+This comparison enables screen tracing and uses 32 cache-sky samples for both
+backends. It rejects incomplete distance fields, unready lighting and missing
+focus. Distance fields approximate geometry, so backend FPS comparisons are
+quality tradeoffs rather than equal-image optimizations. The software gate checks
+punctual bounce, darkness, both portal paths and independence from the sun-shadow
+backend. The existing hardware GI gates explicitly select hardware tracing.
+Set `MIRABILIS_SSGI_SCREEN_TRACE=1` for hardware screen-first tracing, or `0` for
+software direct-world tracing. The defaults preserve the faster measured hardware
+path while making the software hierarchy explicit. Dedicated scene reflections
+retain their optional hardware path. Mesh distance-field GPU images are released
+after composition; static-field rebuilds reload them from the bake cache. This
+reduces retained GPU memory at the cost of extra loading during rebuilds.
+`MIRABILIS_SDF_MAX_DISTANCE_VOXELS` overrides the stored distance clamp (2–64,
+default 8) for tracing experiments; larger ranges increase composition work and
+do not guarantee faster tracing.
 
 For a matched comparison across renderer and shader changes, preserve the old
 Release executable and all of its generated `.spv` files before rebuilding:

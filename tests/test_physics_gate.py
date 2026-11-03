@@ -49,6 +49,20 @@ class PhysicsTelemetry(unittest.TestCase):
         self.assertEqual(variant['objects'][-1]['components']['rigidBody']['motion'], 'Static')
         self.assertEqual(variant['nextPersistentId'], 9)
 
+    def test_software_gi_keeps_distance_fields_stable_with_hardware_shadows(self):
+        records = self.records()
+        for i, item in enumerate(records):
+            item.update({'hardware-world':0, 'ray-blas':2, 'ray-shadow':i+1})
+        physics_gate.check_raster(records)
+        records[3]['sdf'] += 1
+        with self.assertRaises(AssertionError): physics_gate.check_raster(records)
+
+    def test_software_gi_without_hardware_shadows_needs_no_ray_scene(self):
+        records = self.records()
+        for item in records:
+            item.update({'hardware-world':0, 'ray-blas':0, 'ray-shadow':0, 'ray-shadow-enabled':0})
+        physics_gate.check_raster(records)
+
     def test_trace_unchanged_restore_rebuild_is_rejected(self):
         records = self.records()
         physics_gate.check_trace_restore(records)

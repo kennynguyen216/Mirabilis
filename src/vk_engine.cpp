@@ -345,6 +345,9 @@ void VulkanEngine::apply_performance_settings()
 void VulkanEngine::init()
 {
     bool profileEnabled = false;
+    bool preferHardwareGi = true;
+    if (SDL_getenv("MIRABILIS_LUMEN_HARDWARE")) apply_env_flag("MIRABILIS_LUMEN_HARDWARE", preferHardwareGi);
+    _lumenHardwareTracing = preferHardwareGi;
     apply_env_flag("MIRABILIS_PROFILE", profileEnabled);
     _profiler.set_enabled(profileEnabled);
     if (const char* output = std::getenv("MIRABILIS_PROFILE_TRACE"); output && *output) {
@@ -460,10 +463,10 @@ void VulkanEngine::init()
     apply_env_flag("MIRABILIS_SCENE_REFLECTIONS",_reflections.enabled);
     apply_env_flag("MIRABILIS_SSGI_PROBES", _ssgi.probesEnabled);
     apply_env_flag("MIRABILIS_SSGI_HZB", _ssgi.hzbEnabled);
-    // Exact world hits avoid the screen march's camera-dependent visibility
-    // approximation. Keep it available as a comparison or software shortcut.
-    _ssgi.screenTraceEnabled = !_rayQueryShadows;
-    apply_env_flag("MIRABILIS_SSGI_SCREEN_TRACE", _ssgi.screenTraceEnabled);
+    _ssgi.screenTraceEnabled = !lumen_hardware_tracing();
+    if (SDL_getenv("MIRABILIS_SSGI_SCREEN_TRACE")) apply_env_flag("MIRABILIS_SSGI_SCREEN_TRACE", _ssgi.screenTraceEnabled);
+    fmt::print("GI tracing configuration: backend={} screen-first={} hardware-sun={}\n",
+        lumen_hardware_tracing()?"hardware":"software-distance-field", _ssgi.screenTraceEnabled, _rayQueryShadows);
     if (SDL_getenv("MIRABILIS_SSAO"))
         apply_env_flag("MIRABILIS_SSAO", _ssao.globalEnabled);
     // R3.1 environment parity: a candidate compared against a path-traced

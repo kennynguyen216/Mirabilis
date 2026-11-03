@@ -57,6 +57,8 @@ def main():
     parser.add_argument('--warmup', type=int, default=300)
     parser.add_argument('--atlas', type=int, choices=[512,1024,2048,4096], default=4096)
     parser.add_argument('--hitches', action='store_true')
+    parser.add_argument('--compare-backends', action='store_true',
+                        help='Compare screen-first software/hardware GI with equal 32-sample cache sky budgets')
     parser.add_argument('--profiles', nargs='+', choices=('plain','lumen','probes','reflections'),
                         default=('plain','lumen','probes','reflections'))
     args = parser.parse_args()
@@ -89,11 +91,19 @@ def main():
         profiles={'full-blocking-control':{'MIRABILIS_TEST_BLOCKING_RELIGHT':'1','MIRABILIS_IQ13_SUN_ONLY_RELIGHT':'0'},
                   'budgeted-source-reuse':{'MIRABILIS_IQ13_SUN_ONLY_RELIGHT':'1'}}
         measured,warmup=180,60
+    if args.compare_backends:
+        assert not args.hitches, 'Backend and relight comparisons are separate workloads'
+        profiles={'software':{'MIRABILIS_LUMEN_LITE':'1','MIRABILIS_LUMEN_HARDWARE':'0'},
+                  'hardware':{'MIRABILIS_LUMEN_LITE':'1','MIRABILIS_LUMEN_HARDWARE':'1'}}
+        common.update(MIRABILIS_SSGI_SCREEN_TRACE='1',MIRABILIS_IQ_RT_SHADOWS='1',
+                      MIRABILIS_IQ5_CACHE_SKY_SAMPLES='32',MIRABILIS_SCENE_REFLECTIONS='0')
     initial_hash=shader_hash()
+    initial_engine=ecs_gate.digest(repo/'bin/Release/engine.exe')
     summary={'scene':scene,'camera':args.camera,'window':[1600,900],'render':[1200,675],
              'gi':[600,338],'atlasLimit':args.atlas,'warmup':warmup,'samples':measured,
              'revision':subprocess.check_output(['git','rev-parse','HEAD'],cwd=repo,text=True).strip(),
              'workingTree':subprocess.check_output(['git','status','--short'],cwd=repo,text=True),
+             'engineSha256':initial_engine,'backendComparison':args.compare_backends,
              'shaderSha256':initial_hash,'gpu':subprocess.check_output(['nvidia-smi','--query-gpu=name,driver_version,temperature.gpu','--format=csv'],text=True),
              'power':subprocess.check_output(['powercfg','/GetActiveScheme'],text=True),'profiles':{}}
     for repeat in range(3):
@@ -106,8 +116,16 @@ def main():
                    'MIRABILIS_R4_FRAME_TIME_LOG':str(out/(label+'.csv')),**profiles[mode]}
             lumen=flags.get('MIRABILIS_LUMEN_LITE')=='1'
             if lumen:flags['MIRABILIS_TEST_REQUIRE_LUMEN']='1'
+            if args.compare_backends and repeat==0:flags['MIRABILIS_RASTER_CAPTURE']=str(out/(mode+'-hdr'))
             logs,result=ecs_gate.run(label,'Release',flags,seconds=900)
             result.update(parse_metrics(logs,measured,lumen,warmup))
+            assert result['engineSha256']==initial_engine, 'Executable changed during measurement'
+            if args.compare_backends:
+                backend='software-distance-field' if mode=='software' else 'hardware'
+                assert 'GI tracing configuration: backend='+backend+' screen-first=true' in logs
+                if mode=='software':
+                    placed=re.findall(r'GI world backend=distance-field instances=(\d+) ready=(\d+) missing-meshes=(\d+)',logs)
+                    assert placed and all(total==ready and missing=='0' for total,ready,missing in placed)
             with (out/(label+'.csv')).open() as file:
                 rows=list(csv.DictReader(file))
             frames=[float(row['ms']) for row in rows if int(row['frame'])>warmup]
@@ -122,6 +140,16 @@ def main():
             (out/'summary.json').write_text(json.dumps(summary,indent=2))
             print(label,result,flush=True)
     assert initial_hash==shader_hash(),'Shaders changed during measurement'
+    if args.compare_backends:
+        from lumen_gate import read_pfm
+        software,_=read_pfm(out/'software-hdr.pfm');hardware,_=read_pfm(out/'hardware-hdr.pfm')
+        assert np.isfinite(software).all() and np.isfinite(hardware).all()
+        difference=np.abs(software-hardware)
+        summary['captureDifferences']={'maxAbsolute':float(difference.max()),
+            'p99Absolute':float(np.percentile(difference,99)),
+            'meanRelative':float(difference.mean()/max(float(np.abs(hardware).mean()),1e-4))}
+        summary['backendSettings']={'screenFirst':True,'cacheSkySamples':32,'hardwareSun':True}
+        (out/'summary.json').write_text(json.dumps(summary,indent=2))
     print('LUMEN BENCHMARK COMPLETE',flush=True)
 
 

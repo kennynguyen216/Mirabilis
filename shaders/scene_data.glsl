@@ -75,4 +75,5 @@ layout(set = 0, binding = 0) uniform SceneData {
     mat4 localShadowMatrix[7];
     vec4 reflectionSettings;
     vec4 graphicsSettings;
+    vec4 giTracingSettings;
 } sceneData;

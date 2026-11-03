@@ -69,7 +69,8 @@ class GIStability(unittest.TestCase):
 
     def test_hardware_world_trace_uses_the_closest_hit_at_the_surface(self):
         body = shader("lumen_world_trace.glsl")
-        hardware = body.split("vec3 lumen_trace(")[1].split("#ifdef MIRABILIS_RT_SHADOWS")[1].split("#else")[0]
+        trace = body.split("vec3 lumen_trace(")[1]
+        hardware = trace.split("#ifdef MIRABILIS_RT_SHADOWS")[1].split("#endif")[0]
         self.assertIn("worldPosition + worldNormal * epsilon", hardware)
         self.assertNotIn("2.5 * voxel", hardware)
         self.assertNotIn("TerminateOnFirstHit", hardware,
@@ -78,11 +79,11 @@ class GIStability(unittest.TestCase):
         self.assertIn("ray_hit_normal(query)", hardware)
         self.assertIn("lumen_cached_radiance(surface)", hardware)
         self.assertIn("ray_uncached_direct(p,normal)", hardware)
-        self.assertIn("return lumen_hit_radiance(p,lumen_field_normal(p),rayClass);", body.split("vec3 lumen_trace(")[1].split("#else")[1])
+        self.assertIn("return lumen_hit_radiance(p,lumen_field_normal(p),rayClass);", trace.split("#endif")[1])
         engine = (ROOT / "src" / "vk_engine.cpp").read_text(encoding="utf-8")
-        self.assertLess(engine.index("_ssgi.screenTraceEnabled = !_rayQueryShadows;"),
+        self.assertLess(engine.index("_ssgi.screenTraceEnabled = !lumen_hardware_tracing();"),
                         engine.index('apply_env_flag("MIRABILIS_SSGI_SCREEN_TRACE"'),
-                        "Use exact world tracing by default, retaining explicit overrides")
+                        "Use screen-first software tracing, independently of hardware sun shadows")
 
     def test_radiosity_strips_preserve_full_card_uvs_and_blend(self):
         body = shader("surface_cache_radiosity.comp")

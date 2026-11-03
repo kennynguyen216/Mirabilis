@@ -567,6 +567,7 @@ void VulkanEngine::draw_geometry(
 GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
 {
     GPUSceneData data{};
+    data.giTracingSettings.x = lumen_hardware_tracing() ? 1.f : 0.f;
     data.view = view;
     build_local_lights(data);
     data.reflectionSettings=glm::vec4(_reflections.enabled && _materialShading.specular && (_r4Contributions.forward & r4::EnvSpecular)!=0 && _ssgi.enabled && _ssgi.lumenEnabled && _rayQueryShadows && lumen_lite_ready() && !is_forward_material_debug_view(_debugViews.view)?1.f:0.f,_reflections.roughnessLimit,2,1000);

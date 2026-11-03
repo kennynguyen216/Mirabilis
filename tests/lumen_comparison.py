@@ -57,6 +57,7 @@ def main():
                     flags={'MIRABILIS_QT_EDITOR':'0','MIRABILIS_TEST_SCENE':args.scene,'MIRABILIS_TEST_CAMERA':args.camera,
                         'MIRABILIS_TEST_WINDOW':'1600x900','MIRABILIS_TEST_HIDE_PANELS':'1','MIRABILIS_SSGI_PRESET':'2',
                         'MIRABILIS_SSGI_BENCHMARK':'1','MIRABILIS_R4_UNCAP_FRAMES':'1',
+                        'MIRABILIS_LUMEN_HARDWARE':'1','MIRABILIS_SSGI_SCREEN_TRACE':'0',
                         'MIRABILIS_LUMEN_LITE':'0' if mode=='plain' else '1',
                         'MIRABILIS_SCENE_REFLECTIONS':'1' if mode=='reflections' else '0',
                         'MIRABILIS_SURFACE_CACHE_ATLAS_SIZE':str(args.atlas),'MIRABILIS_TEST_FRAMES':str(args.warmup+300),
