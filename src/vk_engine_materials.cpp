@@ -22,6 +22,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     ScopedShaderModule portalSkyVertexShader(engine->_device);
     ScopedShaderModule portalSkyFragmentShader(engine->_device);
     ScopedShaderModule transparentFragmentShader(engine->_device);
+    ScopedShaderModule portalTransparentShader(engine->_device);
     ScopedShaderModule colliderDebugVertexShader(engine->_device);
     ScopedShaderModule colliderDebugFragmentShader(engine->_device);
     if (!fragmentShader.load(engine->ray_query_shader("mesh.frag").c_str()) ||
@@ -33,6 +34,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
         !maskFragmentShader.load(engine->ray_query_shader("mesh_mask.frag").c_str()) ||
         !transparentFragmentShader.load(
             engine->ray_query_shader("mesh_transparent.frag").c_str()) ||
+        !portalTransparentShader.load(engine->ray_query_shader("portal_view_transparent.frag").c_str()) ||
         !portalViewFragmentShader.load(engine->ray_query_shader("portal_view.frag").c_str()) ||
         !portalViewMaskFragmentShader.load(
             engine->ray_query_shader("portal_view_mask.frag").c_str()) ||
@@ -56,6 +58,8 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     layoutBuilder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     layoutBuilder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     layoutBuilder.add_binding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    layoutBuilder.add_binding(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    layoutBuilder.add_binding(5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     materialLayout = layoutBuilder.build(
         engine->_device,
         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -86,6 +90,15 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     portalViewMaskPipeline.layout = pipelineLayout;
     portalOffscreenMaskPipeline.layout = pipelineLayout;
 
+    const auto buildInstanced=[&](PipelineBuilder& builder) {
+        const VkBool32 enabled=VK_TRUE;
+        const VkSpecializationMapEntry entry{0,0,sizeof(enabled)};
+        const VkSpecializationInfo specialization{1,&entry,sizeof(enabled),&enabled};
+        for(auto& stage:builder._shaderStages)if(stage.stage==VK_SHADER_STAGE_VERTEX_BIT)stage.pSpecializationInfo=&specialization;
+        const auto result=builder.build_pipeline(engine->_device);
+        for(auto& stage:builder._shaderStages)stage.pSpecializationInfo=nullptr;
+        return result;
+    };
     PipelineBuilder builder;
     builder._pipelineLayout = pipelineLayout;
     builder.set_shaders(vertexShader, fragmentShader);
@@ -93,23 +106,26 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     builder.set_polygon_mode(VK_POLYGON_MODE_FILL);
     builder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
     builder.set_multisampling_none();
-    const std::array<VkFormat, 4> mainFormats{
+    const std::array<VkFormat, 5> mainFormats{
         engine->_drawImage.imageFormat,
         engine->_sceneTargets.gbufferAlbedo.imageFormat,
         engine->_sceneTargets.gbufferVelocity.imageFormat,
-        engine->_sceneTargets.directLighting.imageFormat};
+        engine->_sceneTargets.directLighting.imageFormat,
+        engine->_sceneTargets.gbufferSpecular.imageFormat};
     builder.set_color_attachment_formats(mainFormats);
     builder.disable_blending();
     builder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
     builder.set_depth_format(engine->_depthImage.imageFormat);
     builder.set_stencil_format(engine->_depthImage.imageFormat);
     opaquePipeline.pipeline = builder.build_pipeline(engine->_device);
+    opaquePipeline.instancedPipeline=buildInstanced(builder);
 
     // Every piece of state above is right for alpha-masked geometry too: it
     // writes depth and the G-buffer exactly like an opaque surface.  Only the
     // fragment shader differs, and only by the cutoff test.
     builder.set_shaders(vertexShader, maskFragmentShader);
     maskPipeline.pipeline = builder.build_pipeline(engine->_device);
+    maskPipeline.instancedPipeline=buildInstanced(builder);
     builder.set_shaders(vertexShader, fragmentShader);
 
     // Transparent surfaces blend into the lit image and nothing else.  With
@@ -119,7 +135,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     // draw_geometry gives transparents a pass with the draw image alone.
     builder.set_shaders(vertexShader, transparentFragmentShader);
     builder.set_color_attachment_format(engine->_drawImage.imageFormat);
-    builder.enable_blending_additive();
+    builder.enable_blending_alphablend();
     builder.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
     transparentPipeline.pipeline = builder.build_pipeline(engine->_device);
 
@@ -174,6 +190,14 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     portalOffscreenMaskPipeline.pipeline = builder.build_pipeline(engine->_device);
     builder.set_shaders(portalViewVertexShader, portalViewFragmentShader);
     portalOffscreenPipeline.pipeline = builder.build_pipeline(engine->_device);
+    builder.set_shaders(portalViewVertexShader,portalTransparentShader);
+    builder.enable_depthtest(false,VK_COMPARE_OP_GREATER_OR_EQUAL);builder.enable_blending_alphablend();
+    portalOffscreenTransparentPipeline.layout=opaquePipeline.layout;
+    portalOffscreenTransparentPipeline.pipeline=builder.build_pipeline(engine->_device);
+    builder.enable_stenciltest(VK_COMPARE_OP_EQUAL,VK_STENCIL_OP_KEEP);
+    portalTransparentPipeline.layout=opaquePipeline.layout;
+    portalTransparentPipeline.pipeline=builder.build_pipeline(engine->_device);
+    builder._depthStencil.stencilTestEnable=VK_FALSE;builder.disable_blending();builder.enable_depthtest(true,VK_COMPARE_OP_GREATER_OR_EQUAL);
 
     VkPipelineLayoutCreateInfo portalSkyLayoutInfo = vkinit::pipeline_layout_create_info();
     portalSkyLayoutInfo.setLayoutCount = 1;
@@ -239,7 +263,11 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
 
     engine->_mainDeletionQueue.push_function([this, engine]() {
         vkDestroyPipeline(engine->_device, opaquePipeline.pipeline, nullptr);
+        vkDestroyPipeline(engine->_device,opaquePipeline.instancedPipeline,nullptr);
+        vkDestroyPipeline(engine->_device,maskPipeline.instancedPipeline,nullptr);
         vkDestroyPipeline(engine->_device, transparentPipeline.pipeline, nullptr);
+        vkDestroyPipeline(engine->_device,portalTransparentPipeline.pipeline,nullptr);
+        vkDestroyPipeline(engine->_device,portalOffscreenTransparentPipeline.pipeline,nullptr);
         vkDestroyPipeline(engine->_device, maskPipeline.pipeline, nullptr);
         vkDestroyPipeline(engine->_device, portalViewMaskPipeline.pipeline, nullptr);
         vkDestroyPipeline(engine->_device, portalOffscreenMaskPipeline.pipeline, nullptr);
@@ -261,7 +289,11 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
 void GLTFMetallic_Roughness::clear_resources(VkDevice device)
 {
     vkDestroyPipeline(device, opaquePipeline.pipeline, nullptr);
+    vkDestroyPipeline(device,opaquePipeline.instancedPipeline,nullptr);
+    vkDestroyPipeline(device,maskPipeline.instancedPipeline,nullptr);
     vkDestroyPipeline(device, transparentPipeline.pipeline, nullptr);
+    vkDestroyPipeline(device,portalTransparentPipeline.pipeline,nullptr);
+    vkDestroyPipeline(device,portalOffscreenTransparentPipeline.pipeline,nullptr);
     vkDestroyPipeline(device, maskPipeline.pipeline, nullptr);
     vkDestroyPipeline(device, portalViewMaskPipeline.pipeline, nullptr);
     vkDestroyPipeline(device, portalOffscreenMaskPipeline.pipeline, nullptr);
@@ -330,5 +362,13 @@ void GLTFMetallic_Roughness::write_material_set(
         resources.normalSampler,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    for (int i=0; i<2; ++i) {
+        const auto& image=i==0?resources.occlusionImage:resources.specularImage;
+        const auto sampler=i==0?resources.occlusionSampler:resources.specularSampler;
+        // Legacy engine materials supply their existing white data texture.
+        writer.write_image(4+i, image.imageView?image.imageView:resources.metalRoughImage.imageView,
+            sampler?sampler:resources.metalRoughSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    }
     writer.update_set(device, materialSet);
 }

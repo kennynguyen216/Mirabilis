@@ -1,10 +1,16 @@
 #include "physics_world.h"
 #include "script_host.h"
+#include "frame_clock.h"
+#include "profiler.h"
+#include "task_system.h"
+#include "editor_assets.h"
 #pragma once
 #include "path_trace_scene.h"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <fstream>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -17,6 +23,8 @@
 #include <scene.h>
 #include "scene_serialization.h"
 #include "scene_render_data.h"
+#include "surface_update_schedule.h"
+#include "ray_scene.h"
 #include <world.h>
 
 struct DeletionQueue
@@ -45,7 +53,20 @@ struct FrameData {
         DeletionQueue _deletionQueue;
         DescriptorAllocatorGrowable _frameDescriptors;
         AllocatedBuffer sceneBuffer;
+        AllocatedBuffer dynamicFieldBuffer;
+        std::vector<AllocatedBuffer> instancePages;
+        size_t instancePageCursor{};
+        AllocatedBuffer clusterInput, clusterInstances, clusterCommands;
+        size_t clusterCapacity{}, clusterInstanceCapacity{};
+        std::vector<std::pair<uint32_t,uint32_t>> clusterRanges;
         VkDescriptorSet sceneDescriptor{};
+        VkAccelerationStructureKHR rayTlas{};
+        AllocatedBuffer rayTlasBuffer, rayInstances, rayScratch, rayHitInstances;
+        size_t rayHitCapacity{};
+        VkDeviceSize rayTlasCapacity{}, rayInstanceCapacity{}, rayScratchCapacity{};
+        uint64_t rayHash{}, rayHitHash{};
+        uint32_t rayCount{};
+        bool rayBuildPending{};
         std::array<AllocatedBuffer, PortalViewCount> portalSceneBuffers;
         std::array<VkDescriptorSet, PortalViewCount> portalSceneDescriptors{};
     };
@@ -105,6 +126,9 @@ struct TonemapPushConstants {
     // sRGB encode runs.
     glm::vec4 settings{1.0f, 0.0f, 0.0f, 0.0f};
     glm::vec4 whiteBalanceGain{1,1,1,0};
+    glm::vec4 bloom{0}; // strength; remaining unused
+    glm::vec4 cel{0}; // enabled, bands, edge threshold, raster flag
+    glm::vec4 extent{0}; // active extent, allocation extent
 };
 
 struct FXAAPushConstants {
@@ -222,7 +246,29 @@ struct ColliderDebugPushConstants {
     glm::mat4 model;
 };
 
+enum class GpuPass : uint32_t {
+    Frame, RayScene, DynamicField, SunShadow, CacheDirect, Radiosity, Reference,
+    LocalShadows, Prepass, Visibility, AO, Background, Forward, GI,
+    Reflections, Portals, Transparents, Debug, Exposure, Bloom, Tonemap,
+    FXAA, PresentCopy, UI, Count
+};
+constexpr size_t GpuPassCount = static_cast<size_t>(GpuPass::Count);
+inline constexpr std::array<const char*, GpuPassCount> GpuPassNames{
+    "frame", "ray_scene", "dynamic_field", "sun_shadow", "cache_direct", "radiosity", "reference",
+    "local_shadows", "prepass", "visibility", "ao", "background", "forward", "gi",
+    "reflections", "portals", "transparents", "debug", "exposure", "bloom", "tonemap",
+    "fxaa", "present_copy", "ui"};
+
 struct EngineStats {
+    std::array<float, GpuPassCount> gpu_pass_ms{};
+    uint64_t gpu_timing_frame{};
+    bool gpu_frame_valid{false};
+    uint64_t gpu_heap_usage{}, gpu_heap_budget{}, gpu_heap_peak{};
+    uint64_t albedo_rebuild_count{};
+    uint64_t draw_index_buffer_grows{0};
+    uint64_t gpu_allocation_bytes{0}, gpu_block_bytes{0};
+    uint32_t gpu_allocation_count{0};
+    bool gpu_memory_sampled{false};
     uint32_t script_instance_count{0};
     uint32_t physics_body_count{0};
     uint64_t sdf_rebuild_count{0}, surface_cache_rebuild_count{0}, trace_rebuild_count{0}, sun_shadow_rebuild_count{0};
@@ -406,6 +452,7 @@ struct SceneMaterialRuntime {
     // Emission colour times strength, as written to the material constants.
     glm::vec4 emission{0.0f};
     bool debugChecker{false};
+    SceneMaterial source;
     bool initialized{false};
 };
 
@@ -419,6 +466,7 @@ enum class EditorGizmoOperation : uint8_t {
 struct GLTFMetallic_Roughness {
     MaterialPipeline opaquePipeline;
     MaterialPipeline transparentPipeline;
+    MaterialPipeline portalTransparentPipeline,portalOffscreenTransparentPipeline;
     // The alpha-tested counterparts of the three passes that shade geometry.
     // They exist as separate pipelines rather than as a branch inside the
     // opaque ones so that discard - which costs every opaque surface its
@@ -446,13 +494,18 @@ struct GLTFMetallic_Roughness {
         glm::vec4 metal_rough_factors;
         // xy = UV tiling, zw = UV offset.  Zero tiling means 1x1.
         glm::vec4 uvTransform;
-        // x = glTF alphaCutoff, left at zero on materials that are not masked.
+        // x = glTF alphaCutoff (zero unless masked), y = BC5 normal-map decoding.
         glm::vec4 alphaMask;
         // rgb = emissive factor times strength, w reserved.
         glm::vec4 emission;
         // x = normal-map scale, y = debug checkerboard, zw reserved.
         glm::vec4 materialFlags;
-        glm::vec4 extra[10];
+        // AO strength, dielectric specular (0.5 = F0 0.04), subsurface, transmission.
+        glm::vec4 surfaceFactors{1,0.5f,0,0};
+        glm::vec4 subsurfaceColor{1,1,1,0};
+        // IOR, thickness; zw reserved.
+        glm::vec4 transmissionFactors{1.5f,0.1f,0,0};
+        glm::vec4 extra[7];
     };
     static_assert(sizeof(MaterialConstants) == 256);
 
@@ -464,6 +517,8 @@ struct GLTFMetallic_Roughness {
         // Tangent-space normal map; the engine's flat normal when there is none.
         AllocatedImage normalImage;
         VkSampler normalSampler{};
+        AllocatedImage occlusionImage{}, specularImage{};
+        VkSampler occlusionSampler{}, specularSampler{};
         VkBuffer dataBuffer{};
         uint32_t dataBufferOffset{};
     };
@@ -495,6 +550,17 @@ class VulkanEngine{
     int _frameNumber {0};
     bool stop_rendering {false};
     bool resize_requested {false};
+    mirabilis::FrameClock _frameClock;
+    mirabilis::Profiler _profiler;
+    std::unique_ptr<mirabilis::TaskSystem> _tasks;
+    std::function<void()> _editorHostPump;
+    bool _qtEditorActive{}, _editorQuitRequested{}, _editorDiscardOnExit{};
+    std::deque<EditorRequest> _editorRequests;
+    std::string _editorAssetStatus;
+    std::filesystem::path _profileTraceOutput;
+    std::string _profileExportStatus;
+    // Command recording is serial; no GPU work retains these CPU indices.
+    std::vector<uint32_t> _opaqueDrawScratch;
     // Render internally below the window size by default.  The swapchain
     // remains 1280x720, while the expensive prepass/SSGI work starts at 75%
     // resolution and is upscaled for presentation.
@@ -525,9 +591,7 @@ class VulkanEngine{
     // round trip is correct, independent of any sphere-tracing or debug-view
     // work still to come. Reads a scripts/bake_sdf.py ".sdf" file, uploads it
     // as a 3D image, reads it back, and reports the max error against the
-    // original bytes. See docs/hybrid_ray_traced_gi_design.md and the
-    // Lumen-lite memory note for why this is SDF-based rather than the
-    // BVH/ray-query fallback that document otherwise describes.
+    // original bytes. This validates the SDF upload independently of tracing.
     void validate_sdf_bake(const char* path);
     std::unordered_map<VkDeviceAddress,std::weak_ptr<TraceMeshSource>> _traceMeshSources;
     std::vector<TraceTriangle> _traceTriangles;
@@ -549,6 +613,7 @@ class VulkanEngine{
     PathTraceSettings _traceSettings;
     void capture_path_trace(const char* filename);
     void capture_ssgi(const char* filename);
+    void capture_reflection_history(const char* filename);
     void capture_raster(const char* filename);
     // The lighting, material and R4 instrumentation state a raster or SSGI
     // capture was taken under, read from the main camera's uploaded scene
@@ -612,6 +677,17 @@ class VulkanEngine{
     std::vector<uint32_t> _traceEmitters;
     std::vector<glm::vec4> read_trace_image(const AllocatedImage& image);
     std::vector<uint32_t> _traceTexels;
+    std::vector<std::shared_ptr<TraceTextureSource>> _traceCpuTextures;
+    struct TraceCpuDraw {
+        std::shared_ptr<TraceMeshSource> source;
+        glm::mat4 transform{1};
+        glm::mat3 normalMatrix{1};
+        uint32_t material{};
+    };
+    std::vector<TraceCpuDraw> _traceCpuDraws;
+    std::vector<TraceTriangleRef> _traceTriangleRefs;
+    bool _traceCpuComplete{true};
+    static TraceTriangle make_trace_triangle(const TraceCpuDraw& draw,uint32_t first,bool normals=true);
     AllocatedBuffer _traceTexelBuffer{};
     uint64_t _traceDrawHash{0};
     std::vector<TracePortal> _tracePortals;
@@ -676,7 +752,7 @@ class VulkanEngine{
     // relative to its sun is a property of the capture.
     float _skyboxIndirectClamp{1.0e4f};
     // Image-based lighting built from the selected panorama whenever it
-    // changes (docs/image_based_lighting_design.md).
+    // changes.
     static constexpr uint32_t IblPrefilterLevels = 6;
     struct ImageBasedLightingState {
         // Level k is prefiltered for roughness k / (IblPrefilterLevels - 1).
@@ -703,11 +779,17 @@ class VulkanEngine{
     // Surface cards rasterize conservatively where the device can, so
     // geometry thinner than a card texel is still captured (R4.60).
     bool _conservativeRasterSupported{false};
-    // IQ2 (docs/lumen_lite_design.md): sun visibility by ray query against the
+    // Sun visibility by ray query against the
     // trace scene's opaque casters, on devices with VK_KHR_ray_query unless
     // MIRABILIS_IQ_RT_SHADOWS=0.  While it is off nothing IQ2 adds is created
     // or loaded, and the shadow map works exactly as before.
     bool _rayQueryShadows{false};
+    bool _lumenHardwareTracing{false};
+    bool lumen_hardware_tracing() const { return _rayQueryShadows && _lumenHardwareTracing; }
+    std::string lumen_shader(const char* name) const
+    {
+        return std::string("../../shaders/") + name + (lumen_hardware_tracing() ? ".rt.spv" : ".spv");
+    }
     // The build of a shader to load: its ray-query build (*.rt.spv, IQ2/IQ8)
     // while _rayQueryShadows is on.
     std::string ray_query_shader(const char* name) const
@@ -785,6 +867,20 @@ class VulkanEngine{
     //run main loop
     void run();
 
+    // Host supplies a bounded delta and input focus; no event loop or UI calls here.
+    void tick_simulation(float deltaTime, bool gameplayInputAllowed);
+    mirabilis::Profiler& profiler() { return _profiler; }
+    void draw_profiling_panel();
+    mirabilis::TaskSystem& tasks() { return *_tasks; }
+    // Qt and SDL run on this owner thread; requests apply between event polling and simulation.
+    std::filesystem::path editor_asset_root() const;
+    EditorSnapshot editor_snapshot() const;
+    void queue_editor_request(EditorRequest request);
+    bool save_from_editor();
+    void release_editor_input();
+    void request_editor_quit();
+    void apply_editor_requests();
+
     void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
 
     private:
@@ -856,6 +952,9 @@ class VulkanEngine{
         void init_shadow_pipeline();
         void init_shadow_mask_pipeline();
         void draw_shadow_map(VkCommandBuffer cmd);
+        void build_local_lights(GPUSceneData& data) const;
+        void draw_local_shadows(VkCommandBuffer cmd);
+        void copy_refraction_source(VkCommandBuffer cmd,const AllocatedImage& source,VkExtent2D extent);
         void init_depth_normal_resources();
         void init_ssgi_resources();
         void init_depth_normal_pipeline();
@@ -875,6 +974,9 @@ class VulkanEngine{
         // their transforms changed since the last build.  Meshes without a
         // baked volume are written to the bake queue and left out.
         void update_scene_sdf();
+        void update_dynamic_sdf();
+        void record_dynamic_sdf(VkCommandBuffer cmd);
+        void capture_dynamic_sdf(const char* filename);
         // Every opaque world draw grouped into instances.  Returns a hash of
         // the grouping and transforms, so callers can skip unchanged scenes.
         uint64_t collect_opaque_instances(
@@ -915,6 +1017,8 @@ class VulkanEngine{
         // Direct sunlight into the cache's direct page, shadowed through the
         // scene distance field.
         void light_surface_cache();
+        void record_surface_cache_lighting(VkCommandBuffer cmd);
+        void run_surface_cache_diagnostics();
         // Card and card-grid storage buffers for looking the cache up at an
         // arbitrary world position.
         void measure_surface_cache_coverage();
@@ -938,6 +1042,23 @@ class VulkanEngine{
         void init_ssgi_pipelines();
         void init_gpu_timestamps();
         void read_gpu_timestamps(uint32_t frameIndex);
+        void begin_gpu_frame(VkCommandBuffer cmd);
+        void sample_gpu_memory_budget(bool print = false);
+        bool begin_gpu_pass(VkCommandBuffer cmd, GpuPass pass);
+        void end_gpu_pass(VkCommandBuffer cmd, GpuPass pass);
+        class GpuPassScope {
+        public:
+            GpuPassScope(VulkanEngine& engine, VkCommandBuffer cmd, GpuPass pass)
+                : engine_(engine), cmd_(cmd), pass_(pass), active_(engine.begin_gpu_pass(cmd, pass)) {}
+            ~GpuPassScope() { if (active_) engine_.end_gpu_pass(cmd_, pass_); }
+            GpuPassScope(const GpuPassScope&) = delete;
+            GpuPassScope& operator=(const GpuPassScope&) = delete;
+        private:
+            VulkanEngine& engine_;
+            VkCommandBuffer cmd_;
+            GpuPass pass_;
+            bool active_;
+        };
         void draw_depth_normal_prepass(VkCommandBuffer cmd);
         void draw_ssao(VkCommandBuffer cmd);
         void draw_ssgi_portal_mask(VkCommandBuffer cmd);
@@ -956,6 +1077,21 @@ class VulkanEngine{
         void save_ao_preferences() const;
         void draw_render_debug(VkCommandBuffer cmd);
         void draw_tonemap(VkCommandBuffer cmd);
+        VkDeviceAddress upload_draw_instances(std::span<const GPUDrawInstance> instances);
+        void init_mesh_visibility();
+        void prepare_mesh_visibility(VkCommandBuffer cmd);
+        struct MeshVisibility {
+            bool supported{false}, enabled{false};
+            uint32_t maxIndirectCount{1};
+            std::array<AllocatedBuffer,FRAME_OVERLAP> readback;
+            std::array<uint32_t,FRAME_OVERLAP> readbackCounts{};
+            AllocatedImage tiles;
+            VkDescriptorSetLayout layout{};
+            MaterialPipeline tilePipeline,cullPipeline;
+        } _meshVisibility;
+        std::vector<GPUDrawInstance> _instanceScratch;
+        void init_bloom();
+        void draw_bloom(VkCommandBuffer cmd);
         void draw_fxaa(VkCommandBuffer cmd);
         glm::mat4 compute_sun_view_projection(const glm::vec3& focusPoint) const;
         void draw_geometry(
@@ -995,7 +1131,7 @@ class VulkanEngine{
         void draw_geometry_to_portal_camera(
             VkCommandBuffer cmd,
             const DrawContext& drawContext,
-            const glm::mat4& viewProjection,
+            const GPUSceneData& camera,
             VkDescriptorSet sceneDescriptor,
             const AllocatedImage& colorTarget);
         RenderObject make_portal_render_object(
@@ -1262,6 +1398,7 @@ class VulkanEngine{
             const char* formatName{"none"};
         };
         ShadowState _shadow;
+        AllocatedImage _localShadowAtlas;
         // IQ2: the ray-query half of sun visibility.  One BLAS holds the
         // trace scene's opaque casters in world space and one TLAS instance
         // points at it; both are rebuilt when that draw list changes.  The
@@ -1276,13 +1413,22 @@ class VulkanEngine{
             PFN_vkCmdWriteAccelerationStructuresPropertiesKHR writeProperties{};
             PFN_vkCmdCopyAccelerationStructureKHR copy{};
             VkDeviceSize scratchAlignment{256};
-            VkAccelerationStructureKHR blas{}, tlas{};
-            AllocatedBuffer blasBuffer{}, tlasBuffer{};
+            struct Mesh {
+                VkDeviceAddress vertices{}; VkBuffer indices{};
+                std::vector<glm::uvec2> ranges;
+                std::weak_ptr<TraceMeshSource> source;
+                VkAccelerationStructureKHR structure{};
+                AllocatedBuffer buffer;
+            };
+            std::vector<Mesh> meshes;
+            VkAccelerationStructureKHR tlas{};
+            uint64_t blasBuilds{}, tlasBuilds{};
             uint64_t hash{0};
         };
         SunCasterScene _sunCasters;
         bool ray_query_caster(const RenderObject& object) const;
         void update_sun_casters();
+        void record_sun_casters(VkCommandBuffer cmd);
         void destroy_sun_casters();
         glm::mat4 _previousMainViewProjection{1.0f};
         bool _previousMainViewProjectionValid{false};
@@ -1309,12 +1455,27 @@ class VulkanEngine{
         PrepassState _prepass;
         struct SceneRenderTargets {
             AllocatedImage gbufferAlbedo;
+            AllocatedImage gbufferSpecular;
             AllocatedImage gbufferVelocity;
             AllocatedImage directLighting;
             AllocatedImage portalMask;
             std::array<AllocatedImage, 2> directLightingHistory{};
         };
         SceneRenderTargets _sceneTargets;
+        struct ReflectionState {
+            bool enabled{}, historyValid{};
+            float roughnessLimit{0.4f};
+            VkDescriptorSetLayout layout{};
+            MaterialPipeline pipeline;
+            AllocatedImage raw{}, rawHit{};
+            std::array<AllocatedImage,2> radiance{}, hit{}, metadata{};
+            uint32_t writeIndex{};
+            uint64_t lastSceneHash{}, lastLightingHash{};
+            glm::vec3 lastCameraPosition{},lastCameraForward{0,0,1};
+            VkExtent2D liveExtent{};
+        } _reflections;
+        void init_reflections();
+        void draw_reflections(VkCommandBuffer cmd);
         struct SSGIState {
             AllocatedImage rawImage;
             AllocatedImage debugImage;
@@ -1366,10 +1527,12 @@ class VulkanEngine{
             // Lumen-lite: screen misses trace the scene distance field and
             // read the surface cache instead of the environment.
             bool lumenEnabled{false};
+            int reportedLumen{-1};
             bool screenTraceEnabled{true};
             VkDescriptorSetLayout lumenLayout{};
             VkPipelineLayout lumenPipelineLayout{};
             VkPipeline lumenPipeline{};
+            VkPipeline lumenStaticPipeline{}, lumenHardwarePipeline{};
             // Screen probes (shaders/ssgi_body.glsl): per-tile hemispheres
             // stored as SH, gathered per pixel.  Lumen-lite only.
             bool probesEnabled{false};
@@ -1416,11 +1579,11 @@ class VulkanEngine{
             uint32_t forward{0xffu};
             uint32_t ray{0xfffu};
             bool rayCoverage{false};
-            // Direct sources the cache keeps (bit 0 sun, 1 sky, 2 emitters);
-            // a diagnostic mask, all three by default (R4.13).
-            uint32_t cacheSources{0x7u};
-            // Scene light sources kept (bit 0 sun, 1 sky), R4.13.
-            uint32_t lightSources{0x3u};
+            // Direct sources the cache keeps (bit 0 sun, 1 sky, 2 emitters, 3 punctual);
+            // a diagnostic mask, all four by default (R4.13).
+            uint32_t cacheSources{0xfu};
+            // Scene light sources kept (bit 0 sun, 1 sky, 2 punctual), R4.13.
+            uint32_t lightSources{0x7u};
             bool sunVisibilityCheck{false};
         } _r4Contributions;
         struct SdfVolumeState {
@@ -1473,6 +1636,7 @@ class VulkanEngine{
             // initialisers are what make the null-handle checks meaningful.
             AllocatedImage field{};
             bool fieldValid{false};
+            bool hardwareProxy{false};
             glm::vec3 fieldMin{0.0f};
             glm::vec3 fieldMax{0.0f};
             glm::uvec3 fieldDimensions{0};
@@ -1496,6 +1660,21 @@ class VulkanEngine{
             VkPipeline compositePipeline{};
         };
         SceneSdfState _sceneSdf;
+        struct DynamicSdfState {
+            struct Job { uint64_t mesh; SdfCompositePushConstants push; glm::vec4 albedo; };
+            std::unordered_map<uint64_t, SceneSdfState::MeshVolume> volumes;
+            std::vector<Job> jobs;
+            AllocatedImage field{};
+            glm::vec4 minimum{}, maximum{};
+            glm::uvec3 dimensions{1,1,2};
+            uint64_t hash{}, updates{};
+            uint32_t missing{};
+            bool pending{}, active{};
+            VkPipelineLayout layout{};
+            VkPipeline pipeline{};
+            VkDescriptorSetLayout descriptorLayout{};
+        };
+        DynamicSdfState _dynamicSdf;
         struct SurfaceCacheState {
             AllocatedImage albedo{};
             AllocatedImage normal{};
@@ -1585,6 +1764,15 @@ class VulkanEngine{
             bool lightingValid{false};
             // Sun and field state the direct page was lit with.
             uint64_t lightingHash{0};
+            uint64_t pendingLightingHash{}, pendingRestHash{}, diagnosticLightingHash{};
+            SurfaceUpdateSchedule lightingSchedule;
+            std::array<glm::vec4,12> pendingSky{};
+            PunctualLights pendingPunctual;
+            glm::vec4 pendingSunDirection{}, pendingSunColor{};
+            bool lightingPending{}, pendingSunOnly{}, pendingDark{};
+            uint64_t lightingBatchTexels{}, relightFrames{}, completedRelights{}, initialLightingRemaining{};
+            uint64_t responsiveUntil{};
+            std::chrono::steady_clock::time_point relightStarted;
             // The same without the sun (IQ13): unchanged, a sun-only relight
             // suffices.  MIRABILIS_IQ13_SUN_ONLY_RELIGHT=0 always relights fully.
             uint64_t lightingRestHash{0};
@@ -1652,8 +1840,22 @@ class VulkanEngine{
         // the three dispatches - read back once the frame's fence has passed.
         static constexpr uint32_t TimestampsPerFrame = 4;
         struct GpuTimingState {
+            VkQueryPool scopePool{VK_NULL_HANDLE};
+            VkCommandBuffer activeCommand{VK_NULL_HANDLE};
+            struct Slot {
+                bool pending{};
+                uint64_t frame{};
+                std::array<bool, GpuPassCount> written{};
+                std::array<uint64_t, 6> rebuilds{};
+                double cpuFence{}, cpuAcquire{}, cpuPrepare{}, cpuRecord{}, cpuSubmit{}, cpuPresent{};
+                uint64_t heapUsage{}, heapBudget{};
+            };
+            std::array<Slot, FRAME_OVERLAP> slots{};
+            std::ofstream log;
+            bool memoryBudgetSupported{};
             VkQueryPool timestampPool{VK_NULL_HANDLE};
             // Nanoseconds per timestamp tick, from the device.
+            uint64_t timestampMask{~uint64_t(0)};
             float timestampPeriod{0.0f};
             bool supported{false};
             std::array<bool, FRAME_OVERLAP> timestampsPending{};
@@ -1684,6 +1886,14 @@ class VulkanEngine{
             // Off leaves the frame linear and clipped, which is how it looked
             // before this pass existed.  Kept as a comparison, not a default.
             bool tonemapEnabled{true};
+            bool celShading{false}, bloomEnabled{false};
+            float celBands{4}, celEdge{0.18f}, bloomStrength{0.08f}, bloomThreshold{1}, bloomScatter{0.7f};
+            AllocatedImage sceneCopy;
+            static constexpr int BloomLevels=6;
+            std::array<AllocatedImage,BloomLevels> bloomDown, bloomUp;
+            std::array<VkDescriptorSet,BloomLevels> bloomDownSets{}, bloomUpSets{};
+            VkDescriptorSetLayout bloomLayout{}, tonemapLayout{};
+            MaterialPipeline bloomPipeline;
             // Stops in photographic terms would be friendlier, but every other
             // exposure-like control in this engine is a plain multiplier.
             float tonemapExposure{1.0f};
@@ -1707,7 +1917,7 @@ class VulkanEngine{
             bool fxaaShowEdges{false};
         };
         PostProcessState _postProcess;
-        // IQ3 auto-exposure (docs/lumen_lite_design.md): a log2 luminance
+        // Auto-exposure: a log2 luminance
         // histogram of the linear frame, read back once the frame slot's fence
         // has passed, sets _postProcess.tonemapExposure.  Off in bounded runs
         // unless MIRABILIS_AUTO_EXPOSURE=1, and then nothing here runs.

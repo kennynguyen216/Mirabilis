@@ -33,12 +33,17 @@
 
 # Local Vulkan/CMake build products
 /build/
+/CMakeUserPresets.json
+/.claude/
 /bin/
 /assets/brickadia/
 /assets/sponza/
+/assets/sponza_hq/
 /shaders/*.spv
 /.vs/
 __pycache__/
+*.mbc
+*.mbc.partial
 
 # Generated Python cache files
 __pycache__/

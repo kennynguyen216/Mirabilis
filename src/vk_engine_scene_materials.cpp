@@ -89,7 +89,7 @@ MaterialInstance* VulkanEngine::resolve_scene_material(EntityRef object)
     runtime.material.traceParameters=glm::vec4(source.metallic,source.roughness,source.transmission,source.ior);
     runtime.material.traceUVScale=source.uvScale;
     const glm::vec4 emission(source.emissionColor * source.emissionStrength, 0.0f);
-    const bool changed = !runtime.initialized ||
+    const bool changed = !runtime.initialized || !(runtime.source == source) ||
         !nearly_equal(runtime.emission, emission) ||
         runtime.texturePath != source.baseColorTexturePath ||
         runtime.normalTexturePath != source.normalTexturePath ||
@@ -127,10 +127,13 @@ MaterialInstance* VulkanEngine::resolve_scene_material(EntityRef object)
     constants->materialFlags = glm::vec4(
         source.normalTexturePath.empty() ? 0.0f : 1.0f,
         source.debugChecker ? 1.0f : 0.0f,
-        0.0f,
-        0.0f);
+        source.doubleSided ? 1.f : 0.f,
+        source.celShading ? 1.f : 0.f);
     constants->uvTransform = glm::vec4(source.uvScale, 0.0f, 0.0f);
     constants->emission = emission;
+    constants->surfaceFactors = glm::vec4(source.occlusionStrength,source.specular,source.subsurface,source.transmission);
+    constants->subsurfaceColor = glm::vec4(source.subsurfaceColor,0);
+    constants->transmissionFactors = glm::vec4(source.ior,source.thickness,0,0);
 
     const AllocatedImage& colorImage =
         load_scene_texture(source.baseColorTexturePath);
@@ -147,13 +150,16 @@ MaterialInstance* VulkanEngine::resolve_scene_material(EntityRef object)
         ? _flatNormalImage
         : load_scene_texture(source.normalTexturePath, false);
     resources.normalSampler = _defaultSamplerLinear;
+    resources.occlusionImage=source.occlusionTexturePath.empty()?_whiteImage:load_scene_texture(source.occlusionTexturePath,false);
+    resources.specularImage=source.specularTexturePath.empty()?_whiteImage:load_scene_texture(source.specularTexturePath,false);
+    resources.occlusionSampler=resources.specularSampler=_defaultSamplerLinear;
     resources.dataBuffer = runtime.constantsBuffer.buffer;
     resources.dataBufferOffset = 0;
 
     if (!runtime.initialized) {
         runtime.material = metalRoughMaterial.write_material(
             _device,
-            MaterialPass::MainColor,
+            source.transmission > 0 ? MaterialPass::Transparent : MaterialPass::MainColor,
             resources,
             globalDescriptorAllocator);
     } else {
@@ -177,6 +183,10 @@ MaterialInstance* VulkanEngine::resolve_scene_material(EntityRef object)
     runtime.roughness = source.roughness;
     runtime.emission = emission;
     runtime.debugChecker = source.debugChecker;
+    runtime.source = source;
+    runtime.material.doubleSided=source.doubleSided;
+    runtime.material.passType=source.transmission>0?MaterialPass::Transparent:MaterialPass::MainColor;
+    runtime.material.pipeline=source.transmission>0?&metalRoughMaterial.transparentPipeline:&metalRoughMaterial.opaquePipeline;
     runtime.initialized = true;
     return &runtime.material;
 }

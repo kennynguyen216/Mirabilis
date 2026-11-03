@@ -30,6 +30,7 @@ EXPECTED_PRESETS = [
     ("true", "2", "32", "12.0f", "0.35f", "0.08f", "5", "800.0f", "32.0f", "0.92f"),
     ("true", "1", "16", "8.0f", "0.45f", "0.10f", "2", "900.0f", "36.0f", "0.90f"),
     ("false", "8", "96", "20.0f", "0.25f", "0.05f", "5", "800.0f", "32.0f", "0.96f"),
+    ("true", "8", "96", "20.0f", "0.25f", "0.05f", "5", "800.0f", "32.0f", "0.96f"),
 ]
 
 STARTUP_PRESET = 2
@@ -103,7 +104,7 @@ class SsgiPresetDefault(unittest.TestCase):
             "override, or the override would be overwritten by it",
         )
 
-    def test_presets_zero_to_four_keep_their_table_entries(self):
+    def test_presets_zero_to_five_keep_their_table_entries(self):
         """Preset selection applies the documented quality settings."""
         table = preset_table()
         self.assertEqual(len(table), len(EXPECTED_PRESETS))

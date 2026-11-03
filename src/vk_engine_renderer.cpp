@@ -1,4 +1,5 @@
 #include "vk_engine.h"
+#include "r4_contributions.h"
 #include "vk_engine_render_helpers.h"
 
 #include <algorithm>
@@ -35,6 +36,22 @@ void set_previous_world_rows(
 }
 
 } // namespace
+
+VkDeviceAddress VulkanEngine::upload_draw_instances(std::span<const GPUDrawInstance> instances)
+{
+    if(instances.empty())return 0;
+    auto& frame=get_current_frame();const size_t page=frame.instancePageCursor++;
+    if(page==frame.instancePages.size())frame.instancePages.emplace_back();
+    auto& buffer=frame.instancePages[page];const size_t bytes=instances.size_bytes();
+    if(buffer.buffer==VK_NULL_HANDLE || buffer.info.size<bytes) {
+        if(buffer.buffer!=VK_NULL_HANDLE)destroy_buffer(buffer);
+        buffer=create_buffer(std::max<size_t>(bytes,64*1024),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
+    }
+    std::memcpy(buffer.info.pMappedData,instances.data(),bytes);
+    vmaFlushAllocation(_allocator,buffer.allocation,0,bytes);
+    VkBufferDeviceAddressInfo info{.sType=VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};info.buffer=buffer.buffer;
+    return vkGetBufferDeviceAddress(_device,&info);
+}
 
 bool is_visible(const RenderObject& object, const glm::mat4& viewProjection)
 {
@@ -175,6 +192,12 @@ void VulkanEngine::init_scene_descriptors()
         builder.add_binding(13, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         builder.add_binding(14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         builder.add_binding(15, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        builder.add_binding(22, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(23, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(24, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        builder.add_binding(25, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(26, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        builder.add_binding(27, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         for (uint32_t binding = 17; binding <= 21; ++binding)
             builder.add_binding(binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         // IQ2: the sun casters' TLAS, only on the ray-query device, where
@@ -197,6 +220,7 @@ void VulkanEngine::init_scene_descriptors()
     const VkSampler occlusionSampler = ssao_occlusion_sampler();
 
     for (FrameData& frame : _frames) {
+        frame.dynamicFieldBuffer=create_buffer(sizeof(glm::vec4)*2,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
         frame.sceneBuffer = create_buffer(
             sizeof(GPUSceneData),
             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
@@ -269,6 +293,9 @@ void VulkanEngine::init_descriptor_cleanup()
         for (FrameData& frame : _frames) {
             frame._frameDescriptors.destroy_pools(_device);
             destroy_buffer(frame.sceneBuffer);
+            destroy_buffer(frame.dynamicFieldBuffer);
+            for(auto page:frame.instancePages)destroy_buffer(page);
+            for(auto buffer:{frame.clusterInput,frame.clusterInstances,frame.clusterCommands})if(buffer.buffer)destroy_buffer(buffer);
             for (AllocatedBuffer& portalSceneBuffer : frame.portalSceneBuffers) {
                 destroy_buffer(portalSceneBuffer);
             }
@@ -317,6 +344,18 @@ void VulkanEngine::init_pipelines()
     init_shadow_mask_pipeline();
     init_depth_normal_mask_pipeline();
     init_ssgi_pipelines();
+    init_mesh_visibility();
+}
+
+void VulkanEngine::copy_refraction_source(VkCommandBuffer cmd,const AllocatedImage& source,VkExtent2D extent)
+{
+    vkutil::transition_image(cmd,source.image,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    vkutil::transition_image(cmd,_postProcess.sceneCopy.image,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkImageCopy copy{};copy.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.dstSubresource=copy.srcSubresource;
+    copy.extent={std::min(extent.width,_postProcess.sceneCopy.imageExtent.width),std::min(extent.height,_postProcess.sceneCopy.imageExtent.height),1};
+    vkCmdCopyImage(cmd,source.image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,_postProcess.sceneCopy.image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
+    vkutil::transition_image(cmd,_postProcess.sceneCopy.image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vkutil::transition_image(cmd,source.image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
 void VulkanEngine::draw_geometry(
@@ -332,9 +371,10 @@ void VulkanEngine::draw_geometry(
     uint32_t stencilCompareMask,
     bool writeGBuffer)
 {
+    auto profileScope = _profiler.scope(mirabilis::CpuZone::Geometry);
     const auto startTime = std::chrono::steady_clock::now();
 
-    std::array<VkRenderingAttachmentInfo, 4> colorAttachments{};
+    std::array<VkRenderingAttachmentInfo, 5> colorAttachments{};
     colorAttachments[0] = vkinit::attachment_info(
         _drawImage.imageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkClearValue clear{};
@@ -348,6 +388,7 @@ void VulkanEngine::draw_geometry(
         colorAttachments[3] = vkinit::attachment_info(
             _sceneTargets.directLighting.imageView, &clear,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        colorAttachments[4]=vkinit::attachment_info(_sceneTargets.gbufferSpecular.imageView,&clear,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     }
     VkRenderingAttachmentInfo depthAttachment = vkinit::depth_attachment_info(
         _depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
@@ -358,7 +399,7 @@ void VulkanEngine::draw_geometry(
 
     VkRenderingInfo renderInfo = vkinit::rendering_info(
         _drawExtent, colorAttachments.data(), &depthAttachment);
-    renderInfo.colorAttachmentCount = writeGBuffer ? 4u : 1u;
+    renderInfo.colorAttachmentCount = writeGBuffer ? 5u : 1u;
     renderInfo.pStencilAttachment = &stencilAttachment;
 
     vkCmdBeginRendering(cmd, &renderInfo);
@@ -379,8 +420,12 @@ void VulkanEngine::draw_geometry(
     vkCmdSetStencilWriteMask(
         cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0x00);
 
-    std::vector<uint32_t> opaqueDraws;
-    opaqueDraws.reserve(drawContext.OpaqueSurfaces.size());
+    auto& opaqueDraws = _opaqueDrawScratch;
+    opaqueDraws.clear();
+    if (opaqueDraws.capacity() < drawContext.OpaqueSurfaces.size()) {
+        opaqueDraws.reserve(drawContext.OpaqueSurfaces.size());
+        ++stats.draw_index_buffer_grows;
+    }
     for (uint32_t i = 0; i < drawContext.OpaqueSurfaces.size(); ++i) {
         // Oblique portal projections replace their near plane.  The simple
         // CPU frustum test above assumes an ordinary projection, so using it
@@ -404,11 +449,15 @@ void VulkanEngine::draw_geometry(
             return std::less<MaterialInstance*>{}(left.material, right.material);
         });
 
-    MaterialPipeline* lastPipeline = nullptr;
+    VkPipeline lastPipeline=VK_NULL_HANDLE;
     MaterialInstance* lastMaterial = nullptr;
     VkBuffer lastIndexBuffer = VK_NULL_HANDLE;
 
-    auto draw = [&](const RenderObject& renderObject) {
+    auto& instances=_instanceScratch;instances.clear();instances.reserve(opaqueDraws.size()+drawContext.TransparentSurfaces.size());
+    for(auto index:opaqueDraws){const auto& object=drawContext.OpaqueSurfaces[index];instances.push_back(make_draw_instance(object.transform,object.previousTransform,object.material&&object.material->doubleSided,object.contributesToStaticCaches));}
+    for(const auto& object:drawContext.TransparentSurfaces)instances.push_back(make_draw_instance(object.transform,object.previousTransform,object.material&&object.material->doubleSided,object.contributesToStaticCaches));
+    const auto instanceAddress=upload_draw_instances(instances);
+    auto draw = [&](const RenderObject& renderObject,uint32_t firstInstance,uint32_t instanceCount) {
         if (renderObject.material == nullptr) {
             return;
         }
@@ -426,10 +475,13 @@ void VulkanEngine::draw_geometry(
                 ? overrideMaskPipeline
                 : overridePipeline;
         }
-        if (pipeline != lastPipeline) {
-            lastPipeline = pipeline;
+        if(renderObject.material->passType==MaterialPass::Transparent && overridePipeline==&metalRoughMaterial.portalViewPipeline)
+            pipeline=&metalRoughMaterial.portalTransparentPipeline;
+        const VkPipeline selected=instanceCount>1 && pipeline->instancedPipeline ? pipeline->instancedPipeline : pipeline->pipeline;
+        if (selected != lastPipeline) {
+            lastPipeline = selected;
             vkCmdBindPipeline(
-                cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
+                cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selected);
             vkCmdBindDescriptorSets(
                 cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -463,6 +515,7 @@ void VulkanEngine::draw_geometry(
         pushConstants.worldMatrix = renderObject.transform;
         pushConstants.vertexBuffer = renderObject.vertexBufferAddress;
         set_previous_world_rows(pushConstants, renderObject.previousTransform);
+        pushConstants.alignmentPadding=instanceAddress+firstInstance*sizeof(GPUDrawInstance);
         vkCmdPushConstants(
             cmd,
             pipeline->layout,
@@ -470,32 +523,44 @@ void VulkanEngine::draw_geometry(
             0,
             sizeof(GPUDrawPushConstants),
             &pushConstants);
-        vkCmdDrawIndexed(
-            cmd, renderObject.indexCount, 1, renderObject.firstIndex, 0, 0);
+        const auto& ranges=get_current_frame().clusterRanges;
+        const auto objectIndex=writeGBuffer&&&drawContext==&mainDrawContext?size_t(&renderObject-drawContext.OpaqueSurfaces.data()):SIZE_MAX;
+        if(instanceCount==1 && objectIndex<ranges.size() && ranges[objectIndex].second) {
+            const auto [first,count]=ranges[objectIndex];
+            for(uint32_t offset=0;offset<count;) {
+                const auto draws=std::min(count-offset,_meshVisibility.maxIndirectCount);
+                vkCmdDrawIndexedIndirect(cmd,get_current_frame().clusterCommands.buffer,VkDeviceSize(first+offset)*sizeof(VkDrawIndexedIndirectCommand),draws,sizeof(VkDrawIndexedIndirectCommand));
+                offset+=draws;
+            }
+        } else vkCmdDrawIndexed(cmd,renderObject.indexCount,instanceCount,renderObject.firstIndex,0,0);
 
         ++stats.drawcall_count;
-        stats.triangle_count += static_cast<int>(renderObject.indexCount / 3);
+        stats.triangle_count += static_cast<int>(renderObject.indexCount / 3)*instanceCount;
     };
 
-    for (uint32_t drawIndex : opaqueDraws) {
-        draw(drawContext.OpaqueSurfaces[drawIndex]);
+    const bool allowInstancing=SDL_getenv("MIRABILIS_TEST_DISABLE_INSTANCING")==nullptr;
+    for(uint32_t i=0;i<opaqueDraws.size();) {
+        const auto& object=drawContext.OpaqueSurfaces[opaqueDraws[i]];
+        uint32_t end=i+1;
+        while(overridePipeline==nullptr && allowInstancing && end<opaqueDraws.size()) {
+            const auto& next=drawContext.OpaqueSurfaces[opaqueDraws[end]];
+            if(next.material!=object.material || next.indexBuffer!=object.indexBuffer || next.vertexBufferAddress!=object.vertexBufferAddress || next.firstIndex!=object.firstIndex || next.indexCount!=object.indexCount)break;
+            ++end;
+        }
+        draw(object,i,end-i);i=end;
     }
-    // The transparent pipeline is built for the draw image alone, so it must
-    // not blend into the G-buffer targets this pass carries.  Restart with
-    // just the draw image, loading the colour and depth the opaque draws
-    // stored.  An override pipeline already matches this pass as it is.
-    if (writeGBuffer && overridePipeline == nullptr &&
-        !drawContext.TransparentSurfaces.empty()) {
-        vkCmdEndRendering(cmd);
-        renderInfo.colorAttachmentCount = 1;
-        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        stencilAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        vkCmdBeginRendering(cmd, &renderInfo);
-        lastPipeline = nullptr;
-        lastMaterial = nullptr;
+    if(!writeGBuffer && !drawContext.TransparentSurfaces.empty()) {
+        vkCmdEndRendering(cmd);copy_refraction_source(cmd,_drawImage,_drawExtent);
+        depthAttachment.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;stencilAttachment.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;
+        vkCmdBeginRendering(cmd,&renderInfo);lastPipeline=VK_NULL_HANDLE;lastMaterial=nullptr;
     }
-    for (const RenderObject& renderObject : drawContext.TransparentSurfaces) {
-        draw(renderObject);
+    std::vector<uint32_t> transparentOrder;
+    if(!writeGBuffer){transparentOrder.resize(drawContext.TransparentSurfaces.size());for(uint32_t i=0;i<transparentOrder.size();++i)transparentOrder[i]=i;
+        std::stable_sort(transparentOrder.begin(),transparentOrder.end(),[&](uint32_t a,uint32_t b){const auto& left=drawContext.TransparentSurfaces[a];const auto& right=drawContext.TransparentSurfaces[b];
+            return (viewProjection*left.transform*glm::vec4(left.bounds.origin,1)).w>(viewProjection*right.transform*glm::vec4(right.bounds.origin,1)).w;});}
+    for (uint32_t i:transparentOrder) {
+        const auto& object=drawContext.TransparentSurfaces[i];
+        draw(object,uint32_t(opaqueDraws.size())+i,1);
     }
 
     vkCmdEndRendering(cmd);
@@ -507,7 +572,14 @@ void VulkanEngine::draw_geometry(
 GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
 {
     GPUSceneData data{};
+    data.giTracingSettings.x = lumen_hardware_tracing() ? 1.f : 0.f;
+    // Force genuine uncovered-hit lighting in the occlusion regression fixture.
+    static const bool uncoveredTest=SDL_getenv("MIRABILIS_TEST_FRAMES") && SDL_getenv("MIRABILIS_TEST_GI_UNCOVERED");
+    data.giTracingSettings.y=uncoveredTest?1.f:0.f;
     data.view = view;
+    build_local_lights(data);
+    data.reflectionSettings=glm::vec4(_reflections.enabled && _materialShading.specular && (_r4Contributions.forward & r4::EnvSpecular)!=0 && _ssgi.enabled && _ssgi.lumenEnabled && _rayQueryShadows && lumen_lite_ready() && !is_forward_material_debug_view(_debugViews.view)?1.f:0.f,_reflections.roughnessLimit,2,1000);
+    if (SDL_getenv("MIRABILIS_TEST_FRAMES") && SDL_getenv("MIRABILIS_TEST_REFLECTION_FURNACE")) data.reflectionSettings.w=-1;
     // Passing far, then near, intentionally builds the reversed-depth
     // projection used by the existing GREATER_OR_EQUAL depth pipeline.
     data.proj = glm::perspective(
@@ -528,7 +600,7 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
         normalized_sun_direction(_shadow.sunlightDirection), 1.0f);
     // One sun for both renderers.  Raster diffuse is baseColor * cos * S and
     // the path tracer's is albedo / pi * cos * E, so S = E / pi, with E the
-    // scene's referenceLighting.sunRadiance (docs/lumen_lite_design.md R4.3).
+    // scene's referenceLighting.sunRadiance.
     constexpr float Pi = 3.14159265358979323846f;
     data.sunlightColor = glm::vec4(
         glm::vec3(_traceSettings.lighting.sunRadiance) / Pi, 1.0f);
@@ -601,6 +673,7 @@ GPUSceneData VulkanEngine::build_scene_data(const glm::mat4& view) const
     // R4 forward owners kept in the final image (src/r4_contributions.h);
     // exact in a float, and all six unless an R4 capture removed some.
     data.materialDebug.y = static_cast<float>(_r4Contributions.forward);
+    data.materialDebug.z = static_cast<float>(_r4Contributions.cacheSources);
     data.iblSettings = glm::vec4(
         _materialShading.imageBasedLighting ? 1.0f : 0.0f,
         static_cast<float>(IblPrefilterLevels - 1),
@@ -632,6 +705,9 @@ uint32_t VulkanEngine::sampled_emitter_count() const
 
 void VulkanEngine::write_emitter_descriptors(FrameData& frame)
 {
+    const glm::vec4 bounds[]{_dynamicSdf.minimum,_dynamicSdf.maximum};
+    std::memcpy(frame.dynamicFieldBuffer.info.pMappedData,bounds,sizeof(bounds));
+    vmaFlushAllocation(_allocator,frame.dynamicFieldBuffer.allocation,0,VK_WHOLE_SIZE);
     if (_portalGiPlaceholder.image == VK_NULL_HANDLE) {
         uint32_t empty[2]{};
         _portalGiPlaceholder = create_image(empty, {1, 1, 2},
@@ -662,6 +738,14 @@ void VulkanEngine::write_emitter_descriptors(FrameData& frame)
     };
     const auto write = [&](VkDescriptorSet set) {
         DescriptorWriter writer;
+        writer.write_image(26,_dynamicSdf.field.imageView,_sdf.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.write_buffer(27,frame.dynamicFieldBuffer.buffer,sizeof(glm::vec4)*2,0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        writer.write_image(22,_localShadowAtlas.imageView,_shadow.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.write_buffer(24,buffer(frame.rayHitInstances,_rayQueryShadows),VK_WHOLE_SIZE,0,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        writer.write_image(23,_postProcess.sceneCopy.imageView,_postProcess.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        const auto prepassView=_prepass.enabled && _prepass.pipeline.pipeline && _prepass.maskPipeline.pipeline
+            ?_prepass.depthImage.imageView:_whiteImage.imageView;
+        writer.write_image(25,prepassView,_prepass.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         const std::array<std::pair<uint32_t, VkImageView>, 4> pages{{
             {6, page(_surfaceCache.albedo)}, {10, page(_surfaceCache.emissive)},
             {11, page(_surfaceCache.depth)}, {12, page(_surfaceCache.emitter)}}};
@@ -705,6 +789,11 @@ void VulkanEngine::write_emitter_descriptors(FrameData& frame)
     // against the buffers just bound, so no camera indexes past them.
     const float emitterCount = static_cast<float>(sampled_emitter_count());
     sceneData.emitterSettings.x = emitterCount;
+    static const EnvBoolOverride rejectHidden = parse_env_bool_override(SDL_getenv("MIRABILIS_PREPASS_REJECT"), true);
+    // Only trust a current D32 prepass with both opaque and masked pipelines available.
+    sceneData.giTracingSettings.z = rejectHidden.valid && rejectHidden.value && _prepass.enabled &&
+        _prepass.pipeline.pipeline && _prepass.maskPipeline.pipeline &&
+        _prepass.depthImage.imageFormat == VK_FORMAT_D32_SFLOAT ? 1.f : 0.f;
     std::memcpy(frame.sceneBuffer.info.pMappedData, &sceneData, sizeof(sceneData));
     for (size_t view = 0; view < frame.portalSceneBuffers.size(); ++view) {
         _portalRender.sceneData[view].portalIndirectSettings.y =
@@ -803,6 +892,13 @@ void VulkanEngine::init_gpu_timestamps()
         return;
     }
     _gpuTiming.timestampPeriod = properties.limits.timestampPeriod;
+    uint32_t queueCount=0;
+    vkGetPhysicalDeviceQueueFamilyProperties(_chosenGPU,&queueCount,nullptr);
+    std::vector<VkQueueFamilyProperties> queues(queueCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(_chosenGPU,&queueCount,queues.data());
+    const uint32_t bits=queues[_graphicsQueueFamily].timestampValidBits;
+    if (!bits) return;
+    _gpuTiming.timestampMask=bits==64 ? ~uint64_t(0) : (uint64_t(1)<<bits)-1;
 
     VkQueryPoolCreateInfo poolInfo{
         .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
@@ -812,9 +908,24 @@ void VulkanEngine::init_gpu_timestamps()
     poolInfo.queryCount = FRAME_OVERLAP * SSGITimestampsPerFrame;
     VK_CHECK(vkCreateQueryPool(
         _device, &poolInfo, nullptr, &_ssgi.timestampPool));
+    const char* scopes=SDL_getenv("MIRABILIS_GPU_SCOPES");
+    if (!scopes || std::string_view(scopes)!="0") {
+        poolInfo.queryCount=FRAME_OVERLAP*uint32_t(GpuPassCount)*2;
+        VK_CHECK(vkCreateQueryPool(_device,&poolInfo,nullptr,&_gpuTiming.scopePool));
+    }
+    if (const char* path=SDL_getenv("MIRABILIS_GPU_FRAME_LOG")) {
+        _gpuTiming.log.open(path);
+        if (!_gpuTiming.log || !_gpuTiming.scopePool) {
+            fmt::print("GI TEST FAIL: GPU frame log requires writable output and GPU scopes\n"); std::abort();
+        }
+        _gpuTiming.log << "frame,gpu_written_mask";
+        for (const char* name:GpuPassNames) _gpuTiming.log << ",gpu_" << name << "_ms";
+        _gpuTiming.log << ",cpu_fence_ms,cpu_acquire_ms,cpu_prepare_ms,cpu_record_ms,cpu_submit_ms,cpu_present_ms,heap_usage,heap_budget,sdf_rebuilds,card_rebuilds,trace_rebuilds,blas_builds,tlas_builds,albedo_rebuilds\n";
+    }
     _gpuTiming.supported = true;
 
     _mainDeletionQueue.push_function([this]() {
+        if (_gpuTiming.scopePool) vkDestroyQueryPool(_device,_gpuTiming.scopePool,nullptr);
         vkDestroyQueryPool(_device, _gpuTiming.timestampPool, nullptr);
         vkDestroyQueryPool(_device, _ssgi.timestampPool, nullptr);
     });
@@ -826,6 +937,40 @@ void VulkanEngine::read_gpu_timestamps(uint32_t frameIndex)
     // results being read belong to a submission that has certainly finished.
     if (!_gpuTiming.supported) {
         return;
+    }
+    auto& slot=_gpuTiming.slots[frameIndex];
+    if (slot.pending) {
+        struct Tick { uint64_t value, available; };
+        std::array<Tick,GpuPassCount*2> ticks{};
+        const VkResult result=vkGetQueryPoolResults(_device,_gpuTiming.scopePool,
+            frameIndex*uint32_t(ticks.size()),uint32_t(ticks.size()),sizeof(ticks),ticks.data(),sizeof(Tick),
+            VK_QUERY_RESULT_64_BIT|VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        if (result!=VK_SUCCESS && result!=VK_NOT_READY) VK_CHECK(result);
+        uint64_t mask=0;
+        for (size_t pass=0;pass<GpuPassCount;++pass) {
+            stats.gpu_pass_ms[pass]=0;
+            if (!slot.written[pass]) continue;
+            if (!ticks[pass*2].available || !ticks[pass*2+1].available) {
+                fmt::print("GI TEST FAIL: completed frame {} has unavailable GPU scope {}\n",slot.frame,GpuPassNames[pass]);
+                std::abort();
+            }
+            const uint64_t delta=(ticks[pass*2+1].value-ticks[pass*2].value)&_gpuTiming.timestampMask;
+            stats.gpu_pass_ms[pass]=float(double(delta)*_gpuTiming.timestampPeriod*1e-6);
+            mask|=uint64_t(1)<<pass;
+        }
+        stats.gpu_timing_frame=slot.frame; stats.gpu_frame_valid=true;
+        _profiler.counter(mirabilis::ProfileCounter::GpuFrame,stats.gpu_pass_ms[size_t(GpuPass::Frame)]);
+        _profiler.counter(mirabilis::ProfileCounter::GpuForward,stats.gpu_pass_ms[size_t(GpuPass::Forward)]);
+        _profiler.counter(mirabilis::ProfileCounter::GpuRadiosity,stats.gpu_pass_ms[size_t(GpuPass::Radiosity)]);
+        if (_gpuTiming.log.is_open()) {
+            _gpuTiming.log << slot.frame << ',' << mask;
+            for (float ms:stats.gpu_pass_ms) _gpuTiming.log << ',' << ms;
+            _gpuTiming.log << ',' << slot.cpuFence << ',' << slot.cpuAcquire << ',' << slot.cpuPrepare << ',' << slot.cpuRecord
+                << ',' << slot.cpuSubmit << ',' << slot.cpuPresent << ',' << slot.heapUsage << ',' << slot.heapBudget;
+            for (uint64_t count:slot.rebuilds) _gpuTiming.log << ',' << count;
+            _gpuTiming.log << '\n';
+        }
+        slot.pending=false;
     }
     if (_gpuTiming.timestampsPending[frameIndex]) {
         _gpuTiming.timestampsPending[frameIndex] = false;
@@ -854,6 +999,7 @@ void VulkanEngine::read_gpu_timestamps(uint32_t frameIndex)
     stats.ssao_blur_vertical_time = toMilliseconds(ticks[2], ticks[3]);
     stats.ssao_total_time = toMilliseconds(ticks[0], ticks[3]);
     stats.ssao_time_is_gpu = true;
+    _profiler.counter(mirabilis::ProfileCounter::GpuAO, stats.ssao_total_time);
     }
 
     if (_ssgi.timingWritten[frameIndex]) {
@@ -875,6 +1021,60 @@ void VulkanEngine::read_gpu_timestamps(uint32_t frameIndex)
             stats.ssgi_composite_time = milliseconds(ssgiTicks[3], ssgiTicks[4]);
             stats.ssgi_total_time = milliseconds(ssgiTicks[0], ssgiTicks[4]);
             stats.ssgi_time_is_gpu = true;
+            _profiler.counter(mirabilis::ProfileCounter::GpuGI, stats.ssgi_total_time);
         }
     }
+}
+
+
+void VulkanEngine::begin_gpu_frame(VkCommandBuffer cmd)
+{
+    if (!_gpuTiming.scopePool) return;
+    auto& slot=_gpuTiming.slots[_frameNumber%FRAME_OVERLAP];
+    slot.frame=uint64_t(_frameNumber)+1;
+    slot.written.fill(false); slot.pending=true;
+    _gpuTiming.activeCommand=cmd;
+    vkCmdResetQueryPool(cmd,_gpuTiming.scopePool,(_frameNumber%FRAME_OVERLAP)*uint32_t(GpuPassCount)*2,uint32_t(GpuPassCount)*2);
+    begin_gpu_pass(cmd,GpuPass::Frame);
+}
+
+bool VulkanEngine::begin_gpu_pass(VkCommandBuffer cmd,GpuPass pass)
+{
+    if (!_gpuTiming.scopePool || cmd!=_gpuTiming.activeCommand) return false;
+    const auto index=uint32_t(pass);
+    if (_gpuTiming.slots[_frameNumber%FRAME_OVERLAP].written[index]) {
+        fmt::print("GI TEST FAIL: repeated GPU scope {} in frame\n",GpuPassNames[index]); std::abort();
+    }
+    vkCmdWriteTimestamp2(cmd,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,_gpuTiming.scopePool,
+        (_frameNumber%FRAME_OVERLAP)*uint32_t(GpuPassCount)*2+index*2);
+    return true;
+}
+
+void VulkanEngine::end_gpu_pass(VkCommandBuffer cmd,GpuPass pass)
+{
+    if (!_gpuTiming.scopePool || cmd!=_gpuTiming.activeCommand) return;
+    const auto index=uint32_t(pass);
+    vkCmdWriteTimestamp2(cmd,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,_gpuTiming.scopePool,
+        (_frameNumber%FRAME_OVERLAP)*uint32_t(GpuPassCount)*2+index*2+1);
+    _gpuTiming.slots[_frameNumber%FRAME_OVERLAP].written[index]=true;
+}
+
+void VulkanEngine::sample_gpu_memory_budget(bool print)
+{
+    vmaSetCurrentFrameIndex(_allocator,uint32_t(_frameNumber));
+    std::array<VmaBudget,VK_MAX_MEMORY_HEAPS> heaps{};
+    vmaGetHeapBudgets(_allocator,heaps.data());
+    VkPhysicalDeviceMemoryProperties properties{};
+    vkGetPhysicalDeviceMemoryProperties(_chosenGPU,&properties);
+    stats.gpu_heap_usage=0;stats.gpu_heap_budget=0;
+    for (uint32_t i=0;i<properties.memoryHeapCount;++i) {
+        if (properties.memoryHeaps[i].flags&VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            stats.gpu_heap_usage+=heaps[i].usage;stats.gpu_heap_budget+=heaps[i].budget;
+        }
+        if (print) fmt::print("GPU heap: index={} device-local={} budget-extension={} usage={} budget={} allocation-bytes={} block-bytes={}\n",
+            i,bool(properties.memoryHeaps[i].flags&VK_MEMORY_HEAP_DEVICE_LOCAL_BIT),_gpuTiming.memoryBudgetSupported,
+            heaps[i].usage,heaps[i].budget,heaps[i].statistics.allocationBytes,heaps[i].statistics.blockBytes);
+    }
+    stats.gpu_heap_peak=std::max(stats.gpu_heap_peak,stats.gpu_heap_usage);
+    if (print) fmt::print("GPU heap peak: device-local-usage={} (sampled, not peak allocation or residency)\n",stats.gpu_heap_peak);
 }

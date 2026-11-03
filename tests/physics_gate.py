@@ -25,7 +25,7 @@ def telemetry(logs):
         fields = dict(re.findall(r'([a-z][a-z-]*)=([^\s]+)', line))
         assert all(key in fields for key in ('phase', *FIELDS)), line
         records.append({'phase': fields['phase'], **{key: int(fields[key]) for key in FIELDS},
-                        **{key: int(fields[key]) for key in ('editor-mode', 'body-sleep', 'ecs-sleep') if key in fields}})
+                        **{key: int(fields[key]) for key in ('editor-mode', 'body-sleep', 'ecs-sleep', 'hardware-world', 'ray-blas') if key in fields}})
     assert records, 'No physics telemetry was emitted'
     assert all(b['frame'] > a['frame'] for a, b in zip(records, records[1:])), 'Telemetry frame order'
     return records
@@ -37,21 +37,34 @@ def check_raster(records):
                             'edit-restore', 'unchanged-restore', 'reopened', 'sandbox')}
     assert all(phases.values()), 'Missing lifecycle phase'
     awake, asleep = phases['awake'], phases['sleep']
-    assert all(awake[-1][f'{cache}-enabled'] == 1 for cache in STATIC_CACHES), 'Required static cache capability inactive'
-    assert all(awake[-1][cache] > 0 for cache in STATIC_CACHES), 'Required cache never built actual geometry'
-    for sample in (awake[-1], asleep[-1]):
-        assert sample['sdf-placed'] == sample['sdf-instances'] and sample['sdf-placed'] > 0, 'SDF geometry not fully baked/placed'
-    assert len(awake) >= 4 and len(asleep) >= 2, 'Need repeated awake/sleep samples'
-    assert all(item['dynamic-draws'] > 0 for item in awake), 'Awake dynamic geometry missing'
-    for phase in (awake[2:], asleep):
-        for cache in RASTER_CACHES:
-            assert phase[-1][cache] == phase[0][cache], f'{cache} rebuilt every frame'
-    for cache in RASTER_CACHES:
-        assert asleep[0][cache] - awake[-1][cache] == 1, f'{cache} sleep rebuild batch'
-        assert phases['wake'][0][cache] - asleep[-1][cache] == 1, f'{cache} wake rebuild batch'
-        assert phases['unchanged-restore'][-1][cache] == phases['edit-restore'][-1][cache], f'{cache} unchanged restore rebuilt'
-    assert asleep[-1]['eligible'] > awake[-1]['eligible'], 'Sleeping subtree never entered static caches'
-    assert phases['wake'][0]['eligible'] < asleep[-1]['eligible'], 'Awake subtree stayed in static caches'
+    hardware=awake[-1].get('hardware-world',0)==1
+    hardware_shadows=awake[-1]['ray-shadow-enabled']==1 and awake[-1].get('ray-blas',0)>0
+    static_caches=('surface',) if hardware else ('sdf','surface')
+    if not hardware_shadows and awake[-1]['ray-shadow-enabled']==1:
+        static_caches=(*static_caches,'ray-shadow')
+    raster_caches=(*static_caches,'trace')
+    assert all(awake[-1][f'{cache}-enabled']==1 for cache in static_caches)
+    assert all(awake[-1][cache]>0 for cache in static_caches)
+    if hardware_shadows:
+        assert awake[-1]['ray-shadow-enabled']==1 and awake[-1]['ray-blas']>0
+        assert len(awake)>=4 and len(asleep)>=2
+        for phase in (awake[2:],asleep):
+            assert phase[-1]['ray-blas']==phase[0]['ray-blas'], 'Immutable mesh BLAS rebuilt during rigid motion'
+        assert awake[-1]['ray-shadow']>awake[0]['ray-shadow'], 'Moving instances never updated TLAS'
+    if not hardware:
+        for sample in (awake[-1],asleep[-1]):
+            assert sample['sdf-placed']==sample['sdf-instances'] and sample['sdf-placed']>0
+        assert len(awake)>=4 and len(asleep)>=2
+    assert all(item['dynamic-draws']>0 for item in awake)
+    for phase in (awake[2:],asleep):
+        for cache in raster_caches:
+            assert phase[-1][cache]==phase[0][cache], f'{cache} rebuilt every frame'
+    for cache in raster_caches:
+        assert asleep[0][cache]==awake[-1][cache], f'{cache} rebuilt on sleep'
+        assert phases['wake'][0][cache]==asleep[-1][cache], f'{cache} rebuilt on wake'
+        assert phases['unchanged-restore'][-1][cache]==phases['edit-restore'][-1][cache], f'{cache} unchanged restore rebuilt'
+    assert asleep[-1]['eligible']==awake[-1]['eligible'], 'Sleep changed static-cache membership'
+    assert phases['wake'][0]['eligible']==asleep[-1]['eligible'], 'Wake changed static-cache membership'
     assert phases['teleport'][0]['history-reset'] > 0, 'Teleport left previous-render history'
     assert phases['restore'][0]['history-reset'] > 0, 'Restore left previous-render history'
     assert phases['reopened'][-1]['bodies'] > 0 and phases['sandbox'][-1]['bodies'] > 0
@@ -88,6 +101,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--repo', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--configuration', choices=('Debug','Release'), default='Debug')
+    parser.add_argument('--software-gi', action='store_true')
     args = parser.parse_args()
     repo, output = args.repo.resolve(), args.output.resolve()
     assert not output.exists() or not any(output.iterdir()), 'Use fresh evidence directory'
@@ -103,20 +118,24 @@ def main():
         shutil.copy2(scene, scratch/scene.name)
     original = json.loads((scratch/'physics_drop_demo.json').read_text())
     (scratch/'physics_child_demo.json').write_text(json.dumps(child_variant(original), indent=2))
-    ecs_gate.run('sdf-preflight', 'Debug', {'MIRABILIS_TEST_SCENE': 'physics_child_demo.json',
+    preflight_logs, _ = ecs_gate.run('sdf-preflight', args.configuration, {'MIRABILIS_TEST_SCENE': 'physics_child_demo.json',
         'MIRABILIS_TEST_SCENE_DIRECTORY': str(scratch), 'MIRABILIS_TEST_FRAMES': '2',
-        'MIRABILIS_TEST_RESET_PLAY': '1', 'MIRABILIS_TEST_WINDOW': '1600x900', 'MIRABILIS_LUMEN_LITE': '1'})
-    queue, cache = repo/'assets/sdf/queue', repo/'assets/sdf/cache'
-    with (output/'sdf-bake.log').open('w') as log:
-        subprocess.run([sys.executable, str(repo/'scripts/bake_sdf.py'), '--queue', str(queue), str(cache)],
-                       stdout=log, stderr=subprocess.STDOUT, check=True, timeout=1800)
-    assert all((cache/f'{path.stem}.sdf').is_file() for path in queue.glob('*.obj')), 'Queued SDF mesh not baked'
-    bake = {'scriptSha256': ecs_gate.digest(repo/'scripts/bake_sdf.py'),
-            'dependencies': {package: importlib.metadata.version(package)
-                             for package in ('numpy', 'trimesh', 'mesh-to-sdf', 'PyOpenGL', 'pyrender', 'scipy')},
-            'fileSha256': {str(path.relative_to(repo)): ecs_gate.digest(path)
-                          for directory in (queue, cache) for path in sorted(directory.iterdir()) if path.is_file()}}
-    (output/'sdf-bake-inventory.json').write_text(json.dumps(bake, indent=2))
+        'MIRABILIS_TEST_RESET_PLAY': '1', 'MIRABILIS_TEST_WINDOW': '1600x900', 'MIRABILIS_LUMEN_LITE': '1',
+        'MIRABILIS_LUMEN_HARDWARE': '0' if args.software_gi else '1'})
+    if 'distance-field-bakes-required=false' in preflight_logs:
+        (output/'sdf-bake-inventory.json').write_text(json.dumps({'backend':'triangle-ray-query','distanceFieldBakesRequired':False},indent=2))
+    else:
+        queue, cache = repo/'assets/sdf/queue', repo/'assets/sdf/cache'
+        with (output/'sdf-bake.log').open('w') as log:
+            subprocess.run([sys.executable, str(repo/'scripts/bake_sdf.py'), '--queue', str(queue), str(cache)],
+                           stdout=log, stderr=subprocess.STDOUT, check=True, timeout=1800)
+        assert all((cache/f'{path.stem}.sdf').is_file() for path in queue.glob('*.obj')), 'Queued SDF mesh not baked'
+        bake = {'scriptSha256': ecs_gate.digest(repo/'scripts/bake_sdf.py'),
+                'dependencies': {package: importlib.metadata.version(package)
+                                 for package in ('numpy', 'trimesh', 'mesh-to-sdf', 'PyOpenGL', 'pyrender', 'scipy')},
+                'fileSha256': {str(path.relative_to(repo)): ecs_gate.digest(path)
+                              for directory in (queue, cache) for path in sorted(directory.iterdir()) if path.is_file()}}
+        (output/'sdf-bake-inventory.json').write_text(json.dumps(bake, indent=2))
     summary = {}
     for name, scene, trace, frames in [('raster-demo', 'physics_drop_demo.json', False, 1080),
                                ('raster-child', 'physics_child_demo.json', False, 1080),
@@ -130,10 +149,14 @@ def main():
                  'MIRABILIS_TEST_CAMERA': '0 2.5 12 -0.08 0',
                  'MIRABILIS_TEST_PHYSICS_CAPTURE_DIRECTORY': str(captures),
                  'MIRABILIS_LUMEN_LITE': '1', 'MIRABILIS_IQ_RT_SHADOWS': '1',
+                 'MIRABILIS_LUMEN_HARDWARE': '0' if args.software_gi else '1',
+                 'VK_INSTANCE_LAYERS': 'VK_LAYER_KHRONOS_validation',
                  'VK_LAYER_VALIDATE_SYNC': '1', 'VK_KHRONOS_VALIDATION_VALIDATE_SYNC': 'true'}
         if trace:
             flags.update(MIRABILIS_TEST_TRACE='1', MIRABILIS_CAPTURE=str(captures/'trace'))
-        logs, result = ecs_gate.run(name, 'Debug', flags, seconds=900)
+        else:
+            flags['MIRABILIS_BENCHMARK_SKIP_CPU_BVH_VALIDATION'] = '1'
+        logs, result = ecs_gate.run(name, args.configuration, flags, seconds=900)
         records = telemetry(logs)
         if trace:
             assert 'renderer=software' in logs and ('PHYSICS trace PASS' if frames <= 200 else 'PHYSICS lifecycle PASS') in logs
@@ -146,6 +169,8 @@ def main():
             assert (captures/'trace.pfm').is_file()
         else:
             assert 'PHYSICS lifecycle PASS' in logs and 'renderer=raster' in logs
+            if 'distance-field-bakes-required=false' in logs:
+                assert 'GI CPU geometry: mode=references' in logs, 'Production hardware geometry path not exercised'
             check_raster(records)
             for phase in ('awake', 'sleep'):
                 assert (captures/f'{phase}.pfm').is_file(), f'Missing {phase} same-camera capture'

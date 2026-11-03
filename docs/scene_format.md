@@ -23,12 +23,42 @@ Invalid parents and cycles are rejected.
 | `visibility` | `{visible: bool, layer: 0 or 1}` |
 | `mesh` | `{asset: empty/floor/cube/ramp/gltf, modelPath: string}` |
 | `material` | `{enabled, baseColorTexture, normalTexture, metallicRoughnessTexture, tint: vec4, uvScale: vec2, metallic, roughness, debugChecker, emissionColor: vec3, emissionStrength, transmission, ior}` |
+| `light` | `{type: Point/Spot, color: vec3, intensity, range, innerCone, outerCone, enabled, castShadows}` (optional) |
 | `collider` | `{enabled: bool, shape: 0/1/2, center: vec3, halfExtents: vec3}` |
 | `rigidBody` | `{motion: Static/Dynamic, mass: float, friction: float, restitution: float, gravityFactor: float}` (optional) |
 | `script` | `{assembly: string, type: string, enabled: bool, fields: object}` (optional) |
 | `timeTrialRole` | `{role: none/spawn/start/finish}` |
 | `portalPlaceable` | `{}` |
 | `transformDrivenExternally` | `{}` |
+
+Material extensions are optional: `doubleSided`, `celShading`,
+`occlusionTexture`, `occlusionStrength`, `specularTexture`, `specular`,
+`subsurface`, `subsurfaceColor`, and `thickness`. Specular defaults to 0.5
+(dielectric F0 0.04), AO strength to 1, thickness to 0.1, and the other new
+features to off/empty. AO/specular/subsurface/transmission strengths are in
+[0, 1], thickness in [0, 10], and IOR in [1, 3]. AO and specular textures are
+linear data; the specular strength uses alpha, matching glTF's specular map.
+Thin subsurface and raster refraction are approximations, not volume transport.
+
+A light's local -Z axis points along its spot cone. Angles are radians;
+0 <= innerCone <= outerCone < pi/2, outerCone > 0, range > 0.05, and color
+and intensity are nonnegative. All values must be finite. Defaults: Point,
+white, intensity 20, range 10, cone angles 0.35/0.6, enabled with shadows.
+The forward renderer evaluates at most 16 lights in creation order and shadows
+the first contributing shadow-enabled point light and spot light. Disabled,
+zero-intensity and black lights consume neither light slots nor shadow passes.
+Imported glTF point/spot lights also participate. Duplication and Play snapshots
+preserve the authored light component.
+
+The optional root `rendering` block saves `celShading`, `celBands` [2,16],
+`celEdge` [0,1], `bloom`, `bloomStrength` [0,2], `bloomThreshold` >= 0,
+`bloomScatter` [0,1], and `tonemapOperator` (0 ACES, 1 Reinhard, 2 PBR Neutral).
+Cel shading and bloom default off; defaults for the remaining fields are
+4, 0.18, 0.08, 1, 0.7, and 0 respectively. `lumenGI` and `sceneReflections`
+are booleans defaulting off; `reflectionRoughness` is finite in [0,1]
+and defaults to 0.4. These settings restore through Play snapshots. Scene
+reflections require a ray-query device and ready world GI. GI quality, render
+scale, experimental screen probes and GPU cluster culling are session settings.
 
 Vectors are JSON arrays. Transform rotation uses Euler radians in Y * X * Z
 order. Collider shapes are Box, GroundPlane and SurfRamp respectively. Basic

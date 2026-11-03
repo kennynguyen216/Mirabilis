@@ -59,7 +59,7 @@ class GIStability(unittest.TestCase):
     def test_radiosity_filters_the_cached_sky_source(self):
         body = shader("surface_cache_radiosity.comp")
         self.assertIn("SURFACE_CACHE_READ_SKY(texel) texelFetch(cacheSky", body)
-        self.assertIn("surface_cache_lookup(p, field_normal(p), false, true, true)", body)
+        self.assertIn("surface_cache_lookup(p,hitNormal,false,true,true)", body)
         lookup = shader("surface_cache_lookup.glsl")
         self.assertIn("cardUV, texel, sameSurfaceMargin, 2, lightingRadius)", lookup,
                       "GI must filter the cached sun shadow as well as the sky")
@@ -69,18 +69,21 @@ class GIStability(unittest.TestCase):
 
     def test_hardware_world_trace_uses_the_closest_hit_at_the_surface(self):
         body = shader("lumen_world_trace.glsl")
-        hardware = body.split("#ifdef MIRABILIS_RT_SHADOWS")[1].split("#else")[0]
+        trace = body.split("vec3 lumen_trace(")[1]
+        hardware = trace.split("#ifdef MIRABILIS_RT_SHADOWS")[1].split("#endif")[0]
         self.assertIn("worldPosition + worldNormal * epsilon", hardware)
         self.assertNotIn("2.5 * voxel", hardware)
         self.assertNotIn("TerminateOnFirstHit", hardware,
                          "GI needs the closest surface, not traversal's first candidate")
         self.assertIn("rayQueryGetIntersectionTEXT(query, true)", hardware)
-        self.assertIn("lumen_hit_radiance(p, rayClass)", hardware)
-        self.assertIn("return lumen_hit_radiance(p, rayClass);", body.split("#else")[1])
+        self.assertIn("ray_hit_normal(query)", hardware)
+        self.assertIn("lumen_cached_radiance(surface)", hardware)
+        self.assertIn("ray_uncached_direct(p,normal)", hardware)
+        self.assertIn("return lumen_hit_radiance(p,lumen_field_normal(p),rayClass);", trace.split("#endif")[1])
         engine = (ROOT / "src" / "vk_engine.cpp").read_text(encoding="utf-8")
-        self.assertLess(engine.index("_ssgi.screenTraceEnabled = !_rayQueryShadows;"),
+        self.assertLess(engine.index("_ssgi.screenTraceEnabled = !lumen_hardware_tracing();"),
                         engine.index('apply_env_flag("MIRABILIS_SSGI_SCREEN_TRACE"'),
-                        "Use exact world tracing by default, retaining explicit overrides")
+                        "Use screen-first software tracing, independently of hardware sun shadows")
 
     def test_radiosity_strips_preserve_full_card_uvs_and_blend(self):
         body = shader("surface_cache_radiosity.comp")
@@ -95,8 +98,8 @@ class GIStability(unittest.TestCase):
     def test_pending_gpu_work_is_not_a_fatal_timeout(self):
         body = (ROOT / "src" / "vk_engine.cpp").read_text(encoding="utf-8")
         self.assertIn("while (result == VK_TIMEOUT)", body)
-        self.assertIn("wait_for_gpu_fence(_device, get_current_frame()._renderFence)", body)
-        self.assertIn("wait_for_gpu_fence(_device, _immFence)", body)
+        self.assertIn("wait_for_gpu_fence(_device, get_current_frame()._renderFence, _profiler)", body)
+        self.assertIn("wait_for_gpu_fence(_device, _immFence, _profiler)", body)
         self.assertIn("if (acquireResult == VK_TIMEOUT || acquireResult == VK_NOT_READY) return", body)
         self.assertIn("draw_frame_ui(wallDeltaTime)", body,
                       "FPS must report real time, not the physics clamp's 10 FPS floor")
@@ -120,8 +123,8 @@ class GIStability(unittest.TestCase):
         self.assertIn("1.0f / float(updates + 1), _surfaceCache.radiosityBlend", cache)
         self.assertNotIn("cardLastUpdate", cache)
         relight = cache.split("void VulkanEngine::light_surface_cache()")[1].split("void VulkanEngine::measure_surface_cache_coverage")[0]
-        self.assertIn("std::fill(_surfaceCache.cardUpdates.begin(), _surfaceCache.cardUpdates.end(), 0)", relight)
-        self.assertIn("_surfaceCache.radiosityRow = 0", relight)
+        self.assertIn("std::fill(pending.cardUpdates.begin(),pending.cardUpdates.end(),0)", relight)
+        self.assertIn("pending.radiosityCursor=pending.radiosityRow=0", relight)
 
 
 if __name__ == "__main__":

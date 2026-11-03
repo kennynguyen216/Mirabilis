@@ -28,12 +28,15 @@ struct SSGIPreset {
 
 // 0 full-resolution validation baseline, 1 high (half resolution, spending the
 // saved pixels on longer rays), 2 balanced, 3 performance, 4 peak.
-constexpr std::array<SSGIPreset, 5> SSGIPresets{{
+constexpr std::array<SSGIPreset, 6> SSGIPresets{{
     {false, 4, 32, 12.0f, 0.35f, 0.08f, 3, 800.0f, 32.0f, 0.92f},
     {true,  4, 48, 16.0f, 0.30f, 0.06f, 4, 700.0f, 28.0f, 0.94f},
     {true,  2, 32, 12.0f, 0.35f, 0.08f, 5, 800.0f, 32.0f, 0.92f},
     {true,  1, 16,  8.0f, 0.45f, 0.10f, 2, 900.0f, 36.0f, 0.90f},
-    {false, 8, 96, 20.0f, 0.25f, 0.05f, 5, 800.0f, 32.0f, 0.96f}}};
+    {false, 8, 96, 20.0f, 0.25f, 0.05f, 5, 800.0f, 32.0f, 0.96f},
+    // Same ray budget and reach as Peak at one quarter of the trace pixels;
+    // existing depth/normal-aware reconstruction trades fine GI detail for speed.
+    {true,  8, 96, 20.0f, 0.25f, 0.05f, 5, 800.0f, 32.0f, 0.96f}}};
 }
 
 void VulkanEngine::apply_ssgi_quality_preset(int preset)
@@ -50,7 +53,7 @@ void VulkanEngine::apply_ssgi_quality_preset(int preset)
     _ssgi.filterDepthFalloff = chosen.filterDepthFalloff;
     _ssgi.filterNormalPower = chosen.filterNormalPower;
     _ssgi.historyWeight = chosen.historyWeight;
-    // IQ4 step 0 diagnostic (docs/screen_probe_proposal.md): a longer temporal
+    // Probe diagnostic: a longer temporal
     // accumulation, which tells blotch variance from cache bias.  Unset changes
     // nothing; the temporal shader caps the weight at 0.99.
     if (const char* weight = SDL_getenv("MIRABILIS_IQ4_HISTORY_WEIGHT")) {
@@ -261,6 +264,8 @@ void VulkanEngine::init_ssgi_resources()
         "HDR/velocity");
 
     const VkExtent3D extent = _drawImage.imageExtent;
+    _sceneTargets.gbufferSpecular=create_image(extent,VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);
     _sceneTargets.gbufferAlbedo = create_image(
         extent, VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -304,7 +309,7 @@ void VulkanEngine::init_ssgi_resources()
     }
     _ssgi.temporalDiagnosticImage = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     _ssgi.filterScratchImage = create_image(
         extent, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
@@ -353,7 +358,8 @@ void VulkanEngine::init_ssgi_resources()
     // The history contents remain invalid until the first forward pass copies
     // into one side of the pair.
     immediate_submit([&](VkCommandBuffer cmd) {
-        const std::array<AllocatedImage*, 6> sampledImages{
+        const std::array<AllocatedImage*, 7> sampledImages{
+            &_sceneTargets.gbufferSpecular,
             &_sceneTargets.gbufferAlbedo,
             &_sceneTargets.gbufferVelocity,
             &_sceneTargets.directLighting,
@@ -400,6 +406,7 @@ void VulkanEngine::init_ssgi_resources()
 
     _mainDeletionQueue.push_function([this]() {
         destroy_image(_sceneTargets.gbufferAlbedo);
+        destroy_image(_sceneTargets.gbufferSpecular);
         destroy_image(_sceneTargets.gbufferVelocity);
         destroy_image(_sceneTargets.directLighting);
         destroy_image(_sceneTargets.portalMask);
@@ -495,6 +502,18 @@ void VulkanEngine::init_ssgi_pipelines()
                 VK_SHADER_STAGE_COMPUTE_BIT, lumenShader.get());
             VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1,
                 &lumenCreate, nullptr, &_ssgi.lumenPipeline));
+            const VkSpecializationMapEntry entries[]{{0,0,sizeof(uint32_t)},
+                {1,sizeof(uint32_t),sizeof(VkBool32)}};
+            struct Mode { uint32_t backend; VkBool32 dynamicField; } mode{1,VK_FALSE};
+            VkSpecializationInfo specialization{2,entries,sizeof(mode),&mode};
+            lumenCreate.stage.pSpecializationInfo=&specialization;
+            VK_CHECK(vkCreateComputePipelines(_device,VK_NULL_HANDLE,1,
+                &lumenCreate,nullptr,&_ssgi.lumenStaticPipeline));
+            if(_rayQueryShadows) {
+                mode.backend=2;
+                VK_CHECK(vkCreateComputePipelines(_device,VK_NULL_HANDLE,1,
+                    &lumenCreate,nullptr,&_ssgi.lumenHardwarePipeline));
+            }
         } else {
             fmt::print("Error loading ssgi_lumen.comp.spv; Lumen-lite fallback unavailable\n");
         }
@@ -531,6 +550,8 @@ void VulkanEngine::init_ssgi_pipelines()
         }
         _mainDeletionQueue.push_function([this]() {
             vkDestroyPipeline(_device, _ssgi.lumenPipeline, nullptr);
+            vkDestroyPipeline(_device, _ssgi.lumenStaticPipeline, nullptr);
+            vkDestroyPipeline(_device, _ssgi.lumenHardwarePipeline, nullptr);
             vkDestroyPipeline(_device, _ssgi.probePipeline, nullptr);
             vkDestroyPipeline(_device, _ssgi.probePlacePipeline, nullptr);
             vkDestroyPipeline(_device, _ssgi.probeAdaptivePipeline, nullptr);
@@ -669,6 +690,7 @@ void VulkanEngine::init_ssgi_pipelines()
 
 void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
 {
+    vkutil::transition_image(cmd,_sceneTargets.gbufferSpecular.image,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     // The forward MRT outputs become read-only inputs for both SSGI and the
     // debug views. Direct lighting is copied into a ping-pong history so the
     // march never samples an image being rendered this frame.
@@ -721,7 +743,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
         const uint32_t timingBase =
             (_frameNumber % FRAME_OVERLAP) * SSGITimestampsPerFrame;
         if (_gpuTiming.supported) {
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                 _ssgi.timestampPool, timingBase + 0);
         }
         // Orders the preceding frame's fragment reads against this
@@ -751,6 +773,11 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             get_current_frame().sceneDescriptor,
             _ssgi.descriptors[writeIndex]};
         const bool lumen = _ssgi.lumenEnabled && lumen_lite_ready();
+        if (_ssgi.reportedLumen != int(lumen)) {
+            fmt::print("GI effective mode={} requested-lumen={} SDF={}/{} cache-lit={}\n",
+                lumen?"lumen-lite":"plain-ssgi",_ssgi.lumenEnabled,_sceneSdf.placedCount,_sceneSdf.instanceCount,_surfaceCache.lightingValid);
+            _ssgi.reportedLumen=int(lumen);
+        }
         VkPipelineLayout traceLayout = _ssgi.pipelineLayout;
         if (lumen) {
             VkDescriptorSet lumenSet = get_current_frame()._frameDescriptors.allocate(
@@ -781,7 +808,6 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
             writer.update_set(_device, lumenSet);
             traceLayout = _ssgi.lumenPipelineLayout;
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.lumenPipeline);
             const std::array<VkDescriptorSet, 3> lumenSets{sets[0], sets[1], lumenSet};
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, traceLayout,
                 0, static_cast<uint32_t>(lumenSets.size()), lumenSets.data(), 0, nullptr);
@@ -832,6 +858,22 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
                 // strength, as before the motion-scaled clamp.
                 (_ssgi.fullClampControl ? 16u : 0u) |
                 (_r4Contributions.ray << 8));
+        if(SDL_getenv("MIRABILIS_GI_RANDOM_SAMPLING")) pushConstants.quality.w|=0x80000000u;
+        VkPipeline lumenTracePipeline=_ssgi.lumenPipeline;
+        static const bool genericWorld=SDL_getenv("MIRABILIS_GI_GENERIC_WORLD");
+        if(lumen && !genericWorld) {
+            if(lumen_hardware_tracing()) lumenTracePipeline=_ssgi.lumenHardwarePipeline;
+            else if(!_dynamicSdf.active) lumenTracePipeline=_ssgi.lumenStaticPipeline;
+        }
+        if(lumen && SDL_getenv("MIRABILIS_TEST_FRAMES")) {
+            static VkPipeline reported{};
+            if(reported!=lumenTracePipeline) {
+                fmt::print("GI gather pipeline={}\n",lumenTracePipeline==_ssgi.lumenHardwarePipeline ?
+                    "hardware" : lumenTracePipeline==_ssgi.lumenStaticPipeline ? "software-static" : "generic");
+                reported=lumenTracePipeline;
+            }
+        }
+        if(lumen) vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,lumenTracePipeline);
         vkCmdPushConstants(
             cmd, traceLayout, VK_SHADER_STAGE_COMPUTE_BIT,
             0, sizeof(pushConstants), &pushConstants);
@@ -851,7 +893,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.probeAdaptivePipeline);
             vkCmdDispatch(cmd, 1024u, 1, 1);
             vkutil::memory_barrier(cmd);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.lumenPipeline);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, lumenTracePipeline);
         }
         vkCmdDispatch(
             cmd,
@@ -859,7 +901,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             (ssgiExtent.height + 7u) / 8u,
             1);
         if (_gpuTiming.supported) {
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                 _ssgi.timestampPool, timingBase + 1);
         }
         vkutil::memory_barrier(cmd);
@@ -867,6 +909,10 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
         // Temporal accumulation is a separate dispatch so every invocation
         // sees the complete current-frame raw image. This makes the 3x3
         // neighborhood clamp deterministic across workgroups.
+        if(lumen && (_surfaceCache.lightingPending || uint64_t(_frameNumber)<_surfaceCache.responsiveUntil)) {
+            pushConstants.temporal.x=std::min(pushConstants.temporal.x,.65f);
+            pushConstants.quality.w=(pushConstants.quality.w & ~32u) | 16u;
+        }
         vkCmdBindPipeline(
             cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _ssgi.temporalPipeline);
         vkCmdBindDescriptorSets(
@@ -881,7 +927,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             (ssgiExtent.height + 7u) / 8u,
             1);
         if (_gpuTiming.supported) {
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                 _ssgi.timestampPool, timingBase + 2);
         }
         vkutil::memory_barrier(cmd);
@@ -924,7 +970,7 @@ void VulkanEngine::draw_ssgi(VkCommandBuffer cmd)
             vkutil::memory_barrier(cmd);
         }
         if (_gpuTiming.supported) {
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                 _ssgi.timestampPool, timingBase + 3);
         }
 
@@ -981,7 +1027,7 @@ void VulkanEngine::draw_ssgi_composite(VkCommandBuffer cmd)
         const uint32_t timingBase =
             (_frameNumber % FRAME_OVERLAP) * SSGITimestampsPerFrame;
         vkCmdWriteTimestamp2(cmd,
-            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
             _ssgi.timestampPool, timingBase + 4);
         _ssgi.timingWritten[_frameNumber % FRAME_OVERLAP] = true;
     }

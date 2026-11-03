@@ -8,13 +8,20 @@
 #include "input_structures.glsl"
 
 layout(location = 0) out vec3 outViewNormal;
+layout(location = 2) flat out float outDoubleSided;
+layout(location=3) out vec3 outViewPosition;
+layout(location=4) flat out float outStaticCacheMember;
 layout(location = 1) out vec2 outUV;
 
 #include "vertex.glsl"
+#include "draw_instance.glsl"
 
 layout(push_constant) uniform constants {
     mat4 render_matrix;
     VertexBuffer vertexBuffer;
+    DrawInstances instances;
+    layout(offset=80) vec4 flags;
+
 } PushConstants;
 
 void main()
@@ -25,9 +32,14 @@ void main()
 
     // Identical to depth_normal.vert, so the silhouettes the two pipelines
     // produce line up to the pixel where they meet.
-    mat3 normalMatrix = transpose(inverse(mat3(PushConstants.render_matrix)));
-    vec3 worldNormal = normalize(normalMatrix * vertex.normal);
+    bool instanced=any(notEqual(uvec2(PushConstants.instances),uvec2(0)));
+    DrawInstance instance;
+    if(instanced)instance=PushConstants.instances.values[0];
+    vec3 worldNormal=instanced?instance_normal(instance,vertex.normal):normalize(transpose(inverse(mat3(PushConstants.render_matrix)))*vertex.normal);
     outViewNormal = mat3(sceneData.view) * worldNormal;
+    outViewPosition=(sceneData.view*worldPosition).xyz;
+    outDoubleSided=PushConstants.flags.x;
+    outStaticCacheMember=instanced ? 1.0-instance.flags.z : 1.0;
 
     vec2 uv = vec2(vertex.uv_x, vertex.uv_y);
     vec2 scale = materialData.uvTransform.xy;

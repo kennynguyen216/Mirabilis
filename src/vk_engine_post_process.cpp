@@ -77,11 +77,15 @@ void VulkanEngine::init_post_process_descriptors()
         builder.add_binding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         _singleImageDescriptorLayout = builder.build(_device, VK_SHADER_STAGE_FRAGMENT_BIT);
 
+        DescriptorLayoutBuilder tonemap;
+        for(uint32_t binding=0;binding<4;++binding)tonemap.add_binding(binding,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        _postProcess.tonemapLayout=tonemap.build(_device,VK_SHADER_STAGE_FRAGMENT_BIT);
+        init_bloom();
         // Both post-process passes want exactly that shape: one sampled
         // colour image.  Every image involved outlives every frame, so these
         // sets are written once here rather than rebuilt per frame.
         _postProcess.tonemapInputDescriptor = globalDescriptorAllocator.allocate(
-            _device, _singleImageDescriptorLayout);
+            _device, _postProcess.tonemapLayout);
 
         DescriptorWriter tonemapWriter;
         tonemapWriter.write_image(
@@ -90,7 +94,11 @@ void VulkanEngine::init_post_process_descriptors()
             _postProcess.sampler,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        tonemapWriter.write_image(1,_postProcess.bloomUp[0].imageView,_postProcess.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        tonemapWriter.write_image(2,_prepass.normalImage.imageView,_prepass.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        tonemapWriter.write_image(3,_sceneTargets.gbufferAlbedo.imageView,_postProcess.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         tonemapWriter.update_set(_device, _postProcess.tonemapInputDescriptor);
+        _mainDeletionQueue.push_function([this]{vkDestroyDescriptorSetLayout(_device,_postProcess.tonemapLayout,nullptr);});
 
         // Anti-aliasing reads the tonemap's output, not the draw image.  Its
         // edge search compares lumas against fixed thresholds, which only
@@ -135,6 +143,12 @@ void VulkanEngine::init_post_process_resources()
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
 
+    _postProcess.sceneCopy=create_image({std::max(_drawImage.imageExtent.width,_portalCameras.extent.width),
+        std::max(_drawImage.imageExtent.height,_portalCameras.extent.height),1},_drawImage.imageFormat,
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);
+    immediate_submit([this](VkCommandBuffer cmd){
+        vkutil::transition_image(cmd,_postProcess.sceneCopy.image,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
     // Linear, unlike the prepass sampler: the whole point of the final tap is
     // to land between two texels and let the hardware mix them.  Clamped
     // because a filter kernel always reaches past the image at its border.
@@ -146,6 +160,7 @@ void VulkanEngine::init_post_process_resources()
         vkDestroySampler(_device, _postProcess.sampler, nullptr);
         destroy_image(_postProcess.tonemapImage);
         destroy_image(_postProcess.image);
+        destroy_image(_postProcess.sceneCopy);
     });
 }
 
@@ -168,7 +183,7 @@ void VulkanEngine::init_tonemap_pipeline()
         .size = sizeof(TonemapPushConstants)};
     VkPipelineLayoutCreateInfo layoutInfo = vkinit::pipeline_layout_create_info();
     layoutInfo.setLayoutCount = 1;
-    layoutInfo.pSetLayouts = &_singleImageDescriptorLayout;
+    layoutInfo.pSetLayouts = &_postProcess.tonemapLayout;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &settingsRange;
     VK_CHECK(vkCreatePipelineLayout(
@@ -310,6 +325,7 @@ void VulkanEngine::init_auto_exposure()
 
 void VulkanEngine::record_auto_exposure(VkCommandBuffer cmd)
 {
+    GpuPassScope gpu(*this,cmd,GpuPass::Exposure);
     // Called with the draw image already readable.  This slot's histogram is
     // cleared, filled and copied out for update_auto_exposure() to read once
     // the slot's fence has passed.
@@ -371,6 +387,7 @@ void VulkanEngine::update_auto_exposure(float deltaTime)
             VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
         _autoExposure.gpuMilliseconds =
             float(ticks[1] - ticks[0]) * _gpuTiming.timestampPeriod * 1e-6f;
+        _profiler.counter(mirabilis::ProfileCounter::GpuExposure, _autoExposure.gpuMilliseconds);
     }
     if (!_autoExposure.enabled) {
         return;
@@ -413,6 +430,8 @@ void VulkanEngine::draw_tonemap(VkCommandBuffer cmd)
         record_auto_exposure(cmd);
     }
 
+    if(_postProcess.bloomEnabled)draw_bloom(cmd);
+    GpuPassScope gpu(*this,cmd,GpuPass::Tonemap);
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(
         _postProcess.tonemapImage.imageView,
         nullptr,
@@ -439,6 +458,9 @@ void VulkanEngine::draw_tonemap(VkCommandBuffer cmd)
         nullptr);
 
     TonemapPushConstants pushConstants{};
+    pushConstants.bloom.x=_postProcess.bloomEnabled?_postProcess.bloomStrength:0.f;
+    pushConstants.cel=glm::vec4(_postProcess.celShading?1.f:0.f,_postProcess.celBands,_postProcess.celEdge,1);
+    pushConstants.extent=glm::vec4(_drawExtent.width,_drawExtent.height,_drawImage.imageExtent.width,_drawImage.imageExtent.height);
     // ponytail: artist RGB balance, use chromatic adaptation if Kelvin-based
     // camera calibration becomes a requirement. Neutral controls are identity.
     const glm::vec2 balance = _postProcess.whiteBalance;
@@ -446,7 +468,7 @@ void VulkanEngine::draw_tonemap(VkCommandBuffer cmd)
     pushConstants.whiteBalanceGain = glm::vec4(gain / glm::dot(gain, glm::vec3(.2126f, .7152f, .0722f)), 0);
     pushConstants.settings = glm::vec4(
         _postProcess.tonemapExposure,
-        _postProcess.tonemapOperator == 1 ? 1.0f : 0.0f,
+        float(_postProcess.tonemapOperator),
         _postProcess.tonemapBypassCurve ? 1.0f : 0.0f,
         0.0f);
     vkCmdPushConstants(

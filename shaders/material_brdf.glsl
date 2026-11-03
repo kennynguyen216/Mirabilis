@@ -10,6 +10,7 @@
 // Include after input_structures.glsl.
 
 #include "environment.glsl"
+#include "reflection_settings.glsl"
 
 const float MaterialPi = 3.14159265359;
 // Roughness 0.045 squares to alpha 0.002025, the path tracer's floor.
@@ -24,6 +25,7 @@ struct MaterialSurface {
     vec3 normal;
     vec3 view;
     float noV;
+    vec3 f0;
 };
 
 bool material_specular_enabled()
@@ -78,6 +80,9 @@ vec3 material_shading_normal(vec3 geometricNormal, vec4 tangent, vec2 uv)
 {
     // Sampled unconditionally, like the metallic/roughness texture.
     vec3 texel = texture(normalTex, uv).xyz * 2.0 - 1.0;
+    if (materialData.alphaMask.y > 0.5) {
+        texel.z = sqrt(max(1.0 - dot(texel.xy, texel.xy), 0.0));
+    }
     if (abs(tangent.w) < 0.001 || sceneData.materialSettings.x < 0.5) {
         return geometricNormal;
     }
@@ -105,7 +110,11 @@ MaterialSurface material_surface(
 {
     MaterialSurface surface;
     surface.baseColor = baseColor;
+    float specular=clamp(materialData.surfaceFactors.y*texture(specularTex,uv).a,0.0,1.0);
     material_factors(uv, surface.metallic, surface.roughness);
+    float ior=max(materialData.transmissionFactors.x,1.0);
+    float dielectricF0=pow((ior-1.0)/(ior+1.0),2.0)*2.0*specular;
+    surface.f0=mix(vec3(dielectricF0),baseColor,surface.metallic);
     surface.roughness = material_antialiased_roughness(
         surface.roughness, geometricNormal);
     surface.normal = normal;
@@ -150,13 +159,23 @@ void material_direct_light(
     diffuse = vec3(0.0);
     specular = vec3(0.0);
     float noL = dot(surface.normal, lightDirection);
+    // Artist-controlled thin-surface approximation; zero preserves the PBR response.
+    vec3 subsurface=vec3(0);
+    if(materialData.surfaceFactors.z>0.0) {
+    float wrapped=clamp((noL+0.5)/1.5,0.0,1.0);
+    vec3 distorted=lightDirection+surface.normal*0.4;
+    float through=pow(clamp(dot(surface.view,-normalize(distorted)),0.0,1.0),4.0);
+    subsurface=materialData.subsurfaceColor.rgb*light*materialData.surfaceFactors.z*
+        (max(wrapped-max(noL,0.0),0.0)+through)*(1.0-surface.metallic);
+    }
+    diffuse=subsurface;
     if (noL <= 0.0) {
         return;
     }
     vec3 sun = MaterialPi * light * noL;
     if (!material_specular_enabled()) {
         // Lambert alone: exactly the term this model replaced.
-        diffuse = surface.baseColor / MaterialPi * sun;
+        diffuse += surface.baseColor / MaterialPi * sun;
         return;
     }
 
@@ -168,14 +187,26 @@ void material_direct_light(
     float noH = max(dot(surface.normal, halfVector), 0.0);
     float alpha = max(surface.roughness * surface.roughness, MaterialMinimumAlpha);
     vec3 fresnel = material_fresnel_schlick(
-        mix(vec3(0.04), surface.baseColor, surface.metallic), voH);
-    diffuse = (1.0 - fresnel) * (1.0 - surface.metallic) *
+        surface.f0, voH);
+    diffuse += (1.0 - fresnel) * (1.0 - surface.metallic) *
         surface.baseColor / MaterialPi * sun;
     float distribution = material_ggx_d(noH, alpha) *
         material_smith_g1(surface.noV, alpha) *
         material_smith_g1(noL, alpha);
     specular = fresnel * distribution /
         max(4.0 * surface.noV * noL, 1e-4) * sun;
+}
+
+// Skip shadow queries only when both sun BRDF lobes are identically zero.
+// Thin subsurface and the visibility diagnostic still need the shadow test.
+float material_sun_visibility(MaterialSurface surface, vec3 position, vec3 geometricNormal)
+{
+    vec3 direction=normalize(sceneData.sunlightDirection.xyz);
+    bool diagnostic=sceneData.emitterSettings.w>0.5 && uint(sceneData.materialDebug.y+0.5)==1u &&
+        dot(geometricNormal,direction)>0.0;
+    bool contributes=sceneData.screenSpaceSettings.y<0.5 && any(greaterThan(sceneData.sunlightColor.rgb,vec3(0))) &&
+        (dot(surface.normal,direction)>0.0 || materialData.surfaceFactors.z>0.0);
+    return contributes || diagnostic ? sunlight_visibility(position,geometricNormal) : 1.0;
 }
 
 // Direct sunlight.  visibility is the shadow-map result.
@@ -224,7 +255,7 @@ void material_ambient(
     }
     diffuse = irradiance * surface.baseColor * (1.0 - surface.metallic);
     specular = irradiance * material_environment_brdf(
-        mix(vec3(0.04), surface.baseColor, surface.metallic),
+        surface.f0,
         surface.roughness,
         surface.noV);
 }
@@ -296,7 +327,7 @@ void material_ambient_ibl(
     diffuse = diffuseLight * surface.baseColor * (1.0 - surface.metallic);
     vec3 reflected = reflect(-surface.view, surface.normal);
     vec2 scaleBias = texture(brdfLut, vec2(surface.noV, surface.roughness)).rg;
-    vec3 f0 = mix(vec3(0.04), surface.baseColor, surface.metallic);
+    vec3 f0 = surface.f0;
     specular = material_ibl_specular_light(reflected, surface.roughness) *
         (f0 * scaleBias.x + scaleBias.y) * occlusion;
 }
@@ -324,13 +355,14 @@ void material_emitters(
     vec3 worldPosition,
     vec3 geometricNormal,
     vec2 pixel,
+    bool staticCacheMember,
     out vec3 diffuse,
     out vec3 specular)
 {
     diffuse = vec3(0.0);
     specular = vec3(0.0);
     uint count = uint(sceneData.emitterSettings.x + 0.5);
-    if (count == 0u || sceneData.screenSpaceSettings.y > 0.5) {
+    if (!staticCacheMember || count == 0u || sceneData.screenSpaceSettings.y > 0.5) {
         return;
     }
     SurfaceCacheSample cached = surface_cache_lookup(worldPosition, geometricNormal);
@@ -343,9 +375,13 @@ void material_emitters(
         return;
     }
     diffuse = material_diffuse_albedo(surface) * cached.direct;
-    if (!material_specular_enabled()) {
+    if (!material_specular_enabled() || cached.directAlpha <= 0.0) {
         return;
     }
+#ifndef MIRABILIS_COLOR_ONLY
+    // Scene reflections replace this specular term in both main and portal views.
+    if (reflection_roughness_owned(surface.roughness)) return;
+#endif
     uint samples = max(uint(sceneData.emitterSettings.z + 0.5), 1u);
     vec3 rotation = emitter_rotation(uint(pixel.x) * 1973u ^ uint(pixel.y) * 9277u ^
         uint(sceneData.emitterSettings.y + 0.5) * 26699u);
@@ -354,6 +390,7 @@ void material_emitters(
         vec3 target;
         vec3 light = emitter_sample(worldPosition, geometricNormal, count,
             emitter_stratum(i, samples, rotation), 0.0, direction, target);
+        if (!any(greaterThan(light, vec3(0.0)))) continue;
         vec3 sampleDiffuse;
         vec3 sampleSpecular;
         material_direct_light(surface, direction, light, sampleDiffuse, sampleSpecular);

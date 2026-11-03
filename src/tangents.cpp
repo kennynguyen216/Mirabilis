@@ -17,11 +17,12 @@ bool finite(const glm::vec3& value)
 } // namespace
 
 void generate_tangents(
-    std::span<Vertex> vertices, std::span<const uint32_t> indices)
+    std::span<Vertex> vertices, std::span<const uint32_t> indices,
+    std::pmr::memory_resource* scratch)
 {
-    std::vector<glm::vec3> tangents(vertices.size(), glm::vec3(0.0f));
-    std::vector<glm::vec3> bitangents(vertices.size(), glm::vec3(0.0f));
-    std::vector<bool> referenced(vertices.size(), false);
+    std::pmr::vector<glm::vec3> tangents(vertices.size(), glm::vec3(0.0f), scratch);
+    std::pmr::vector<glm::vec3> bitangents(vertices.size(), glm::vec3(0.0f), scratch);
+    std::pmr::vector<bool> referenced(vertices.size(), false, scratch);
 
     for (size_t i = 0; i + 2 < indices.size(); i += 3) {
         const uint32_t a = indices[i];

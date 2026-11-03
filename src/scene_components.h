@@ -44,6 +44,20 @@ struct Script {
     std::map<std::string, ScriptField> fields;
     bool operator==(const Script&) const = default;
 };
+enum class LightType : uint8_t { Point, Spot };
+struct Light {
+    LightType type{LightType::Point};
+    glm::vec3 color{1};
+    float intensity{20}, range{10};
+    // Radians; the transform's local -Z is the spot direction.
+    float innerCone{0.35f}, outerCone{0.6f};
+    bool enabled{true}, castShadows{true};
+    // Zero-power imported lights remain authored data, but consume no shading/shadow budget.
+    bool emits_light() const {
+        return enabled && intensity>0 && (color.r>0 || color.g>0 || color.b>0);
+    }
+};
+bool valid_component(const Light&);
 struct PortalPlaceable {};
 struct TimeTrial { TimeTrialRole role{TimeTrialRole::None}; };
 struct TransformDrivenExternally {};
@@ -78,6 +92,7 @@ struct EntityState {
     UnknownComponents unknown;
     std::optional<RigidBody> rigidBody;
     std::optional<Script> script;
+    std::optional<Light> light;
 };
 struct SceneSnapshot {
     std::vector<EntityState> entities;

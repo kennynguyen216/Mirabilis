@@ -5,6 +5,7 @@
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_vulkan.h"
+#include <limits>
 
 void VulkanEngine::init_imgui()
 {
@@ -105,5 +106,81 @@ void VulkanEngine::draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView)
 	vkCmdBeginRendering(cmd, &renderInfo);
 	ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
 	vkCmdEndRendering(cmd);
+}
+
+void VulkanEngine::draw_profiling_panel()
+{
+    if (!ImGui::Begin("Profiler")) { ImGui::End(); return; }
+    bool enabled = _profiler.enabled();
+    if (ImGui::Checkbox("Enable CPU profiling", &enabled)) _profiler.set_enabled(enabled);
+    if (ImGui::Button("Start trace")) { _profiler.start_capture(); _profileExportStatus.clear(); }
+    ImGui::SameLine();
+    if (ImGui::Button("Stop trace")) _profiler.stop_capture();
+    ImGui::SameLine();
+    if (ImGui::Button("Save trace")) {
+        _profiler.stop_capture();
+        const auto path = _profileTraceOutput.empty() ? std::filesystem::path("mirabilis-profile.json") : _profileTraceOutput;
+        _profileExportStatus = (_profiler.save_trace(path) ? "Saved: " : "Could not write: ") + path.string();
+    }
+    const auto trace = _profiler.trace_status();
+    ImGui::Text("Trace: %s, %zu / %zu events, %llu dropped",
+        trace.capturing ? "recording" : "stopped", trace.events, mirabilis::Profiler::MaxTraceEvents,
+        static_cast<unsigned long long>(trace.dropped));
+    if (!_profileExportStatus.empty()) ImGui::TextWrapped("%s", _profileExportStatus.c_str());
+    if (enabled) {
+        const auto& frame = _profiler.latest();
+        ImGui::Text("Completed host frame %llu; start-to-start %.3f ms",
+            static_cast<unsigned long long>(frame.frame), frame.wallMilliseconds);
+        ImGui::PlotLines("Host frame ms", _profiler.frame_history(), _profiler.history_size(),
+            _profiler.history_offset(), nullptr, 0.0f, std::numeric_limits<float>::max(), ImVec2(0, 65));
+        ImGui::TextWrapped("CPU timings are inclusive. Frame and render include waits; GPU samples below arrive after completion.");
+        if (ImGui::BeginTable("CPU scopes", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
+            ImGui::TableSetupColumn("Operation"); ImGui::TableSetupColumn("ms"); ImGui::TableSetupColumn("Calls");
+            ImGui::TableHeadersRow();
+            for (size_t i = 0; i < frame.zones.size(); ++i) {
+                const auto& sample = frame.zones[i];
+                if (!sample.calls) continue;
+                ImGui::TableNextRow(); ImGui::TableNextColumn();
+                ImGui::TextUnformatted(mirabilis::zone_name(static_cast<mirabilis::CpuZone>(i)));
+                ImGui::TableNextColumn(); ImGui::Text("%.3f", sample.milliseconds);
+                ImGui::TableNextColumn(); ImGui::Text("%llu", static_cast<unsigned long long>(sample.calls));
+            }
+            ImGui::EndTable();
+        }
+    }
+    ImGui::Separator();
+    if (stats.gpu_frame_valid && ImGui::CollapsingHeader("GPU passes (completed submission)")) {
+        ImGui::Text("Submitted frame %llu",static_cast<unsigned long long>(stats.gpu_timing_frame));
+        for (size_t i=0;i<GpuPassCount;++i) ImGui::Text("%s: %.3f ms",GpuPassNames[i],stats.gpu_pass_ms[i]);
+        ImGui::TextUnformatted("Frame includes the child passes; do not add it to their sum.");
+        ImGui::Text("Device-local heap: %.1f / %.1f MiB (%s)",double(stats.gpu_heap_usage)/1048576,
+            double(stats.gpu_heap_budget)/1048576,_gpuTiming.memoryBudgetSupported?"driver budget":"VMA estimate");
+    }
+    if (stats.ssao_time_is_gpu) ImGui::Text("Completed GPU AO: %.3f ms", stats.ssao_total_time);
+    if (stats.ssgi_time_is_gpu) ImGui::Text("Completed GPU GI: %.3f ms", stats.ssgi_total_time);
+    if (_autoExposure.enabled) ImGui::Text("Completed GPU exposure: %.3f ms", _autoExposure.gpuMilliseconds);
+    if (_rendererMode == RendererMode::SoftwarePathTrace) ImGui::Text("Completed GPU trace: %.3f ms", _traceRuntime.gpuMs);
+    ImGui::Text("Draw-index scratch: %zu bytes, %llu growths",
+        _opaqueDrawScratch.capacity() * sizeof(uint32_t), static_cast<unsigned long long>(stats.draw_index_buffer_grows));
+    if (_tasks) {
+        const auto tasks = _tasks->statistics();
+        ImGui::Text("Tasks: %zu workers, %zu fibers (%s)", tasks.workers, tasks.fibers,
+            tasks.backend == mirabilis::FiberBackend::Assembly ? "x64 assembly" : "Windows fibers");
+        ImGui::Text("Queued %zu, running %zu, parked %zu, completed %zu", tasks.queued, tasks.running, tasks.parked, tasks.completed);
+        ImGui::Text("Pool-exhaustion fallbacks %zu, cancelled %zu", tasks.inlineFallbacks, tasks.cancelled);
+        ImGui::Text("Task scratch: %.2f MiB committed, %.2f MiB peak; small pools %.2f MiB",
+            double(tasks.scratchCommitted) / 1048576, double(tasks.scratchPeak) / 1048576, double(tasks.poolCommitted) / 1048576);
+    }
+    if (ImGui::Button("Sample GPU allocations")) {
+        VmaTotalStatistics memory{};
+        vmaCalculateStatistics(_allocator, &memory);
+        stats.gpu_allocation_bytes = memory.total.statistics.allocationBytes;
+        stats.gpu_block_bytes = memory.total.statistics.blockBytes;
+        stats.gpu_allocation_count = memory.total.statistics.allocationCount;
+        stats.gpu_memory_sampled = true;
+    }
+    if (stats.gpu_memory_sampled) ImGui::Text("Last sample: %.2f MiB allocated, %.2f MiB in blocks, %u allocations",
+        double(stats.gpu_allocation_bytes) / (1024 * 1024), double(stats.gpu_block_bytes) / (1024 * 1024), stats.gpu_allocation_count);
+    ImGui::End();
 }
 

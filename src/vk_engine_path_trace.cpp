@@ -140,6 +140,7 @@ void VulkanEngine::draw_path_trace(VkCommandBuffer cmd) {
             if(vkGetQueryPoolResults(_device,_traceRuntime.timestampPool,slot*2,2,sizeof(ticks),ticks,sizeof(uint64_t),VK_QUERY_RESULT_64_BIT)==VK_SUCCESS) {
                 VkPhysicalDeviceProperties properties{}; vkGetPhysicalDeviceProperties(_chosenGPU,&properties);
                 _traceRuntime.gpuMs=float(ticks[1]-ticks[0])*properties.limits.timestampPeriod/1e6f;
+                _profiler.counter(mirabilis::ProfileCounter::GpuTrace, _traceRuntime.gpuMs);
                 _traceRuntime.maxGpuMs=std::max(_traceRuntime.maxGpuMs,_traceRuntime.gpuMs);
             }
         }
@@ -190,7 +191,7 @@ void VulkanEngine::draw_path_trace_ui() {
         ImGui::SliderFloat("Exposure (EV)",&_traceSettings.exposure,-6,6);
         if(ImGui::Button("Reset accumulation")) _traceRuntime.wasActive=false;
         ImGui::Text("Samples %u | GPU %.2f ms (max %.2f)",_traceRuntime.samples,_traceRuntime.gpuMs,_traceRuntime.maxGpuMs);
-        ImGui::Text("Triangles %zu | BVH nodes %zu | revision %llu",_traceTriangles.size(),_traceNodes.size(),_traceSceneRevision);
+        ImGui::Text("CPU triangles %zu | references %zu | BVH nodes %zu | revision %llu",_traceTriangles.size(),_traceTriangleRefs.size(),_traceNodes.size(),_traceSceneRevision);
         ImGui::SliderInt("Portal traversals per path",&_traceSettings.portalLimit,0,4);
         ImGui::Text("Portal apertures %zu (same scene)",_tracePortals.size());
         ImGui::TextWrapped("Portal limit terminates the path in black. Unlinked apertures are marked as invalid.");
@@ -391,6 +392,25 @@ void VulkanEngine::validate_path_trace() {
     }
 }
 
+TraceTriangle VulkanEngine::make_trace_triangle(const TraceCpuDraw& draw,uint32_t first,bool normals) {
+    const auto& source=*draw.source;
+    const auto& v0=source.vertices[source.indices[first]];
+    const auto& v1=source.vertices[source.indices[first+1]];
+    const auto& v2=source.vertices[source.indices[first+2]];
+    TraceTriangle t{};
+    t.p0=draw.transform*glm::vec4(v0.position,1);t.p1=draw.transform*glm::vec4(v1.position,1);t.p2=draw.transform*glm::vec4(v2.position,1);
+    const auto geometric=glm::cross(glm::vec3(t.p1-t.p0),glm::vec3(t.p2-t.p0));
+    if(!std::isfinite(glm::dot(geometric,geometric)) || glm::dot(geometric,geometric)<1e-16f)return t;
+    const auto normal=[&](glm::vec3 n) {
+        if(!normals)return glm::vec3(0);
+        n=draw.normalMatrix*n;return glm::dot(n,n)>1e-16f?glm::normalize(n):glm::normalize(geometric);
+    };
+    t.n0=glm::vec4(normal(v0.normal),v0.uv_x);t.n1=glm::vec4(normal(v1.normal),v0.uv_y);t.n2=glm::vec4(normal(v2.normal),0);
+    t.uv12=glm::vec4(v1.uv_x,v1.uv_y,v2.uv_x,v2.uv_y);t.meta.x=draw.material;
+    t.c0=v0.color;t.c1=v1.color;t.c2=v2.color;
+    return t;
+}
+
 void VulkanEngine::update_trace_scene() {
     std::vector<TracePortal> portals;
     auto addPortal=[&](const Portal& source,const Portal* destination) {
@@ -429,7 +449,12 @@ void VulkanEngine::update_trace_scene() {
     // albedo volume and relit the whole surface cache.  It is rewritten on its
     // own, and draw_path_trace's hash restarts accumulation when it changes.
     _traceSettings.lighting.sunDirection=glm::vec4(glm::normalize(glm::dot(_shadow.sunlightDirection,_shadow.sunlightDirection)>1e-10f?_shadow.sunlightDirection:glm::vec3(0,1,0)),0);
+    _traceSettings.lighting.punctual.count.x = uint32_t(sceneData.graphicsSettings.x);
+    for (uint32_t i=0;i<_traceSettings.lighting.punctual.count.x;++i)
+        _traceSettings.lighting.punctual.lights[i] = {sceneData.localLightPosition[i],
+            sceneData.localLightColor[i],sceneData.localLightDirection[i],sceneData.localLightCone[i]};
     auto uploadLighting=[&] {
+        if (_rendererMode != RendererMode::SoftwarePathTrace) return;
         if(std::memcmp(_traceLightBuffer.info.pMappedData,&_traceSettings.lighting,sizeof(TraceLighting))==0) return;
         VK_CHECK(vkDeviceWaitIdle(_device)); // A path trace in flight may still read it.
         std::memcpy(_traceLightBuffer.info.pMappedData,&_traceSettings.lighting,sizeof(TraceLighting));
@@ -437,16 +462,26 @@ void VulkanEngine::update_trace_scene() {
     };
     // Raster GI shares the static-cache policy; the reference renderer keeps moving geometry.
     const bool includeAwakeDynamics = _rendererMode == RendererMode::SoftwarePathTrace;
+    const bool fullGpuTrace=includeAwakeDynamics || SDL_getenv("MIRABILIS_TEST_FULL_TRACE_UPLOAD");
+    const bool validateCpu=SDL_getenv("MIRABILIS_TEST_FRAMES") && !SDL_getenv("MIRABILIS_BENCHMARK_SKIP_CPU_BVH_VALIDATION");
+    const bool fullCpuTrace=fullGpuTrace || validateCpu || _surfaceCache.measureShadows || _surfaceCache.measureEmitterVisibility ||
+        SDL_getenv("MIRABILIS_R4_CACHE_SUN_CHECK") || SDL_getenv("MIRABILIS_R4_SKY_VISIBILITY_CHECK") ||
+        SDL_getenv("MIRABILIS_R4_SOURCE_IMPORTANCE_CSV") || _r4Contributions.sunVisibilityCheck;
     const auto included = [includeAwakeDynamics](const RenderObject& draw) {
         return includeAwakeDynamics || draw.contributesToStaticCaches;
     };
     uint64_t drawHash=1469598103934665603ull;
     auto append=[&](const void* data,size_t bytes) {auto p=static_cast<const uint8_t*>(data);for(size_t i=0;i<bytes;++i) {drawHash^=p[i];drawHash*=1099511628211ull;}};
     append(&includeAwakeDynamics, sizeof(includeAwakeDynamics));
+    append(&fullGpuTrace, sizeof(fullGpuTrace));
+    append(&fullCpuTrace, sizeof(fullCpuTrace));
     for(const auto& draw:worldDrawContext.OpaqueSurfaces) {
         if (!included(draw)) continue;
         append(&draw.transform,sizeof(draw.transform)); append(&draw.vertexBufferAddress,sizeof(draw.vertexBufferAddress));
         append(&draw.firstIndex,sizeof(draw.firstIndex)); append(&draw.indexCount,sizeof(draw.indexCount));
+        const auto source=_traceMeshSources.find(draw.vertexBufferAddress);
+        const auto owner=source==_traceMeshSources.end()?nullptr:source->second.lock();
+        const auto* identity=owner.get();append(&identity,sizeof(identity));
         if(draw.material) {
             append(&draw.material->traceBaseColor,3*sizeof(glm::vec4));
             append(&draw.material->traceUVScale,sizeof(glm::vec2));
@@ -457,8 +492,11 @@ void VulkanEngine::update_trace_scene() {
     const auto rebuildStarted = std::chrono::steady_clock::now();
     _traceDrawHash=drawHash;
     std::vector<TraceTriangle> triangles;
+    std::vector<TraceCpuDraw> cpuDraws;
+    std::vector<TraceTriangleRef> refs;
     std::vector<TraceMaterial> materials;
     std::vector<uint32_t> texels;
+    std::vector<std::shared_ptr<TraceTextureSource>> cpuTextures;
     std::unordered_map<const TraceTextureSource*,glm::uvec4> textures;
     std::unordered_map<const MaterialInstance*,uint32_t> materialIds;
     // Reserve once: growing the ~630 MiB Sponza triangle vector otherwise
@@ -474,14 +512,14 @@ void VulkanEngine::update_trace_scene() {
         triangleCapacity += (end - first) / 3;
         if (auto texture = draw.material->traceTexture;
             texture && textures.emplace(texture.get(), glm::uvec4(0)).second) {
-            texelCapacity += texture->rgba.size();
+            if (fullGpuTrace) texelCapacity += texture->rgba.size();
         }
     }
     textures.clear();
     fmt::print("GI scene packing: {} triangles, {} texture texels ({:.1f} MiB)\n",
         triangleCapacity, texelCapacity,
-        double(triangleCapacity * sizeof(TraceTriangle) + texelCapacity * sizeof(uint32_t)) / (1024.0 * 1024.0));
-    triangles.reserve(triangleCapacity);
+        double(triangleCapacity * (fullCpuTrace?sizeof(TraceTriangle):sizeof(TraceTriangleRef)) + texelCapacity * sizeof(uint32_t)) / (1024.0 * 1024.0));
+    if(fullCpuTrace)triangles.reserve(triangleCapacity);else refs.reserve(triangleCapacity);
     texels.reserve(texelCapacity);
     for (const auto& draw : worldDrawContext.OpaqueSurfaces) {
         if (!included(draw)) continue;
@@ -491,62 +529,89 @@ void VulkanEngine::update_trace_scene() {
         auto [entry,inserted]=materialIds.emplace(draw.material,uint32_t(materials.size()));
         if (inserted) {
             materials.push_back({draw.material->traceBaseColor,draw.material->traceEmission,draw.material->traceParameters});
+            cpuTextures.push_back(fullGpuTrace ? nullptr : draw.material->traceTexture);
             materials.back().uvScale=glm::vec4(draw.material->traceUVScale,0,0);
             if(auto texture=draw.material->traceTexture) {
                 auto [record,isNew]=textures.emplace(texture.get(),glm::uvec4(uint32_t(texels.size()),texture->width,texture->height,0));
-                if(isNew) texels.insert(texels.end(),texture->rgba.begin(),texture->rgba.end());
+                if(isNew && fullGpuTrace) texels.insert(texels.end(),texture->rgba.begin(),texture->rgba.end());
                 materials.back().texture=record->second;
             }
         }
         const glm::mat3 linear(draw.transform);
         if (std::abs(glm::determinant(linear))<1e-12f) continue;
-        const glm::mat3 normalMatrix=glm::transpose(glm::inverse(linear));
+        const uint32_t drawIndex=uint32_t(cpuDraws.size());
+        cpuDraws.push_back({source,draw.transform,glm::transpose(glm::inverse(linear)),entry->second});
         const size_t end=std::min(source->indices.size(),size_t(draw.firstIndex)+draw.indexCount);
         for (size_t i=draw.firstIndex;i+2<end;i+=3) {
-            uint32_t a=source->indices[i],b=source->indices[i+1],c=source->indices[i+2];
-            if (std::max({a,b,c})>=source->vertices.size()) continue;
-            const auto& v0=source->vertices[a]; const auto& v1=source->vertices[b]; const auto& v2=source->vertices[c];
-            TraceTriangle t{};
-            t.p0=draw.transform*glm::vec4(v0.position,1); t.p1=draw.transform*glm::vec4(v1.position,1); t.p2=draw.transform*glm::vec4(v2.position,1);
+            if(std::max({source->indices[i],source->indices[i+1],source->indices[i+2]})>=source->vertices.size())continue;
+            TraceTriangle t=make_trace_triangle(cpuDraws.back(),uint32_t(i),fullCpuTrace);
             auto geometric=glm::cross(glm::vec3(t.p1-t.p0),glm::vec3(t.p2-t.p0));
-            if (!std::isfinite(glm::dot(geometric,geometric))||glm::dot(geometric,geometric)<1e-16f) continue;
-            const auto normal=[&](glm::vec3 n) { n=normalMatrix*n; return glm::dot(n,n)>1e-16f?glm::normalize(n):glm::normalize(geometric); };
-            t.n0=glm::vec4(normal(v0.normal),v0.uv_x); t.n1=glm::vec4(normal(v1.normal),v0.uv_y); t.n2=glm::vec4(normal(v2.normal),0);
-            t.uv12=glm::vec4(v1.uv_x,v1.uv_y,v2.uv_x,v2.uv_y); t.meta.x=entry->second;
-            t.c0=v0.color; t.c1=v1.color; t.c2=v2.color;
-            triangles.push_back(t);
+            if(!std::isfinite(glm::dot(geometric,geometric)) || glm::dot(geometric,geometric)<1e-16f)continue;
+            if(fullCpuTrace)triangles.push_back(t);
+            else refs.push_back({glm::vec3(t.p0+t.p1+t.p2)/3.f,drawIndex,uint32_t(i)});
         }
     }
+    if(!fullCpuTrace) {
+        order_trace_triangle_refs(refs);
+        for(const auto& ref:refs) if(glm::length(glm::vec3(materials[cpuDraws[ref.draw].material].emission))>0)
+            triangles.push_back(make_trace_triangle(cpuDraws[ref.draw],ref.first));
+    }
+
     uint64_t hash=1469598103934665603ull;
     const auto hashBytes=[&](const void* data,size_t size) { auto p=static_cast<const unsigned char*>(data); for(size_t i=0;i<size;++i) { hash^=p[i]; hash*=1099511628211ull; } };
     hashBytes(&includeAwakeDynamics, sizeof(includeAwakeDynamics));
+    hashBytes(&fullGpuTrace, sizeof(fullGpuTrace));
+    hashBytes(&fullCpuTrace, sizeof(fullCpuTrace));
+    if(!fullCpuTrace)hashBytes(&drawHash,sizeof(drawHash));
     hashBytes(triangles.data(),triangles.size()*sizeof(TraceTriangle)); hashBytes(materials.data(),materials.size()*sizeof(TraceMaterial));
     hashBytes(texels.data(),texels.size()*sizeof(uint32_t));
+    if (!fullGpuTrace) for (const auto& source:cpuTextures) {
+        const auto* identity=source.get(); hashBytes(&identity,sizeof(identity));
+    }
     if (_traceTriangleBuffer.buffer && hash==_traceSceneHash) {uploadPortals(); uploadLighting(); return;}
     VK_CHECK(vkDeviceWaitIdle(_device)); // Rare scene edits retire all readers before replacing descriptors/buffers.
     _traceSceneHash=hash; ++_traceSceneRevision;
     _traceTriangles=std::move(triangles); _traceMaterials=std::move(materials);
     _traceTexels=std::move(texels);
+    _traceCpuTextures=std::move(cpuTextures);
+    _traceCpuComplete=fullCpuTrace;
+    _traceCpuDraws=fullCpuTrace?std::vector<TraceCpuDraw>{}:std::move(cpuDraws);
+    _traceTriangleRefs=std::move(refs);
     _traceSettings.lighting.counts.y=uint32_t(_tracePortals.size());
-    _traceNodes=build_trace_bvh(_traceTriangles);
+    _traceNodes=fullCpuTrace?build_trace_bvh(_traceTriangles):std::vector<TraceBVHNode>{};
     _traceEmitters.clear();
     for(uint32_t i=0;i<_traceTriangles.size();++i) {
         const auto& m=_traceMaterials[_traceTriangles[i].meta.x];
         if(glm::length(glm::vec3(m.emission))>0) _traceEmitters.push_back(i);
     }
     _traceSettings.lighting.counts.x=uint32_t(_traceEmitters.size());
-    if(std::getenv("MIRABILIS_TEST_FRAMES")) validate_trace_bvh(_traceTriangles,_traceNodes);
+    if(validateCpu) validate_trace_bvh(_traceTriangles,_traceNodes);
     auto upload=[&](AllocatedBuffer& buffer,const void* data,size_t bytes,size_t minimum) {
         destroy_buffer(buffer); buffer=create_buffer(std::max(bytes,minimum),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
         std::memset(buffer.info.pMappedData,0,std::max(bytes,minimum));
         if(bytes) std::memcpy(buffer.info.pMappedData,data,bytes);
         vmaFlushAllocation(_allocator,buffer.allocation,0,VK_WHOLE_SIZE);
     };
-    upload(_traceTriangleBuffer,_traceTriangles.data(),_traceTriangles.size()*sizeof(TraceTriangle),sizeof(TraceTriangle));
+    fmt::print("GI CPU geometry: mode={} triangle-record-bytes={} visibility=\"{}\"\n",
+        fullCpuTrace?"full":"references",_traceTriangles.size()*sizeof(TraceTriangle)+_traceTriangleRefs.size()*sizeof(TraceTriangleRef),
+        includeAwakeDynamics?"software BVH":lumen_hardware_tracing()?"hardware":"distance field");
+    // Hardware raster GI only needs emitter triangles on the GPU. Texture
+    // CPU albedo reads retain immutable source images instead of repacking them.
+    std::vector<TraceTriangle> emitterTriangles;
+    std::vector<uint32_t> emitterIndices;
+    if (!fullGpuTrace) for (uint32_t index:_traceEmitters) {
+        emitterIndices.push_back(uint32_t(emitterTriangles.size()));
+        emitterTriangles.push_back(_traceTriangles.at(index));
+    }
+    const auto& gpuTriangles=fullGpuTrace?_traceTriangles:emitterTriangles;
+    const auto& gpuEmitters=fullGpuTrace?_traceEmitters:emitterIndices;
+    upload(_traceTriangleBuffer,gpuTriangles.data(),gpuTriangles.size()*sizeof(TraceTriangle),sizeof(TraceTriangle));
     upload(_traceMaterialBuffer,_traceMaterials.data(),_traceMaterials.size()*sizeof(TraceMaterial),sizeof(TraceMaterial));
-    upload(_traceNodeBuffer,_traceNodes.data(),_traceNodes.size()*sizeof(TraceBVHNode),sizeof(TraceBVHNode));
-    upload(_traceEmitterBuffer,_traceEmitters.data(),_traceEmitters.size()*sizeof(uint32_t),sizeof(uint32_t));
-    upload(_traceTexelBuffer,_traceTexels.data(),_traceTexels.size()*sizeof(uint32_t),sizeof(uint32_t));
+    upload(_traceNodeBuffer,_traceNodes.data(),fullGpuTrace?_traceNodes.size()*sizeof(TraceBVHNode):0,sizeof(TraceBVHNode));
+    upload(_traceEmitterBuffer,gpuEmitters.data(),gpuEmitters.size()*sizeof(uint32_t),sizeof(uint32_t));
+    upload(_traceTexelBuffer,_traceTexels.data(),fullGpuTrace?_traceTexels.size()*sizeof(uint32_t):0,sizeof(uint32_t));
+    fmt::print("GI GPU trace payload: mode={} triangles={} texels={} CPU-triangles={} CPU-texels={}\n",
+        fullGpuTrace?"full":"raster-emitters",gpuTriangles.size(),fullGpuTrace?_traceTexels.size():0,_traceTriangles.size(),_traceTexels.size());
     if (_tracePortals.size() > MaxPortalSurfaces) std::abort();
     upload(_tracePortalBuffer,_tracePortals.data(),_tracePortals.size()*sizeof(TracePortal),MaxPortalSurfaces*sizeof(TracePortal));
     _tracePortalBufferDirty = false;

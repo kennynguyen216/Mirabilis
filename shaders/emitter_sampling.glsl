@@ -25,6 +25,9 @@ const float EmitterClearanceVoxels = 2.5;
 // Hard visibility along the whole segment through the scene field.
 float emitter_visibility(vec3 origin, vec3 target, float voxel)
 {
+#ifdef EMITTER_HARDWARE_VISIBILITY
+    return EMITTER_HARDWARE_VISIBILITY(origin,target);
+#else
     vec3 delta = target - origin;
     float span = length(delta);
     if (span <= 1e-6) {
@@ -39,7 +42,9 @@ float emitter_visibility(vec3 origin, vec3 target, float voxel)
         }
         t += max(d, 0.5 * voxel);
     }
-    return 1.0;
+    // Exhaustion is unknown visibility, not evidence that the segment was clear.
+    return t >= span ? 1.0 : 0.0;
+#endif
 }
 #endif
 
@@ -97,7 +102,11 @@ vec3 emitter_sample(vec3 world, vec3 normal, uint count, vec3 xi, float voxel,
     if (dot(normal, direction) <= 0.0 || cosineLight <= 1e-8) {
         return vec3(0.0);
     }
+#ifdef EMITTER_FIELD_ORIGIN
+    visibilityTarget = EMITTER_FIELD_ORIGIN(lightPoint,emitterNormal,voxel);
+#else
     visibilityTarget = lightPoint + emitterNormal * (EmitterClearanceVoxels * voxel);
+#endif
     return materials[emitter.meta.x].emission.rgb * cosineLight * (0.5 * twiceArea) *
         float(count) / (3.14159265359 * distanceSquared);
 }

@@ -775,6 +775,7 @@ void VulkanEngine::destroy_buffer(const AllocatedBuffer& buffer)
 GPUMeshBuffers VulkanEngine::uploadMesh(
     std::span<uint32_t> indices, std::span<Vertex> vertices)
 {
+    auto profileScope = _profiler.scope(mirabilis::CpuZone::Upload);
     const size_t vertexBufferSize = vertices.size_bytes();
     const size_t indexBufferSize = indices.size_bytes();
 
@@ -898,6 +899,7 @@ AllocatedImage VulkanEngine::create_image(
     VkImageUsageFlags usage,
     bool mipmapped)
 {
+    auto profileScope = _profiler.scope(mirabilis::CpuZone::Upload);
     AllocatedBuffer uploadBuffer = create_buffer(
         dataSize,
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,

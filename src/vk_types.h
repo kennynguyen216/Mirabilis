@@ -8,6 +8,8 @@
 #include <array>
 #include <functional>
 #include <deque>
+#include "draw_instance.h"
+#include "mesh_clusters.h"
 
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_enum_string_helper.h>
@@ -105,6 +107,7 @@ enum class MaterialPass : uint8_t {
 struct MaterialPipeline {
     VkPipeline pipeline{};
     VkPipelineLayout layout{};
+    VkPipeline instancedPipeline{};
 };
 
 struct MaterialInstance {
@@ -116,6 +119,7 @@ struct MaterialInstance {
     MaterialPipeline* pipeline{};
     VkDescriptorSet materialSet{};
     MaterialPass passType{MaterialPass::MainColor};
+    bool doubleSided{false};
 };
 
 struct GPUSceneData {
@@ -204,6 +208,15 @@ struct GPUSceneData {
     glm::vec4 emitterSettings{0.0f};
     // rgb = environment multiplier, w = final GI color saturation.
     glm::vec4 environmentTint{1.0f};
+    glm::vec4 localLightPosition[16]{}; // xyz position, w point=0/spot=1
+    glm::vec4 localLightColor[16]{}; // rgb intensity/pi, w range
+    glm::vec4 localLightDirection[16]{}; // xyz direction, w inner cosine
+    glm::vec4 localLightCone[16]{}; // x outer cosine, y shadow base slot (-1 off)
+    glm::mat4 localShadowMatrix[7]{};
+    glm::vec4 reflectionSettings{0,0.4f,2,1000};
+    glm::vec4 graphicsSettings{0}; // x local light count; y global cel
+    glm::vec4 giTracingSettings{0}; // x hardware world GI, y uncovered-hit test, z prepass fragment rejection
+
 };
 
 // Sixteen visible surfaces (the player pair plus seven authored links), with
@@ -228,6 +241,7 @@ public:
 
 struct RenderObject {
     bool contributesToStaticCaches{true};
+    std::shared_ptr<std::vector<MeshCluster>> clusters;
     uint32_t indexCount{};
     uint32_t firstIndex{};
     VkBuffer indexBuffer{};

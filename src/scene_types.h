@@ -74,5 +74,10 @@ struct SceneMaterial {
     float emissionStrength{0};
     float transmission{0};
     float ior{1.5f};
+    bool doubleSided{false}, celShading{false};
+    std::string occlusionTexturePath, specularTexturePath;
+    float occlusionStrength{1}, specular{0.5f}, subsurface{0}, thickness{0.1f};
+    glm::vec3 subsurfaceColor{1};
+    bool operator==(const SceneMaterial&) const = default;
 };
 

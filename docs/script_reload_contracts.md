@@ -1,10 +1,5 @@
 # Script reload extension
 
-The user explicitly authorizes hot reload after completed Milestone 3, overriding
-that milestone's no-reload scope. Work stays local on feature/script-hot-reload.
-The lead owns this extension serially; preserve the user's modified demo and
-.last_scene byte-for-byte. Builds and scratch evidence stay outside OneDrive.
-
 Reload runs on the main thread between frames, never inside a callback. Compile
 user projects under scripting/ asynchronously into a separate generation directory when their source
 changes, with a manual Build & Reload action too. Compilation failures leave the

@@ -8,6 +8,9 @@
 #include "alpha_mask.glsl"
 #include "environment.glsl"
 #include "material_brdf.glsl"
+#include "local_lights.glsl"
+#include "material_transmission.glsl"
+#include "cel_shading.glsl"
 #include "portal_indirect.glsl"
 #include "indirect_color.glsl"
 
@@ -15,6 +18,7 @@
 layout(early_fragment_tests) in;
 #endif
 
+layout(location=7) flat in float inStaticCacheMember;
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec4 inColor;
 layout(location = 2) in vec2 inUV;
@@ -22,6 +26,8 @@ layout(location = 3) in vec3 inWorldPosition;
 layout(location = 4) in vec4 inTangent;
 layout(location = 0) out vec4 outFragColor;
 
+#define REFLECTION_CACHE_LOOKUP(p,n) surface_cache_lookup(p,n,false,true,true)
+#include "scene_reflection.glsl"
 void main()
 {
     vec4 baseColor = inColor * texture(colorTex, inUV);
@@ -43,14 +49,19 @@ void main()
     }
     vec3 geometricNormal = normalize(inNormal);
     vec3 normal = material_shading_normal(geometricNormal, inTangent, inUV);
+    vec3 lightingGeometricNormal=geometricNormal;
+    if (materialData.materialFlags.z>0.5 && dot(geometricNormal,sceneData.cameraPosition.xyz-inWorldPosition)<0.0) {
+        lightingGeometricNormal=-geometricNormal; normal=-normal;
+    }
     MaterialSurface surface = material_surface(
-        baseColor.rgb, inUV, geometricNormal, normal, inWorldPosition);
-    float visibility = sunlight_visibility(inWorldPosition, geometricNormal);
+        baseColor.rgb, inUV, lightingGeometricNormal, normal, inWorldPosition);
+    float visibility = material_sun_visibility(surface, inWorldPosition, lightingGeometricNormal);
     // Lumen portals gather scene lighting; plain SSGI keeps its legacy stand-in.
     bool lumen = sceneData.portalIndirectSettings.y == 1.0;
     // The main camera's AO coordinates do not describe this virtual camera.
     float occlusion = lumen ? 1.0 : ambient_occlusion(gl_FragCoord.xy);
     float substitute = lumen ? 0.0 : sceneData.portalIndirectSettings.x;
+    occlusion*=mix(1.0,texture(occlusionTex,inUV).r,materialData.surfaceFactors.x);
     float ambientScale = lumen ? 0.0 : 1.0 - substitute;
     vec3 ambientLight = sceneData.ambientColor.rgb * occlusion * ambientScale +
         substitute * environment_irradiance(normal) * occlusion;
@@ -60,6 +71,9 @@ void main()
     vec3 directDiffuse;
     vec3 directSpecular;
     material_sun(surface, visibility, directDiffuse, directSpecular);
+    vec3 localDiffuse,localSpecular;
+    material_local_lights(surface,inWorldPosition,lightingGeometricNormal,localDiffuse,localSpecular);
+    directDiffuse+=localDiffuse;directSpecular+=localSpecular;
     vec3 ambientDiffuse;
     vec3 ambientSpecular;
     if (sceneData.iblSettings.x > 0.5) {
@@ -82,19 +96,33 @@ void main()
     vec3 emitterDiffuse = vec3(0.0);
     vec3 emitterSpecular = vec3(0.0);
     if (lumen)
-        material_emitters(surface, inWorldPosition, geometricNormal, gl_FragCoord.xy,
+        material_emitters(surface, inWorldPosition, lightingGeometricNormal, gl_FragCoord.xy,inStaticCacheMember>0.5,
             emitterDiffuse, emitterSpecular);
     vec3 indirect = lumen ? material_diffuse_albedo(surface) *
-        indirect_color(portal_indirect(inWorldPosition, geometricNormal), sceneData.environmentTint.w) * sceneData.portalIndirectSettings.z
+        indirect_color(portal_indirect(inWorldPosition, lightingGeometricNormal,inStaticCacheMember>0.5), sceneData.environmentTint.w) * sceneData.portalIndirectSettings.z
         : vec3(0.0);
 
+    vec3 reflected=vec3(0);
+#ifndef MIRABILIS_COLOR_ONLY
+    if (reflection_roughness_owned(surface.roughness)) {
+        ReflectionHit reflectionHit;
+        reflected=scene_reflection(inWorldPosition,surface.normal,lightingGeometricNormal,surface.view,
+            surface.f0,surface.roughness,uint(gl_FragCoord.x)*1973u^uint(gl_FragCoord.y)*9277u,reflectionHit);
+        ambientSpecular=vec3(0); emitterSpecular=vec3(0);
+    }
+#endif
     outFragColor = vec4(
         directDiffuse + directSpecular + ambientDiffuse + ambientSpecular +
-            emission + emitterDiffuse + emitterSpecular + indirect,
+            emission + emitterDiffuse + emitterSpecular + indirect + reflected,
         1.0);
+    if(materialData.materialFlags.w>0.5 && sceneData.graphicsSettings.y<0.5)
+        outFragColor.rgb=cel_bands(outFragColor.rgb,4.0)*mix(0.15,1.0,step(0.18,surface.noV));
+#ifdef MIRABILIS_COLOR_ONLY
+    outFragColor=material_transmission(surface,baseColor,outFragColor.rgb,directSpecular+ambientSpecular+emitterSpecular+emission);
+#endif
     vec3 debugColor;
     if (material_debug_color(
-            surface, geometricNormal, inTangent,
+            surface, lightingGeometricNormal, inTangent,
             directDiffuse, directSpecular, emission, debugColor)) {
         outFragColor = vec4(debugColor, 1.0);
     }

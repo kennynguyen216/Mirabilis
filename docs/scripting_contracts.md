@@ -1,9 +1,8 @@
-# Milestone 3 frozen contracts
+# Base scripting contracts
 
-CURRENT MILESTONE 3, overriding the downloaded prompt's stale 1. Base is reviewed
-physics tip e46908d3e10cd17276a2410c6b597a8ae05123cb. Preserve every M1/M2 rule,
-body/cache behavior and authored file. No push/main merge, hot reload, player/body
-interaction, body portal traversal, raycasts, joints or new collider shapes.
+The base scripting API preserves Scene and physics ownership. Live reload and
+ABI v2 extend these contracts as described in `script_reload_contracts.md`;
+the current native declarations are in `src/script_abi.h`.
 
 ## Saved data and ownership
 
@@ -21,15 +20,6 @@ subtree; null, ID0 and external references remain distinct. Runtime handles,
 faults and diagnostics are never saved. Core serialization provides
 serialize_script_fields/parse_script_fields; caller buffers own all JSON.
 
-Lead owns components, Scene, script_abi.h, script_host.h/.cpp, engine main/header,
-vk_engine_input.cpp (reassigned from default lead ownership), all CMake, the new
-scripted demo and report. Managed specialist owns everything under scripting/,
-including Mirabilis.ScriptCore, Mirabilis.SampleScripts and author guide
-docs/scripting.md (explicit reassignment); no CMake edits. Editor specialist owns
-engine editor/scene IO, core scene serialization header/cpp and scene_format.md.
-Validation owns tests/fixtures/runners and writes from contracts/spec/public
-headers without reading implementation. Shared declaration changes remain lead
-owned and are communicated before use. Workers branch from this commit.
 
 ## ABI
 
@@ -118,8 +108,7 @@ processed to avoid stuck keys; losing mouse/UI capture releases held game input.
 EngineStats script_instance_count and MIRABILIS_TEST_SCRIPT_* hooks report actual
 live handles. Headless tests validate host/boundary/lifecycle without Vulkan;
 existing GPU harness verifies renderer/portal/cache preservation. Validation must
-exercise real managed callbacks rather than native mocks alone. Fresh independent
-GPT-6 Astra High reviewer starts after workers retire at the gate.
+exercise real managed callbacks rather than native mocks alone.
 
 ## Review refinement: diagnostics
 

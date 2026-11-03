@@ -93,12 +93,14 @@ void VulkanEngine::emit_scene_render_objects(
         _previousSceneObjectTransforms[object.persistentId] = world;
         renderObject.vertexBufferAddress = primitive.vertexBufferAddress;
         renderObject.contributesToStaticCaches = cacheEligible;
-        drawContext.OpaqueSurfaces.push_back(renderObject);
+        if(renderObject.material->passType==MaterialPass::Transparent)drawContext.TransparentSurfaces.push_back(renderObject);
+        else drawContext.OpaqueSurfaces.push_back(renderObject);
     }
 }
 
 void VulkanEngine::update_scene(float deltaTime)
 {
+    auto profileScope = _profiler.scope(mirabilis::CpuZone::SceneUpdate);
     const auto startTime = std::chrono::steady_clock::now();
     mainCamera.position = _playerMovement.position + glm::vec3(0.0f, 1.7f, 0.0f);
     const Camera& camera = render_camera();
@@ -172,6 +174,7 @@ void VulkanEngine::update_scene(float deltaTime)
     _shadow.sunViewProjection = compute_sun_view_projection(camera.position);
 
     sceneData = build_scene_data(camera.getViewMatrix());
+    if (!_previousMainViewProjectionValid) _reflections.historyValid=false;
     sceneData.previousViewProjection = _previousMainViewProjectionValid
         ? _previousMainViewProjection
         : sceneData.viewproj;

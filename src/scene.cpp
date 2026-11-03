@@ -60,7 +60,21 @@ bool valid_component(const SceneMaterial& value) {
         std::isfinite(value.metallic) && value.metallic >= 0 && value.metallic <= 1 &&
         std::isfinite(value.roughness) && value.roughness >= 0 && value.roughness <= 1 &&
         std::isfinite(value.transmission) && value.transmission >= 0 && value.transmission <= 1 &&
-        std::isfinite(value.ior) && value.ior >= 1 && value.ior <= 3;
+        std::isfinite(value.ior) && value.ior >= 1 && value.ior <= 3 &&
+        std::isfinite(value.occlusionStrength) && value.occlusionStrength >= 0 && value.occlusionStrength <= 1 &&
+        std::isfinite(value.specular) && value.specular >= 0 && value.specular <= 1 &&
+        std::isfinite(value.subsurface) && value.subsurface >= 0 && value.subsurface <= 1 &&
+        std::isfinite(value.thickness) && value.thickness >= 0 && value.thickness <= 10 &&
+        finite_vector(value.subsurfaceColor) && glm::all(glm::greaterThanEqual(value.subsurfaceColor,glm::vec3(0)));
+}
+bool valid_component(const Light& value) {
+    return value.type <= LightType::Spot && finite_vector(value.color) &&
+        glm::all(glm::greaterThanEqual(value.color,glm::vec3(0))) &&
+        std::isfinite(value.intensity) && value.intensity >= 0 &&
+        std::isfinite(value.range) && value.range > 0.05f &&
+        std::isfinite(value.innerCone) && std::isfinite(value.outerCone) &&
+        value.innerCone >= 0 && value.innerCone <= value.outerCone &&
+        value.outerCone > 0 && value.outerCone < 1.5707f;
 }
 bool valid_component(const Collider& value) {
     return value.collisionShape <= CollisionShape::SurfRamp && finite_vector(value.colliderCenter) &&
@@ -386,7 +400,8 @@ EntityState Scene::capture_entity(EntityRef ref) const {
         has<PortalPlaceable>(ref), has<TransformDrivenExternally>(ref),
         read<UnknownComponents>(ref) ? *read<UnknownComponents>(ref) : UnknownComponents{},
         read<RigidBody>(ref) ? std::optional(*read<RigidBody>(ref)) : std::nullopt,
-        read<Script>(ref) ? std::optional(*read<Script>(ref)) : std::nullopt};
+        read<Script>(ref) ? std::optional(*read<Script>(ref)) : std::nullopt,
+        read<Light>(ref) ? std::optional(*read<Light>(ref)) : std::nullopt};
 }
 void Scene::restore_entity(const EntityState& state) {
     auto ref = get(state.id);
@@ -405,6 +420,8 @@ void Scene::restore_entity(const EntityState& state) {
     else _registry.remove<RigidBody>(ref.entity);
     if (state.script) _registry.emplace_or_replace<Script>(ref.entity, *state.script);
     else _registry.remove<Script>(ref.entity);
+    if (state.light) _registry.emplace_or_replace<Light>(ref.entity, *state.light);
+    else _registry.remove<Light>(ref.entity);
     _registry.remove<PhysicsState>(ref.entity);
     if (state.portalPlaceable) _registry.emplace_or_replace<PortalPlaceable>(ref.entity);
     else _registry.remove<PortalPlaceable>(ref.entity);
@@ -474,7 +491,7 @@ bool Scene::restore_snapshot(const SceneSnapshot& snapshot, const DestroyCallbac
     std::unordered_set<PersistentID> saved;
     for (const auto& state : snapshot.entities) {
         if (state.id == UINT64_MAX || !saved.insert(state.id).second ||
-            !valid_component(state.transform) || !valid_component(state.mesh) || !valid_component(state.material) || !valid_component(state.collider) || (state.rigidBody && !valid_component(*state.rigidBody)) || (state.script && !valid_component(*state.script))) {
+            !valid_component(state.transform) || !valid_component(state.mesh) || !valid_component(state.material) || !valid_component(state.collider) || (state.rigidBody && !valid_component(*state.rigidBody)) || (state.script && !valid_component(*state.script)) || (state.light && !valid_component(*state.light))) {
             return fail("Invalid scene snapshot");
         }
     }

@@ -1,0 +1,110 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x=8,local_size_y=8) in;
+#ifdef MIRABILIS_RT_SHADOWS
+#include "scene_data.glsl"
+#include "sun_shadow.glsl"
+layout(set=0,binding=3) uniform sampler2D environmentTexture;
+#include "environment.glsl"
+layout(set=0,binding=6) uniform sampler2D cacheAlbedo;
+layout(set=0,binding=10) uniform sampler2D cacheEmissive;
+layout(set=0,binding=11) uniform sampler2D cacheDepth;
+layout(set=0,binding=18) uniform sampler2D cacheDirect;
+layout(set=0,binding=19) uniform sampler2D cacheIndirect;
+#define SURFACE_CACHE_SET 0
+#define SURFACE_CACHE_BINDING_CARDS 13
+#define SURFACE_CACHE_BINDING_GRID 14
+#define SURFACE_CACHE_BINDING_INDICES 15
+#define SURFACE_CACHE_READ_INDIRECT(p) texelFetch(cacheIndirect,p,0).rgb
+#define SURFACE_CACHE_READ_SKY(p) vec3(0)
+#include "surface_cache_lookup.glsl"
+#define REFLECTION_CACHE_LOOKUP(p,n) surface_cache_lookup(p,n,false,true,true)
+#include "scene_reflection.glsl"
+layout(rgba16f,set=1,binding=0) uniform image2D rawImage;
+layout(rgba32f,set=1,binding=1) uniform image2D rawHitImage;
+layout(set=1,binding=2) uniform sampler2D rawTexture;
+layout(set=1,binding=3) uniform sampler2D rawHitTexture;
+layout(set=1,binding=4) uniform sampler2D depthTexture;
+layout(set=1,binding=5) uniform sampler2D normalTexture;
+layout(set=1,binding=6) uniform sampler2D velocityTexture;
+layout(set=1,binding=7) uniform sampler2D specularTexture;
+layout(set=1,binding=8) uniform sampler2D portalTexture;
+layout(set=1,binding=9) uniform sampler2D previousRadiance;
+layout(set=1,binding=10) uniform sampler2D previousHit;
+layout(set=1,binding=11) uniform sampler2D previousMetadata;
+layout(rgba16f,set=1,binding=12) uniform image2D currentRadiance;
+layout(rgba32f,set=1,binding=13) uniform image2D currentHit;
+layout(rgba16f,set=1,binding=14) uniform image2D currentMetadata;
+layout(set=1,binding=15) uniform sampler2D filteredTexture;
+layout(rgba16f,set=1,binding=16) uniform image2D colorImage;
+layout(push_constant) uniform Push {
+    mat4 inverseViewProjection;
+    vec4 camera;
+    uvec4 control; // extent, seed, pass
+    vec4 settings; // history valid
+} push;
+vec3 unpack_normal(vec2 p) {
+    vec3 n=vec3(p,1-abs(p.x)-abs(p.y));
+    if(n.z<0) n.xy=(1-abs(n.yx))*mix(vec2(-1),vec2(1),greaterThanEqual(n.xy,vec2(0)));
+    return normalize(n);
+}
+void main()
+{
+    ivec2 pixel=ivec2(gl_GlobalInvocationID.xy),extent=ivec2(push.control.xy);
+    if(any(greaterThanEqual(pixel,extent))) return;
+    float depth=texelFetch(depthTexture,pixel,0).r;
+    vec4 specular=texelFetch(specularTexture,pixel,0);
+    bool owned=depth>0 && reflection_roughness_owned(specular.a) && texelFetch(portalTexture,pixel,0).r<0.5;
+    vec4 motion=texelFetch(velocityTexture,pixel,0);
+    if(push.control.w==0u) {
+        vec3 value=vec3(0); ReflectionHit hit=ReflectionHit(vec3(0),-2);
+        if(owned) {
+            vec2 uv=(vec2(pixel)+0.5)/vec2(extent);
+            vec4 world=push.inverseViewProjection*vec4(uv*2-1,depth,1); world/=world.w;
+            vec3 normal=unpack_normal(motion.zw);
+            vec3 geometric=normalize(transpose(mat3(sceneData.view))*texelFetch(normalTexture,pixel,0).xyz);
+            vec3 view=normalize(push.camera.xyz-world.xyz);
+            value=scene_reflection(world.xyz,normal,geometric,view,specular.rgb,specular.a,
+                uint(pixel.x)*1973u^uint(pixel.y)*9277u^push.control.z*26699u,hit);
+        }
+        imageStore(rawImage,pixel,vec4(value,owned?1:0));
+        imageStore(rawHitImage,pixel,vec4(hit.position,hit.identity));
+    } else if(push.control.w==1u) {
+        vec4 raw=texelFetch(rawTexture,pixel,0),hit=texelFetch(rawHitTexture,pixel,0);
+        vec4 value=vec4(raw.rgb,1);
+        ivec2 previousPixel=ivec2(floor(vec2(pixel)+0.5+motion.xy*vec2(extent)));
+        if(owned && push.settings.x>0.5 && all(greaterThanEqual(previousPixel,ivec2(0))) && all(lessThan(previousPixel,extent))) {
+            vec4 oldHit=texelFetch(previousHit,previousPixel,0),meta=texelFetch(previousMetadata,previousPixel,0);
+            vec2 uv=(vec2(pixel)+0.5)/vec2(extent);
+            vec4 world=push.inverseViewProjection*vec4(uv*2-1,depth,1);
+            vec4 previousClip=sceneData.previousViewProjection*(world/world.w);
+            float previousDepth=previousClip.z/previousClip.w;
+            bool compatible=previousClip.w>0 && hit.w==oldHit.w &&
+                abs(meta.x-previousDepth)<max(abs(previousDepth)*0.002,1e-5) &&
+                abs(meta.y-specular.a)<0.02 && dot(unpack_normal(meta.zw),unpack_normal(motion.zw))>0.98;
+            if(hit.w>=0) compatible=compatible && distance(hit.xyz,oldHit.xyz)<0.02+specular.a*0.02*distance(hit.xyz,push.camera.xyz);
+            if(compatible) {
+                vec4 old=texelFetch(previousRadiance,previousPixel,0);
+                vec3 lo=raw.rgb,hi=raw.rgb;
+                for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x) {
+                    vec4 neighbor=texelFetch(rawTexture,clamp(pixel+ivec2(x,y),ivec2(0),extent-1),0);
+                    if(neighbor.a<.5) continue;
+                    lo=min(lo,neighbor.rgb);hi=max(hi,neighbor.rgb);
+                }
+                // Bound stale directional radiance when a reflected sky ray changes with the view.
+                old.rgb=clamp(old.rgb,lo,hi);
+                float count=min(old.a+1,push.settings.y);
+                value=vec4(mix(old.rgb,raw.rgb,1/count),count);
+            }
+        }
+        imageStore(currentRadiance,pixel,value);
+        imageStore(currentHit,pixel,hit);
+        imageStore(currentMetadata,pixel,vec4(depth,specular.a,motion.zw));
+    } else if(owned) {
+        vec4 color=imageLoad(colorImage,pixel);
+        imageStore(colorImage,pixel,vec4(color.rgb+texelFetch(filteredTexture,pixel,0).rgb,color.a));
+    }
+}
+#else
+void main() {}
+#endif

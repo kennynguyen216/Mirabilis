@@ -1,0 +1,39 @@
+#version 450
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=0) uniform sampler2D sourceImage;
+layout(set=0,binding=1) uniform sampler2D detailImage;
+layout(rgba16f,set=0,binding=2) uniform writeonly image2D targetImage;
+layout(push_constant) uniform Bloom {
+    ivec4 extents; // output live size, input live size
+    vec4 settings; // threshold, scatter, first downsample, upsample
+} push;
+vec3 read_source(vec2 pixel)
+{
+    vec2 limit=vec2(push.extents.zw)-0.5;
+    return texture(sourceImage,clamp(pixel,vec2(0.5),limit)/vec2(textureSize(sourceImage,0))).rgb;
+}
+vec3 extract(vec3 color)
+{
+    if(push.settings.z<0.5)return color;
+    float peak=max(max(color.r,color.g),color.b);
+    return color*max(peak-push.settings.x,0.0)/max(peak,1e-5);
+}
+void main()
+{
+    ivec2 pixel=ivec2(gl_GlobalInvocationID.xy);
+    if(any(greaterThanEqual(pixel,push.extents.xy)))return;
+    vec2 inputPixel=(vec2(pixel)+0.5)*vec2(push.extents.zw)/vec2(push.extents.xy);
+    vec3 color=vec3(0);
+    if(push.settings.w<0.5) {
+        // Threshold before averaging prevents an isolated HDR highlight disappearing.
+        for(int y=-1;y<=1;y+=2)for(int x=-1;x<=1;x+=2)
+            color+=extract(read_source(inputPixel+vec2(x,y)*0.5));
+        color*=0.25;
+    } else {
+        // Normalized 3x3 tent. Normalized octave mixing keeps strength independent of level count.
+        for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x)
+            color+=read_source(inputPixel+vec2(x,y))*float((x==0?2:1)*(y==0?2:1))/16.0;
+        color=mix(texelFetch(detailImage,pixel,0).rgb,color,push.settings.y);
+    }
+    imageStore(targetImage,pixel,vec4(color,1));
+}

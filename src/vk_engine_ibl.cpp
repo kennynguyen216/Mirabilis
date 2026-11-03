@@ -1,5 +1,4 @@
-// Image-based lighting built from the selected skybox
-// (docs/image_based_lighting_design.md): nine spherical-harmonic irradiance
+// Image-based lighting built from the selected skybox: nine spherical-harmonic irradiance
 // coefficients, a GGX-prefiltered equirectangular mip chain, and a split-sum
 // BRDF lookup table.
 

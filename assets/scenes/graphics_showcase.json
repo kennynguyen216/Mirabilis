@@ -1,0 +1,449 @@
+{
+  "version": 2,
+  "nextActor": 11,
+  "nextPersistentId": 10,
+  "lighting": {
+    "sunDirection": [
+      0.3,
+      1,
+      0.4
+    ],
+    "shadowsEnabled": true
+  },
+  "referenceLighting": {
+    "sunRadiance": [
+      0.4,
+      0.4,
+      0.4
+    ],
+    "environmentIntensity": 0.2
+  },
+  "rendering": {
+    "bloom": true,
+    "bloomStrength": 0.12,
+    "bloomThreshold": 1,
+    "tonemapOperator": 2
+  },
+  "objects": [
+    {
+      "id": 0,
+      "parent": null,
+      "siblingIndex": 0,
+      "components": {
+        "name": {
+          "value": "Sandbox"
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "asset": "empty",
+          "modelPath": ""
+        }
+      }
+    },
+    {
+      "id": 1,
+      "parent": 0,
+      "siblingIndex": 0,
+      "components": {
+        "name": {
+          "value": "Floor"
+        },
+        "transform": {
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            16,
+            1,
+            14
+          ]
+        },
+        "mesh": {
+          "asset": "floor",
+          "modelPath": ""
+        },
+        "material": {
+          "enabled": true,
+          "tint": [
+            0.65,
+            0.65,
+            0.65,
+            1
+          ],
+          "roughness": 0.7
+        }
+      }
+    },
+    {
+      "id": 2,
+      "parent": 0,
+      "siblingIndex": 1,
+      "components": {
+        "name": {
+          "value": "Backdrop"
+        },
+        "transform": {
+          "position": [
+            0,
+            2,
+            -4
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            14,
+            4,
+            0.25
+          ]
+        },
+        "mesh": {
+          "asset": "cube",
+          "modelPath": ""
+        },
+        "material": {
+          "enabled": true,
+          "tint": [
+            0.65,
+            0.65,
+            0.65,
+            1
+          ]
+        }
+      }
+    },
+    {
+      "id": 3,
+      "parent": 0,
+      "siblingIndex": 2,
+      "components": {
+        "name": {
+          "value": "Warm ceramic"
+        },
+        "transform": {
+          "position": [
+            -2.3,
+            1,
+            -1
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1.6,
+            2,
+            1.6
+          ]
+        },
+        "mesh": {
+          "asset": "cube",
+          "modelPath": ""
+        },
+        "material": {
+          "enabled": true,
+          "tint": [
+            0.7,
+            0.12,
+            0.04,
+            1
+          ],
+          "roughness": 0.25
+        }
+      }
+    },
+    {
+      "id": 4,
+      "parent": 0,
+      "siblingIndex": 3,
+      "components": {
+        "name": {
+          "value": "Brushed metal"
+        },
+        "transform": {
+          "position": [
+            2,
+            1,
+            -1.5
+          ],
+          "rotation": [
+            0,
+            0.4,
+            0
+          ],
+          "scale": [
+            1.7,
+            2,
+            1.7
+          ]
+        },
+        "mesh": {
+          "asset": "cube",
+          "modelPath": ""
+        },
+        "material": {
+          "enabled": true,
+          "tint": [
+            0.55,
+            0.7,
+            0.9,
+            1
+          ],
+          "metallic": 0.9,
+          "roughness": 0.3
+        }
+      }
+    },
+    {
+      "id": 5,
+      "parent": 0,
+      "siblingIndex": 4,
+      "components": {
+        "name": {
+          "value": "Refractive glass"
+        },
+        "transform": {
+          "position": [
+            0,
+            1.7,
+            1
+          ],
+          "rotation": [
+            1.5707963,
+            0.2,
+            0
+          ],
+          "scale": [
+            3,
+            1,
+            2.8
+          ]
+        },
+        "mesh": {
+          "asset": "floor",
+          "modelPath": ""
+        },
+        "material": {
+          "enabled": true,
+          "tint": [
+            0.8,
+            0.95,
+            1,
+            0.12
+          ],
+          "roughness": 0.08,
+          "transmission": 1,
+          "ior": 1.5,
+          "thickness": 0.6,
+          "doubleSided": true
+        }
+      }
+    },
+    {
+      "id": 6,
+      "parent": 0,
+      "siblingIndex": 5,
+      "components": {
+        "name": {
+          "value": "Thin cloth"
+        },
+        "transform": {
+          "position": [
+            -4.6,
+            2,
+            -0.5
+          ],
+          "rotation": [
+            1.5707963,
+            0.2,
+            0
+          ],
+          "scale": [
+            1.6,
+            1,
+            3
+          ]
+        },
+        "mesh": {
+          "asset": "floor",
+          "modelPath": ""
+        },
+        "material": {
+          "enabled": true,
+          "tint": [
+            0.2,
+            0.5,
+            0.18,
+            1
+          ],
+          "doubleSided": true,
+          "subsurface": 0.35,
+          "subsurfaceColor": [
+            0.4,
+            0.9,
+            0.25
+          ]
+        }
+      }
+    },
+    {
+      "id": 7,
+      "parent": 0,
+      "siblingIndex": 6,
+      "components": {
+        "name": {
+          "value": "Emissive strip"
+        },
+        "transform": {
+          "position": [
+            0,
+            3.4,
+            -3.8
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            5,
+            0.16,
+            0.1
+          ]
+        },
+        "mesh": {
+          "asset": "cube",
+          "modelPath": ""
+        },
+        "material": {
+          "enabled": true,
+          "tint": [
+            1,
+            0.4,
+            0.08,
+            1
+          ],
+          "emissionColor": [
+            1,
+            0.35,
+            0.08
+          ],
+          "emissionStrength": 8
+        }
+      }
+    },
+    {
+      "id": 8,
+      "parent": 0,
+      "siblingIndex": 7,
+      "components": {
+        "name": {
+          "value": "Warm point light"
+        },
+        "transform": {
+          "position": [
+            -3,
+            3,
+            2
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "asset": "empty",
+          "modelPath": ""
+        },
+        "light": {
+          "type": "Point",
+          "color": [
+            1,
+            0.6,
+            0.3
+          ],
+          "intensity": 100,
+          "range": 14,
+          "castShadows": true
+        }
+      }
+    },
+    {
+      "id": 9,
+      "parent": 0,
+      "siblingIndex": 8,
+      "components": {
+        "name": {
+          "value": "Cool spot light"
+        },
+        "transform": {
+          "position": [
+            3,
+            4.5,
+            2.5
+          ],
+          "rotation": [
+            -0.7,
+            0.4,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "mesh": {
+          "asset": "empty",
+          "modelPath": ""
+        },
+        "light": {
+          "type": "Spot",
+          "color": [
+            0.4,
+            0.65,
+            1
+          ],
+          "intensity": 180,
+          "range": 16,
+          "innerCone": 0.35,
+          "outerCone": 0.7,
+          "castShadows": true
+        }
+      }
+    }
+  ],
+  "authoredPortals": []
+}

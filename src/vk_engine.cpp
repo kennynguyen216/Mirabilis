@@ -53,8 +53,9 @@ namespace {
 
 // A pending fence is not a Vulkan failure. Keep servicing the native window
 // while waiting; reset/reuse GPU resources only after the fence is signaled.
-void wait_for_gpu_fence(VkDevice device, VkFence fence)
+void wait_for_gpu_fence(VkDevice device, VkFence fence, mirabilis::Profiler& profiler)
 {
+    auto scope = profiler.scope(mirabilis::CpuZone::WaitGPU);
     VkResult result;
     do {
         SDL_PumpEvents();
@@ -79,22 +80,6 @@ void apply_env_flag(const char* name, bool& flag)
     flag = value == EnvBool::On;
 }
 
-// Interpolates between two yaw angles along the shorter arc.  Yaw is
-// accumulated from mouse motion and is never wrapped, so the raw difference
-// between two samples can be several turns' worth even when the player barely
-// moved; folding it into (-pi, pi] first keeps the step small and in the
-// direction they actually turned.
-float lerp_yaw(float from, float to, float t)
-{
-    constexpr float Pi = 3.14159265358979323846f;
-    constexpr float TwoPi = 2.0f * Pi;
-    float delta = std::fmod(to - from + Pi, TwoPi);
-    if (delta < 0.0f) {
-        delta += TwoPi;
-    }
-    return from + (delta - Pi) * t;
-}
-
 } // namespace
 
 VulkanEngine* loadedEngine = nullptr;
@@ -112,6 +97,7 @@ void VulkanEngine::reset_physics_render_history()
 
 void VulkanEngine::sync_physics_world()
 {
+    auto scope = _profiler.scope(mirabilis::CpuZone::PhysicsSync);
     std::vector<PersistentID> hosts;
     for (const auto& pair : _authoredPortals.pairs) {
         if (pair.first.hostWallObject) hosts.push_back(*pair.first.hostWallObject);
@@ -156,6 +142,7 @@ void VulkanEngine::take_play_snapshot()
 
 void VulkanEngine::drain_scene_destruction()
 {
+    auto scope = _profiler.scope(mirabilis::CpuZone::Destruction);
     bool pending = false;
     for (const auto entity : _scene.registry().view<PendingDestroy>()) { (void)entity; pending = true; break; }
     if (!pending) return;
@@ -357,6 +344,18 @@ void VulkanEngine::apply_performance_settings()
 
 void VulkanEngine::init()
 {
+    bool profileEnabled = false;
+    bool preferHardwareGi = true;
+    if (SDL_getenv("MIRABILIS_LUMEN_HARDWARE")) apply_env_flag("MIRABILIS_LUMEN_HARDWARE", preferHardwareGi);
+    _lumenHardwareTracing = preferHardwareGi;
+    apply_env_flag("MIRABILIS_PROFILE", profileEnabled);
+    _profiler.set_enabled(profileEnabled);
+    if (const char* output = std::getenv("MIRABILIS_PROFILE_TRACE"); output && *output) {
+        _profileTraceOutput = output;
+        _profiler.start_capture();
+    }
+    auto profileScope = _profiler.scope(mirabilis::CpuZone::Startup);
+    _tasks = std::make_unique<mirabilis::TaskSystem>(mirabilis::TaskSystemDesc{}, &_profiler);
     //only one engine init is allowed with the application
     assert(loadedEngine == nullptr);
     loadedEngine = this;
@@ -438,12 +437,8 @@ void VulkanEngine::init()
     // Balanced is the candidate default: preset 0 is a full-resolution
     // validation mode and costs about 7.7x plain SSGI on this GPU.
     apply_ssgi_quality_preset(2);
-    if (const char* preset = SDL_getenv("MIRABILIS_SSGI_PRESET")) {
-        apply_ssgi_quality_preset(std::atoi(preset));
-    }
-    if (SDL_getenv("MIRABILIS_MAX_FIDELITY")) {
-        apply_max_fidelity_settings();
-    }
+    if (SDL_getenv("MIRABILIS_MAX_FIDELITY"))apply_max_fidelity_settings();
+    if (const char* preset = SDL_getenv("MIRABILIS_SSGI_PRESET"))apply_ssgi_quality_preset(std::atoi(preset));
     // R6 original cache budget is a startup-only test control, not an SSGI preset.
     if (SDL_getenv("MIRABILIS_TEST_FRAMES") && SDL_getenv("MIRABILIS_R6_RADIOSITY_CONTROL"))
         _surfaceCache.radiosityTexelBudget = 300000u;
@@ -465,12 +460,13 @@ void VulkanEngine::init()
     // After the presets, so a capture run can compare against the frame
     // without screen-space GI whatever else it asked for.
     apply_env_flag("MIRABILIS_LUMEN_LITE", _ssgi.lumenEnabled);
+    apply_env_flag("MIRABILIS_SCENE_REFLECTIONS",_reflections.enabled);
     apply_env_flag("MIRABILIS_SSGI_PROBES", _ssgi.probesEnabled);
     apply_env_flag("MIRABILIS_SSGI_HZB", _ssgi.hzbEnabled);
-    // Exact world hits avoid the screen march's camera-dependent visibility
-    // approximation. Keep it available as a comparison or software shortcut.
-    _ssgi.screenTraceEnabled = !_rayQueryShadows;
-    apply_env_flag("MIRABILIS_SSGI_SCREEN_TRACE", _ssgi.screenTraceEnabled);
+    _ssgi.screenTraceEnabled = !lumen_hardware_tracing();
+    if (SDL_getenv("MIRABILIS_SSGI_SCREEN_TRACE")) apply_env_flag("MIRABILIS_SSGI_SCREEN_TRACE", _ssgi.screenTraceEnabled);
+    fmt::print("GI tracing configuration: backend={} screen-first={} hardware-sun={}\n",
+        lumen_hardware_tracing()?"hardware":"software-distance-field", _ssgi.screenTraceEnabled, _rayQueryShadows);
     if (SDL_getenv("MIRABILIS_SSAO"))
         apply_env_flag("MIRABILIS_SSAO", _ssao.globalEnabled);
     // R3.1 environment parity: a candidate compared against a path-traced
@@ -686,6 +682,10 @@ void VulkanEngine::init_vulkan()
         .select()
         .value();
 
+    VkPhysicalDeviceFeatures indirectFeatures{};indirectFeatures.multiDrawIndirect=VK_TRUE;
+    _meshVisibility.supported=physicalDevice.enable_features_if_present(indirectFeatures);
+    // GPU cluster culling is opt-in until measured on the target scene/device.
+    _meshVisibility.enabled=_meshVisibility.supported && SDL_getenv("MIRABILIS_MESH_CULLING") && std::string_view(SDL_getenv("MIRABILIS_MESH_CULLING"))=="1";
     // Anisotropic filtering is requested rather than required: it is a large
     // quality win on Sponza's oblique floors and arches, but it is an optional
     // Vulkan feature and a device that lacks it should still run with plain
@@ -695,6 +695,9 @@ void VulkanEngine::init_vulkan()
     anisotropyFeature.samplerAnisotropy = VK_TRUE;
     _samplerAnisotropySupported =
         physicalDevice.enable_features_if_present(anisotropyFeature);
+    VkPhysicalDeviceFeatures compressionFeature{};compressionFeature.textureCompressionBC=VK_TRUE;
+    const bool blockCompression=physicalDevice.enable_features_if_present(compressionFeature);
+    fmt::print("BC texture support: {}\n",blockCompression);
     _conservativeRasterSupported = physicalDevice.enable_extension_if_present(
         VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
     // IQ2 ray-query sun shadows, optional.  Device extensions are fixed here,
@@ -721,6 +724,8 @@ void VulkanEngine::init_vulkan()
             physicalDevice.enable_extension_features_if_present(accelerationFeatures) &&
             physicalDevice.enable_extension_features_if_present(rayQueryFeatures);
     }
+
+    _gpuTiming.memoryBudgetSupported = physicalDevice.enable_extension_if_present(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 
     // create the vulkan device now
 
@@ -784,7 +789,9 @@ void VulkanEngine::init_vulkan()
     allocatorInfo.device = _device;
     allocatorInfo.instance = _instance;
     allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
-    vmaCreateAllocator(&allocatorInfo, &_allocator);
+    allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_3;
+    if (_gpuTiming.memoryBudgetSupported) allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
+    VK_CHECK(vmaCreateAllocator(&allocatorInfo, &_allocator));
 
     _mainDeletionQueue.push_function([&]() {
         vmaDestroyAllocator(_allocator);
@@ -855,16 +862,25 @@ void VulkanEngine::init_sync_structures()
 
 void VulkanEngine::cleanup()
 {
+    if (_tasks) _tasks->shutdown();
     if (_scriptHost) _scriptHost->shutdown();
     if(_isInitialized) {
-        vkDeviceWaitIdle(_device);
+        VK_CHECK(vkDeviceWaitIdle(_device));
+        // Interactive editor exits must export their final in-flight submissions too.
+        if (_gpuTiming.scopePool) {
+            for (uint32_t slot=0;slot<FRAME_OVERLAP;++slot) read_gpu_timestamps(slot);
+        }
+        if (_gpuTiming.log.is_open()) {
+            _gpuTiming.log.flush();
+            fmt::print("GPU frame log: submitted-frames={} stream-ok={}\n",_frameNumber,bool(_gpuTiming.log));
+        }
         destroy_path_trace();
         destroy_sun_casters();
 
         // The explicit File > Save Scene command is still useful for named
         // checkpoints, but closing the editor should not discard unsaved
         // level construction work.
-        if (_sceneDocument.dirty && !SDL_getenv("MIRABILIS_TEST_FRAMES")) {
+        if (_sceneDocument.dirty && !_editorDiscardOnExit && !SDL_getenv("MIRABILIS_TEST_FRAMES")) {
             save_editor_scene();
         }
 
@@ -908,27 +924,44 @@ void VulkanEngine::cleanup()
 
     // clear engine pointer 
     loadedEngine = nullptr;
+    _profiler.stop_capture();
+    if (!_profileTraceOutput.empty()) {
+        if (!_profiler.save_trace(_profileTraceOutput))
+            throw std::runtime_error("Could not write profiling trace: " + _profileTraceOutput.string());
+        const auto trace = _profiler.trace_status();
+        fmt::print("Profile trace saved: {} ({} events, {} dropped)\n",
+            _profileTraceOutput.string(), trace.events, trace.dropped);
+    }
 }
 
 void VulkanEngine::draw(float deltaTime)
 {
+    auto profileScope = _profiler.scope(mirabilis::CpuZone::Render);
 
-    wait_for_gpu_fence(_device, get_current_frame()._renderFence);
+    const auto hostStart=std::chrono::steady_clock::now();
+    const std::array<uint64_t,6> rebuildStart{stats.sdf_rebuild_count,stats.surface_cache_rebuild_count,
+        stats.trace_rebuild_count,_sunCasters.blasBuilds,_sunCasters.tlasBuilds,stats.albedo_rebuild_count};
+    wait_for_gpu_fence(_device, get_current_frame()._renderFence, _profiler);
+    const auto fenceDone=std::chrono::steady_clock::now();
     // The fence has passed, so any timestamps this slot recorded belong to a
     // submission that has finished and can be read without stalling.
     read_gpu_timestamps(_frameNumber % FRAME_OVERLAP);
+    if (_frameNumber%60==0) sample_gpu_memory_budget();
     update_auto_exposure(deltaTime);
     get_current_frame()._deletionQueue.flush();
+    get_current_frame().instancePageCursor=0;
     get_current_frame()._frameDescriptors.clear_pools(_device);
     //request image from the swapchain 
     uint32_t swapchainImageIndex;
-    VkResult acquireResult = vkAcquireNextImageKHR(
-        _device,
-        _swapchain,
-        1000000000,
-        get_current_frame()._swapchainSemaphore,
-        nullptr,
-        &swapchainImageIndex);
+    VkResult acquireResult;
+    const auto acquireStart=std::chrono::steady_clock::now();
+    {
+        auto scope = _profiler.scope(mirabilis::CpuZone::AcquireImage);
+        acquireResult = vkAcquireNextImageKHR(
+            _device, _swapchain, 1000000000,
+            get_current_frame()._swapchainSemaphore, nullptr, &swapchainImageIndex);
+    }
+    const auto acquireDone=std::chrono::steady_clock::now();
     if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
         resize_requested = true;
         return;
@@ -982,16 +1015,32 @@ void VulkanEngine::draw(float deltaTime)
         _debugViews.view == RenderDebugView::SurfaceCache ||
         (_ssgi.lumenEnabled && _ssgi.enabled)) {
         update_scene_sdf();
+        update_dynamic_sdf();
     }
     const bool surfaceCacheActive = _debugViews.view == RenderDebugView::SurfaceCache ||
         (_ssgi.lumenEnabled && _ssgi.enabled);
     if (surfaceCacheActive) {
         update_surface_cache();
     }
+    if (_reflections.enabled && _rayQueryShadows && lumen_lite_ready()) init_reflections();
     // After the field and the trace scene are current, before recording.
     write_emitter_descriptors(get_current_frame());
 
+    if (SDL_getenv("MIRABILIS_TEST_FRAMES") && SDL_getenv("MIRABILIS_TEST_BLOCKING_RELIGHT") && _surfaceCache.lightingPending) {
+        // Same-build benchmark control for the former blocking relight schedule.
+        immediate_submit([&](VkCommandBuffer command) {
+            record_sun_casters(command);
+            record_dynamic_sdf(command);
+            while (_surfaceCache.lightingPending && _surfaceCache.valid && _sceneSdf.fieldValid) record_surface_cache_lighting(command);
+        });
+    }
+
+    const auto recordStart=std::chrono::steady_clock::now();
     VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
+    begin_gpu_frame(cmd);
+
+    { GpuPassScope gpu(*this,cmd,GpuPass::RayScene); record_sun_casters(cmd); }
+    { GpuPassScope gpu(*this,cmd,GpuPass::DynamicField); record_dynamic_sdf(cmd); }
 
     // Diagnostic VRAM pressure: a buffer referenced by every frame stays
     // resident, so the rest of the working set has that much less room.
@@ -1021,12 +1070,6 @@ void VulkanEngine::draw(float deltaTime)
 			SSGITimestampsPerFrame);
 		_ssgi.timingWritten[_frameNumber % FRAME_OVERLAP] = false;
 	}
-    // First in the frame, where the blocking submission used to run, so every
-    // later pass sees this update's page.
-    if (surfaceCacheActive) {
-        update_surface_cache_radiosity(cmd);
-    }
-
 	// The shadow and prepass counters are recorded before the main pass
 	// resets its own, so they are cleared here instead.
 	stats.shadow_drawcall_count = 0;
@@ -1035,14 +1078,20 @@ void VulkanEngine::draw(float deltaTime)
 	stats.prepass_triangle_count = 0;
 	stats.prepass_record_time = 0.0f;
 
+    // Uncached GI hits also sample the masked/player shadow map. Initialize
+    // it before radiosity, including when the reference renderer is active.
+    { GpuPassScope gpu(*this,cmd,GpuPass::SunShadow); draw_shadow_map(cmd); }
+    if (surfaceCacheActive) {
+        { GpuPassScope gpu(*this,cmd,GpuPass::CacheDirect); record_surface_cache_lighting(cmd); }
+        { GpuPassScope gpu(*this,cmd,GpuPass::Radiosity); update_surface_cache_radiosity(cmd); }
+    }
+
     VkImage presentSource = _drawImage.image;
     if (_rendererMode == RendererMode::SoftwarePathTrace && _traceSupported) {
-        draw_path_trace(cmd);
+        { GpuPassScope gpu(*this,cmd,GpuPass::Reference); draw_path_trace(cmd); }
     } else {
     _traceRuntime.wasActive=false;
-	// Render the sunlight depth map first: every later pass, main camera and
-	// portal cameras alike, samples it while shading.
-	draw_shadow_map(cmd);
+    { GpuPassScope gpu(*this,cmd,GpuPass::LocalShadows); draw_local_shadows(cmd); }
 
 	// Camera depth and view-space normals for the screen-space passes.  A
 	// debug view samples those images, so it also forces the pass to run, and
@@ -1050,16 +1099,18 @@ void VulkanEngine::draw(float deltaTime)
 	const bool showRenderDebugView = _debugViews.view != RenderDebugView::None;
 	const bool occlusionActive = ssao_active();
 	if (_prepass.enabled || showRenderDebugView || occlusionActive ||
-        _ssgi.enabled) {
-		draw_depth_normal_prepass(cmd);
+        _ssgi.enabled || _postProcess.tonemapEnabled || _meshVisibility.enabled) {
+		{ GpuPassScope gpu(*this,cmd,GpuPass::Prepass); draw_depth_normal_prepass(cmd); }
 	}
+
+    { GpuPassScope gpu(*this,cmd,GpuPass::Visibility); prepare_mesh_visibility(cmd); }
 
 	// Ambient occlusion reads the prepass and is finished before any shading
 	// starts, because every lit surface in the frame samples its result.
 	// Skipped entirely when disabled: the images keep the neutral 1.0 they
 	// were cleared to, so nothing downstream needs a second code path.
 	if (occlusionActive) {
-		draw_ssao(cmd);
+		{ GpuPassScope gpu(*this,cmd,GpuPass::AO); draw_ssao(cmd); }
 	} else {
 		stats.ssao_width = 0;
 		stats.ssao_height = 0;
@@ -1074,6 +1125,7 @@ void VulkanEngine::draw(float deltaTime)
 	// we will overwrite it all so we dont care about what was the older layout
 	vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
 
+	{ GpuPassScope gpu(*this,cmd,GpuPass::Background);
 	ComputeEffect& effect = backgroundEffects[currentBackgroundEffect];
 
 	if ((_r4Contributions.forward & r4::Background) == 0u) {
@@ -1099,9 +1151,11 @@ void VulkanEngine::draw(float deltaTime)
 	}
 
 	vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	}
 	vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
+    vkutil::transition_image(cmd,_sceneTargets.gbufferSpecular.image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     vkutil::transition_image(cmd, _sceneTargets.gbufferAlbedo.image,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -1116,6 +1170,7 @@ void VulkanEngine::draw(float deltaTime)
 	stats.world_drawcall_count = 0;
 	stats.portal_drawcall_count = 0;
 	stats.mesh_draw_time = 0.0f;
+    { GpuPassScope gpu(*this,cmd,GpuPass::Forward);
 	draw_geometry(
         cmd,
         mainDrawContext,
@@ -1128,24 +1183,36 @@ void VulkanEngine::draw(float deltaTime)
         true,
         0xff,
         true);
+    }
 	stats.world_drawcall_count = stats.drawcall_count;
+    { GpuPassScope gpu(*this,cmd,GpuPass::GI);
     draw_ssgi_portal_mask(cmd);
     draw_ssgi(cmd);
     draw_ssgi_composite(cmd);
+    }
+    { GpuPassScope gpu(*this,cmd,GpuPass::Reflections); draw_reflections(cmd); }
     // The portal view remains live all the way to the crossing plane.  Hiding
     // it for a frame-rate-sized safety band exposed the solid host wall before
     // physics teleported the player, causing the black flash.
+    { GpuPassScope gpu(*this,cmd,GpuPass::Portals);
     draw_portal_masks(cmd);
     if (_portalCameras.useOffscreen && _authoredPortals.pairs.empty()) {
         draw_offscreen_portal_views(cmd);
     } else {
         draw_portal_views(cmd);
     }
-	stats.portal_drawcall_count = stats.drawcall_count - stats.world_drawcall_count;
+    }
+    stats.portal_drawcall_count = stats.drawcall_count - stats.world_drawcall_count;
+    if (!mainDrawContext.TransparentSurfaces.empty()) {
+        GpuPassScope gpu(*this,cmd,GpuPass::Transparents);
+        DrawContext transparent;transparent.TransparentSurfaces=mainDrawContext.TransparentSurfaces;
+        draw_geometry(cmd,transparent,sceneData.viewproj,get_current_frame().sceneDescriptor,false);
+    }
 
     // Replaces the shaded image with one of the buffers behind it.  Editor
     // overlays are still drawn on top, so shadow and collider bounds can be
     // read against the depth or normals they were built from.
+    { GpuPassScope gpu(*this,cmd,GpuPass::Debug);
     if (_debugViews.view == RenderDebugView::SDFTrace) {
         draw_sdf_debug(cmd);
     } else if (_debugViews.view == RenderDebugView::SurfaceCache) {
@@ -1171,6 +1238,7 @@ void VulkanEngine::draw(float deltaTime)
     // depth, velocity - whose whole value is that nothing has reshaped it, and
     // a tone curve would do exactly that.  They present from the draw image on
     // the untouched path below, as they always have.
+    }
     const bool tonemapping = _postProcess.tonemapEnabled && !showRenderDebugView &&
         _postProcess.tonemapPipeline.pipeline != VK_NULL_HANDLE;
     if (tonemapping) {
@@ -1184,7 +1252,7 @@ void VulkanEngine::draw(float deltaTime)
     // It reads the tonemap's output, so it is only available when that ran.
     if (tonemapping && _postProcess.fxaaEnabled &&
         _postProcess.fxaaPipeline.pipeline != VK_NULL_HANDLE) {
-        draw_fxaa(cmd);
+        { GpuPassScope gpu(*this,cmd,GpuPass::FXAA); draw_fxaa(cmd); }
         presentSource = _postProcess.image.image;
     } else if (tonemapping) {
         vkutil::transition_image(
@@ -1197,6 +1265,7 @@ void VulkanEngine::draw(float deltaTime)
     }
 
     }
+    { GpuPassScope gpu(*this,cmd,GpuPass::PresentCopy);
 	// transition the swapchain image into its correct transfer layout
 	vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
@@ -1205,13 +1274,28 @@ void VulkanEngine::draw(float deltaTime)
 
 	// Draw ImGui directly into the swapchain image with dynamic rendering.
 	vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
+    { GpuPassScope gpu(*this,cmd,GpuPass::UI);
 	draw_imgui(cmd, _swapchainImageViews[swapchainImageIndex]);
+    }
 
 	// Set the swapchain image layout to Present so we can show it on screen.
 	vkutil::transition_image(cmd, _swapchainImages[swapchainImageIndex], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
 	//finalize the command buffer (we can no longer add commands, but it can now be executed)
+    end_gpu_pass(cmd,GpuPass::Frame);
+    _gpuTiming.activeCommand=VK_NULL_HANDLE;
 	VK_CHECK(vkEndCommandBuffer(cmd));
+    const auto recordDone=std::chrono::steady_clock::now();
+    const auto ms=[](auto from,auto to) { return std::chrono::duration<double,std::milli>(to-from).count(); };
+    auto& gpuSlot=_gpuTiming.slots[_frameNumber%FRAME_OVERLAP];
+    gpuSlot.cpuFence=ms(hostStart,fenceDone);gpuSlot.cpuAcquire=ms(acquireStart,acquireDone);
+    gpuSlot.cpuPrepare=ms(hostStart,recordStart)-gpuSlot.cpuFence-gpuSlot.cpuAcquire;
+    gpuSlot.cpuRecord=ms(recordStart,recordDone);
+    const std::array<uint64_t,6> rebuildEnd{stats.sdf_rebuild_count,stats.surface_cache_rebuild_count,
+        stats.trace_rebuild_count,_sunCasters.blasBuilds,_sunCasters.tlasBuilds,stats.albedo_rebuild_count};
+    for (size_t i=0;i<rebuildEnd.size();++i) gpuSlot.rebuilds[i]=rebuildEnd[i]-rebuildStart[i];
+    gpuSlot.heapUsage=stats.gpu_heap_usage;gpuSlot.heapBudget=stats.gpu_heap_budget;
 
 	//prepare the submission to the queue.
 	//wait until the swapchain image is ready, then signal when rendering is finished
@@ -1230,7 +1314,9 @@ void VulkanEngine::draw(float deltaTime)
 	VkSubmitInfo2 submit = vkinit::submit_info(&cmdinfo, &signalInfo, &waitInfo);
 
 	//submit command buffer to the queue and execute it
+    const auto submitStart=std::chrono::steady_clock::now();
 	VK_CHECK(vkQueueSubmit2(_graphicsQueue, 1, &submit, get_current_frame()._renderFence));
+    gpuSlot.cpuSubmit=ms(submitStart,std::chrono::steady_clock::now());
 
     //prepare present
 	// this will put the image we just rendered to into the visible window.
@@ -1247,7 +1333,9 @@ void VulkanEngine::draw(float deltaTime)
 
 	presentInfo.pImageIndices = &swapchainImageIndex;
 
+    const auto presentStart=std::chrono::steady_clock::now();
 	VkResult presentResult = vkQueuePresentKHR(_graphicsQueue, &presentInfo);
+    gpuSlot.cpuPresent=ms(presentStart,std::chrono::steady_clock::now());
 	if (presentResult == VK_ERROR_OUT_OF_DATE_KHR ||
         presentResult == VK_SUBOPTIMAL_KHR) {
         resize_requested = true;
@@ -1563,6 +1651,10 @@ void VulkanEngine::run(){
         begin_cinematic_recording(
             cinematicFrames, outputDirectory, /*quitWhenDone=*/true);
     }
+    if(frameLimit && SDL_getenv("MIRABILIS_TEST_PLAYER_PORTALS") && !_authoredPortals.pairs.empty()) {
+        _bluePortal=_authoredPortals.pairs.front().first;_orangePortal=_authoredPortals.pairs.front().second;
+        _authoredPortals.pairs.clear();_portalCameras.useOffscreen=SDL_getenv("MIRABILIS_TEST_PORTAL_OFFSCREEN")!=nullptr;
+    }
     if (testTraversal) {
         if (_authoredPortals.pairs.empty() || _cinematic.recording) std::abort();
         set_editor_mode(false);
@@ -1616,6 +1708,15 @@ void VulkanEngine::run(){
         r4FrameTimes << "frame,ms,radiosity_gpu_ms,ssgi_gpu_ms,radiosity_texels\n";
     }
     const bool testPhysics = frameLimit && SDL_getenv("MIRABILIS_TEST_PHYSICS_LIFECYCLE");
+    const bool testDynamicGi=frameLimit && SDL_getenv("MIRABILIS_TEST_DYNAMIC_GI");
+    PersistentID dynamicGiBody=InvalidSceneObject;
+    const Camera dynamicGiCamera=_editorCamera;
+    if(testDynamicGi) {
+        for(auto ref:_scene.creation_order()) if(auto body=_scene.read<RigidBody>(ref);body && body->motion==BodyMotion::Dynamic)
+            dynamicGiBody=ref.persistentId;
+        if(dynamicGiBody==InvalidSceneObject) throw std::runtime_error("Dynamic GI test requires a dynamic body");
+        set_editor_mode(false);set_mouse_capture(false);
+    }
     const bool testPhysicsTrace = testPhysics && _rendererMode == RendererMode::SoftwarePathTrace;
     const bool testPhysicsShortTrace = testPhysicsTrace && frameLimit <= 200;
     SceneDocumentSnapshot physicsAuthored;
@@ -1724,7 +1825,7 @@ void VulkanEngine::run(){
         input.clear(); ImGui::GetIO().WantCaptureKeyboard = capturedKeyboard;
         scriptState("reopened-play");
     }
-    auto previousTime = std::chrono::steady_clock::now();
+    _frameClock.reset();
     const bool testReload=frameLimit && SDL_getenv("MIRABILIS_TEST_SCRIPT_RELOAD");
     if (testReload) {
         set_editor_mode(false);set_mouse_capture(false);
@@ -1738,24 +1839,31 @@ void VulkanEngine::run(){
     //main loop
     while(!bQuit) {
         const auto currentTime = std::chrono::steady_clock::now();
-        float deltaTime = std::chrono::duration<float>(currentTime - previousTime).count();
-        previousTime = currentTime;
-        // Avoid a large movement jump after dragging/resuming the window.
-        const float wallDeltaTime = deltaTime;
-        deltaTime = std::min(deltaTime, 0.1f);
+        const auto frameTime = _frameClock.tick(currentTime);
+        float deltaTime = frameTime.simulationSeconds;
+        const float wallDeltaTime = static_cast<float>(frameTime.wallSeconds);
+        stats.frametime = wallDeltaTime * 1000.0f;
+        auto profileFrame = _profiler.frame(_frameNumber, frameTime.wallSeconds);
         if (frameLimit && SDL_getenv("MIRABILIS_SSGI_BENCHMARK") && _frameNumber == 5) {
             SDL_SetHint(SDL_HINT_FORCE_RAISEWINDOW, "1");
             SDL_RaiseWindow(_window);
         }
 
         //handle events on queue
+        {
+        auto scope = _profiler.scope(mirabilis::CpuZone::Events);
+        if (_editorHostPump) _editorHostPump();
         while (SDL_PollEvent(&e) != 0) {
             if (testPhysics && e.type == SDL_KEYDOWN) {
                 fmt::print("PHYSICS interactive key event: key={} repeat={}\n",int(e.key.keysym.sym),int(e.key.repeat));
             }
             bQuit = process_event(e) || bQuit;
         }
+        }
+        apply_editor_requests();
+        if (bQuit || _editorQuitRequested) break;
         if (_scriptHost) {
+            auto scope = _profiler.scope(mirabilis::CpuZone::Reload);
             const auto ref=testReload ? _scene.get(3) : EntityRef{};
             const auto epoch=_scene.epoch();
             const auto pose=testReload ? _scene.world_matrix(ref) : glm::mat4(1);
@@ -1767,7 +1875,7 @@ void VulkanEngine::run(){
             const auto accumulator=_playerStep.accumulator;
             const auto history=_physicsHistoryResetCount;
             if (_scriptHost->poll_reload()) {
-                previousTime=std::chrono::steady_clock::now();
+                _frameClock.reset();
                 if (testReload) {
                     scriptRequire(!_editorMode && _scene.epoch()==epoch && _scene.valid(ref),"reload reset Play or entity identity");
                     scriptRequire(_scene.world_matrix(ref)==pose && _physicsWorld.velocity(ref)==velocity,"reload reset live physics pose/velocity");
@@ -1914,56 +2022,23 @@ void VulkanEngine::run(){
                 }
             }
         }
-        if (_editorMode) {
-            if (_cinematic.recording) {
-                // Live mouse-look input is ignored while recording: the pose
-                // this frame is entirely a function of frameIndex, which is
-                // what makes the output reproducible frame-for-frame.
-                apply_cinematic_camera_pose();
-                deltaTime = _cinematic.frameDt;
-            } else {
-                _editorCamera.update(deltaTime);
-            }
-            _playerStep.accumulator = 0.0f;
-            // Leaving the editor should not make the first tick back in play
-            // sweep through however far the editor camera was turned.
-            _playerStep.previousPlayerYaw = mainCamera.yaw;
-        } else {
-            if (_scriptHost && (!_mouseCaptured || ImGui::GetIO().WantCaptureKeyboard ||
-                !(SDL_GetWindowFlags(_window) & SDL_WINDOW_INPUT_FOCUS))) _scriptHost->input().focus_lost();
-            _playerStep.accumulator = std::min(
-                _playerStep.accumulator + deltaTime,
-                PlayerMovementDt * static_cast<float>(MaxPlayerMovementSteps));
-            // Where this frame's turn ends.  update_player_movement() may overwrite
-            // both ends of it partway through if the player crosses a portal,
-            // which is why the loop reads the members rather than a local.
-            _playerStep.targetPlayerYaw = mainCamera.yaw;
-            // Clamped to at least one: the accumulator can sit a hair above
-            // PlayerMovementDt while the division truncates to zero, and dividing by
-            // that below would hand the first tick an infinite fraction.
-            const int stepCount = std::max(
-                1, static_cast<int>(_playerStep.accumulator / PlayerMovementDt));
-            int stepIndex = 0;
-            while (_playerStep.accumulator >= PlayerMovementDt) {
-                ++stepIndex;
-                _playerInput.yaw = lerp_yaw(
-                    _playerStep.previousPlayerYaw,
-                    _playerStep.targetPlayerYaw,
-                    static_cast<float>(stepIndex) /
-                        static_cast<float>(stepCount));
-                if (_scriptHost) _scriptHost->fixed_update(PlayerMovementDt);
-                _scene.apply_commands();
-                update_player_movement(PlayerMovementDt);
-                sync_physics_world();
-                _physicsWorld.step(_scene, PlayerMovementDt);
-                drain_scene_destruction();
-                _playerStep.accumulator -= PlayerMovementDt;
-            }
-            _playerStep.previousPlayerYaw = _playerStep.targetPlayerYaw;
-            if (_scriptHost) _scriptHost->update(deltaTime);
-            drain_scene_destruction();
+        if (_editorMode && _cinematic.recording) {
+            apply_cinematic_camera_pose();
+            deltaTime = _cinematic.frameDt;
         }
+        if(testDynamicGi) {
+            deltaTime=PlayerMovementDt;_noClip.enabled=true;_playerInput={};
+            mainCamera=_editorCamera=dynamicGiCamera;
+            _playerMovement.position=dynamicGiCamera.position-glm::vec3(0,1.7f,0);
+            _playerMovement.previousPosition=_playerMovement.position;_playerMovement.velocity={};
+            const float velocity=SDL_getenv("MIRABILIS_TEST_DYNAMIC_GI_OSCILLATE") ? 3.f*std::cos(float(_frameNumber)*.05f) : 3.f;
+            _physicsWorld.queue_velocity(_scene,_scene.get(dynamicGiBody),{velocity,0,0});
+        }
+        tick_simulation(deltaTime, _mouseCaptured && !ImGui::GetIO().WantCaptureKeyboard &&
+            (SDL_GetWindowFlags(_window) & SDL_WINDOW_INPUT_FOCUS));
 
+        {
+        auto scope = _profiler.scope(mirabilis::CpuZone::UI);
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
@@ -1971,6 +2046,7 @@ void VulkanEngine::run(){
         if (!SDL_getenv("MIRABILIS_TEST_HIDE_PANELS")) draw_frame_ui(wallDeltaTime);
 
         ImGui::Render();
+        }
         // Exercise the editor's scene replacement path, not only cold startup.
         if (frameLimit && _frameNumber == 20) {
             if (const char* scene = SDL_getenv("MIRABILIS_TEST_SCENE_SWITCH")) {
@@ -1994,6 +2070,24 @@ void VulkanEngine::run(){
             _frameNumber >= 100 && _frameNumber < 130) {
             _shadow.sunlightDirection.x += 0.005f;
         }
+        if (frameLimit && SDL_getenv("MIRABILIS_TEST_LIGHT_DRAG") && _frameNumber>=100 &&
+            (_frameNumber<130 || SDL_getenv("MIRABILIS_TEST_LIGHT_DRAG_CONTINUOUS"))) {
+            for (auto ref:_scene.creation_order()) if (const auto* light=_scene.read<Light>(ref)) {
+                auto changed=*light; changed.intensity=20.f+10.f*std::sin(float(_frameNumber)*0.1f);
+                _scene.set(ref,changed,true); break;
+            }
+        }
+        if(frameLimit && SDL_getenv("MIRABILIS_TEST_LIGHT_OFF") && _frameNumber==160) {
+            for(auto ref:_scene.creation_order()) if(auto light=_scene.read<Light>(ref)) {
+                auto changed=*light;changed.intensity=0;_scene.set(ref,changed,true);
+            }
+        }
+        if (frameLimit && SDL_getenv("MIRABILIS_TEST_REFLECTION_MOTION") && _frameNumber>=100) {
+            _editorCamera.position.x+=.002f;
+            _editorCamera.position.z-=.01f;
+        }
+        if (frameLimit && SDL_getenv("MIRABILIS_TEST_REFLECTION_CUT") && _frameNumber==159)
+            _editorCamera.position.x+=3.f;
         const bool testInvalidation=frameLimit&&SDL_getenv("MIRABILIS_TEST_INVALIDATION");
         const int testFrame=_frameNumber;
         if(testInvalidation) {
@@ -2091,6 +2185,24 @@ void VulkanEngine::run(){
             _sceneResourcesRetired = false;
         }
         draw(deltaTime);
+        if(frameLimit) if(const char* directory=SDL_getenv("MIRABILIS_TEST_GI_SEQUENCE")) {
+            const std::filesystem::path outputDirectory(directory);
+            int start=160,count=16;
+            if(const char* range=SDL_getenv("MIRABILIS_TEST_GI_CAPTURE_RANGE")) std::sscanf(range,"%d %d",&start,&count);
+            if(count<1 || count>64 || start<0) throw std::runtime_error("Invalid GI capture range");
+            if(_frameNumber>=start && _frameNumber-start<count) {
+                std::filesystem::create_directories(outputDirectory);
+                const auto path=(outputDirectory/fmt::format("frame-{:04}",_frameNumber)).string();
+                capture_raster(path.c_str());
+                if(_frameNumber==start || _frameNumber-start==count-1) capture_dynamic_sdf(path.c_str());
+            }
+        }
+        _profiler.counter(mirabilis::ProfileCounter::DrawCalls, stats.drawcall_count);
+        _profiler.counter(mirabilis::ProfileCounter::Triangles, stats.triangle_count);
+        _profiler.counter(mirabilis::ProfileCounter::DrawScratchBytes,
+            static_cast<double>(_opaqueDrawScratch.capacity() * sizeof(uint32_t)));
+        _profiler.counter(mirabilis::ProfileCounter::DrawScratchGrowths,
+            static_cast<double>(stats.draw_index_buffer_grows));
         if (testPhysics) {
             const auto ref = _scene.get(physicsBox);
             if (_frameNumber < 900) physicsPhase = _physicsWorld.sleeping(ref) ? "sleep" : "awake";
@@ -2107,11 +2219,11 @@ void VulkanEngine::run(){
                 else if (runtime->second.primitive.valid()) ++dynamicDraws;
             }
             const bool lumen = _ssgi.lumenEnabled && _ssgi.enabled;
-            fmt::print("PHYSICS phase={} frame={} bodies={} sdf={} surface={} trace={} ray-shadow={} eligible={} dynamic-draws={} history-reset={} sdf-enabled={} surface-enabled={} ray-shadow-enabled={} trace-enabled={} sdf-placed={} sdf-instances={} editor-mode={} body-sleep={} ecs-sleep={}\n",
+            fmt::print("PHYSICS phase={} frame={} bodies={} sdf={} surface={} trace={} ray-shadow={} eligible={} dynamic-draws={} history-reset={} sdf-enabled={} surface-enabled={} ray-shadow-enabled={} trace-enabled={} sdf-placed={} sdf-instances={} editor-mode={} body-sleep={} ecs-sleep={} hardware-world={} ray-blas={}\n",
                 physicsPhase,_frameNumber,_physicsWorld.body_count(),stats.sdf_rebuild_count,stats.surface_cache_rebuild_count,
                 stats.trace_rebuild_count,stats.sun_shadow_rebuild_count,eligible,dynamicDraws,_physicsHistoryResetCount,
                 int(lumen),int(lumen),int(_rayQueryShadows),int(_traceSupported),_sceneSdf.placedCount,_sceneSdf.instanceCount,int(_editorMode),int(_physicsWorld.sleeping(ref)),
-                int(_scene.read<PhysicsState>(ref) && _scene.read<PhysicsState>(ref)->sleeping));
+                int(_scene.read<PhysicsState>(ref) && _scene.read<PhysicsState>(ref)->sleeping),int(_sceneSdf.hardwareProxy),_sunCasters.blasBuilds);
             if (physicsPhase == "teleport") {
                 const auto pose = _scene.world_matrix(ref);
                 physicsRequire(glm::length(glm::vec3(pose[3])-glm::vec3(-.5f,2,0)) < 1e-4f, "teleport target pose drifted");
@@ -2242,6 +2354,7 @@ void VulkanEngine::run(){
             }
         }
         if (_frameRateCapEnabled && _targetFrameRate > 0.0f) {
+            auto scope = _profiler.scope(mirabilis::CpuZone::FrameLimit);
             const auto frameEnd = std::chrono::steady_clock::now();
             const auto targetDuration = std::chrono::duration<double>(
                 1.0 / static_cast<double>(_targetFrameRate));
@@ -2272,6 +2385,13 @@ void VulkanEngine::run(){
                 fmt::print("GI TEST FAIL: requested portal GI cache unavailable\n");
                 std::abort();
             }
+            // Drain delayed GPU rows outside the measured loop, including its final slots.
+            if (_gpuTiming.scopePool) {
+                VK_CHECK(vkDeviceWaitIdle(_device));
+                for (uint32_t slot=0;slot<FRAME_OVERLAP;++slot) read_gpu_timestamps(slot);
+                if (_gpuTiming.log.is_open()) _gpuTiming.log.flush();
+            }
+            sample_gpu_memory_budget(true);
             if (r4FrameTimes) {
                 VmaTotalStatistics memory{};
                 vmaCalculateStatistics(_allocator, &memory);
@@ -2304,6 +2424,7 @@ void VulkanEngine::run(){
             }
             if (const char* capture=SDL_getenv("MIRABILIS_CAPTURE")) capture_path_trace(capture);
             if (const char* capture=SDL_getenv("MIRABILIS_SSGI_CAPTURE")) capture_ssgi(capture);
+            if (const char* capture=SDL_getenv("MIRABILIS_TEST_REFLECTION_HISTORY")) capture_reflection_history(capture);
             if (const char* capture=SDL_getenv("MIRABILIS_RASTER_CAPTURE")) capture_raster(capture);
             if (const char* directory = SDL_getenv("MIRABILIS_TEST_COLOR_CAPTURE")) {
                 std::filesystem::create_directories(directory);
@@ -2311,6 +2432,12 @@ void VulkanEngine::run(){
             }
             if (const char* path=SDL_getenv("MIRABILIS_R4_SOURCE_IMPORTANCE_CSV"))
                 measure_cache_source_importance(path);
+            if (SDL_getenv("MIRABILIS_TEST_REQUIRE_LUMEN") && (!_ssgi.enabled || !_ssgi.lumenEnabled || !lumen_lite_ready())) {
+                fmt::print("GI TEST FAIL: requested Lumen did not become ready\n"); std::abort();
+            }
+            fmt::print("GI updates: BLAS-builds={} TLAS-builds={} completed-relights={} pending-texels={} reflections-active={} reflection-history={}\n",
+                _sunCasters.blasBuilds,_sunCasters.tlasBuilds,_surfaceCache.completedRelights,_surfaceCache.lightingSchedule.remaining,sceneData.reflectionSettings.x>0.5,_reflections.historyValid);
+            fmt::print("Forward prepass rejection: {}\n",sceneData.giTracingSettings.z>.5f);
             fmt::print("GI bounded run complete: frames={} renderer={}\n",_frameNumber,
                 _rendererMode==RendererMode::SoftwarePathTrace&&_traceSupported?"software":"raster");
             bQuit = true;
@@ -2548,6 +2675,7 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
         object.indexBuffer = mesh->meshBuffers.indexBuffer.buffer;
         object.material = surface.material ? &surface.material->data : nullptr;
         object.bounds = surface.bounds;
+        object.clusters = surface.clusters;
         object.transform = nodeMatrix;
         object.previousTransform = hasPreviousDrawTransform
             ? previousDrawTransform
@@ -2596,5 +2724,5 @@ void VulkanEngine::immediate_submit(std::function<void(VkCommandBuffer cmd)>&& f
 	//  _renderFence will now block until the graphic commands finish execution
 	VK_CHECK(vkQueueSubmit2(_graphicsQueue, 1, &submit, _immFence));
 
-    wait_for_gpu_fence(_device, _immFence);
+    wait_for_gpu_fence(_device, _immFence, _profiler);
 }

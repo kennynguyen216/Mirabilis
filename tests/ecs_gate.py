@@ -9,11 +9,48 @@ import subprocess
 import time
 import platform
 import shutil
+import ctypes
+import threading
 
 REPO = Path(__file__).resolve().parent.parent
 OUT = None
 BASELINE = None
 FATAL = re.compile(r'GI TEST FAIL|Validation Error|\[ERROR:|VUID-|Device lost|Unhandled renderer exception|Detected Vulkan error')
+
+def focus_benchmark_window(process):
+    if os.name != 'nt':
+        return
+    from ctypes import wintypes
+    user32 = ctypes.WinDLL('user32', use_last_error=True)
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+    user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
+    user32.BringWindowToTop.argtypes = (wintypes.HWND,)
+    user32.ShowWindow.argtypes = (wintypes.HWND, ctypes.c_int)
+    user32.IsWindowVisible.argtypes = (wintypes.HWND,)
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def activate(window, _):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(window, ctypes.byref(owner))
+        if owner.value == process.pid and user32.IsWindowVisible(window):
+            foreground = user32.GetForegroundWindow()
+            thread = user32.GetWindowThreadProcessId(foreground, None)
+            current = ctypes.windll.kernel32.GetCurrentThreadId()
+            attached = thread != current and user32.AttachThreadInput(current, thread, True)
+            try:
+                user32.ShowWindow(window, 9)
+                user32.BringWindowToTop(window)
+                user32.SetForegroundWindow(window)
+            finally:
+                if attached: user32.AttachThreadInput(current, thread, False)
+            return False
+        return True
+    callback = callback_type(activate)
+    while process.poll() is None:
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), ctypes.byref(owner))
+        if owner.value != process.pid: user32.EnumWindows(callback, 0)
+        time.sleep(.5)
 
 def digest(path):
     with path.open('rb') as file:
@@ -36,10 +73,13 @@ def run(name, configuration, flags, seconds=400):
     started = time.monotonic()
     with (directory / 'stdout.log').open('w') as stdout, (directory / 'stderr.log').open('w') as stderr:
         try:
-            p = subprocess.run([str(engine)], cwd=engine.parent, env=env, stdout=stdout, stderr=stderr,
-                timeout=seconds, creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-            code = p.returncode
+            p = subprocess.Popen([str(engine)], cwd=engine.parent, env=env, stdout=stdout, stderr=stderr,
+                creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            if flags.get('MIRABILIS_SSGI_BENCHMARK') == '1':
+                threading.Thread(target=focus_benchmark_window,args=(p,),daemon=True).start()
+            code = p.wait(timeout=max(1, seconds-(time.monotonic()-started)))
         except subprocess.TimeoutExpired:
+            p.kill(); p.wait()
             code = 'timeout'
     logs = (directory / 'stdout.log').read_text(errors='replace') + (directory / 'stderr.log').read_text(errors='replace')
     result = {'exit':code, 'elapsedSeconds':time.monotonic()-started, 'engineSha256':digest(engine), 'fatalLines':[line for line in logs.splitlines() if FATAL.search(line)], 'lastSceneUnchanged':before == digest(REPO / 'assets/scenes/.last_scene')}

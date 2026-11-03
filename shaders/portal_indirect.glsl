@@ -8,9 +8,10 @@ const uint RayFieldExhausted = 1u << 9;
 #define LUMEN_SURFACE_LOOKUP(p, n) surface_cache_lookup(p, n, false, true, true)
 #include "lumen_world_trace.glsl"
 
-vec3 portal_indirect(vec3 world, vec3 normal)
+vec3 portal_indirect(vec3 world, vec3 normal,bool staticCacheMember)
 {
-    SurfaceCacheSample sky = surface_cache_lookup(world, normal, true, true, true);
+    SurfaceCacheSample sky;sky.weight=0;sky.sky=vec3(0);
+    if(staticCacheMember) sky=surface_cache_lookup(world, normal, true, true, true);
     if (sceneData.portalIndirectSettings.w > 0.5 && sky.weight > 0.0) {
         SurfaceCacheSample lighting = surface_cache_lookup(world, normal, false, true, true, 3);
         return sky.sky + lighting.indirect;

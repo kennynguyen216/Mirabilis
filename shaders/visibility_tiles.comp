@@ -1,0 +1,15 @@
+#version 450
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=3) uniform sampler2D prepassDepth;
+layout(r32f,set=0,binding=4) uniform writeonly image2D depthTiles;
+layout(push_constant) uniform Settings {mat4 viewProjection;uvec4 extent;} push;
+shared float depths[64];
+void main()
+{
+    ivec2 pixel=ivec2(gl_GlobalInvocationID.xy);
+    // Reversed Z: every covered pixel must be nearer than the candidate.
+    // Empty pixels and allocation padding stay zero and therefore fail open.
+    depths[gl_LocalInvocationIndex]=all(lessThan(pixel,ivec2(push.extent.xy)))?texelFetch(prepassDepth,pixel,0).r:0.0;
+    barrier();
+    if(gl_LocalInvocationIndex==0){float farthest=1.0;for(int i=0;i<64;++i)farthest=min(farthest,depths[i]);imageStore(depthTiles,ivec2(gl_WorkGroupID.xy),vec4(farthest));}
+}

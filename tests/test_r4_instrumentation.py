@@ -164,7 +164,7 @@ class CacheChannelContract(unittest.TestCase):
         ssgi = SSGI.read_text(encoding="utf-8")
         self.assertIn('#include "sun_shadow.glsl"', ssgi)
         world = (ROOT / "shaders" / "lumen_world_trace.glsl").read_text(encoding="utf-8")
-        self.assertIn("rayClass = RayFieldUncovered; return lumen_hit_sun(p);",
+        self.assertIn("rayClass = RayFieldUncovered; return lumen_hit_sun(p,normal);",
                       re.sub(r"\s+", " ", world))
         structures = (ROOT / "shaders" / "input_structures.glsl").read_text(encoding="utf-8")
         self.assertIn('#include "sun_shadow.glsl"', structures)

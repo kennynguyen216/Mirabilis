@@ -66,6 +66,12 @@ vec3 r4_ray_value(uint rayClass, vec3 radiance)
 #include "environment.glsl"
 
 #ifdef LUMEN_LITE
+// Generic diagnostics keep runtime selection; production can remove unused
+// tracing backends and moving-field hit lighting at pipeline creation.
+layout(constant_id=0) const uint GiWorldBackend=0u;
+layout(constant_id=1) const bool GiDynamicField=true;
+#define MIRABILIS_DYNAMIC_FIELD_ENABLED GiDynamicField
+#define LUMEN_HARDWARE_WORLD (GiWorldBackend==2u || (GiWorldBackend==0u && sceneData.giTracingSettings.x>0.5))
 // Lumen-lite world fallback: set 2 holds the scene distance field and the
 // surface cache.  See docs/lumen_lite_design.md.
 layout(set = 2, binding = 0) uniform sampler3D sceneField;
@@ -262,6 +268,7 @@ struct TraceOrigin {
     vec3 normal;
     vec3 worldPosition;
     vec3 worldNormal;
+    bool staticCacheMember;
 };
 
 TraceOrigin trace_origin(vec2 screenUV, float depth)
@@ -269,8 +276,8 @@ TraceOrigin trace_origin(vec2 screenUV, float depth)
     screenUV = ssgi_geometry_uv(screenUV, vec2(PushConstants.quality.yz));
     TraceOrigin o;
     o.position = view_position(screenUV, depth);
-    o.normal = normalize(texture(prepassNormal,
-        frame_uv(screenUV, prepassNormal)).xyz);
+    vec4 geometryNormal=texture(prepassNormal,frame_uv(screenUV,prepassNormal));
+    o.normal=normalize(geometryNormal.xyz);o.staticCacheMember=geometryNormal.w>0.5;
     vec4 world = sceneData.inverseViewProjection *
         vec4(screenUV * 2.0 - 1.0, depth, 1.0);
     o.worldPosition = world.xyz / world.w;
@@ -352,7 +359,9 @@ vec3 trace_incident(TraceOrigin o, vec3 direction, bool primarySkyCached,
             vec4(hitUV * 2.0 - 1.0, hitDepth, 1.0);
         vec3 hitNormal = normalize(transpose(mat3(sceneData.view)) *
             texture(prepassNormal, frame_uv(hitUV, prepassNormal)).xyz);
-        SurfaceCacheSample hitSurface = LUMEN_SURFACE_LOOKUP(hitWorld.xyz / hitWorld.w, hitNormal);
+        SurfaceCacheSample hitSurface;hitSurface.weight=0;
+        if(texture(prepassNormal,frame_uv(hitUV,prepassNormal)).w>0.5)
+            hitSurface=LUMEN_SURFACE_LOOKUP(hitWorld.xyz / hitWorld.w, hitNormal);
         if (hitSurface.weight > 0.0) {
             incident = r4_ray_value(RayScreenHit,
                 hitSurface.albedo * hitSurface.direct +
@@ -754,7 +763,8 @@ void main()
     TraceOrigin o = trace_origin(screenUV, depth);
 #ifdef LUMEN_LITE
     // quality.w bit 6: IQ10's control, the nearest-texel sky read.
-    SurfaceCacheSample primarySky = surface_cache_lookup(
+    SurfaceCacheSample primarySky;primarySky.weight=0;primarySky.sky=vec3(0);
+    if(o.staticCacheMember) primarySky=surface_cache_lookup(
         o.worldPosition, o.worldNormal, true, (PushConstants.quality.w & 64u) == 0u, true);
     bool primarySkyCached = primarySky.weight > 0.0;
     if (probes_enabled()) {
@@ -802,6 +812,17 @@ void main()
     for (int rayIndex = 0; rayIndex < rayCount; ++rayIndex) {
         vec2 xi = vec2((float(rayIndex) + randomFloat(state)) / float(rayCount),
             fract((float(rayCount - 1 - rayIndex) + randomFloat(state)) / float(rayCount) + rotation));
+#ifdef LUMEN_LITE
+        if((PushConstants.quality.w & 0x80000000u)==0u) {
+            uint pixelSeed=uint(pixel.x)*1973u^uint(pixel.y)*9277u^0x68bc21ebu;
+            vec2 shift=vec2(randomFloat(pixelSeed),randomFloat(pixelSeed));
+            uint sampleIndex=PushConstants.control.w*uint(rayCount)+uint(rayIndex)+1u;
+            // Wrap the phase as an integer before conversion, preserving its
+            // fractional precision even after hours of frame accumulation.
+            xi=fract(shift+vec2(float(bitfieldReverse(sampleIndex))*(1.0/4294967296.0),
+                float(sampleIndex*0x9e3779b9u)*(1.0/4294967296.0)));
+        }
+#endif
         vec3 direction = cosine_direction(o.normal, xi);
         bool hit, portalTermination;
         int stepsTaken;

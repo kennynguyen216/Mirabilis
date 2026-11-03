@@ -17,6 +17,10 @@ struct SceneSettings {
     glm::vec3 environmentTint{1};
     bool blackEnvironment{false};
     float warmth{0}, tint{0}, giSaturation{1};
+    bool celShading{false}, bloom{false}, sceneReflections{false}, lumenGI{false};
+    float reflectionRoughness{0.4f};
+    float celBands{4}, celEdge{0.18f}, bloomStrength{0.08f}, bloomThreshold{1}, bloomScatter{0.7f};
+    int tonemapOperator{0};
     struct SSAO {
         bool enabled{false};
         float radius{0.75f}, bias{0.075f}, intensity{1}, power{1.5f};

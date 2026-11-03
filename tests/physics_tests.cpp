@@ -355,7 +355,7 @@ TEST_CASE("offset rotated collider sync retains entity origin and interpolation"
     check_matrix(scene.world_matrix(moving),to_matrix(teleported));
 }
 
-TEST_CASE("falling box rests at floor height then sleep and wake change subtree eligibility") {
+TEST_CASE("falling box rests at floor height while sleep and wake retain dynamic cache membership") {
     Scene scene; PhysicsWorld physics; const auto floor = box(scene), moving = box(scene,{0,4,0},true);
     auto collider = *scene.read<Collider>(floor); collider.collisionShape = CollisionShape::GroundPlane;
     collider.colliderHalfExtents = {20,.5f,20}; REQUIRE(scene.set(floor,collider));
@@ -367,7 +367,7 @@ TEST_CASE("falling box rests at floor height then sleep and wake change subtree 
     for (int i=0;i<900 && !physics.sleeping(moving);++i) tick(physics,scene);
     CHECK(physics.sleeping(moving));
     CHECK(scene.read<Transform>(moving)->position.y == doctest::Approx(.5f).epsilon(.03));
-    CHECK(contributes_to_static_caches(scene,moving,false)); CHECK(contributes_to_static_caches(scene,child,false));
+    CHECK_FALSE(contributes_to_static_caches(scene,moving,false)); CHECK_FALSE(contributes_to_static_caches(scene,child,false));
     check_matrix(physics.render_world(scene,moving,0),scene.world_matrix(moving));
     check_matrix(physics.render_world(scene,moving,1),scene.world_matrix(moving));
     REQUIRE(physics.queue_impulse(scene,moving,{0,5,0})); tick(physics,scene);
@@ -415,11 +415,11 @@ TEST_CASE("snapshot reset rebinds bodies restores deleted entities removes play 
     CHECK(physics.has_body(scene.get(replacementBody.persistentId))); CHECK_FALSE(physics.has_body(rebound));
 }
 
-TEST_CASE("cache eligibility follows ancestor sleep state including missing state") {
+TEST_CASE("dynamic cache eligibility is independent of ancestor sleep state") {
     Scene scene; const auto root = box(scene,{},true), child = box(scene,{},false,root), ordinary = box(scene);
     REQUIRE(scene.set(child,RigidBody{})); CHECK_FALSE(contributes_to_static_caches(scene,child,false));
     CHECK(contributes_to_static_caches(scene,ordinary,false)); CHECK(contributes_to_static_caches(scene,child,true));
-    REQUIRE(scene.set(root,PhysicsState{true})); CHECK(contributes_to_static_caches(scene,child,false));
+    REQUIRE(scene.set(root,PhysicsState{true})); CHECK_FALSE(contributes_to_static_caches(scene,child,false));
     REQUIRE(scene.set(root,PhysicsState{false})); CHECK_FALSE(contributes_to_static_caches(scene,child,false));
     auto stale = root; ++stale.epoch; CHECK_FALSE(contributes_to_static_caches(scene,stale,false));
 }
