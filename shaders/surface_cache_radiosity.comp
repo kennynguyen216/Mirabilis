@@ -135,7 +135,6 @@ void main()
     float maxDistance = PushConstants.settings.y;
     uint rays = max(PushConstants.control.y, 1u);
     vec3 sum = vec3(0.0);
-    uint counted = 0u;
     for (uint r = 0u; r < rays; ++r) {
         vec3 direction = cosine_direction(normal, state);
         vec3 p,hitNormal;
@@ -145,7 +144,7 @@ void main()
         rayQueryEXT query;
         rayQueryInitializeEXT(query,sunCasters,gl_RayFlagsOpaqueEXT,0xff,origin,0.0001,direction,maxDistance);
         while(rayQueryProceedEXT(query)) {}
-        if(rayQueryGetIntersectionTypeEXT(query,true)==gl_RayQueryCommittedIntersectionNoneEXT) {++counted;continue;}
+        if(rayQueryGetIntersectionTypeEXT(query,true)==gl_RayQueryCommittedIntersectionNoneEXT) continue;
         p=origin+direction*rayQueryGetIntersectionTEXT(query,true);
         hitNormal=ray_hit_normal(query);
         if(dot(hitNormal,direction)>0)hitNormal=-hitNormal;
@@ -171,12 +170,8 @@ void main()
         if (!hit) {
             // A ray that left the field (or reached the trace distance) has
             // nothing to reflect -- the sky it saw belongs to the direct
-            // page -- so it counts as zero.  One that ran out of steps is
-            // still inside, where the field's truncated distances make long
-            // or grazing rays slow, and its light is unknown: not counted.
-            if (t >= tExit) {
-                ++counted;
-            }
+            // page. An exhausted ray is unknown and also contributes zero;
+            // excluding it would amplify the remaining covered directions.
             continue;
         }
         p=origin+direction*t;
@@ -191,21 +186,12 @@ void main()
             vec3 arriving = PushConstants.control.z != 0u
                 ? surface.direct : surface.direct + surface.indirect;
             sum += surface.albedo * arriving;
-            ++counted;
         }
-        else {
 #ifdef MIRABILIS_RT_SHADOWS
-            sum+=ray_hit_albedo(query)*ray_uncached_direct(p,hitNormal);
+        else sum+=ray_hit_albedo(query)*ray_uncached_direct(p,hitNormal);
 #endif
-            // Missing lighting contributes zero instead of renormalizing the
-            // covered directions into extra energy on the software backend.
-            ++counted;
-        }
     }
-    if (counted == 0u) {
-        return;
-    }
-    vec3 estimate = sum / float(counted);
+    vec3 estimate = sum / float(rays);
     vec3 previous = imageLoad(indirectPage, texel).rgb;
     imageStore(indirectPage, texel,
         vec4(mix(previous, estimate, PushConstants.settings.x), 1.0));

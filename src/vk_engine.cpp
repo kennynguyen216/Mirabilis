@@ -695,6 +695,9 @@ void VulkanEngine::init_vulkan()
     anisotropyFeature.samplerAnisotropy = VK_TRUE;
     _samplerAnisotropySupported =
         physicalDevice.enable_features_if_present(anisotropyFeature);
+    VkPhysicalDeviceFeatures compressionFeature{};compressionFeature.textureCompressionBC=VK_TRUE;
+    const bool blockCompression=physicalDevice.enable_features_if_present(compressionFeature);
+    fmt::print("BC texture support: {}\n",blockCompression);
     _conservativeRasterSupported = physicalDevice.enable_extension_if_present(
         VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
     // IQ2 ray-query sun shadows, optional.  Device extensions are fixed here,
@@ -2052,6 +2055,12 @@ void VulkanEngine::run(){
                 _scene.set(ref,changed,true); break;
             }
         }
+        if (frameLimit && SDL_getenv("MIRABILIS_TEST_REFLECTION_MOTION") && _frameNumber>=100) {
+            _editorCamera.position.x+=.002f;
+            _editorCamera.position.z-=.01f;
+        }
+        if (frameLimit && SDL_getenv("MIRABILIS_TEST_REFLECTION_CUT") && _frameNumber==159)
+            _editorCamera.position.x+=3.f;
         const bool testInvalidation=frameLimit&&SDL_getenv("MIRABILIS_TEST_INVALIDATION");
         const int testFrame=_frameNumber;
         if(testInvalidation) {
@@ -2376,6 +2385,7 @@ void VulkanEngine::run(){
             }
             if (const char* capture=SDL_getenv("MIRABILIS_CAPTURE")) capture_path_trace(capture);
             if (const char* capture=SDL_getenv("MIRABILIS_SSGI_CAPTURE")) capture_ssgi(capture);
+            if (const char* capture=SDL_getenv("MIRABILIS_TEST_REFLECTION_HISTORY")) capture_reflection_history(capture);
             if (const char* capture=SDL_getenv("MIRABILIS_RASTER_CAPTURE")) capture_raster(capture);
             if (const char* directory = SDL_getenv("MIRABILIS_TEST_COLOR_CAPTURE")) {
                 std::filesystem::create_directories(directory);
@@ -2388,6 +2398,7 @@ void VulkanEngine::run(){
             }
             fmt::print("GI updates: BLAS-builds={} TLAS-builds={} completed-relights={} pending-texels={} reflections-active={} reflection-history={}\n",
                 _sunCasters.blasBuilds,_sunCasters.tlasBuilds,_surfaceCache.completedRelights,_surfaceCache.lightingSchedule.remaining,sceneData.reflectionSettings.x>0.5,_reflections.historyValid);
+            fmt::print("Forward prepass rejection: {}\n",sceneData.giTracingSettings.z>.5f);
             fmt::print("GI bounded run complete: frames={} renderer={}\n",_frameNumber,
                 _rendererMode==RendererMode::SoftwarePathTrace&&_traceSupported?"software":"raster");
             bQuit = true;

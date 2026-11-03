@@ -18,6 +18,7 @@ layout(set = 0, binding = 3) uniform sampler2D environmentTexture;
 // roughness k / iblSettings.y, and the split-sum (scale, bias) table.
 layout(set = 0, binding = 4) uniform sampler2D prefilteredEnvironment;
 layout(set = 0, binding = 5) uniform sampler2D brdfLut;
+layout(set = 0, binding = 25) uniform sampler2D mainPrepassDepth;
 // Emitter light at the visible surface (R4.9, R4.12): the path tracer's own
 // triangles, materials and emitter list for specular sampling, and the
 // surface cache with its emitter page for the shadowed diffuse term.

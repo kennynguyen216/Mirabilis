@@ -32,6 +32,11 @@ layout(location = 4) out vec4 outSpecular;
 
 void main()
 {
+#ifndef MIRABILIS_COLOR_ONLY
+    // Reject hidden fragments before material/cache/ray work; keep a conservative depth margin.
+    if (sceneData.giTracingSettings.z > 0.5 &&
+        gl_FragCoord.z + 1e-6 < texelFetch(mainPrepassDepth, ivec2(gl_FragCoord.xy), 0).r) discard;
+#endif
     vec4 baseColor = inColor * texture(colorTex, inUV);
 #ifdef MIRABILIS_ALPHA_MASK
     // Before any shading work: a discarded fragment must not have cost a

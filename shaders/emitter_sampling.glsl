@@ -42,7 +42,8 @@ float emitter_visibility(vec3 origin, vec3 target, float voxel)
         }
         t += max(d, 0.5 * voxel);
     }
-    return 1.0;
+    // Exhaustion is unknown visibility, not evidence that the segment was clear.
+    return t >= span ? 1.0 : 0.0;
 #endif
 }
 #endif

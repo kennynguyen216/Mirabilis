@@ -1,9 +1,12 @@
 #include "vk_engine.h"
 #include "vk_engine_render_helpers.h"
+#include "env_flags.h"
 #include <vk_images.h>
 #include <vk_initializers.h>
 #include <glm/gtc/matrix_inverse.hpp>
-#include <cstring>
+#include <algorithm>
+#include <fstream>
+#include <cmath>
 
 void VulkanEngine::init_reflections()
 {
@@ -40,7 +43,7 @@ void VulkanEngine::init_reflections()
         VK_CHECK(vkDeviceWaitIdle(_device));
         for(auto* image:{&state.raw,&state.rawHit,&state.radiance[0],&state.radiance[1],&state.hit[0],&state.hit[1],&state.metadata[0],&state.metadata[1]}) destroy_image(*image);
     }
-    constexpr auto usage=VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    constexpr auto usage=VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     state.raw=create_image(_drawImage.imageExtent,VK_FORMAT_R16G16B16A16_SFLOAT,usage);
     state.rawHit=create_image(_drawImage.imageExtent,VK_FORMAT_R32G32B32A32_SFLOAT,usage);
     for(int i=0;i<2;++i) {
@@ -64,12 +67,17 @@ void VulkanEngine::draw_reflections(VkCommandBuffer cmd)
 {
     auto& state=_reflections;
     if(sceneData.reflectionSettings.x<0.5 || !state.pipeline.pipeline) {state.historyValid=false;return;}
-    // Reject all moving-scene/camera history initially. This conservative path
-    // avoids reusing a stationary mirror's obsolete reflected objects.
-    state.historyValid=state.historyValid && state.lastSceneHash==_sunCasters.hash &&
+    static const auto history = parse_env_bool_override(SDL_getenv("MIRABILIS_REFLECTION_HISTORY"), true);
+    const bool allowHistory=history.valid && history.value;
+    const glm::mat4 cameraWorld=glm::inverse(sceneData.view);
+    const glm::vec3 cameraPosition(cameraWorld[3]),cameraForward(cameraWorld[2]);
+    // Large per-frame jumps are cuts; smooth motion uses the per-hit reprojection checks.
+    const bool continuousCamera=glm::distance(cameraPosition,state.lastCameraPosition)<2.f &&
+        glm::dot(cameraForward,state.lastCameraForward)>.5f;
+    // Scene edits invalidate globally; camera motion is checked per reprojected hit.
+    state.historyValid=allowHistory && continuousCamera && state.historyValid && state.lastSceneHash==_sunCasters.hash &&
         state.lastLightingHash==_surfaceCache.lightingHash && !_surfaceCache.lightingPending &&
-        state.liveExtent.width==_drawExtent.width && state.liveExtent.height==_drawExtent.height &&
-        std::memcmp(&state.lastViewProjection,&sceneData.viewproj,sizeof(glm::mat4))==0;
+        state.liveExtent.width==_drawExtent.width && state.liveExtent.height==_drawExtent.height;
     const uint32_t write=state.writeIndex,read=1-write;
     VkDescriptorSet set=get_current_frame()._frameDescriptors.allocate(_device,state.layout);
     DescriptorWriter writer;
@@ -85,7 +93,7 @@ void VulkanEngine::draw_reflections(VkCommandBuffer cmd)
     const VkDescriptorSet sets[]{get_current_frame().sceneDescriptor,set};
     struct Push { glm::mat4 inverseViewProjection; glm::vec4 camera; glm::uvec4 control; glm::vec4 settings; };
     static_assert(sizeof(Push)==112);
-    Push push{glm::inverse(sceneData.viewproj),glm::inverse(sceneData.view)[3],glm::uvec4(_drawExtent.width,_drawExtent.height,uint32_t(_frameNumber),0),glm::vec4(state.historyValid?1.f:0.f,0,0,0)};
+    Push push{glm::inverse(sceneData.viewproj),cameraWorld[3],glm::uvec4(_drawExtent.width,_drawExtent.height,uint32_t(_frameNumber),0),glm::vec4(state.historyValid?1.f:0.f,0,0,0)};
     vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,state.pipeline.pipeline);
     vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,state.pipeline.layout,0,2,sets,0,nullptr);
     const auto dispatch=[&](uint32_t pass) {
@@ -98,6 +106,28 @@ void VulkanEngine::draw_reflections(VkCommandBuffer cmd)
     vkutil::memory_barrier(cmd); dispatch(1);
     vkutil::memory_barrier(cmd); dispatch(2);
     vkutil::transition_image(cmd,_drawImage.image,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    state.historyValid=!_surfaceCache.lightingPending; state.lastSceneHash=_sunCasters.hash; state.lastLightingHash=_surfaceCache.lightingHash;
-    state.lastViewProjection=sceneData.viewproj; state.liveExtent=_drawExtent; state.writeIndex=read;
+    state.historyValid=allowHistory && !_surfaceCache.lightingPending; state.lastSceneHash=_sunCasters.hash; state.lastLightingHash=_surfaceCache.lightingHash;
+    state.lastCameraPosition=cameraPosition;state.lastCameraForward=cameraForward;
+    state.liveExtent=_drawExtent; state.writeIndex=read;
+}
+
+void VulkanEngine::capture_reflection_history(const char* filename)
+{
+    if (!_reflections.raw.image || sceneData.reflectionSettings.x<.5f)
+        throw std::runtime_error("Reflection history capture requires active scene reflections");
+    const auto owned=read_ssgi_image(_reflections.raw,_drawExtent);
+    const auto values=read_ssgi_image(_reflections.radiance[1-_reflections.writeIndex],_drawExtent);
+    size_t pixels=0,reused=0;double samples=0;float maximum=0;
+    for (size_t i=0;i<values.size();++i) {
+        const auto value=values[i];
+        if (!std::isfinite(value.r) || !std::isfinite(value.g) || !std::isfinite(value.b) || !std::isfinite(value.a))
+            throw std::runtime_error("Nonfinite reflection history");
+        if (owned[i].a<.5f) continue;
+        ++pixels;reused+=value.a>1.f;samples+=value.a;maximum=std::max(maximum,value.a);
+    }
+    std::ofstream file(filename);
+    const auto position=render_camera().position;
+    file<<fmt::format("{{\"ownedPixels\":{},\"reusedPixels\":{},\"meanSamples\":{},\"maximumSamples\":{},\"cameraPosition\":[{},{},{}]}}\n",
+        pixels,reused,pixels?samples/pixels:0,maximum,position.x,position.y,position.z);
+    if (!file) throw std::runtime_error("Cannot write reflection history capture");
 }

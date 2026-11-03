@@ -174,6 +174,7 @@ void VulkanEngine::update_scene(float deltaTime)
     _shadow.sunViewProjection = compute_sun_view_projection(camera.position);
 
     sceneData = build_scene_data(camera.getViewMatrix());
+    if (!_previousMainViewProjectionValid) _reflections.historyValid=false;
     sceneData.previousViewProjection = _previousMainViewProjectionValid
         ? _previousMainViewProjection
         : sceneData.viewproj;

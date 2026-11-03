@@ -493,7 +493,7 @@ struct GLTFMetallic_Roughness {
         glm::vec4 metal_rough_factors;
         // xy = UV tiling, zw = UV offset.  Zero tiling means 1x1.
         glm::vec4 uvTransform;
-        // x = glTF alphaCutoff, left at zero on materials that are not masked.
+        // x = glTF alphaCutoff (zero unless masked), y = BC5 normal-map decoding.
         glm::vec4 alphaMask;
         // rgb = emissive factor times strength, w reserved.
         glm::vec4 emission;
@@ -612,6 +612,7 @@ class VulkanEngine{
     PathTraceSettings _traceSettings;
     void capture_path_trace(const char* filename);
     void capture_ssgi(const char* filename);
+    void capture_reflection_history(const char* filename);
     void capture_raster(const char* filename);
     // The lighting, material and R4 instrumentation state a raster or SSGI
     // capture was taken under, read from the main camera's uploaded scene
@@ -1466,7 +1467,7 @@ class VulkanEngine{
             std::array<AllocatedImage,2> radiance{}, hit{}, metadata{};
             uint32_t writeIndex{};
             uint64_t lastSceneHash{}, lastLightingHash{};
-            glm::mat4 lastViewProjection{1};
+            glm::vec3 lastCameraPosition{},lastCameraForward{0,0,1};
             VkExtent2D liveExtent{};
         } _reflections;
         void init_reflections();

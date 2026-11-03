@@ -18,6 +18,9 @@
 #include "tangents.h"
 #include "vk_engine.h"
 #include "vk_engine_render_helpers.h"
+#include "texture_cache.h"
+#include "env_flags.h"
+#include <vk_images.h>
 
 namespace {
 
@@ -151,7 +154,7 @@ void print_gltf_texture_summary(
         estimatedBytes += baseLevel + baseLevel / 3;
     }
     fmt::print(
-        "GLTF textures: {} sRGB + {} linear, ~{:.1f} MB with mips; "
+        "GLTF textures: {} sRGB + {} linear, ~{:.1f} MB RGBA-equivalent with mips; "
         "{}/{} materials bound base colour, {}/{} metallic-roughness, "
         "{}/{} normal ({})\n",
         srgbCount,
@@ -495,6 +498,31 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
     }
     fastgltf::Asset gltf = std::move(*parsed);
 
+    const auto uploadCompressed = [&](const mirabilis::texture_cache::BlockImage& texture) -> std::optional<AllocatedImage> {
+        const auto format=texture.dxgiFormat==83?VK_FORMAT_BC5_UNORM_BLOCK:
+            texture.srgb?VK_FORMAT_BC7_SRGB_BLOCK:VK_FORMAT_BC7_UNORM_BLOCK;
+        VkFormatProperties properties{};vkGetPhysicalDeviceFormatProperties(engine->_chosenGPU,format,&properties);
+        constexpr auto required=VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT|VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+        if ((properties.optimalTilingFeatures&required)!=required) return {};
+        auto staging=engine->create_buffer(texture.payload.size(),VK_BUFFER_USAGE_TRANSFER_SRC_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
+        std::memcpy(staging.info.pMappedData,texture.payload.data(),texture.payload.size());
+        vmaFlushAllocation(engine->_allocator,staging.allocation,0,VK_WHOLE_SIZE);
+        auto image=engine->create_image({texture.width,texture.height,1},format,
+            VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,true);
+        std::vector<VkBufferImageCopy> regions;
+        for (size_t level=0;level<texture.mips.size();++level) {
+            const auto& mip=texture.mips[level];VkBufferImageCopy copy{};
+            copy.bufferOffset=mip.offset;copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,uint32_t(level),0,1};
+            copy.imageExtent={mip.width,mip.height,1};regions.push_back(copy);
+        }
+        engine->immediate_submit([&](VkCommandBuffer cmd) {
+            vkutil::transition_image(cmd,image.image,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            vkCmdCopyBufferToImage(cmd,staging.buffer,image.image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,uint32_t(regions.size()),regions.data());
+            vkutil::transition_image(cmd,image.image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        });
+        engine->destroy_buffer(staging);return image;
+    };
+
     // The format is the caller's, not the file's: the same PNG byte for byte
     // is sRGB-encoded when it arrives as base color and linear when it arrives
     // as a normal or metallic/roughness map.  stb hands back the stored bytes
@@ -503,8 +531,12 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
     struct DecodedPixels {
         std::unique_ptr<stbi_uc, decltype(&stbi_image_free)> pixels{nullptr, &stbi_image_free};
         int width{}, height{};
+        std::array<std::optional<mirabilis::texture_cache::BlockImage>,2> compressed;
     };
-    auto decodeImage = [&](fastgltf::Image& source, DecodedPixels& output) {
+    VkPhysicalDeviceFeatures textureFeatures{};vkGetPhysicalDeviceFeatures(engine->_chosenGPU,&textureFeatures);
+    const auto cacheSetting=parse_env_bool_override(SDL_getenv("MIRABILIS_TEXTURE_CACHE"),true);
+    const bool useTextureCache=cacheSetting.valid && cacheSetting.value && textureFeatures.textureCompressionBC;
+    auto decodeImage = [&](fastgltf::Image& source, DecodedPixels& output,uint8_t roles) {
         auto scope = engine->profiler().scope(mirabilis::CpuZone::ImageDecode);
         int channels{};
         // Bound each RGBA result to 256 MiB; at most two results are live per batch.
@@ -522,9 +554,17 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
             [](auto&) {},
             [&](fastgltf::sources::URI& uri) {
                 if (uri.fileByteOffset != 0 || !uri.uri.isLocalPath()) return;
-                const auto name = (filePath.parent_path() / std::string(uri.uri.path().begin(), uri.uri.path().end())).string();
-                if (stbi_info(name.c_str(), &output.width, &output.height, &channels) && validSize())
-                    output.pixels.reset(stbi_load(name.c_str(), &output.width, &output.height, &channels, 4));
+                const auto name=filePath.parent_path()/std::string(uri.uri.path().begin(),uri.uri.path().end());
+                const auto bytes=mirabilis::texture_cache::read_bytes(name,512ull*1024*1024);
+                memory(bytes,0,bytes.size());
+                if (useTextureCache && output.pixels) for (int srgb=0;srgb<2;++srgb) if (roles&(1<<srgb)) {
+                    // Lossy alpha must never change coverage at an authored mask cutoff.
+                    if (srgb && (roles&16)) continue;
+                    // BC5 drops blue/alpha, so it is valid only for an exclusively normal-map use.
+                    auto cached=mirabilis::texture_cache::load(name,bytes,srgb!=0,(roles&4) && !(roles&8));
+                    if (cached && cached->width==uint32_t(output.width) && cached->height==uint32_t(output.height))
+                        output.compressed[srgb]=std::move(cached);
+                }
             },
             [&](fastgltf::sources::Vector& data) { memory(data.bytes, 0, data.bytes.size()); },
             [&](fastgltf::sources::ByteView& data) { memory(data.bytes, 0, data.bytes.size()); },
@@ -563,12 +603,14 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
     };
     for (const auto& material : gltf.materials) {
         mark(material.pbrData.baseColorTexture, 2);
-        mark(material.pbrData.metallicRoughnessTexture, 1);
-        mark(material.normalTexture, 1);
-        mark(material.occlusionTexture, 1);
-        if(material.specular)mark(material.specular->specularTexture,1);
+        if (material.alphaMode==fastgltf::AlphaMode::Mask) mark(material.pbrData.baseColorTexture,16);
+        mark(material.pbrData.metallicRoughnessTexture, 9);
+        mark(material.normalTexture, 5);
+        mark(material.occlusionTexture, 9);
+        if(material.specular)mark(material.specular->specularTexture,9);
     }
     std::vector<size_t> referenced;
+    size_t bc7Uploads=0,bc5Uploads=0,rgbaUploads=0,compressedBytes=0;
     for (size_t i = 0; i < roles.size(); ++i) if (roles[i]) referenced.push_back(i);
     for (size_t begin = 0; begin < referenced.size(); begin += 2) {
         std::array<DecodedPixels, 2> decoded;
@@ -577,7 +619,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         try {
             for (size_t i = 0; i < count; ++i) {
                 const auto image = referenced[begin + i];
-                engine->tasks().submit(group, [&, image, i] { decodeImage(gltf.images[image], decoded[i]); });
+                engine->tasks().submit(group, [&, image, i] { decodeImage(gltf.images[image], decoded[i],roles[image]); });
             }
         } catch (...) {
             const auto error = std::current_exception();
@@ -591,8 +633,17 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
                 auto resolved = engine->_errorCheckerboardImage;
                 if (decoded[i].pixels) {
                     const auto extent = VkExtent3D{uint32_t(decoded[i].width), uint32_t(decoded[i].height), 1};
-                    resolved = engine->create_image(decoded[i].pixels.get(), extent,
-                        srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, true);
+                    std::optional<AllocatedImage> compressed;
+                    if (decoded[i].compressed[srgb]) compressed=uploadCompressed(*decoded[i].compressed[srgb]);
+                    if (compressed) {
+                        resolved=*compressed;
+                        if (resolved.imageFormat==VK_FORMAT_BC5_UNORM_BLOCK) ++bc5Uploads;else ++bc7Uploads;
+                        compressedBytes+=decoded[i].compressed[srgb]->payload.size();
+                    } else {
+                        resolved = engine->create_image(decoded[i].pixels.get(), extent,
+                            srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, true);
+                        ++rgbaUploads;
+                    }
                     if (srgb) resolved.traceSource = VulkanEngine::make_trace_texture(decoded[i].pixels.get(), extent);
                 } else scene->hasMissingTextures = true;
                 imageCache[uint64_t(image) * 2 + srgb] = resolved;
@@ -601,6 +652,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         }
     }
     fmt::print("GLTF decode batches: {} sources, {} color-space uploads ({})\n", referenced.size(), imageCache.size(), filePath.filename().string());
+    fmt::print("GLTF texture cache: BC7={} BC5={} RGBA={} compressed-payload-bytes={} ({})\n",bc7Uploads,bc5Uploads,rgbaUploads,compressedBytes,filePath.filename().string());
     const auto acquireImage = [&](size_t image, bool srgb) {
         const auto found = imageCache.find(uint64_t(image) * 2 + (srgb ? 1 : 0));
         return found != imageCache.end() ? found->second : engine->_errorCheckerboardImage;
@@ -685,7 +737,6 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
         }
         constants.materialFlags.z = source && source->doubleSided ? 1.f : 0.f;
         constants.surfaceFactors.x = source && source->occlusionTexture ? source->occlusionTexture->strength : 1.f;
-        materialConstants[index] = constants;
 
         GLTFMetallic_Roughness::MaterialResources resources{};
         resources.colorImage = engine->_whiteImage;
@@ -732,6 +783,8 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(
             }
         }
 
+        constants.alphaMask.y=resources.normalImage.imageFormat==VK_FORMAT_BC5_UNORM_BLOCK?1.f:0.f;
+        materialConstants[index] = constants;
         material->data = engine->metalRoughMaterial.write_material(
             engine->_device,
             pass,

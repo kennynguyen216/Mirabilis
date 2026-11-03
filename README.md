@@ -246,8 +246,24 @@ The focused lighting checks and matched HQ Sponza/curtains benchmark are:
 
 ```powershell
 python tests/lighting_visibility_gate.py --configuration Debug --output C:/temp/lighting-visibility
+python tests/cache_lookup_gate.py --configuration Debug --output C:/temp/cache-lookup
+python tests/forward_depth_gate.py --configuration Debug --output C:/temp/forward-depth
+python tests/software_visibility_budget_gate.py --configuration Debug --output C:/temp/visibility-budget
+python tests/reflection_motion_gate.py --configuration Debug --output C:/temp/reflection-motion
 python tests/lighting_benchmark.py --baseline C:/path/to/frozen-baseline --output C:/temp/sponza-lighting
 ```
+
+`MIRABILIS_SURFACE_CACHE_LINEAR_LOOKUP=1` disables exact-direction group skips
+for an exhaustive reference. `MIRABILIS_SURFACE_CACHE_BOX_LOOKUP=1` restores the
+full mesh-box candidate index. The default index uses occupied capture tiles,
+including complete texel footprints and conservative depth/blend margins. Its
+depth readback runs on recapture, without adding a per-frame readback. The cache lookup gate compares finite HDR captures
+exactly, including rotated/mirrored geometry, reflections and cells over 64 cards.
+`MIRABILIS_PREPASS_REJECT=0` disables hidden-fragment rejection for image and
+timing controls. `MIRABILIS_REFLECTION_HISTORY=0` disables temporal reflection
+reuse. Reflection reprojection validates previous depth, normals, roughness and
+hit identity/position; scene edits, camera cuts and unfinished relights reject
+history. The motion gate reads actual GPU sample counts after the bounded run.
 
 The baseline must contain `bin/Release/engine.exe`, its runtime dependencies,
 compiled `shaders`, and the same `assets`. Benchmark profiles preserve the
@@ -258,6 +274,17 @@ submissions; static windows reject representation rebuilds. Visibility and
 coverage fixes may change images, so their timing changes are not automatically
 equal-image optimization gains. A separate direct-hit hardware GI baseline is
 still needed to compare cached GI against directly shaded RT GI.
+
+Use `--screen-trace on` to compare both tracing backends with the same screen
+policy. `--baseline-gpu-scopes` exports timings from a baseline that supports
+them. For a same-binary optimization comparison, point `--baseline` at the
+current checkout and add `--reference-controls`; this requires identical
+executable/shader hashes. An extra reference repeat measures run-to-run HDR
+variation: optimized image errors must stay within three times that variation,
+with a 0.5% hard mean-relative-error ceiling and small rounding floors. Small
+regression fixtures still require exact equality. `--profiles hardware software`
+limits the matrix to cached GI; `--scene sponza_hq_full_4k.json --reflections`
+includes all-4K textures and scene reflections.
 
 `FrameClock` and `Profiler` live in the GPU-free core. The frame clock preserves
 unclamped wall time and caps simulation deltas at 100 ms; reload resets its time
@@ -437,3 +464,27 @@ python tests/graphics_gate.py --configuration Debug --output C:/temp/mirabilis-g
 ```
 
 The gate requires NumPy and Pillow, as do the existing image-validation tools.
+
+Referenced glTF textures can use optional BC7 color/data and BC5 normal-map caches
+to reduce GPU memory at the original pixel dimensions. Install Microsoft's
+[DirectXTex texconv](https://github.com/microsoft/DirectXTex/releases), then run:
+
+```powershell
+python scripts/cache_textures.py assets/sponza_hq/main_sponza/NewSponza_Main_glTF_003.gltf assets/sponza_hq/pkg_a_curtains/NewSponza_Curtains_glTF.gltf --texconv C:/tools/texconv.exe --gpu 0 --report C:/temp/texture-quality.json
+```
+
+This prepares the all-4K scene. Substitute
+`assets/sponza_hq/runtime_6gb/Sponza_4K_Color.gltf` for the preview profile.
+Choose the texconv adapter index for your GPU. The compiler writes ignored `.mbc`
+caches beside the original images, with full mip chains and source/payload
+checksums. Base-level quality checks accept color/data at 35 dB RGB PSNR or better
+and at most 1/255 mean alpha error. BC5 normals must stay below 1 degree mean and
+5 degrees p99 angular error after reconstruction. Textures that fail stay on the original RGBA path;
+alpha-masked color textures always use the original to preserve cutout coverage.
+Missing, stale, corrupt, role-incompatible or unsupported caches also fall back.
+Set `MIRABILIS_TEXTURE_CACHE=0` for an uncompressed comparison. Originals are
+retained, including the CPU path tracer's reference texture bytes.
+
+```powershell
+python tests/texture_cache_gate.py --configuration Debug --texconv C:/tools/texconv.exe --gpu 0 --output C:/temp/mirabilis-texture-check
+```

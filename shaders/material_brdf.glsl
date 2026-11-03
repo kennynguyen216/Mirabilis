@@ -10,6 +10,7 @@
 // Include after input_structures.glsl.
 
 #include "environment.glsl"
+#include "reflection_settings.glsl"
 
 const float MaterialPi = 3.14159265359;
 // Roughness 0.045 squares to alpha 0.002025, the path tracer's floor.
@@ -79,6 +80,9 @@ vec3 material_shading_normal(vec3 geometricNormal, vec4 tangent, vec2 uv)
 {
     // Sampled unconditionally, like the metallic/roughness texture.
     vec3 texel = texture(normalTex, uv).xyz * 2.0 - 1.0;
+    if (materialData.alphaMask.y > 0.5) {
+        texel.z = sqrt(max(1.0 - dot(texel.xy, texel.xy), 0.0));
+    }
     if (abs(tangent.w) < 0.001 || sceneData.materialSettings.x < 0.5) {
         return geometricNormal;
     }
@@ -373,6 +377,10 @@ void material_emitters(
     if (!material_specular_enabled() || cached.directAlpha <= 0.0) {
         return;
     }
+#ifndef MIRABILIS_COLOR_ONLY
+    // Scene reflections replace this specular term in both main and portal views.
+    if (reflection_roughness_owned(surface.roughness)) return;
+#endif
     uint samples = max(uint(sceneData.emitterSettings.z + 0.5), 1u);
     vec3 rotation = emitter_rotation(uint(pixel.x) * 1973u ^ uint(pixel.y) * 9277u ^
         uint(sceneData.emitterSettings.y + 0.5) * 26699u);

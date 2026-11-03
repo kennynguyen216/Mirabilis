@@ -195,6 +195,7 @@ void VulkanEngine::init_scene_descriptors()
         builder.add_binding(22, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(23, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         builder.add_binding(24, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        builder.add_binding(25, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         for (uint32_t binding = 17; binding <= 21; ++binding)
             builder.add_binding(binding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         // IQ2: the sun casters' TLAS, only on the ray-query device, where
@@ -733,6 +734,9 @@ void VulkanEngine::write_emitter_descriptors(FrameData& frame)
         writer.write_image(22,_localShadowAtlas.imageView,_shadow.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         writer.write_buffer(24,buffer(frame.rayHitInstances,_rayQueryShadows),VK_WHOLE_SIZE,0,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         writer.write_image(23,_postProcess.sceneCopy.imageView,_postProcess.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        const auto prepassView=_prepass.enabled && _prepass.pipeline.pipeline && _prepass.maskPipeline.pipeline
+            ?_prepass.depthImage.imageView:_whiteImage.imageView;
+        writer.write_image(25,prepassView,_prepass.sampler,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
         const std::array<std::pair<uint32_t, VkImageView>, 4> pages{{
             {6, page(_surfaceCache.albedo)}, {10, page(_surfaceCache.emissive)},
             {11, page(_surfaceCache.depth)}, {12, page(_surfaceCache.emitter)}}};
@@ -776,6 +780,11 @@ void VulkanEngine::write_emitter_descriptors(FrameData& frame)
     // against the buffers just bound, so no camera indexes past them.
     const float emitterCount = static_cast<float>(sampled_emitter_count());
     sceneData.emitterSettings.x = emitterCount;
+    static const EnvBoolOverride rejectHidden = parse_env_bool_override(SDL_getenv("MIRABILIS_PREPASS_REJECT"), true);
+    // Only trust a current D32 prepass with both opaque and masked pipelines available.
+    sceneData.giTracingSettings.z = rejectHidden.valid && rejectHidden.value && _prepass.enabled &&
+        _prepass.pipeline.pipeline && _prepass.maskPipeline.pipeline &&
+        _prepass.depthImage.imageFormat == VK_FORMAT_D32_SFLOAT ? 1.f : 0.f;
     std::memcpy(frame.sceneBuffer.info.pMappedData, &sceneData, sizeof(sceneData));
     for (size_t view = 0; view < frame.portalSceneBuffers.size(); ++view) {
         _portalRender.sceneData[view].portalIndirectSettings.y =

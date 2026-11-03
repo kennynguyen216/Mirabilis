@@ -7,6 +7,85 @@
 #include <set>
 #include "ray_scene.h"
 #include "path_trace_scene.h"
+#include "surface_cache_index.h"
+#include <numeric>
+
+TEST_CASE("occupied card tiles conservatively retain texel footprints and blend-depth margins") {
+    constexpr uint32_t width=27,height=23;
+    const glm::uvec4 rect(3,2,19,17);
+    std::vector<uint16_t> depth(width*height,glm::packHalf1x16(1.f));
+    for(uint32_t y=0;y<rect.w;++y) for(uint32_t x=0;x<rect.z;++x)
+        if ((x+y)%7==0) depth[(rect.y+y)*width+rect.x+x]=glm::packHalf1x16(.15f+.02f*((x+3*y)%29));
+    for(int transform=0;transform<6;++transform) {
+        glm::mat4 matrix=glm::translate(glm::mat4(1),glm::vec3(1200,-800,30))*
+            glm::rotate(glm::mat4(1),.27f*transform,glm::normalize(glm::vec3(1,2,3)))*
+            glm::scale(glm::mat4(1),glm::vec3(transform%2?-7.f:7.f,.3f,5.f));
+        const float worldDepth=glm::length(glm::vec3(matrix[2]));
+        std::vector<std::pair<glm::vec3,glm::vec3>> boxes;
+        REQUIRE(surface_card_occupied_bounds(depth,width,rect,matrix,worldDepth,.05f,.2f,
+            [&](glm::vec3 a,glm::vec3 b){boxes.emplace_back(a,b);}));
+        REQUIRE_FALSE(boxes.empty());
+        for(uint32_t y=0;y<rect.w;++y) for(uint32_t x=0;x<rect.z;++x) {
+            const float stored=glm::unpackHalf1x16(depth[(rect.y+y)*width+rect.x+x]);
+            if(stored>=1)continue;
+            for(float behind:{-.05f,0.f,.15f,.2f}) for(float corner:{0.f,.5f,1.f}) {
+                const auto point=glm::vec3(matrix*glm::vec4((x+corner)/rect.z,(y+corner)/rect.w,stored-behind/worldDepth,1));
+                const bool retained=std::any_of(boxes.begin(),boxes.end(),[&](const auto& box){
+                    return glm::all(glm::greaterThanEqual(point,box.first))&&glm::all(glm::lessThanEqual(point,box.second));});
+                CHECK(retained);
+            }
+        }
+    }
+    size_t emitted=0;auto count=[&](glm::vec3,glm::vec3){++emitted;};
+    std::fill(depth.begin(),depth.end(),glm::packHalf1x16(1.f));
+    CHECK(surface_card_occupied_bounds(depth,width,rect,glm::mat4(1),1,.05f,.2f,count));CHECK(emitted==0);
+    depth[rect.y*width+rect.x]=glm::packHalf1x16(std::numeric_limits<float>::quiet_NaN());
+    CHECK_FALSE(surface_card_occupied_bounds(depth,width,rect,glm::mat4(1),1,.05f,.2f,count));
+    CHECK_FALSE(surface_card_occupied_bounds(depth,0,rect,glm::mat4(1),1,.05f,.2f,count));
+    CHECK_FALSE(surface_card_occupied_bounds(depth,width,glm::uvec4(25,2,19,17),glm::mat4(1),1,.05f,.2f,count));
+    CHECK_FALSE(surface_card_occupied_bounds(depth,width,rect,glm::mat4(1),0,.05f,.2f,count));
+}
+
+TEST_CASE("cache facing groups preserve every eligible card across transforms and dense cells") {
+    std::vector<glm::vec3> directions;
+    for (uint32_t i = 0; i < 300; ++i) {
+        glm::vec3 direction(0); direction[i % 3] = i % 2 ? -1.f : 1.f;
+        if (i % 7 == 0) direction = glm::normalize(glm::vec3(glm::rotate(glm::mat4(1), .37f,
+            glm::normalize(glm::vec3(1,2,3))) * glm::vec4(direction,0)));
+        directions.push_back(direction);
+    }
+    std::vector<uint32_t> candidates(directions.size());
+    std::iota(candidates.begin(), candidates.end(), 0u);
+    std::reverse(candidates.begin(), candidates.end());
+    std::vector<glm::uvec2> grouped(5,glm::uvec2(0)), linear(5,glm::uvec2(0));
+    append_surface_cache_candidates(directions,candidates,grouped,true);
+    append_surface_cache_candidates(directions,candidates,linear,false);
+    REQUIRE(grouped.size()==directions.size()+5);
+    for (size_t i=5;i<grouped.size();++i) {
+        CHECK(grouped[i].x==linear[i].x);
+        CHECK(grouped[i].y>i);
+        CHECK(grouped[i].y<=grouped.size());
+    }
+    uint32_t random=216;
+    for (uint32_t query=0;query<1000;++query) {
+        glm::vec3 normal;
+        for (int axis=0;axis<3;++axis) { random=random*1664525u+1013904223u; normal[axis]=float(random%2001)-1000.f; }
+        normal=glm::normalize(normal);
+        std::vector<uint32_t> expected,actual;
+        for (size_t i=5;i<linear.size();++i)
+            if (glm::dot(normal,directions[linear[i].x])>=.2f) expected.push_back(linear[i].x);
+        for (size_t i=5;i<grouped.size();) {
+            const auto entry=grouped[i];
+            if (glm::dot(normal,directions[entry.x])<.2f) i=entry.y;
+            else {actual.push_back(entry.x);++i;}
+        }
+        CHECK(actual==expected);
+    }
+    std::vector<uint32_t> empty;
+    const auto previous=grouped.size();
+    append_surface_cache_candidates(directions,empty,grouped,true);
+    CHECK(grouped.size()==previous);
+}
 
 TEST_CASE("compact triangle references preserve full BVH order including equal centroids") {
     for (uint32_t count:{0u,1u,4u,5u,17u,129u,257u}) for(bool ties:{false,true}) {

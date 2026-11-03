@@ -1,6 +1,7 @@
 #include "vk_engine.h"
 #include "vk_engine_render_helpers.h"
 #include "r4_contributions.h"
+#include "surface_cache_index.h"
 
 #include <algorithm>
 #include <numeric>
@@ -1289,29 +1290,56 @@ void VulkanEngine::build_surface_cache_lookup()
     const glm::ivec3 dims = glm::clamp(
         glm::ivec3(glm::ceil(extent / cellSize)), glm::ivec3(1), glm::ivec3(MaxCells));
     std::vector<std::vector<uint32_t>> cellCards(size_t(dims.x) * dims.y * dims.z);
+    const bool occupiedIndex=parse_env_bool(SDL_getenv("MIRABILIS_SURFACE_CACHE_BOX_LOOKUP"))!=EnvBool::On;
+    std::vector<uint16_t> capturedDepth;
+    if (occupiedIndex) {
+        const auto size=_surfaceCache.atlasSize;
+        capturedDepth.resize(size_t(size.x)*size.y);
+        auto readback=create_buffer(capturedDepth.size()*sizeof(uint16_t),VK_BUFFER_USAGE_TRANSFER_DST_BIT,VMA_MEMORY_USAGE_GPU_TO_CPU);
+        immediate_submit([&](VkCommandBuffer cmd) {
+            vkutil::transition_image(cmd,_surfaceCache.depth.image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={size.x,size.y,1};
+            vkCmdCopyImageToBuffer(cmd,_surfaceCache.depth.image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,readback.buffer,1,&copy);
+            vkutil::transition_image(cmd,_surfaceCache.depth.image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        });
+        void* mapped=nullptr;VK_CHECK(vmaMapMemory(_allocator,readback.allocation,&mapped));
+        vmaInvalidateAllocation(_allocator,readback.allocation,0,VK_WHOLE_SIZE);
+        std::memcpy(capturedDepth.data(),mapped,capturedDepth.size()*sizeof(uint16_t));
+        vmaUnmapMemory(_allocator,readback.allocation);destroy_buffer(readback);
+    }
+    std::vector<uint32_t> seen(cellCards.size(),UINT32_MAX);
     for (size_t i = 0; i < cards.size(); ++i) {
         const glm::ivec3 first = glm::clamp(
             glm::ivec3(glm::floor((boxes[i].first - lo) / cellSize)), glm::ivec3(0), dims - 1);
         const glm::ivec3 last = glm::clamp(
             glm::ivec3(glm::floor((boxes[i].second - lo) / cellSize)), glm::ivec3(0), dims - 1);
-        for (int z = first.z; z <= last.z; ++z) {
-            for (int y = first.y; y <= last.y; ++y) {
-                for (int x = first.x; x <= last.x; ++x) {
-                    cellCards[(size_t(z) * dims.y + y) * dims.x + x].push_back(uint32_t(i));
-                }
+        const auto addBounds=[&](glm::vec3 a,glm::vec3 b) {
+            const glm::ivec3 begin=glm::max(first,glm::ivec3(glm::floor((a-lo)/cellSize)));
+            const glm::ivec3 end=glm::min(last,glm::ivec3(glm::floor((b-lo)/cellSize)));
+            for (int z=begin.z;z<=end.z;++z) for (int y=begin.y;y<=end.y;++y) for (int x=begin.x;x<=end.x;++x) {
+                const size_t cell=(size_t(z)*dims.y+y)*dims.x+x;
+                if (seen[cell]!=i) { cellCards[cell].push_back(uint32_t(i));seen[cell]=uint32_t(i); }
             }
-        }
+        };
+        // Beyond four blend margins, every other card is below the shader's 1e-3 cutoff.
+        if (!occupiedIndex || !surface_card_occupied_bounds(capturedDepth,_surfaceCache.atlasSize.x,
+                cards[i].rect,cards[i].cardToWorld,cards[i].worldDepth,_surfaceCache.texelSize,
+                depthTolerance+_surfaceCache.texelSize,addBounds)) addBounds(boxes[i].first,boxes[i].second);
     }
     std::vector<glm::uvec4> cellRanges(cellCards.size());
-    std::vector<uint32_t> indices;
+    std::vector<glm::vec3> directions;
+    directions.reserve(gpuCards.size());
+    for (const auto& card : gpuCards) directions.emplace_back(card.direction);
+    const bool skipFacingGroups = parse_env_bool(SDL_getenv("MIRABILIS_SURFACE_CACHE_LINEAR_LOOKUP")) != EnvBool::On;
+    std::vector<glm::uvec2> indices;
     size_t fullestCell = 0;
     for (size_t c = 0; c < cellCards.size(); ++c) {
-        cellRanges[c] = glm::uvec4(uint32_t(indices.size()), uint32_t(cellCards[c].size()), 0, 0);
-        indices.insert(indices.end(), cellCards[c].begin(), cellCards[c].end());
+        cellRanges[c] = glm::uvec4(uint32_t(indices.size()), uint32_t(cellCards[c].size()), skipFacingGroups ? 1u : 0u, 0);
+        append_surface_cache_candidates(directions, cellCards[c], indices, skipFacingGroups);
         fullestCell = std::max(fullestCell, cellCards[c].size());
     }
     if (indices.empty()) {
-        indices.push_back(0);
+        indices.emplace_back(0, 1);
     }
 
     SurfaceCacheGridHeader header;
@@ -1342,10 +1370,12 @@ void VulkanEngine::build_surface_cache_lookup()
     upload(gpuCards.data(), gpuCards.size() * sizeof(SurfaceCacheGpuCard), _surfaceCache.cardBuffer);
     upload(cellRanges.data(), cellRanges.size() * sizeof(glm::uvec4), _surfaceCache.gridBuffer,
         &header, sizeof(header));
-    upload(indices.data(), indices.size() * sizeof(uint32_t), _surfaceCache.indexBuffer);
+    upload(indices.data(), indices.size() * sizeof(glm::uvec2), _surfaceCache.indexBuffer);
     _surfaceCache.lookupValid = true;
     fmt::print("Surface cache lookup: {}x{}x{} cells of {:.2f} m, {} entries, fullest cell {} cards, depth tolerance {:.1f} cm\n",
         dims.x, dims.y, dims.z, cellSize, indices.size(), fullestCell, depthTolerance * 100.0f);
+    fmt::print("Surface cache facing groups: {}\n", skipFacingGroups ? "enabled" : "linear reference");
+    fmt::print("Surface cache occupancy index: {}\n",occupiedIndex?"enabled":"box reference");
 }
 
 bool VulkanEngine::lumen_lite_ready() const

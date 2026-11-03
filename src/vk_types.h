@@ -215,7 +215,7 @@ struct GPUSceneData {
     glm::mat4 localShadowMatrix[7]{};
     glm::vec4 reflectionSettings{0,0.4f,2,1000};
     glm::vec4 graphicsSettings{0}; // x local light count; y global cel
-    glm::vec4 giTracingSettings{0}; // x hardware world-GI queries (independent of sun shadows)
+    glm::vec4 giTracingSettings{0}; // x hardware world GI, y uncovered-hit test, z prepass fragment rejection
 
 };
 

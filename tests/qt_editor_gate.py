@@ -19,6 +19,8 @@ def fixtures(root, repo):
            + chunk(b"IDAT", zlib.compress(bytes([0, 180, 100, 240, 255]))) + chunk(b"IEND", b""))
     (root / "color.png").write_bytes(png)
     (root / "broken.png").write_text("not an image")
+    (root / "color.png.srgb.mbc").write_text("generated cache")
+    (root / "color.png.srgb.mbc.partial").write_text("incomplete generated cache")
     vertices = 4096  # exercise the worker tangent path and its PMR scratch
     position_bytes, uv_bytes = vertices * 12, vertices * 8
     geometry = (struct.pack("<9f", -1, 0, 0, 1, 0, 0, 0, 1, 0) + bytes((vertices - 3) * 12)

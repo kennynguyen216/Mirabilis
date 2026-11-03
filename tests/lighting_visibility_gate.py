@@ -128,6 +128,8 @@ def main():
         name='overflow-'+order
         logs,result=ecs_gate.run(name,args.configuration,{**common,'MIRABILIS_TEST_SCENE':name+'.json',
             'MIRABILIS_LUMEN_HARDWARE':'1','MIRABILIS_RENDER_DEBUG_VIEW':'29','MIRABILIS_SURFACE_CACHE_PAGE':'9',
+            # Keep the old-cap regression dense even when empty-space pruning is available.
+            'MIRABILIS_SURFACE_CACHE_BOX_LOOKUP':'1',
             'MIRABILIS_SURFACE_CACHE_ATLAS_SIZE':'1024',
             'MIRABILIS_TEST_FRAMES':'240','MIRABILIS_TEST_REQUIRE_LUMEN':'1','MIRABILIS_RASTER_CAPTURE':str(out/name)})
         counts=re.findall(r'fullest cell (\d+) cards',logs)

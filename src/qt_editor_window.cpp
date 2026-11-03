@@ -57,7 +57,7 @@ protected:
         const auto* files=qobject_cast<const QFileSystemModel*>(sourceModel());
         const auto info=files->fileInfo(files->index(row,0,parent));
         if(info.isDir())return true;
-        if(QStringList{"bin","meta","tmp","pdb","spv"}.contains(info.suffix().toLower()))return false;
+        if(QStringList{"bin","meta","tmp","pdb","spv","mbc","partial"}.contains(info.suffix().toLower()))return false;
         return QSortFilterProxyModel::filterAcceptsRow(row,parent);
     }
 };

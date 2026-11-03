@@ -92,6 +92,10 @@ void install_qt_browser_test_driver(QtEditorWindow& window, VulkanEngine& engine
         case 0:
             if (!snapshot.editing) { click("TogglePlay"); return; }
             if (!select("triangle.gltf")) return;
+            for (const auto* name:{"color.png.srgb.mbc","color.png.srgb.mbc.partial"}) {
+                const auto source=files->index(QString::fromStdWString(engine.editor_asset_root().wstring())+"/"+name);
+                require(source.isValid()&&!proxy->mapFromSource(source).isValid(),"generated texture cache appears in content browser");
+            }
             click("ImportAssetModel"); break;
         case 1:
             if (snapshot.status != "Model imported") return;

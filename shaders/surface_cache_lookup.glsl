@@ -45,13 +45,14 @@ readonly buffer SurfaceCacheGrid {
     vec4 fieldMax;
     // xyz = direction toward the sun.
     vec4 sunDirection;
-    // x = first index into cardIndices, y = count.
+    // x first candidate, y count, z exact-lookup acceleration enabled.
     uvec4 cells[];
 };
 
 layout(std430, set = SURFACE_CACHE_SET, binding = SURFACE_CACHE_BINDING_INDICES)
 readonly buffer SurfaceCacheIndices {
-    uint cardIndices[];
+    // x card index; y first candidate after its exact-direction group.
+    uvec2 cardIndices[];
 };
 
 struct SurfaceCacheSample {
@@ -203,30 +204,55 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky, b
     // finds that nearest surface; the second blends only the cards that
     // captured it.
     float nearest = 1e30;
-    for (uint i = 0u; i < count; ++i) {
+    float secondNearest = 1e30;
+    uint nearestCard = 0u;
+    ivec2 nearestTexel = ivec2(0);
+    vec2 nearestUV = vec2(0);
+    float nearestFacing = 0.0;
+    for (uint i = 0u; i < count;) {
+        uvec2 candidate = cardIndices[range.x + i];
+        ++i;
         ivec2 texel;
         float behind;
         float facing;
         vec2 cardUV;
-        if (!card_probe(cardIndices[range.x + i], p, normal, minimumFacing,
-                texel, behind, facing, cardUV) ||
-            behind < -frontTolerance || behind > depthTolerance) {
+        if (!card_probe(candidate.x, p, normal, minimumFacing,
+                texel, behind, facing, cardUV)) {
+            if (facing < minimumFacing) i = candidate.y - range.x;
             continue;
         }
-        nearest = min(nearest, behind);
+        if (behind < -frontTolerance) {
+            continue;
+        }
+        if (behind < nearest) {
+            secondNearest = nearest;
+            nearest = behind;
+            nearestCard = candidate.x;
+            nearestTexel = texel;
+            nearestUV = cardUV;
+            nearestFacing = facing;
+        } else secondNearest = min(secondNearest, behind);
     }
     if (nearest > depthTolerance) {
         return result;
     }
 
-    for (uint i = 0u; i < count; ++i) {
-        ivec2 texel;
-        float behind;
-        float facing;
-        vec2 cardUV;
-        if (!card_probe(cardIndices[range.x + i], p, normal, minimumFacing,
-                texel, behind, facing, cardUV) || behind < -frontTolerance) {
-            continue;
+    // Every other card then has weight < exp(-9), below the existing 1e-3 cutoff.
+    bool single = range.z != 0u && secondNearest - nearest > 3.0 * sameSurfaceMargin;
+    for (uint i = 0u; i < (single ? 1u : count);) {
+        uvec2 candidate = single ? uvec2(nearestCard, 0) : cardIndices[range.x + i];
+        ++i;
+        ivec2 texel = nearestTexel;
+        float behind = nearest;
+        float facing = nearestFacing;
+        vec2 cardUV = nearestUV;
+        if (!single) {
+            if (!card_probe(candidate.x, p, normal, minimumFacing,
+                    texel, behind, facing, cardUV)) {
+                if (facing < minimumFacing) i = candidate.y - range.x;
+                continue;
+            }
+            if (behind < -frontTolerance) continue;
         }
         // Full weight for the nearest surface and any other card that
         // captured it at the same depth; a surface even a couple of
@@ -240,10 +266,10 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky, b
         result.weight += weight;
         if (readSky) {
             result.sky += weight * (readLighting && bilinearSky
-                ? surface_cache_receiver_filtered(cards[cardIndices[range.x + i]], cardUV, texel,
+                ? surface_cache_receiver_filtered(cards[candidate.x], cardUV, texel,
                     sameSurfaceMargin, 0, 3)
                 : bilinearSky
-                ? surface_cache_sky_bilinear(cards[cardIndices[range.x + i]], cardUV, texel,
+                ? surface_cache_sky_bilinear(cards[candidate.x], cardUV, texel,
                     sameSurfaceMargin)
                 : SURFACE_CACHE_READ_SKY(texel));
             continue;
@@ -259,13 +285,13 @@ SurfaceCacheSample surface_cache_lookup(vec3 world, vec3 normal, bool readSky, b
         // shadow or noisy bounce texel otherwise prints a grid on the receiver.
         // The forward sun shadow remains evaluated at the actual surface.
         if (readLighting) {
-            direct.rgb = surface_cache_receiver_filtered(cards[cardIndices[range.x + i]],
+            direct.rgb = surface_cache_receiver_filtered(cards[candidate.x],
                 cardUV, texel, sameSurfaceMargin, 2, lightingRadius);
         }
         result.direct += weight * direct.rgb;
         result.directAlpha += weight * direct.a;
         result.indirect += weight * (bilinearSky
-            ? surface_cache_receiver_filtered(cards[cardIndices[range.x + i]], cardUV, texel,
+            ? surface_cache_receiver_filtered(cards[candidate.x], cardUV, texel,
                 sameSurfaceMargin, 1, lightingRadius)
             : SURFACE_CACHE_READ_INDIRECT(texel));
     }
