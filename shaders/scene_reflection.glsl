@@ -19,10 +19,10 @@ vec3 scene_reflected_radiance(vec3 origin,vec3 direction,out ReflectionHit hit)
         return apply_environment_policy(sceneData.indirectSettings.y>0.5 ? textureLod(environmentTexture,equirectangular_uv(direction),0).rgb : gradient_radiance(direction));
     }
     hit.position=origin+direction*rayQueryGetIntersectionTEXT(query,true);
-    hit.identity=float(rayQueryGetIntersectionInstanceCustomIndexEXT(query,true)+1u);
+    hit.identity=float(ray_hit_index(query)+1u);
     vec3 normal=ray_hit_normal(query);
     if (dot(normal,direction)>0) normal=-normal;
-    RayInstance instance=rayInstances[rayQueryGetIntersectionInstanceCustomIndexEXT(query,true)];
+    RayInstance instance=rayInstances[ray_hit_index(query)];
     SurfaceCacheSample surface;surface.weight=0;
     if(instance.geometry.z!=0u) surface=REFLECTION_CACHE_LOOKUP(hit.position,normal);
     // Specular paths see emission even when diffuse emitter sampling owns it.

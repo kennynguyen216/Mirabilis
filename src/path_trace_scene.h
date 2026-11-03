@@ -46,6 +46,12 @@ struct TraceBVHNode {
 };
 static_assert(sizeof(TraceBVHNode)==32);
 struct TraceCPUHit { float t{1e30f}; int triangle{-1}; glm::vec2 bary{}; };
+struct TraceTriangleRef {
+    glm::vec3 centroid{};
+    uint32_t draw{}, first{};
+};
+static_assert(sizeof(TraceTriangleRef)==20);
+void order_trace_triangle_refs(std::vector<TraceTriangleRef>& triangles);
 std::vector<TraceBVHNode> build_trace_bvh(std::vector<TraceTriangle>& triangles);
 TraceCPUHit trace_cpu_intersect(const std::vector<TraceTriangle>& triangles,
     const std::vector<TraceBVHNode>& nodes, glm::vec3 origin, glm::vec3 direction, bool bruteForce);

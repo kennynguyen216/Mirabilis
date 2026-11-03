@@ -62,7 +62,7 @@ struct FrameData {
         AllocatedBuffer rayTlasBuffer, rayInstances, rayScratch, rayHitInstances;
         size_t rayHitCapacity{};
         VkDeviceSize rayTlasCapacity{}, rayInstanceCapacity{}, rayScratchCapacity{};
-        uint64_t rayHash{};
+        uint64_t rayHash{}, rayHitHash{};
         uint32_t rayCount{};
         bool rayBuildPending{};
         std::array<AllocatedBuffer, PortalViewCount> portalSceneBuffers;
@@ -657,6 +657,16 @@ class VulkanEngine{
     std::vector<glm::vec4> read_trace_image(const AllocatedImage& image);
     std::vector<uint32_t> _traceTexels;
     std::vector<std::shared_ptr<TraceTextureSource>> _traceCpuTextures;
+    struct TraceCpuDraw {
+        std::shared_ptr<TraceMeshSource> source;
+        glm::mat4 transform{1};
+        glm::mat3 normalMatrix{1};
+        uint32_t material{};
+    };
+    std::vector<TraceCpuDraw> _traceCpuDraws;
+    std::vector<TraceTriangleRef> _traceTriangleRefs;
+    bool _traceCpuComplete{true};
+    static TraceTriangle make_trace_triangle(const TraceCpuDraw& draw,uint32_t first,bool normals=true);
     AllocatedBuffer _traceTexelBuffer{};
     uint64_t _traceDrawHash{0};
     std::vector<TracePortal> _tracePortals;
@@ -1358,7 +1368,7 @@ class VulkanEngine{
             VkDeviceSize scratchAlignment{256};
             struct Mesh {
                 VkDeviceAddress vertices{}; VkBuffer indices{};
-                uint32_t first{}, count{};
+                std::vector<glm::uvec2> ranges;
                 std::weak_ptr<TraceMeshSource> source;
                 VkAccelerationStructureKHR structure{};
                 AllocatedBuffer buffer;

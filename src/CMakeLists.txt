@@ -49,7 +49,7 @@ function(mirabilis_deploy_scripts TARGET)
     VERBATIM)
 endfunction()
 
-add_library(mirabilis_core STATIC scene.cpp scene_math.cpp scene_queries.cpp scene_serialization.cpp player_movement.cpp physics_world.cpp script_host.cpp profiler.cpp)
+add_library(mirabilis_core STATIC scene.cpp scene_math.cpp scene_queries.cpp scene_serialization.cpp player_movement.cpp physics_world.cpp script_host.cpp profiler.cpp path_trace_scene.cpp)
 target_sources(mirabilis_core PRIVATE memory_resources.cpp fiber.cpp task_system.cpp)
 if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND NOT CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64")
   enable_language(ASM_MASM)
@@ -106,7 +106,6 @@ add_executable (engine
   vk_engine.cpp
   vk_engine_render_helpers.h
   vk_engine_path_trace.cpp
-  path_trace_scene.cpp
   vk_engine_editor.cpp
   vk_engine_editor_assets.cpp
   vk_engine_ibl.cpp

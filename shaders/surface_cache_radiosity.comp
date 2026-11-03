@@ -184,7 +184,7 @@ void main()
 #endif
         SurfaceCacheSample surface;surface.weight=0;
 #ifdef MIRABILIS_RT_SHADOWS
-        if(rayInstances[rayQueryGetIntersectionInstanceCustomIndexEXT(query,true)].geometry.z!=0u)
+        if(rayInstances[ray_hit_index(query)].geometry.z!=0u)
 #endif
             surface=surface_cache_lookup(p,hitNormal,false,true,true);
         if (surface.weight > 0.0) {

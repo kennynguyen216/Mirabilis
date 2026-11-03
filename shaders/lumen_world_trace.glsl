@@ -79,7 +79,7 @@ vec3 lumen_trace(vec3 worldPosition, vec3 worldNormal, vec3 worldDirection,
         vec3 normal=ray_hit_normal(query);
         bool front=dot(normal,worldDirection)<0;
         if(!front) normal=-normal;
-        RayInstance instance=rayInstances[rayQueryGetIntersectionInstanceCustomIndexEXT(query,true)];
+        RayInstance instance=rayInstances[ray_hit_index(query)];
         SurfaceCacheSample surface;surface.weight=0;
         if(instance.geometry.z!=0u) surface=LUMEN_SURFACE_LOOKUP(p,normal);
         if(surface.weight>0) { rayClass=RayFieldCache; return lumen_cached_radiance(surface); }

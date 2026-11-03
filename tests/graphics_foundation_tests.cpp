@@ -5,6 +5,40 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <limits>
 #include <set>
+#include "ray_scene.h"
+#include "path_trace_scene.h"
+
+TEST_CASE("compact triangle references preserve full BVH order including equal centroids") {
+    for (uint32_t count:{0u,1u,4u,5u,17u,129u,257u}) for(bool ties:{false,true}) {
+        std::vector<TraceTriangle> full;std::vector<TraceTriangleRef> refs;
+        uint32_t random=216;
+        for(uint32_t i=0;i<count;++i) {
+            random=random*1664525u+1013904223u;
+            glm::vec3 p(float(random%31),float((random>>8)%17),float((random>>16)%23));
+            if(ties)p=glm::vec3(2,3,4);
+            TraceTriangle t;t.p0=glm::vec4(p+glm::vec3(-1,-1,0),1);t.p1=glm::vec4(p+glm::vec3(1,-1,0),1);t.p2=glm::vec4(p+glm::vec3(0,2,0),1);t.meta.y=i;
+            full.push_back(t);refs.push_back({glm::vec3(t.p0+t.p1+t.p2)/3.f,0,i});
+        }
+        build_trace_bvh(full);order_trace_triangle_refs(refs);
+        for(size_t i=0;i<full.size();++i)CHECK(refs[i].first==full[i].meta.y);
+    }
+}
+
+TEST_CASE("ray mesh groups retain material geometry indices and reuse geometry across transforms") {
+    auto moved=glm::translate(glm::mat4(1),glm::vec3(2,0,0));
+    std::vector<RayGeometryDraw> draws{
+        {1,9,glm::mat4(1),{0,6}}, {2,9,glm::mat4(1),{0,3}},
+        {1,9,glm::mat4(1),{6,3}}, {1,9,moved,{0,6}}, {1,9,moved,{6,3}},
+        {1,10,glm::mat4(1),{0,6}}};
+    const auto groups=group_ray_geometry(draws);
+    REQUIRE(groups.size()==4);
+    CHECK(groups[0].draws==std::vector<size_t>{0,2});
+    CHECK(groups[2].draws==std::vector<size_t>{3,4});
+    CHECK(groups[0].ranges==groups[2].ranges);
+    CHECK(groups[0].ranges[1]==glm::uvec2(6,3));
+    CHECK(groups[3].indices==10);
+    CHECK(group_ray_geometry({}).empty());
+}
 
 TEST_CASE("draw instances preserve normal orthogonality and mirrored tangent handedness") {
     const auto world = glm::rotate(glm::mat4(1), 0.6f, glm::vec3(0, 1, 0)) *

@@ -61,7 +61,7 @@ void main()
     // surface would be pure black rather than merely out of the sun.  What it
     // does get is ambient occlusion, which asks the different question of how
     // much of the surrounding hemisphere nearby geometry blocks.
-    float visibility = sunlight_visibility(inWorldPosition, lightingGeometricNormal);
+    float visibility = material_sun_visibility(surface, inWorldPosition, lightingGeometricNormal);
     float occlusion = ambient_occlusion(gl_FragCoord.xy);
     // Diffuse environment has one owner (docs/lumen_lite_design.md 4.2).
     // While SSGI runs it is the trace, which lights a ray from the sky only

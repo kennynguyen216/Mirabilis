@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <bit>
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -302,7 +303,7 @@ void VulkanEngine::draw_shadow_map(VkCommandBuffer cmd)
 
 bool VulkanEngine::ray_query_caster(const RenderObject& object) const
 {
-    // update_trace_scene()'s filter, so the BLAS holds exactly _traceTriangles.
+    // Hardware ray geometry requires opaque indexed meshes with invertible transforms.
     if (object.material == nullptr || object.material->passType != MaterialPass::MainColor) {
         return false;
     }
@@ -318,7 +319,7 @@ void VulkanEngine::destroy_sun_casters()
         destroy_buffer(frame.rayTlasBuffer); destroy_buffer(frame.rayInstances); destroy_buffer(frame.rayScratch); destroy_buffer(frame.rayHitInstances);
         frame.rayHitInstances={}; frame.rayHitCapacity=0;
         frame.rayTlas={}; frame.rayTlasBuffer={}; frame.rayInstances={}; frame.rayScratch={};
-        frame.rayTlasCapacity=frame.rayInstanceCapacity=frame.rayScratchCapacity=frame.rayHash=0;
+        frame.rayTlasCapacity=frame.rayInstanceCapacity=frame.rayScratchCapacity=frame.rayHash=frame.rayHitHash=0;
     }
     for (auto& mesh:_sunCasters.meshes) {
         _sunCasters.destroy(_device,mesh.structure,nullptr); destroy_buffer(mesh.buffer);
@@ -359,7 +360,27 @@ void VulkanEngine::update_sun_casters()
         casters.push_back(&draw);
         mix(&draw.transform,sizeof(draw.transform)); mix(&draw.vertexBufferAddress,sizeof(draw.vertexBufferAddress));
         mix(&draw.indexBuffer,sizeof(draw.indexBuffer)); mix(&draw.firstIndex,sizeof(draw.firstIndex)); mix(&draw.indexCount,sizeof(draw.indexCount));
+        const auto source=_traceMeshSources.at(draw.vertexBufferAddress).lock();
+        const auto* identity=source.get();mix(&identity,sizeof(identity));
     }
+    scene.hash=hash;
+    uint64_t hitHash=hash;
+    const auto mixHit=[&](const void* value,size_t size) { auto bytes=static_cast<const uint8_t*>(value);for(size_t i=0;i<size;++i){hitHash^=bytes[i];hitHash*=1099511628211ull;} };
+    for (const auto* draw:casters) {
+        mixHit(&draw->material->traceBaseColor,sizeof(glm::vec4));
+        mixHit(&draw->material->traceEmission,sizeof(glm::vec4));
+        mixHit(&draw->material->traceParameters.x,sizeof(float));
+        mixHit(&draw->contributesToStaticCaches,sizeof(bool));
+        const auto* texture=draw->material->traceTexture.get();mixHit(&texture,sizeof(texture));
+    }
+    if (frame.rayTlas && frame.rayHash==hash && frame.rayHitHash==hitHash) { scene.tlas=frame.rayTlas;return; }
+    std::vector<RayGeometryDraw> groupInputs;
+    for (const auto* draw:casters)
+        groupInputs.push_back({draw->vertexBufferAddress,std::bit_cast<uint64_t>(draw->indexBuffer),draw->transform,{draw->firstIndex,draw->indexCount}});
+    const auto groups=group_ray_geometry(groupInputs);
+    std::vector<const RenderObject*> ordered;
+    for (const auto& group:groups) for (size_t draw:group.draws) ordered.push_back(casters[draw]);
+    casters=std::move(ordered);
     size_t hitBytes=std::max<size_t>(casters.size(),1)*sizeof(GPURayInstance);
     if (hitBytes>frame.rayHitCapacity) {
         destroy_buffer(frame.rayHitInstances);
@@ -384,50 +405,54 @@ void VulkanEngine::update_sun_casters()
         hits[i]=hit;
     }
     vmaFlushAllocation(_allocator,frame.rayHitInstances.allocation,0,VK_WHOLE_SIZE);
-    scene.hash=hash;
+    frame.rayHitHash=hitHash;
     if (frame.rayTlas && frame.rayHash==hash) { scene.tlas=frame.rayTlas; return; }
     const auto started=std::chrono::steady_clock::now();
     constexpr auto inputUsage=VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR|VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     std::vector<size_t> meshIndices;
     std::vector<size_t> added;
-    for (const auto* draw:casters) {
+    size_t firstDraw=0;
+    for (const auto& group:groups) {
+        const auto* draw=casters[firstDraw];firstDraw+=group.draws.size();
         const auto source=_traceMeshSources.at(draw->vertexBufferAddress).lock();
         auto it=std::find_if(scene.meshes.begin(),scene.meshes.end(),[&](const auto& mesh) {
-            return mesh.vertices==draw->vertexBufferAddress && mesh.indices==draw->indexBuffer && mesh.first==draw->firstIndex && mesh.count==draw->indexCount && mesh.source.lock()==source;
+            return mesh.vertices==draw->vertexBufferAddress && mesh.indices==draw->indexBuffer && mesh.ranges==group.ranges && mesh.source.lock()==source;
         });
         size_t index=it-scene.meshes.begin();
         if (it==scene.meshes.end()) {
-            scene.meshes.push_back({draw->vertexBufferAddress,draw->indexBuffer,draw->firstIndex,draw->indexCount,source});
+            scene.meshes.push_back({draw->vertexBufferAddress,draw->indexBuffer,group.ranges,source});
             added.push_back(index);
         }
         meshIndices.push_back(index);
     }
     if (!added.empty()) {
-        std::vector<VkAccelerationStructureGeometryKHR> geometries(added.size());
+        std::vector<std::vector<VkAccelerationStructureGeometryKHR>> geometries(added.size());
         std::vector<VkAccelerationStructureBuildGeometryInfoKHR> builds(added.size());
-        std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges(added.size());
-        std::vector<VkDeviceSize> originalSizes(added.size());
+        std::vector<std::vector<VkAccelerationStructureBuildRangeInfoKHR>> ranges(added.size());
         VkDeviceSize scratchBytes=0;
         for (size_t i=0;i<added.size();++i) {
             auto& mesh=scene.meshes[added[i]];
-            auto& geometry=geometries[i]; geometry.sType=VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
-            geometry.geometryType=VK_GEOMETRY_TYPE_TRIANGLES_KHR; geometry.flags=VK_GEOMETRY_OPAQUE_BIT_KHR;
-            auto& triangles=geometry.geometry.triangles;
-            triangles.sType=VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-            triangles.vertexFormat=VK_FORMAT_R32G32B32_SFLOAT; triangles.vertexData.deviceAddress=mesh.vertices;
-            triangles.vertexStride=sizeof(Vertex); triangles.maxVertex=uint32_t(mesh.source.lock()->vertices.size()-1);
-            triangles.indexType=VK_INDEX_TYPE_UINT32; triangles.indexData.deviceAddress=address(mesh.indices);
-            uint32_t count=mesh.count/3;
-            ranges[i]={count,mesh.first*uint32_t(sizeof(uint32_t)),0,0};
+            geometries[i].resize(mesh.ranges.size());ranges[i].resize(mesh.ranges.size());
+            std::vector<uint32_t> counts;
+            for (size_t part=0;part<mesh.ranges.size();++part) {
+                auto& geometry=geometries[i][part]; geometry.sType=VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+                geometry.geometryType=VK_GEOMETRY_TYPE_TRIANGLES_KHR; geometry.flags=VK_GEOMETRY_OPAQUE_BIT_KHR;
+                auto& triangles=geometry.geometry.triangles;
+                triangles.sType=VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+                triangles.vertexFormat=VK_FORMAT_R32G32B32_SFLOAT; triangles.vertexData.deviceAddress=mesh.vertices;
+                triangles.vertexStride=sizeof(Vertex); triangles.maxVertex=uint32_t(mesh.source.lock()->vertices.size()-1);
+                triangles.indexType=VK_INDEX_TYPE_UINT32; triangles.indexData.deviceAddress=address(mesh.indices);
+                uint32_t count=mesh.ranges[part].y/3;counts.push_back(count);
+                ranges[i][part]={count,mesh.ranges[part].x*uint32_t(sizeof(uint32_t)),0,0};
+            }
             auto& build=builds[i]; build.sType=VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
             build.type=VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
             build.flags=VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR|VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
-            build.mode=VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR; build.geometryCount=1; build.pGeometries=&geometry;
+            build.mode=VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR; build.geometryCount=uint32_t(counts.size()); build.pGeometries=geometries[i].data();
             VkAccelerationStructureBuildSizesInfoKHR sizes{.sType=VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-            scene.buildSizes(_device,VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,&build,&count,&sizes);
+            scene.buildSizes(_device,VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,&build,counts.data(),&sizes);
             create(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,sizes.accelerationStructureSize,mesh.buffer,mesh.structure);
             build.dstAccelerationStructure=mesh.structure;
-            originalSizes[i]=sizes.accelerationStructureSize;
             scratchBytes=std::max(scratchBytes,sizes.buildScratchSize);
         }
         AllocatedBuffer scratch=create_buffer(scratchBytes+scene.scratchAlignment,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,VMA_MEMORY_USAGE_GPU_ONLY);
@@ -438,7 +463,7 @@ void VulkanEngine::update_sun_casters()
             vkCmdResetQueryPool(cmd,query,0,uint32_t(added.size()));
             for (size_t i=0;i<added.size();++i) {
                 builds[i].scratchData.deviceAddress=scratchAddress;
-                const auto* range=&ranges[i]; scene.build(cmd,1,&builds[i],&range);
+                const auto* range=ranges[i].data(); scene.build(cmd,1,&builds[i],&range);
                 vkutil::memory_barrier(cmd);
                 scene.writeProperties(cmd,1,&builds[i].dstAccelerationStructure,VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,query,uint32_t(i));
             }
@@ -464,16 +489,17 @@ void VulkanEngine::update_sun_casters()
         }
         destroy_buffer(scratch); scene.blasBuilds+=added.size();
     }
-    const VkDeviceSize instanceBytes=std::max<size_t>(1,casters.size())*sizeof(VkAccelerationStructureInstanceKHR);
+    const VkDeviceSize instanceBytes=std::max<size_t>(1,groups.size())*sizeof(VkAccelerationStructureInstanceKHR);
     if (instanceBytes>frame.rayInstanceCapacity) {
         destroy_buffer(frame.rayInstances);
         frame.rayInstances=create_buffer(instanceBytes,inputUsage,VMA_MEMORY_USAGE_CPU_TO_GPU); frame.rayInstanceCapacity=instanceBytes;
     }
     auto* instances=static_cast<VkAccelerationStructureInstanceKHR*>(frame.rayInstances.info.pMappedData);
-    for (size_t i=0;i<casters.size();++i) {
+    uint32_t firstHit=0;
+    for (size_t i=0;i<groups.size();++i) {
         auto& instance=instances[i]; instance={};
-        for (int row=0;row<3;++row) for(int column=0;column<4;++column) instance.transform.matrix[row][column]=casters[i]->transform[column][row];
-        instance.instanceCustomIndex=uint32_t(i); instance.mask=0xff;
+        for (int row=0;row<3;++row) for(int column=0;column<4;++column) instance.transform.matrix[row][column]=groups[i].transform[column][row];
+        instance.instanceCustomIndex=firstHit;firstHit+=uint32_t(groups[i].draws.size());instance.mask=0xff;
         instance.flags=VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR|VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
         VkAccelerationStructureDeviceAddressInfoKHR info{.sType=VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,.accelerationStructure=scene.meshes[meshIndices[i]].structure};
         instance.accelerationStructureReference=scene.address(_device,&info);
@@ -484,7 +510,7 @@ void VulkanEngine::update_sun_casters()
     VkAccelerationStructureBuildGeometryInfoKHR build{.sType=VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     build.type=VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR; build.flags=VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
     build.mode=VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR; build.geometryCount=1; build.pGeometries=&geometry;
-    frame.rayCount=uint32_t(casters.size());
+    frame.rayCount=uint32_t(groups.size());
     VkAccelerationStructureBuildSizesInfoKHR sizes{.sType=VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
     scene.buildSizes(_device,VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,&build,&frame.rayCount,&sizes);
     if (sizes.accelerationStructureSize>frame.rayTlasCapacity) {
@@ -497,7 +523,7 @@ void VulkanEngine::update_sun_casters()
         frame.rayScratch=create_buffer(frame.rayScratchCapacity,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,VMA_MEMORY_USAGE_GPU_ONLY);
     }
     frame.rayHash=hash; frame.rayBuildPending=true; scene.tlas=frame.rayTlas;
-    if (!added.empty()) fmt::print("Ray scene: {} instances, {} new mesh BLASes ({} total), prepared in {:.1f} ms\n",casters.size(),added.size(),scene.blasBuilds,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count());
+    if (!added.empty()) fmt::print("Ray scene: {} instances ({} material ranges), {} new mesh BLASes ({} total), prepared in {:.1f} ms\n",groups.size(),casters.size(),added.size(),scene.blasBuilds,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count());
 }
 
 void VulkanEngine::record_sun_casters(VkCommandBuffer cmd)

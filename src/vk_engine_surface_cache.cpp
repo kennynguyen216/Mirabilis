@@ -952,7 +952,7 @@ void VulkanEngine::light_surface_cache()
     pending.pendingSunOnly=sunOnly; pending.lightingPending=true;
     std::copy(_ibl.environmentSH.begin(),_ibl.environmentSH.end(),pending.pendingSky.begin());
     const glm::uvec4 settings(panoramaSky,emitterCount,_r4Contributions.cacheSources,
-        _traceSupported && !_traceNodes.empty()?1u:0u);
+        _traceSupported && (_rayQueryShadows || !_traceNodes.empty())?1u:0u);
     std::memcpy(&pending.pendingSky[9],&settings,sizeof(settings));
     pending.pendingSky[10]=skyEnvironment;
     pending.pendingSky[11]=_traceSettings.lighting.environmentTint;
@@ -1765,7 +1765,13 @@ std::vector<glm::vec4> VulkanEngine::build_albedo_volume(glm::vec3 lo, glm::vec3
     std::vector<glm::vec4> cells(size_t(dims.x) * dims.y * dims.z, glm::vec4(0.0f));
     const glm::vec3 hi = lo + glm::vec3(dims) * voxel;
     const float largest = std::max({voxel.x, voxel.y, voxel.z});
-    for (const TraceTriangle& t : _traceTriangles) {
+    struct Piece { glm::vec2 a, b, c; };
+    std::vector<Piece> stack;
+    const size_t count=_traceCpuComplete?_traceTriangles.size():_traceTriangleRefs.size();
+    for(size_t i=0;i<count;++i) {
+        TraceTriangle decoded;
+        if(!_traceCpuComplete) { const auto& ref=_traceTriangleRefs[i];decoded=make_trace_triangle(_traceCpuDraws[ref.draw],ref.first,false); }
+        const TraceTriangle& t=_traceCpuComplete?_traceTriangles[i]:decoded;
         const TraceMaterial& m = _traceMaterials[t.meta.x];
         // Only what a bounce reflects: glass passes light on, emitters are
         // sampled as emitters.
@@ -1776,8 +1782,7 @@ std::vector<glm::vec4> VulkanEngine::build_albedo_volume(glm::vec3 lo, glm::vec3
         // drop any piece outside the box, so a ground plane far larger than
         // the scene costs only the part of it inside.  One sample per piece,
         // at its centroid, weighted by its area.
-        struct Piece { glm::vec2 a, b, c; };
-        std::vector<Piece> stack{{glm::vec2(0.0f), glm::vec2(1.0f, 0.0f), glm::vec2(0.0f, 1.0f)}};
+        stack.clear();stack.push_back({glm::vec2(0.0f),glm::vec2(1.0f,0.0f),glm::vec2(0.0f,1.0f)});
         while (!stack.empty()) {
             const Piece piece = stack.back();
             stack.pop_back();
@@ -1839,7 +1844,7 @@ void VulkanEngine::update_albedo_volume()
     const glm::vec3 extent = glm::max(_sceneSdf.fieldMax - _sceneSdf.fieldMin, glm::vec3(1e-3f));
     const glm::uvec3 dims = glm::max(glm::uvec3(glm::ceil(
         extent / std::max(4.0f * _sceneSdf.voxelSize, 1e-3f))), glm::uvec3(1u));
-    const std::vector<glm::vec4> cells = _traceTriangles.empty()
+    const std::vector<glm::vec4> cells = (_traceTriangles.empty() && _traceTriangleRefs.empty())
         ? std::vector<glm::vec4>(size_t(dims.x) * dims.y * dims.z, glm::vec4(0.0f))
         : build_albedo_volume(_sceneSdf.fieldMin, extent / glm::vec3(dims), dims);
     // Premultiplied by presence: rgb = mean albedo, a = 1 where a surface
@@ -2858,6 +2863,7 @@ void VulkanEngine::draw_surface_cache_settings()
     }
     ImGui::SameLine();
     if (ImGui::Button("Check Shadows")) {
-        measure_surface_cache_shadows();
+        const bool previous=_surfaceCache.measureShadows;_surfaceCache.measureShadows=true;
+        update_trace_scene();measure_surface_cache_shadows();_surfaceCache.measureShadows=previous;
     }
 }

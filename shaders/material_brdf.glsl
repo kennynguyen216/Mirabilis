@@ -193,6 +193,18 @@ void material_direct_light(
         max(4.0 * surface.noV * noL, 1e-4) * sun;
 }
 
+// Skip shadow queries only when both sun BRDF lobes are identically zero.
+// Thin subsurface and the visibility diagnostic still need the shadow test.
+float material_sun_visibility(MaterialSurface surface, vec3 position, vec3 geometricNormal)
+{
+    vec3 direction=normalize(sceneData.sunlightDirection.xyz);
+    bool diagnostic=sceneData.emitterSettings.w>0.5 && uint(sceneData.materialDebug.y+0.5)==1u &&
+        dot(geometricNormal,direction)>0.0;
+    bool contributes=sceneData.screenSpaceSettings.y<0.5 && any(greaterThan(sceneData.sunlightColor.rgb,vec3(0))) &&
+        (dot(surface.normal,direction)>0.0 || materialData.surfaceFactors.z>0.0);
+    return contributes || diagnostic ? sunlight_visibility(position,geometricNormal) : 1.0;
+}
+
 // Direct sunlight.  visibility is the shadow-map result.
 void material_sun(
     MaterialSurface surface,
@@ -358,7 +370,7 @@ void material_emitters(
         return;
     }
     diffuse = material_diffuse_albedo(surface) * cached.direct;
-    if (!material_specular_enabled()) {
+    if (!material_specular_enabled() || cached.directAlpha <= 0.0) {
         return;
     }
     uint samples = max(uint(sceneData.emitterSettings.z + 0.5), 1u);
@@ -369,6 +381,7 @@ void material_emitters(
         vec3 target;
         vec3 light = emitter_sample(worldPosition, geometricNormal, count,
             emitter_stratum(i, samples, rotation), 0.0, direction, target);
+        if (!any(greaterThan(light, vec3(0.0)))) continue;
         vec3 sampleDiffuse;
         vec3 sampleSpecular;
         material_direct_light(surface, direction, light, sampleDiffuse, sampleSpecular);

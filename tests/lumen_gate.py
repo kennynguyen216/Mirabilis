@@ -93,6 +93,7 @@ def main():
             'MIRABILIS_TEST_CAMERA':'0 2.5 8 -0.6 0' if scene in ('mirror','rough','threshold','portal') else '0 3.5 9 -0.3 0',
             'MIRABILIS_TEST_HIDE_PANELS':'1', 'MIRABILIS_TEST_FRAMES':'180',
             'MIRABILIS_LUMEN_LITE':'1', 'MIRABILIS_TEST_REQUIRE_LUMEN':'1',
+            'MIRABILIS_BENCHMARK_SKIP_CPU_BVH_VALIDATION':'1',
             'MIRABILIS_R4_UNCAP_FRAMES':'1', 'MIRABILIS_RASTER_CAPTURE':str(capture),
             'MIRABILIS_R4_CONTRIBUTIONS':'env_diffuse,ray_field_cache,ray_field_uncovered,ray_field_exit,ray_field_exhausted,ray_primary_cache_sky' if scene in ('point','dark','spot') else 'env_specular',
             'VK_INSTANCE_LAYERS':'VK_LAYER_KHRONOS_validation', 'VK_LAYER_VALIDATE_SYNC':'1',
@@ -100,6 +101,7 @@ def main():
         logs, result = ecs_gate.run(name, args.configuration, flags, seconds=240)
         assert 'GI effective mode=lumen-lite' in logs and 'no blocking relight submissions' in logs
         assert 'distance-field-bakes-required=false' in logs
+        assert 'GI CPU geometry: mode='+('full' if name=='emitter-full-upload' else 'references') in logs
         if name in ('mirror-on','rough','portal','portal-offscreen'):
             assert 'reflections-active=true' in logs, 'Reflection path did not run'
         images[name], _ = read_pfm(capture.with_suffix('.pfm'))

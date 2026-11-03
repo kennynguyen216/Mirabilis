@@ -54,7 +54,7 @@ void main()
     }
     MaterialSurface surface = material_surface(
         baseColor.rgb, inUV, lightingGeometricNormal, normal, inWorldPosition);
-    float visibility = sunlight_visibility(inWorldPosition, lightingGeometricNormal);
+    float visibility = material_sun_visibility(surface, inWorldPosition, lightingGeometricNormal);
     // Lumen portals gather scene lighting; plain SSGI keeps its legacy stand-in.
     bool lumen = sceneData.portalIndirectSettings.y == 1.0;
     // The main camera's AO coordinates do not describe this virtual camera.

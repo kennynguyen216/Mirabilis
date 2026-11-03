@@ -149,6 +149,8 @@ def main():
                  'VK_LAYER_VALIDATE_SYNC': '1', 'VK_KHRONOS_VALIDATION_VALIDATE_SYNC': 'true'}
         if trace:
             flags.update(MIRABILIS_TEST_TRACE='1', MIRABILIS_CAPTURE=str(captures/'trace'))
+        else:
+            flags['MIRABILIS_BENCHMARK_SKIP_CPU_BVH_VALIDATION'] = '1'
         logs, result = ecs_gate.run(name, args.configuration, flags, seconds=900)
         records = telemetry(logs)
         if trace:
@@ -162,6 +164,8 @@ def main():
             assert (captures/'trace.pfm').is_file()
         else:
             assert 'PHYSICS lifecycle PASS' in logs and 'renderer=raster' in logs
+            if 'distance-field-bakes-required=false' in logs:
+                assert 'GI CPU geometry: mode=references' in logs, 'Production hardware geometry path not exercised'
             check_raster(records)
             for phase in ('awake', 'sleep'):
                 assert (captures/f'{phase}.pfm').is_file(), f'Missing {phase} same-camera capture'

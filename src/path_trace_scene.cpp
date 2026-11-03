@@ -4,7 +4,22 @@
 #include <functional>
 #include <stdexcept>
 #include <cmath>
-#include <fmt/core.h>
+#include <cstdio>
+
+void order_trace_triangle_refs(std::vector<TraceTriangleRef>& triangles) {
+    // Match the full BVH's partition order so emitter sampling and voxel sums stay identical.
+    std::function<void(uint32_t,uint32_t,uint32_t)> order=[&](uint32_t first,uint32_t count,uint32_t depth) {
+        if(count<=4 || depth>=48) return;
+        glm::vec3 lo(1e30f),hi(-1e30f);
+        for(uint32_t i=first;i<first+count;++i) {lo=glm::min(lo,triangles[i].centroid);hi=glm::max(hi,triangles[i].centroid);}
+        glm::vec3 size=hi-lo;int axis=size.y>size.x?1:0;if(size.z>size[axis])axis=2;
+        uint32_t middle=first+count/2;
+        std::nth_element(triangles.begin()+first,triangles.begin()+middle,triangles.begin()+first+count,
+            [&](const auto& a,const auto& b){return a.centroid[axis]<b.centroid[axis];});
+        order(first,middle-first,depth+1);order(middle,first+count-middle,depth+1);
+    };
+    order(0,uint32_t(triangles.size()),0);
+}
 
 std::vector<TraceBVHNode> build_trace_bvh(std::vector<TraceTriangle>& triangles) {
     std::vector<TraceBVHNode> nodes(1);
@@ -80,7 +95,7 @@ void validate_trace_bvh(const std::vector<TraceTriangle>& triangles,const std::v
         if((a.triangle<0)!=(b.triangle<0)) throw std::runtime_error("BVH hit/miss disagreement");
         if(a.triangle>=0) maxError=std::max(maxError,std::abs(a.t-b.t));
     }
-    fmt::print("GI CPU BVH vs brute force: {} rays, max t error={}, {:.1f} s\n",rays,maxError,
+    std::printf("GI CPU BVH vs brute force: %d rays, max t error=%g, %.1f s\n",rays,double(maxError),
         std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count());
     if(maxError>1e-4f) throw std::runtime_error("BVH distance disagreement");
 }

@@ -10,9 +10,12 @@ struct RayInstance {
     vec4 normalRows[3]; vec4 baseColor; vec4 emission; uvec4 geometry;
 };
 layout(std430,set=0,binding=24) readonly buffer RayInstances { RayInstance rayInstances[]; };
+uint ray_hit_index(rayQueryEXT query) {
+    return rayQueryGetIntersectionInstanceCustomIndexEXT(query,true)+rayQueryGetIntersectionGeometryIndexEXT(query,true);
+}
 vec3 ray_hit_normal(rayQueryEXT query)
 {
-    uint index=rayQueryGetIntersectionInstanceCustomIndexEXT(query,true);
+    uint index=ray_hit_index(query);
     RayInstance instance=rayInstances[index];
     uint first=instance.geometry.x+rayQueryGetIntersectionPrimitiveIndexEXT(query,true)*3u;
     RayVertex a=instance.vertices.values[instance.indices.values[first]];
@@ -25,7 +28,7 @@ vec3 ray_hit_normal(rayQueryEXT query)
     return normalize(n+vec3(1e-12));
 }
 vec3 ray_hit_albedo(rayQueryEXT query) {
-    RayInstance instance=rayInstances[rayQueryGetIntersectionInstanceCustomIndexEXT(query,true)];
+    RayInstance instance=rayInstances[ray_hit_index(query)];
     if(instance.geometry.w!=0u) return vec3(0); // Uncaptured texture data is unknown.
     uint first=instance.geometry.x+rayQueryGetIntersectionPrimitiveIndexEXT(query,true)*3u;
     vec2 bary=rayQueryGetIntersectionBarycentricsEXT(query,true);
